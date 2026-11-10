@@ -744,7 +744,7 @@ fn no_process_exit_bypasses_the_flush() {
     let allowed: &[(&str, usize, &str)] = &[
         ("workstation.rs", 1, "exit_process itself"),
         // Ip22Machine::new's three startup failures, before a guest has run.
-        ("ip22_machine.rs", 3, "bad SCSI configuration or an IMPACT raster backend that will not start"),
+        ("ip22_machine.rs", 2, "a device that will not place or attach, or an IMPACT raster backend that will not start"),
         // The bare-metal test device ends the run with the guest's exit code.
         ("dev/testdev.rs", 1, "bare-metal test device, a harness only"),
         // Command-line and configuration front ends: nothing is running yet.

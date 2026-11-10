@@ -79,7 +79,8 @@ fn the_provided_methods_answer_on_every_machine_type() {
             let pending = with_buses(m, |b| b.iter().map(|b| b.pending_chd_sync_count()).sum::<usize>());
             assert_eq!(m.pending_chd_sync_count(), pending, "{machine:?}");
             assert!(m.flush_disks().is_ok());
-            assert!(m.disc_changer().is_some(), "{machine:?}");
+            // The changer is the controller of the first CD-ROM, if there is one.
+            assert_eq!(m.disc_changer().is_some(), m.disks().records().iter().any(|r| r.cdrom), "{machine:?}");
             assert_eq!(m.sync_chd_disks(None, &mut |_, _, _| {}, &|| false).unwrap(), 0);
         });
     }

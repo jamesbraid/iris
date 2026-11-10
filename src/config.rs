@@ -163,83 +163,6 @@ impl ScsiDeviceConfig {
         if key >= 16 { (key / 16, key % 16) } else { (self.controller, key) }
     }
 
-    /// The media this target starts with: the active image and, for a
-    /// CD-ROM, the changer list built from `path` and `discs` with empty
-    /// entries skipped (an empty `path` is a drive with its tray empty, to be
-    /// loaded at run time). A disk is just its path.
-    pub fn media(&self) -> (String, Vec<String>) {
-        if !self.is_cdrom() {
-            return (self.path.clone(), vec![]);
-        }
-        let mut list: Vec<String> = Vec::new();
-        if !self.path.is_empty() {
-            list.push(self.path.clone());
-        }
-        for d in &self.discs {
-            if !d.is_empty() && !list.contains(d) {
-                list.push(d.clone());
-            }
-        }
-        let active = list.first().cloned().unwrap_or_default();
-        (active, list)
-    }
-
-    /// Where a `--ci` run keeps the copy-on-write overlay of the disk at
-    /// `id`: in the host's temporary directory (`$TMPDIR`, or `/tmp` when it
-    /// is unset), as an absolute path, so a later change of directory still
-    /// finds it.
-    ///
-    /// The name carries [`ci_run_tag`](Self::ci_run_tag), so an interactive
-    /// iris holding `PATH.overlay`, any number of CI runs, and a later run
-    /// that gets the same process ID never open each other's overlay. A
-    /// machine rebuilt in the same process reopens its own. The files are
-    /// kept after the run for inspection.
-    pub fn ci_overlay_path(id: u8) -> String {
-        static RUN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        let run = RUN.get_or_init(|| {
-            let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                .map_err(|before| before.duration());
-            Self::ci_run_tag(std::process::id(), started)
-        });
-        let path = std::env::temp_dir().join(format!("iris-ci-{run}-scsi{id}.overlay"));
-        std::path::absolute(&path).unwrap_or(path).to_string_lossy().into_owned()
-    }
-
-    /// One run's part of its overlay names: the process ID and the time the
-    /// run first named an overlay, in nanoseconds since the epoch, or with a
-    /// `b` before it when the host clock is set before the epoch, so such a
-    /// clock still gives each run its own name.
-    fn ci_run_tag(pid: u32, started: Result<std::time::Duration, std::time::Duration>) -> String {
-        match started {
-            Ok(after) => format!("{pid}-{:x}", after.as_nanos()),
-            Err(before) => format!("{pid}-b{:x}", before.as_nanos()),
-        }
-    }
-
-    /// For `scratch = true`: make sure the volume exists, creating it with a
-    /// minimal SGI volume header and `size_mb` MB when it does not, and
-    /// return its path for the CI socket's scratch commands. None when the
-    /// target is not a scratch volume, or cannot be one (a CD-ROM or an
-    /// overlay is not host-writable in place), which is reported.
-    pub fn prepare_scratch(&self, id: u8) -> Option<std::path::PathBuf> {
-        if !self.scratch {
-            return None;
-        }
-        if self.is_cdrom() || self.overlay {
-            println!("Note: SCSI ID {}: scratch=true is incompatible with cdrom/overlay; ignoring scratch flag", id);
-            return None;
-        }
-        let path = std::path::Path::new(&self.path);
-        if !path.exists() {
-            let size_mb = self.size_mb.unwrap_or(64) as u64;
-            match crate::sgi_vh::create_scratch_image(path, size_mb * 1024 * 1024) {
-                Ok(()) => println!("iris: created scratch volume {} ({} MB, with SGI VH)", self.path, size_mb),
-                Err(e) => println!("Note: could not create scratch volume {}: {}", self.path, e),
-            }
-        }
-        Some(path.to_path_buf())
-    }
-
     /// A DaynaPort target for this SCSI id, with defaults filled in.
     /// Errors describe a bad `mac` / `subnet`; `validate()` catches those first.
     pub fn daynaport_params(&self, id: u8) -> Result<DaynaportParams, String> {
@@ -785,6 +708,19 @@ impl MachineProfile {
     /// What differs between the machines built on the MC, IOC and HPC3: the
     /// Indy, the Indigo2 and the Indigo2 IMPACT. `None` for the O2, the
     /// Octane and the Origin family, which are other machines.
+    /// Add the rows of the socket map this machine has before anything is
+    /// placed. Touches no hardware.
+    pub fn fill(self, cfg: &MachineConfig, t: &crate::topology::Topology) {
+        match self {
+            Self::IndyIp24 | Self::Indigo2Ip22 | Self::Indigo2Ip28 => crate::ip22_machine::Ip22Machine::fill(cfg, t),
+            Self::O2Ip32 => crate::ip32_machine::O2Machine::fill(cfg, t),
+            Self::OctaneIp30 => crate::ip30_machine::OctaneMachine::fill(cfg, t),
+            Self::Origin200Ip29 => crate::ip27_machine::fill(None, t),
+            Self::Origin2000Ip27 => crate::ip27_machine::fill(Some(crate::ip27_origin2000::WIDGET_BASEIO), t),
+            Self::Onyx2Ip27 => crate::ip27_machine::fill(Some(crate::ip27_onyx2::WIDGET_BASEIO), t),
+        }
+    }
+
     pub fn board(self) -> Option<&'static Ip22Board> {
         match self {
             Self::IndyIp24 => Some(&INDY_BOARD),
@@ -2709,6 +2645,64 @@ impl MachineConfig {
         self.machine.cpu = Some(part.name());
     }
 
+    /// The devices to place, from the `[scsi.N]` tables: each table as an
+    /// `hdd`, `cdrom` or `daynaport` at its controller's target row, the
+    /// controller found by its number in `t` (key 16 + id names controller 1,
+    /// a key below 16 uses `controller`).
+    pub fn placements(&self, t: &crate::topology::Topology) -> Result<Vec<crate::attach::Placement>, String> {
+        let mut out = Vec::new();
+        // The map is a HashMap: sorted, so the order is the same every run.
+        let mut keys: Vec<u8> = self.scsi.keys().copied().collect();
+        keys.sort_unstable();
+        for key in keys {
+            let dev = &self.scsi[&key];
+            let (controller, id) = dev.placement(key);
+            let ctl = t
+                .controller(controller)
+                .ok_or_else(|| format!("{}: this machine has no controller {controller}", scsi_label(controller, id)))?;
+            let mut opts = toml::Table::new();
+            let mut put = |k: &str, v: toml::Value| {
+                opts.insert(k.into(), v);
+            };
+            let device = match dev.kind() {
+                ScsiKind::Disk => {
+                    put("path", dev.path.clone().into());
+                    put("write_cache", dev.write_cache.into());
+                    if dev.overlay {
+                        put("overlay", true.into());
+                    }
+                    if dev.scratch {
+                        put("scratch", true.into());
+                    }
+                    if let Some(mb) = dev.size_mb {
+                        put("size_mb", i64::from(mb).into());
+                    }
+                    "hdd"
+                }
+                ScsiKind::Cdrom => {
+                    if !dev.path.is_empty() {
+                        put("path", dev.path.clone().into());
+                    }
+                    if !dev.discs.is_empty() {
+                        put("discs", dev.discs.clone().into());
+                    }
+                    "cdrom"
+                }
+                ScsiKind::Daynaport => {
+                    if let Some(mac) = &dev.mac {
+                        put("mac", mac.clone().into());
+                    }
+                    if let Some(subnet) = &dev.subnet {
+                        put("subnet", subnet.clone().into());
+                    }
+                    "daynaport"
+                }
+            };
+            out.push(crate::attach::Placement { device: device.into(), at: ctl.join(crate::location::Hop::t(id)), opts });
+        }
+        Ok(out)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.validate_virtio_serial()?;
         self.xio_widgets()?;
@@ -4470,43 +4464,5 @@ mod apply_env_tests {
         std::env::remove_var(OURS);
         set_or_remove_env(OURS, "");
         assert!(std::env::var_os(OURS).is_none());
-    }
-}
-
-#[cfg(test)]
-mod ci_overlay_tests {
-    use super::ScsiDeviceConfig;
-    use std::time::Duration;
-
-    /// Process IDs come round again, and a container gives iris the same one
-    /// every time, so a later run must not take an earlier run's name and
-    /// adopt its overlay.
-    #[test]
-    fn a_later_run_with_the_same_process_id_gets_its_own_overlay() {
-        let first = ScsiDeviceConfig::ci_run_tag(2, Ok(Duration::from_nanos(1_000)));
-        let later = ScsiDeviceConfig::ci_run_tag(2, Ok(Duration::from_nanos(2_000)));
-        assert_ne!(first, later);
-    }
-
-    /// A host clock set before the epoch still names each run apart, and
-    /// never as a run the same distance after it.
-    #[test]
-    fn a_clock_before_the_epoch_still_names_runs_apart() {
-        let tag = |t| ScsiDeviceConfig::ci_run_tag(2, t);
-        let (a, b) = (tag(Err(Duration::from_nanos(5_000))), tag(Err(Duration::from_nanos(4_000))));
-        assert_ne!(a, b);
-        assert_ne!(a, tag(Ok(Duration::from_nanos(5_000))));
-        assert_ne!(tag(Err(Duration::ZERO)), tag(Ok(Duration::ZERO)));
-    }
-
-    #[test]
-    fn one_run_keeps_one_name_per_disk_in_the_temporary_directory() {
-        let a = ScsiDeviceConfig::ci_overlay_path(1);
-        let path = std::path::Path::new(&a);
-        assert!(path.is_absolute(), "{a}");
-        assert_eq!(path.parent(), std::path::absolute(std::env::temp_dir()).ok().as_deref());
-        assert_eq!(a, ScsiDeviceConfig::ci_overlay_path(1));
-        assert_ne!(a, ScsiDeviceConfig::ci_overlay_path(2));
-        assert!(a.contains(&format!("iris-ci-{}-", std::process::id())), "{a}");
     }
 }

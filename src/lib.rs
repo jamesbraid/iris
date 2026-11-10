@@ -195,6 +195,8 @@ pub mod machine_state;
 pub mod control;
 pub mod devices;
 pub mod location;
+pub mod topology;
+pub mod attach;
 pub mod disks;
 pub mod guest_net;
 pub mod platform;

@@ -47,6 +47,10 @@ use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Saveable};
 use crate::control::Control;
 use crate::devices::{Devices, Phase};
 use crate::disks::Disks;
+use crate::attach::{attach_devices, Ctx};
+use crate::location::{Hop, Location};
+use crate::scsi::ScsiPort;
+use crate::topology::{Row, Topology};
 use crate::guest_net::GuestNet;
 use crate::workstation::Workstation;
 use crate::xtalk::{HostPort, Upstream};
@@ -149,15 +153,14 @@ pub struct OctaneMachine {
     pub vpro: Option<Arc<Odyssey>>,
     /// The NAT handle, when the Ethernet is plugged in.
     net: Option<GuestNet>,
-    scratch_path: Option<std::path::PathBuf>,
     nvram_path: String,
     /// Lifecycle state, machine events and the pointer slot the front ends
     /// share.
     pub(crate) control: Control,
     devices: Devices,
     disks: Disks,
-    /// The disks as a snapshot records them, to refuse one taken on others.
-    disk_refs: Vec<crate::snapshot::DiskRef>,
+    /// The NVMe card's disk as a snapshot records it, with `[nvme]`.
+    nvme_ref: Option<crate::snapshot::DiskRef>,
     /// The snapshot the CI socket last restored, for `rollback`.
     last_restore: Option<String>,
     /// Where snapshots go: `saves` under the current directory, as on the
@@ -264,10 +267,14 @@ impl OctaneMachine {
         // The status bar's activity bits, shared with the graphics board.
         let heartbeat = Arc::new(AtomicU64::new(0));
         let mac = cfg.network().mac;
-        // The buses are filled from `[scsi.N]` before the controllers exist.
-        let [bus_a, bus_b] = [Isp1040::new_bus(), Isp1040::new_bus()];
-        let (scratch_path, mut disk_refs) = Self::attach_scsi(cfg, [&bus_a, &bus_b])?;
-        let scsi = [Arc::new(Isp1040::new_at(0, bus_a)), Arc::new(Isp1040::new_at(1, bus_b))];
+        // The controllers own their buses; the devices are placed on them
+        // below.
+        let topology = Arc::new(Topology::fill_for(cfg));
+        let scsi = [Arc::new(Isp1040::new_at(0, Isp1040::new_bus())), Arc::new(Isp1040::new_at(1, Isp1040::new_bus()))];
+        for (n, s) in scsi.iter().enumerate() {
+            let at = topology.controller(n as u8).expect("fill added a row for every controller");
+            topology.bind(&at, Arc::new(ScsiPort::new(s.clone()))).expect("the controller row takes its handle once");
+        }
         for s in &scsi {
             s.set_heartbeat(heartbeat.clone());
         }
@@ -287,14 +294,14 @@ impl OctaneMachine {
                 Ok(card.nvme)
             })
             .transpose()?;
-        disk_refs.extend(nvme.as_ref().map(|n| crate::dev::nvme::disk_ref(&cfg.nvme, n)));
-        // Both controllers' buses, then the NVMe card's namespace.
-        let disks = Disks::new(
-            scsi.iter()
-                .map(|s| s.clone() as Arc<dyn crate::disks::DiskController>)
-                .chain(nvme.iter().map(|n| n.clone() as Arc<dyn crate::disks::DiskController>))
-                .collect(),
-        );
+        let nvme_ref = nvme.as_ref().map(|n| crate::dev::nvme::disk_ref(&cfg.nvme, n));
+        let disks = Disks::new(topology.clone()).with_ci(cfg.ci);
+        // The NVMe card's namespace is a disk outside the map.
+        if let Some(n) = &nvme {
+            disks.add_unplaced(n.clone());
+        }
+        let mut placed = Devices::new();
+        attach_devices(&cfg.placements(&topology)?, cfg, Some(&mut Ctx { devices: &mut placed, disks: &disks }), &topology)?;
         let ioc3 = Arc::new(Ioc3::octane(mac, false));
         ioc3.set_heartbeat(heartbeat.clone());
         let eth = Ioc3Eth::new(mac);
@@ -518,6 +525,7 @@ impl OctaneMachine {
         devices.add("heart", Phase::Chipset, heart.clone());
         devices.add("flash_lines", Phase::Chipset, Arc::new(FlashLineSet(flash_lines.clone())));
         devices.add("bridge", Phase::Chipset, bridge.clone());
+        devices.append(placed);
         // Only with boards, so a machine without them saves what it always did.
         if !xio_boards.is_empty() {
             let bridges = xio_boards.iter().map(|b| b.bridge().clone()).collect();
@@ -613,12 +621,11 @@ impl OctaneMachine {
             gfx,
             vpro,
             net,
-            scratch_path,
             nvram_path: cfg.nvram.clone(),
             control,
             devices,
             disks,
-            disk_refs,
+            nvme_ref,
             last_restore: None,
             saves: std::path::PathBuf::from("saves"),
         })
@@ -632,23 +639,30 @@ impl OctaneMachine {
         }
     }
 
-    /// The `[scsi.N]` devices: `controller` 0 is the internal bus, 1 the
-    /// external one. Returns the `scratch = true` volume, if any, and the
-    /// disks as a snapshot records them.
-    fn attach_scsi(cfg: &MachineConfig, buses: [&crate::scsi::ScsiBus; 2]) -> Result<(Option<std::path::PathBuf>, Vec<crate::snapshot::DiskRef>), String> {
-        let attached = crate::scsi::attach_from_config(cfg, Some("ip30"), &|c| {
-            buses.get(c as usize)
-                .copied()
-                .ok_or_else(|| format!("controller {c} (an Octane has controllers 0 and 1)"))
-        })?;
-        if let Some(d) = attached.daynaports.first() {
-            return Err(format!("{}: kind = \"daynaport\" is not available on the Octane", crate::config::scsi_label(d.controller, d.id)));
+    /// The places an Octane has: the Bridge widget with its PCI bus, whose
+    /// first two devices are the ISP1040 SCSI controllers (internal, external)
+    /// with targets 1 to 15, then the IOC3 and the RAD1. Touches no hardware.
+    pub(crate) fn fill(_: &MachineConfig, t: &Topology) {
+        let at = |hops: &[Hop]| hops.iter().fold(Location::root(), |l, h| l.join(*h));
+        let add = |l: Location, row: Row| t.add(l, row).expect("rows are added once");
+        let bus = [Hop::xio(WIDGET_BRIDGE), Hop::pci(0)];
+        add(Location::root(), Row::fixed("XIO"));
+        add(at(&bus[..1]), Row::fixed("Bridge"));
+        add(at(&bus), Row::fixed("PCI bus"));
+        for (n, label) in ["SCSI internal", "SCSI external"].into_iter().enumerate() {
+            let ctl = at(&bus).join(Hop::pos(n as u8));
+            add(ctl.clone(), Row::fixed(label).ctl(n as u8).onboard("isp1040"));
+            t.scsi(&ctl, 1..=15, false);
         }
-        let disks = attached.tables.iter()
-            .filter(|t| !t.is_cdrom)
-            .map(|t| crate::snapshot::DiskRef { id: t.slot, path: t.path.clone(), size_bytes: t.size_bytes })
-            .collect();
-        Ok((attached.scratch, disks))
+        add(at(&bus).join(Hop::pos(2)), Row::fixed("").onboard("ioc3"));
+        add(at(&bus).join(Hop::pos(3)), Row::fixed("").onboard("rad1"));
+    }
+
+    /// The hard disks as a snapshot records them, to refuse one taken on others.
+    fn disk_refs(&self) -> Vec<crate::snapshot::DiskRef> {
+        let mut refs = crate::snapshot::DiskRef::from_records(&self.disks, false);
+        refs.extend(self.nvme_ref.clone());
+        refs
     }
 
     /// IOC3's first port is the console: the CI socket's backend in CI
@@ -861,7 +875,7 @@ impl OctaneMachine {
         let mut manifest = Manifest::for_current_save();
         manifest.machine = Some(SNAPSHOT_MACHINE.into());
         manifest.parent = self.last_restore.clone();
-        manifest.disks = self.disk_refs.clone();
+        manifest.disks = self.disk_refs();
         manifest.nvram = Some(self.nvram_path.clone());
         manifest.cpu_model = Some(cpu.model_name().to_string());
         manifest.cpu_cache = Some(cpu.cache_kind().to_string());
@@ -924,7 +938,7 @@ impl OctaneMachine {
         }
         crate::snapshot::check_schema(name, m.schema_version)?;
         // As the Indy and the O2: build, CPU and disks must match.
-        crate::snapshot::check_provenance(&m, cpu.model_name(), cpu.cache_kind(), &self.disk_refs)?;
+        crate::snapshot::check_provenance(&m, cpu.model_name(), cpu.cache_kind(), &self.disk_refs())?;
         let sv = m.schema_version;
         let state = |base: &str| snap.read_state(base, sv).map_err(|e| format!("{base}: {e}"));
         let chunks = snap.read_chunks_manifest().map_err(|e| format!("chunks.bin: {e}"))?;
@@ -1102,9 +1116,6 @@ impl Workstation for OctaneMachine {
         }
         self.ioc3.flush_nvram();
         Ok(self.nvram_path.clone())
-    }
-    fn scratch_path(&self) -> Option<&std::path::Path> {
-        self.scratch_path.as_deref()
     }
 }
 
@@ -1465,7 +1476,7 @@ mod snapshot_tests {
             // The onboard Bridge keeps its own devices.
             let onboard: Vec<u8> = (0..8).filter(|&d| m.bridge.bus().occupied(d)).collect();
             assert_eq!(onboard, [0, 1, 2, 3], "SCSI, IOC3 and the RAD, and nothing else");
-            assert!(m.disk_refs.iter().any(|d| d.id == crate::dev::nvme::SNAPSHOT_SLOT && d.size_bytes == 1 << 20));
+            assert!(m.disk_refs().iter().any(|d| d.id == crate::dev::nvme::SNAPSHOT_SLOT && d.size_bytes == 1 << 20));
 
             let nvme = m.nvme.clone().unwrap();
             let io = |cdb: Vec<u8>, data: Option<Vec<u8>>| {
@@ -1749,5 +1760,44 @@ mod snapshot_tests {
             assert!(e.contains("flash"), "{e}");
             assert_eq!(digest(&a), before, "the machine is as it was");
         }).unwrap().join().unwrap();
+    }
+}
+
+/// Disks are placed through the socket map.
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+    use crate::config::ScsiDeviceConfig;
+    use crate::topology::Family;
+
+    fn loc(s: &str) -> Location {
+        s.parse().unwrap()
+    }
+
+    fn octane() -> MachineConfig {
+        let mut cfg = MachineConfig::default();
+        cfg.machine.profile = MachineProfile::OctaneIp30;
+        cfg
+    }
+
+    /// The Octane's SCSI ids run to 15; the rows stop there, and the IOC3's
+    /// device is not a place for a card.
+    #[test]
+    fn octane_ids_up_to_15_are_rows_and_16_is_not() {
+        let t = Topology::fill_for(&octane());
+        assert!(t.claim(&loc("xio15.pci0.1.t15"), "hdd", Family::Scsi, false, "").is_ok());
+        assert!(t.claim(&loc("xio15.pci0.1.t16"), "hdd", Family::Scsi, false, "").is_err());
+        let e = t.claim(&loc("xio15.pci0.2"), "nvme", Family::Pci, false, "").unwrap_err();
+        assert!(e.contains("onboard ioc3"), "{e}");
+    }
+
+    /// `[scsi.31]` is controller 1, target 15.
+    #[test]
+    fn legacy_key_31_lands_on_xio15_pci0_1_t15() {
+        let mut cfg = octane();
+        let t = Topology::fill_for(&cfg);
+        cfg.scsi.clear();
+        cfg.scsi.insert(31, ScsiDeviceConfig { path: "x.img".into(), ..Default::default() });
+        assert_eq!(cfg.placements(&t).unwrap()[0].at, loc("xio15.pci0.1.t15"));
     }
 }

@@ -196,7 +196,7 @@ fn a_scratch_volume_is_the_machines_scratch_path() {
         cfg.scsi.clear();
         cfg.scsi.insert(2, toml::from_str(&format!("path = {:?}\nscratch = true\nsize_mb = 4", disk.to_string_lossy())).unwrap());
         let m = Origin200Machine::new(&cfg).unwrap();
-        assert_eq!(m.scratch_path(), Some(disk.as_path()));
+        assert_eq!(m.scratch_path(), Some(disk.clone()));
     });
 }
 
@@ -286,4 +286,22 @@ fn a_reference_by_node_number_can_compare_and_swap() {
         assert_eq!(phys.cas32(WORD + 4, 0x9a, 0x9c), Some(true));
         assert_eq!(hub.cpu_special().read64(0x61_c000).data, 0x9c);
     });
+}
+
+/// The BaseIO's rows sit at the root on the Origin 200 and below its
+/// Crossbow port on the Origin 2000 and Onyx2.
+#[test]
+fn the_baseio_rows_follow_the_machine() {
+    use crate::config::{MachineConfig, MachineProfile};
+    for (profile, ctl) in [
+        (MachineProfile::Origin200Ip29, "pci0.0"),
+        (MachineProfile::Origin2000Ip27, "xio8.pci0.0"),
+        (MachineProfile::Onyx2Ip27, "xio15.pci0.0"),
+    ] {
+        let mut cfg = MachineConfig::default();
+        cfg.machine.profile = profile;
+        let t = Topology::fill_for(&cfg);
+        assert_eq!(t.controller(0), Some(ctl.parse().unwrap()), "{profile:?}");
+        assert!(t.claim(&format!("{ctl}.t15").parse().unwrap(), "hdd", crate::topology::Family::Scsi, false, "").is_ok());
+    }
 }

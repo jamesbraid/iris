@@ -70,6 +70,15 @@ impl Devices {
         self.push(key, phase, true, dev);
     }
 
+    /// Register every part of `other` after the ones already here, in its
+    /// order: the devices a machine placed by location, built before the
+    /// machine's own parts were registered.
+    pub fn append(&mut self, other: Devices) {
+        for e in other.entries {
+            self.push(&e.key, e.phase, e.optional, e.dev);
+        }
+    }
+
     fn push(&mut self, key: &str, phase: Phase, optional: bool, dev: Arc<dyn Part>) {
         assert!(self.entries.iter().all(|e| e.key != key), "devices: {key} registered twice");
         self.entries.push(Entry { key: key.to_string(), phase, optional, dev });

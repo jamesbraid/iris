@@ -54,7 +54,7 @@ pub type Origin2000Machine = Ip27Machine<Origin2000>;
 /// Node boards the deskside midplane has.
 pub const MAX_NODES: usize = 2;
 /// The Crossbow's widget for the BaseIO card, in XIO slot 1.
-const WIDGET_BASEIO: u8 = 8;
+pub(crate) const WIDGET_BASEIO: u8 = 8;
 /// The Crossbow's widget for a node board's Hub: 9 in node slot 1, 10 in 2.
 const fn widget_hub(node: usize) -> u8 {
     9 + node as u8
@@ -232,7 +232,7 @@ impl Ip27Board for Origin2000 {
                 }));
                 node.hub.io().connect_widget(WIDGET_BASEIO, xbow.port(WIDGET_BASEIO, bridge.clone()));
                 let mac = cfg.network().mac;
-                io = Some(pci_devices(node, cfg, bridge, Self::ioc3_config(mac), Ioc3Eth::new_origin200(mac), controller.clone(), SUPERIO_PIN, "origin2000", Self::NAME)?);
+                io = Some(pci_devices(node, cfg, bridge, Self::ioc3_config(mac), Ioc3Eth::new_origin200(mac), controller.clone(), SUPERIO_PIN, Self::NAME)?);
             }
         }
         if let [a, b] = nodes {

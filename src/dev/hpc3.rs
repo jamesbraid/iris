@@ -1186,19 +1186,10 @@ pub struct Hpc3 {
 
 impl Hpc3 {
     /// The empty SCSI buses of a board: one controller on an Indy (guinness),
-    /// two on an Indigo2. A machine fills them from `[scsi.N]` and gives them
-    /// to [`Self::with_net`].
+    /// two on an Indigo2, given to [`Self::with_net`]. The machine places the
+    /// configured devices on them once it is built.
     pub fn new_scsi_buses(guinness: bool) -> Vec<crate::scsi::ScsiBus> {
         (0..if guinness { 1 } else { 2 }).map(|_| Wd33c93a::new_bus()).collect()
-    }
-
-    /// The bus `controller` names among a board's `buses`, or why there is none.
-    pub fn route_scsi(buses: &[crate::scsi::ScsiBus], controller: u8) -> Result<&crate::scsi::ScsiBus, String> {
-        match controller {
-            c if (c as usize) < buses.len() => Ok(&buses[c as usize]),
-            1 => Err("controller 1 (this machine has only controller 0)".to_string()),
-            c => Err(format!("controller {c} (valid: 0, 1)")),
-        }
     }
 
     /// `no_audio` skips HAL2 audio init (used by `--noaudio` and also by full
@@ -3032,18 +3023,5 @@ mod enet_rx_chain_tests {
         assert_eq!(sent, 0x600);
         assert_eq!(hpc3.read32(reg(ENET_TX_BASE + ENET_TX_CTRL)).data & ENET_TX_CTRL_ACTIVE, 0);
         assert_ne!(ram.read32(0x104).data & ENET_BC_TXD as u32, 0, "the channel stopped before marking the packet sent");
-    }
-
-    /// A target for controller 1 on an Indy, which has one, is an error that
-    /// names the machine; an Indigo2 has the second bus.
-    #[test]
-    fn the_second_scsi_controller_exists_on_an_indigo2_only() {
-        let indy = Hpc3::new_scsi_buses(true);
-        assert!(Hpc3::route_scsi(&indy, 0).is_ok());
-        let e = Hpc3::route_scsi(&indy, 1).err().unwrap();
-        assert!(e.contains("only controller 0"), "{e}");
-        let indigo2 = Hpc3::new_scsi_buses(false);
-        assert!(Hpc3::route_scsi(&indigo2, 1).is_ok());
-        assert!(Hpc3::route_scsi(&indigo2, 2).err().unwrap().contains("valid: 0, 1"));
     }
 }

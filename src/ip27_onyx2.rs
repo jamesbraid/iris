@@ -42,7 +42,7 @@ pub type Onyx2Machine = Ip27Machine<Onyx2Deskside>;
 
 /// The graphics slot's widget, and the BaseIO-G's.
 const WIDGET_PIPE: u8 = 8;
-const WIDGET_BASEIO: u8 = 15;
+pub(crate) const WIDGET_BASEIO: u8 = 15;
 /// A node board's Hub port: 10 in node slot 1, 9 in slot 2.
 const fn widget_hub(node: usize) -> u8 {
     10 - node as u8
@@ -189,7 +189,7 @@ impl Ip27Board for Onyx2Deskside {
             }
         }
         let mac = cfg.network().mac;
-        pci_devices(owner, cfg, bridge, Self::ioc3_config(mac), Ioc3Eth::new_origin200(mac), controller, SUPERIO_PIN, "onyx2", Self::NAME)
+        pci_devices(owner, cfg, bridge, Self::ioc3_config(mac), Ioc3Eth::new_origin200(mac), controller, SUPERIO_PIN, Self::NAME)
     }
 }
 

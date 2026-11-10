@@ -72,6 +72,10 @@ use crate::xtalk::{Upstream, XtalkHost};
 use crate::control::Control;
 use crate::devices::Devices;
 use crate::disks::Disks;
+use crate::attach::{attach_devices, Ctx};
+use crate::location::{Hop, Location};
+use crate::scsi::ScsiPort;
+use crate::topology::{Row, Topology};
 use crate::workstation::Workstation;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -213,8 +217,6 @@ pub struct BoardIo {
     pub timekeeper: Arc<Timekeeper>,
     /// The console, when it serves the CI socket.
     pub console: Option<Arc<CiSerialBackend>>,
-    /// The `scratch = true` volume.
-    pub scratch: Option<PathBuf>,
     /// The Ethernet's NAT, when `[network]` connects it.
     pub net: Option<GuestNet>,
     /// The module controller the nodes' I2C controllers reach.
@@ -398,7 +400,15 @@ impl<B: Ip27Board> Ip27Machine<B> {
 
         let nodes: Vec<&Node> = parts.iter().collect();
         let io = B::wire(&nodes, cfg)?;
-        let disks = Disks::new(io.scsi.iter().map(|s| s.clone() as Arc<dyn crate::disks::DiskController>).collect());
+        // The BaseIO's controllers on their rows, and the disks on them.
+        let topology = Arc::new(Topology::fill_for(cfg));
+        for (n, s) in io.scsi.iter().enumerate() {
+            let at = topology.controller(n as u8).expect("fill added a row for every controller");
+            topology.bind(&at, Arc::new(ScsiPort::new(s.clone()))).expect("the controller row takes its handle once");
+        }
+        let disks = Disks::new(topology.clone()).with_ci(cfg.ci);
+        let mut devices = Devices::new();
+        attach_devices(&cfg.placements(&topology)?, cfg, Some(&mut Ctx { devices: &mut devices, disks: &disks }), &topology)?;
 
         let control = Control::new();
         let tx = control.sender();
@@ -448,7 +458,7 @@ impl<B: Ip27Board> Ip27Machine<B> {
             ci: cfg.ci,
             nvram: cfg.nvram.clone(),
             control,
-            devices: Devices::new(),
+            devices,
             disks,
         })
     }
@@ -695,9 +705,6 @@ impl<B: Ip27Board> Workstation for Ip27Machine<B> {
         self.io.timekeeper.flush_nvram()?;
         Ok(self.nvram.clone())
     }
-    fn scratch_path(&self) -> Option<&Path> {
-        self.io.scratch.as_deref()
-    }
 }
 
 impl<B: Ip27Board> Drop for Ip27Machine<B> {
@@ -822,8 +829,30 @@ impl Ip27Board for Origin200 {
             node.hub.io().connect_widget(widget, bridge.clone());
         }
         let eth = Ioc3Eth::new_origin200(cfg.network().mac);
-        pci_devices(node, cfg, bridge, Self::ioc3_config(cfg.network().mac), eth, controller, SUPERIO_PIN, "origin200", Self::NAME)
+        pci_devices(node, cfg, bridge, Self::ioc3_config(cfg.network().mac), eth, controller, SUPERIO_PIN, Self::NAME)
     }
+}
+
+/// The places an IP27 machine has: the BaseIO Bridge's PCI bus with the two
+/// ISP1040s, targets 1 to 15 on each, and the IOC3. `base` is where the
+/// Bridge is: the root on the Origin 200, whose Bridge is on the Hub's own
+/// port, or its Crossbow port on the Origin 2000 and Onyx2. Touches no
+/// hardware.
+pub(crate) fn fill(base: Option<u8>, t: &Topology) {
+    let add = |l: Location, row: Row| t.add(l, row).expect("rows are added once");
+    add(Location::root(), Row::fixed(if base.is_some() { "XIO" } else { "Hub" }));
+    let bridge = Location::root().join_opt(base.map(Hop::xio));
+    if base.is_some() {
+        add(bridge.clone(), Row::fixed("BaseIO Bridge"));
+    }
+    let bus = bridge.join(Hop::pci(0));
+    add(bus.clone(), Row::fixed("PCI bus"));
+    for (n, label) in ["SCSI 0", "SCSI 1"].into_iter().enumerate() {
+        let ctl = bus.join(Hop::pos(n as u8));
+        add(ctl.clone(), Row::fixed(label).ctl(n as u8).onboard("isp1040"));
+        t.scsi(&ctl, 1..=15, false);
+    }
+    add(bus.join(Hop::pos(2)), Row::fixed("").onboard("ioc3"));
 }
 
 /// The PCI devices both IP27 I/O boards carry behind their Bridge: two
@@ -836,20 +865,11 @@ pub(crate) fn pci_devices(
     eth: Arc<Ioc3Eth>,
     controller: Arc<dyn ModuleController>,
     superio_pin: u8,
-    scsi_name: &str,
     name: &str,
 ) -> Result<BoardIo, String> {
     let heartbeat = Arc::new(AtomicU64::new(0));
-    let (bus_a, bus_b) = (Isp1040::new_bus(), Isp1040::new_bus());
-    let attached = crate::scsi::attach_from_config(cfg, Some(scsi_name), &|c| match c {
-        0 => Ok(&bus_a),
-        1 => Ok(&bus_b),
-        _ => Err(format!("controller {c} ({name} has controllers 0 and 1)")),
-    })?;
-    if let Some(d) = attached.daynaports.first() {
-        return Err(format!("{}: kind = \"daynaport\" is not available on the {name}", crate::config::scsi_label(d.controller, d.id)));
-    }
-    let scsi = vec![Arc::new(Isp1040::new_at(0, bus_a)), Arc::new(Isp1040::new_at(1, bus_b))];
+    // The machine places the devices on the controllers once it is built.
+    let scsi = vec![Arc::new(Isp1040::new_at(0, Isp1040::new_bus())), Arc::new(Isp1040::new_at(1, Isp1040::new_bus()))];
     for s in &scsi {
         s.set_heartbeat(heartbeat.clone());
     }
@@ -909,7 +929,6 @@ pub(crate) fn pci_devices(
         ps2,
         timekeeper,
         console,
-        scratch: attached.scratch,
         net,
         controller,
         reset,

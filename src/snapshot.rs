@@ -76,6 +76,25 @@ pub struct DiskRef {
     pub size_bytes: u64,
 }
 
+impl DiskRef {
+    /// The placed disks as a manifest numbers them: controller * 16 + target
+    /// id. CD-ROMs only when `cdroms`: the Indy and Indigo2 have always listed
+    /// them beside the disks, the O2 and Octane do not.
+    pub fn from_records(disks: &crate::disks::Disks, cdroms: bool) -> Vec<DiskRef> {
+        let mut refs: Vec<DiskRef> = disks
+            .records()
+            .iter()
+            .filter(|r| cdroms || !r.cdrom)
+            .filter_map(|r| {
+                let id = crate::config::scsi_slot(disks.topology().ctl_of(&r.at)?, r.at.target()?);
+                Some(DiskRef { id, path: r.path.clone(), size_bytes: r.size_bytes })
+            })
+            .collect();
+        refs.sort_by_key(|r| r.id);
+        refs
+    }
+}
+
 /// Reject a restore whose CPU model differs from the running machine's.
 /// `None` from the snapshot means a legacy manifest — the model was a build
 /// flag then, so there is nothing to compare and the restore is allowed.
