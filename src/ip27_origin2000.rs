@@ -80,9 +80,12 @@ const fn hub_host(node: usize) -> XtalkHost {
 
 /// The module number the controller's store starts with.
 const MODULE_NUMBER: u8 = 1;
-/// The module's serial and its identity part's ROM serial: synthetic, so an
-/// inventory from the model never reads as a real unit.
-const MODULE_SERIAL: &str = "EMU0000001";
+/// The module identity part's ROM serial: synthetic, so an inventory from the
+/// model never reads as a real unit. The module's own serial, which the guest
+/// folds into its host id, comes from the machine identity
+/// (`[machine] emu_id`, `serial`, `hostid`), `KEMU2` and the `emu_id` by
+/// default. IRIX is expected to read a module serial only when it starts with
+/// `K` (not yet confirmed on an iris boot).
 const MODULE_IDENTITY_SERIAL: u64 = 0x5145_4d55_4d00;
 
 /// The module management as the machine drives it: the adapters to reset
@@ -148,6 +151,12 @@ impl Origin2000 {
         path.as_ref().map(|p| if node == 0 { PathBuf::from(p) } else { PathBuf::from(format!("{p}.{node}")) })
     }
 
+    /// The serial of the one module: the ten characters on its identity
+    /// part, whose low nibbles the guest folds into its host id.
+    pub(crate) fn module_serial(cfg: &MachineConfig) -> Result<String, String> {
+        cfg.identity()?.module_text(0).ok_or_else(|| "module identity: no serial for module 0".to_string())
+    }
+
     /// The module controller: one for the module, in front of every node's
     /// I2C controller.
     pub(crate) fn controller(nodes: &[&Node], cfg: &MachineConfig) -> Result<Arc<ModuleManagement>, String> {
@@ -159,7 +168,7 @@ impl Origin2000 {
             node.hub.attach_i2c(module.adapter(i));
         }
         module
-            .attach_parts(MODULE_SERIAL, MODULE_IDENTITY_SERIAL, None)
+            .attach_parts(&Self::module_serial(cfg)?, MODULE_IDENTITY_SERIAL, None)
             .map_err(|e| format!("module identity: {e}"))?;
         module.power_on();
         Ok(Arc::new(ModuleManagement { module, adapters: nodes.len() }))

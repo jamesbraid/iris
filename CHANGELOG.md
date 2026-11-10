@@ -26,6 +26,12 @@ hashes are given where a change is easiest to understand by reading the commit.
   iris writes the address into a blank slot only. A DHCP reservation, a
   node-locked license or a script that relied on the old default needs
   `[network] mac = "08:00:69:12:34:56"` to keep it.
+- The Origin 2000 and Onyx2 module serial changes from `EMU0000001` to
+  `KEMU200000` (`KEMU2`, the `emu_id`, the module number). IRIX is expected to
+  read a module serial only when it starts with `K`, which the old one did not,
+  so the guest should now report a host id derived from it. This is an
+  expectation from the IRIX fold rule, not yet confirmed by an iris Origin 2000
+  or Onyx2 boot.
 
 ### R10000 family fixes, R12000 and R14000
 

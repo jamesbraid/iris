@@ -287,3 +287,32 @@ fn a_reference_by_node_number_can_compare_and_swap() {
         assert_eq!(hub.cpu_special().read64(0x61_c000).data, 0x9c);
     });
 }
+
+/// IRIX takes the host id from the last four bytes of the address on the
+/// IOC3's one-wire Ethernet part; the Origin 200 builds that part from the
+/// station address its machine identity gives.
+#[test]
+fn the_ioc3_part_carries_the_configured_identity() {
+    use crate::dev::ioc3::default_wire;
+    use crate::dev::w1::sgi::nic_address;
+    for (inputs, mac, hostid) in [
+        ("", [0x08, 0x00, 0x69, 0xe2, 0x00, 0x00], 0x69e2_0000),
+        ("emu_id = 42", [0x08, 0x00, 0x69, 0xe2, 0x02, 0xa0], 0x69e2_02a0),
+        ("hostid = \"69aabbcc\"", [0x08, 0x00, 0x69, 0xaa, 0xbb, 0xcc], 0x69aa_bbcc),
+        ("serial = \"F9N102J0\"", [0x08, 0x00, 0x69, 0xe1, 0x02, 0xa0], 0x69e1_02a0),
+    ] {
+        let cfg: MachineConfig = toml::from_str(&format!("[machine]\nprofile = \"origin200_ip29\"\n{inputs}\n")).unwrap();
+        cfg.validate().expect(inputs);
+        assert_eq!(cfg.identity().unwrap().hostids(1).unwrap(), [hostid], "{inputs}");
+        let mut wire = default_wire(&Origin200::ioc3_config(cfg.network().mac));
+        assert_eq!(nic_address(&mut wire), Some(mac), "{inputs}");
+    }
+}
+
+#[test]
+fn an_address_outside_the_sgi_block_is_refused() {
+    let mut cfg: MachineConfig = toml::from_str("[machine]\nprofile = \"origin200_ip29\"\n").unwrap();
+    cfg.network.mac = Some("52:54:00:12:34:56".into());
+    let e = cfg.validate().unwrap_err();
+    assert!(e.contains("must start 08:00:69; use mac=08:00:69:12:34:56 or hostid=123456"), "{e}");
+}

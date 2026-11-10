@@ -828,7 +828,7 @@ impl Ioc3Config {
 
 /// The wire the board carries: the station-address part and the board
 /// records, the front plane and the power supply on the Octane.
-fn default_wire(cfg: &Ioc3Config) -> w1::Bus {
+pub(crate) fn default_wire(cfg: &Ioc3Config) -> w1::Bus {
     let mut bus = w1::Bus::new();
     bus.add(Box::new(sgi::ethernet_address_part(cfg.mac, sgi::ETHERNET_PART_SERIAL)));
     for (r, serial) in &cfg.records {

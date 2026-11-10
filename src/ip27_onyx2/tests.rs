@@ -216,3 +216,49 @@ fn the_bridge_sends_dma_and_interrupts_to_the_hub_the_guest_names() {
         }
     });
 }
+
+/// IRIX folds the first ten characters of the module serial the module's
+/// identity part holds into the host id, and reads the serial only if it
+/// starts with K; the Ethernet address is the port's alone and takes no part.
+#[test]
+fn the_module_part_carries_the_configured_serial() {
+    use crate::dev::o2000_module::identity_pages;
+    for (inputs, serial, hostid) in [
+        ("", "KEMU200000", 0xd520_0000u32),
+        ("emu_id = 42", "KEMU200420", 0xd520_0420),
+        ("serial = \"K2100887\"", "KKK2100887", 0xb210_0887),
+        ("serial = \"KEMU100887\"", "KEMU100887", 0xd510_0887),
+        ("hostid = \"d2100887\"", "KKM2100887", 0xd210_0887),
+    ] {
+        let cfg: MachineConfig = toml::from_str(&format!("[machine]\nprofile = \"onyx2_ip27\"\n{inputs}\n")).unwrap();
+        cfg.validate().expect(inputs);
+        assert_eq!(Origin2000::module_serial(&cfg).unwrap(), serial, "{inputs}");
+        let pages = identity_pages(serial).expect(inputs);
+        assert_eq!((pages[0][0], &pages[0][1..11]), (0x01, serial.as_bytes()), "{inputs}");
+        assert_eq!(crate::identity::hostid_from_text(std::str::from_utf8(&pages[0][1..11]).unwrap()), hostid, "{inputs}");
+        assert_eq!(cfg.identity().unwrap().hostids(1).unwrap(), [hostid], "{inputs}");
+    }
+}
+
+#[test]
+fn a_serial_the_guest_would_ignore_is_refused() {
+    let cfg: MachineConfig = toml::from_str("[machine]\nprofile = \"onyx2_ip27\"\nserial = \"M2100887\"\n").unwrap();
+    let e = cfg.validate().unwrap_err();
+    assert!(e.contains("serial 'M2100887' must start with K on this machine: the guest ignores a module serial that does not"), "{e}");
+}
+
+/// The port keeps any address, and takes the layout's by default.
+#[test]
+fn the_ethernet_port_has_its_own_address() {
+    use crate::dev::ioc3::default_wire;
+    use crate::dev::w1::sgi::nic_address;
+    for (inputs, mac) in [("emu_id = 42", [0x08, 0x00, 0x69, 0xe2, 0x02, 0xa0]), ("serial = \"K2100887\"", [0x08, 0x00, 0x69, 0xe2, 0x00, 0x00])] {
+        let cfg: MachineConfig = toml::from_str(&format!("[machine]\nprofile = \"onyx2_ip27\"\n{inputs}\n")).unwrap();
+        let mut wire = default_wire(&Origin2000::ioc3_config(cfg.network().mac));
+        assert_eq!(nic_address(&mut wire), Some(mac), "{inputs}");
+    }
+    let mut cfg: MachineConfig = toml::from_str("[machine]\nprofile = \"onyx2_ip27\"\n").unwrap();
+    cfg.network.mac = Some("52:54:00:12:34:56".into());
+    cfg.validate().expect("a module machine's port keeps any address");
+    assert_eq!(cfg.network().mac, [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+}
