@@ -4824,6 +4824,54 @@ mod tests {
         assert_eq!(exec.core.read_fpu_control(31), 0x0100_0000);
     }
 
+    /// A multiply-add whose sum is denormal follows the same rule. The
+    /// product, 2^-125 (single) or 2^-1021 (double), is normal; adding or
+    /// subtracting 1.75 times the smallest normal leaves an exact 2^-128 or
+    /// 2^-1024. NMADD and NMSUB negate it, so the flushed zero is negative.
+    /// Seed 7770 of olperi took NMADD.S to 0x0000AD08 with FS set.
+    #[test]
+    fn test_fpu_madd_denorm_result_follows_fs() {
+        let (mut exec, _) = create_executor_m4();
+        exec.core.cp0_status |= STATUS_CU1 | STATUS_FR;
+        exec.update_fpr_mode();
+        // fr = f1, ft = f2, fs = f3, fd = f4
+        for (funct, fr_neg, neg) in [
+            (FUNCT_MADD_S, true, false), (FUNCT_MSUB_S, false, false),
+            (FUNCT_NMADD_S, true, true), (FUNCT_NMSUB_S, false, true),
+        ] {
+            for is_d in [false, true] {
+                let (fs, fr, sign) = if is_d {
+                    (0x0020_0000_0000_0000u64, 0x001C_0000_0000_0000u64, 1u64 << 63)
+                } else {
+                    (0x0100_0000, 0x00E0_0000, 1 << 31)
+                };
+                let (one, write): (u64, fn(&mut crate::cpu::mips_core::MipsCore, u32, u64)) = if is_d {
+                    (0x3FF0_0000_0000_0000, |c, r, v| c.write_fpr_l(r, v))
+                } else {
+                    (0x3F80_0000, |c, r, v| c.write_fpr_w(r, v as u32))
+                };
+                let read = |c: &crate::cpu::mips_core::MipsCore| if is_d { c.read_fpr_l(4) } else { u64::from(c.read_fpr_w(4)) };
+                write(&mut exec.core, 1, fr | if fr_neg { sign } else { 0 });
+                write(&mut exec.core, 2, one);
+                write(&mut exec.core, 3, fs);
+                write(&mut exec.core, 4, 0x5a5a_5a5a);
+                let instr = make_cop1x(1, 2, 3, 4, funct + is_d as u32);
+
+                exec.core.fpu_fcsr = 0x0100_0000; // FS, no enables
+                assert_eq!(exec.exec(instr), EXEC_COMPLETE, "funct {funct:#x} d={is_d}: flushed, no trap");
+                assert_eq!(read(&exec.core), if neg { sign } else { 0 }, "funct {funct:#x} d={is_d}");
+                assert_eq!(exec.core.read_fpu_control(31), 0x0100_300c, "funct {funct:#x} d={is_d}: Cause and Flag U|I");
+
+                write(&mut exec.core, 4, 0x5a5a_5a5a);
+                exec.core.fpu_fcsr = 0; // FS clear
+                let s = exec.exec(instr);
+                assert!(s & EXEC_IS_EXCEPTION != 0, "funct {funct:#x} d={is_d}: denormal result without FS must trap");
+                assert_eq!(exec.core.read_fpu_control(31) & 0x0003_f000, 0x0002_0000, "funct {funct:#x} d={is_d}: Cause E alone");
+                assert_eq!(read(&exec.core), 0x5a5a_5a5a, "funct {funct:#x} d={is_d}: fd untouched");
+            }
+        }
+    }
+
     #[test]
     fn test_cop1x_load_store() {
         let (mut exec, mem) = create_executor_m4();

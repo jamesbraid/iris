@@ -5986,6 +5986,45 @@ mod tests {
         assert_eq!((jit.fpr[3] & 0xFFFF_FFFF, jit.fpu_fcsr), (0x0080_0000, FS), "2^126: normal, stale Cause cleared");
     }
 
+    /// The multiply-add family's denormal sum follows the same rule: a
+    /// normal product, 2^-125 or 2^-1021, plus or minus 1.75 times the
+    /// smallest normal leaves an exact 2^-128 or 2^-1024, negated by NMADD
+    /// and NMSUB.
+    #[test]
+    fn madd_denormal_result_flushes_like_the_interpreter() {
+        use crate::cpu::mips_isa::{FUNCT_MADD_S, FUNCT_MSUB_S, FUNCT_NMADD_S, FUNCT_NMSUB_S, OP_COP1X};
+        const FS: u32 = 0x0100_0000;
+        for (funct, fr_neg, neg) in [
+            (FUNCT_MADD_S, true, false), (FUNCT_MSUB_S, false, false),
+            (FUNCT_NMADD_S, true, true), (FUNCT_NMSUB_S, false, true),
+        ] {
+            for is_d in [false, true] {
+                let (fs, fr, one, sign) = if is_d {
+                    (0x0020_0000_0000_0000u64, 0x001C_0000_0000_0000u64, 0x3FF0_0000_0000_0000u64, 1u64 << 63)
+                } else {
+                    (0x0100_0000, 0x00E0_0000, 0x3F80_0000, 1 << 31)
+                };
+                for fcsr in [FS, 0, FS | 0x0100] {
+                    let mut fpr = [0u64; 32];
+                    fpr[1] = fr | if fr_neg { sign } else { 0 };
+                    fpr[2] = one;
+                    fpr[3] = fs;
+                    fpr[4] = 0xDEAD_BEEF_DEAD_BEEF;
+                    // fr = f1, ft = f2, fs = f3, fd = f4
+                    let jit = assert_fpu_matches_interpreter_fcsr(
+                        make_r(OP_COP1X, 1, 2, 3, 4, funct + is_d as u32), [0u64; 32], fpr, true, Some(fcsr));
+                    let r = if is_d { jit.fpr[4] } else { jit.fpr[4] & 0xFFFF_FFFF };
+                    if fcsr == FS {
+                        assert_eq!(jit.fpu_fcsr, FS | 0x0000_300C, "funct={funct:#x} d={is_d}: Cause and Flag U|I");
+                        assert_eq!(r, if neg { sign } else { 0 }, "funct={funct:#x} d={is_d}: signed zero delivered");
+                    } else {
+                        assert_eq!(jit.fpu_fcsr & 0x0003_F000, 0x0002_0000, "funct={funct:#x} d={is_d} fcsr={fcsr:#x}: Cause E alone");
+                    }
+                }
+            }
+        }
+    }
+
     /// SQRT, RSQRT, the multiply-add family and CVT.S.D leave an Invalid
     /// Operation's result as the MIPS default NaN, not the host's
     /// (0xFFC00000 on x86, which is a signalling NaN under the MIPS

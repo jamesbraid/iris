@@ -5701,11 +5701,11 @@ fn emit_fix_invalid(ctx: &mut EmitCtx, is_d: bool, flags: Value, result_bits: Va
 /// `flags_fn`, applies `emit_fix_invalid` and does the full FCSR update, and
 /// a finite result with Cause set only clears it.
 ///
-/// `may_underflow` is for RECIP, whose result can be denormal, mirroring
-/// `fpu_fix_invalid_denorm_s/d`: the one compare becomes a range test that also
-/// sends zero and denormal results cold, where a denormal one goes through
-/// `emit_fpu_update_fcsr_arith` (flushed to a signed zero under FCSR.FS,
-/// otherwise Unimplemented Operation).
+/// `may_underflow` is for RECIP and the multiply-add family, whose results
+/// can be denormal, mirroring `fpu_fix_invalid_denorm_s/d`: the one compare
+/// becomes a range test that also sends zero and denormal results cold,
+/// where a denormal one goes through `emit_fpu_update_fcsr_arith` (flushed to
+/// a signed zero under FCSR.FS, otherwise Unimplemented Operation).
 fn emit_commit_finite_first(
     ctx: &mut EmitCtx,
     is_d: bool,
@@ -10650,23 +10650,17 @@ fn emit_sdxc1(ctx: &mut EmitCtx, fr_mode: FrMode) {
 
 /// MADD/MSUB/NMADD/NMSUB.S/D — COP1X multiply-add, `fd = ±(fs*ft ± fr)`.
 ///
-/// Three things here are deliberately *unlike* `emit_fbinop_s/d`, because
+/// Two things here are deliberately *unlike* `emit_fbinop_s/d`, because
 /// they are unlike the interpreter's `exec_madd_*` too, and lockstep compares
 /// against the interpreter rather than against the other emitters:
 ///
 /// - **No `emit_check_denorm_operand`.** The binop handlers call
 ///   `fpu_check_denorm_operand_*` on each operand and can trap before
 ///   computing; `exec_madd_d` does not.
-/// - **No flush-to-zero on a denormal result.** The binops route through
-///   `fpu_update_fcsr_full` with a `Some(is_negative)` denorm argument;
-///   `exec_madd_d` uses plain `fpu_update_fcsr`, i.e. `denorm = None`, so the
-///   result is written as computed.
 /// - **Invalid is computed over all three sources**, not two.
 ///
-/// (Whether the interpreter *should* do the denormal handling for this family
-/// as it does for ADD/SUB/MUL is a real question, but it is a question about
-/// the interpreter. Diverging here would only break lockstep while leaving
-/// the behaviour just as wrong.)
+/// A denormal result is flushed or trapped as for the binops, through
+/// `emit_commit_finite_first`'s `may_underflow`.
 ///
 /// Not fused: MIPS IV rounds the product to the format and then adds,
 /// rounding again — on the R10000, one pass through the multiplier and a
@@ -10704,7 +10698,7 @@ fn emit_fternop_s(ctx: &mut EmitCtx, fr_mode: FrMode, negate_fr: bool, negate_re
     let result = if negate_result { ctx.builder.ins().fneg(sum) } else { sum };
     let result_bits = ctx.builder.ins().bitcast(ir::types::I32, MemFlagsData::new(), result);
     emit_commit_finite_first(
-        ctx, false, false, result_bits, &[fr_bits, ft_bits, fs_bits],
+        ctx, false, true, result_bits, &[fr_bits, ft_bits, fs_bits],
         |ctx| emit_fpu_arith_flags_snan_only3_s(ctx, fr_bits, ft_bits, fs_bits),
         move |ctx, bits| emit_write_fpr_w(ctx, fd, bits, fr_mode),
     );
@@ -10734,7 +10728,7 @@ fn emit_fternop_d(ctx: &mut EmitCtx, fr_mode: FrMode, negate_fr: bool, negate_re
     let result = if negate_result { ctx.builder.ins().fneg(sum) } else { sum };
     let result_bits = ctx.builder.ins().bitcast(ir::types::I64, MemFlagsData::new(), result);
     emit_commit_finite_first(
-        ctx, true, false, result_bits, &[fr_bits, ft_bits, fs_bits],
+        ctx, true, true, result_bits, &[fr_bits, ft_bits, fs_bits],
         |ctx| emit_fpu_arith_flags_snan_only3_d(ctx, fr_bits, ft_bits, fs_bits),
         move |ctx, bits| emit_write_fpr_l(ctx, fd, bits, fr_mode),
     );
