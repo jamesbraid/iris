@@ -37,9 +37,10 @@ PROM/kernel from the `eaddr` environment variable, which real hardware stores
 in battery-backed NVRAM (Indy: DS1386) or a serial EEPROM (Indigo2: 93CS56).
 Real hardware always ships with one burned in — there's no way to leave it
 unset — so `Machine::new` (`src/machine.rs`, right after `Hpc3::with_net`)
-backdoor-injects `[network] mac` (default `08:00:69:12:34:56`, see
-`config::DEFAULT_MAC`) directly into the emulated chip before the CPU ever
-runs, rather than requiring a guest-side `setenv`:
+backdoor-injects `[network] mac` (default `08:00:69:e2:00:00`, see
+`config::DEFAULT_MAC`; it was `08:00:69:12:34:56` before the machine identity
+keys) directly into the emulated chip before the CPU ever runs, rather than
+requiring a guest-side `setenv`:
 
 - **Indy (`Ds1x86::backdoor_set_mac_if_blank`, `src/dev/ds1x86.rs`):** patches
   NVRAM bytes `regs[314..320]` — the offset SGI's own documented

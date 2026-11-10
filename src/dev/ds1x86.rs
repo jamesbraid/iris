@@ -250,6 +250,12 @@ impl Ds1x86 {
         true
     }
 
+    /// The station address the PROM reads from the NVRAM's `eaddr` slot.
+    #[cfg(test)]
+    pub(crate) fn eaddr(&self) -> [u8; 6] {
+        self.data.lock().regs[MAC_REGS_OFFSET..MAC_REGS_OFFSET + 6].try_into().unwrap()
+    }
+
     fn read(&self, addr: u32) -> BusRead8 {
         let offset = addr as usize;
         if offset >= self.size {

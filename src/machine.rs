@@ -2230,6 +2230,71 @@ mod drop_tests {
     }
 }
 
+/// IRIX takes the host id from the last four bytes of the station address in
+/// the machine's NVRAM (Indy) or board EEPROM (Indigo2), so those hold the
+/// address the machine identity gives. A blank slot is filled; a slot that
+/// already holds an address keeps it, as it did before.
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::config::{GraphicsBoard, MachineProfile};
+    use crate::display_stop_tests::{big_stack, config, scratch};
+
+    fn machine(dir: &std::path::Path, profile: MachineProfile, board: GraphicsBoard, inputs: &str) -> Machine {
+        let mut cfg = config(dir, profile, board);
+        let set: MachineConfig = toml::from_str(&format!("[machine]\n{inputs}\n")).unwrap();
+        cfg.machine.emu_id = set.machine.emu_id;
+        cfg.machine.serial = set.machine.serial;
+        cfg.machine.hostid = set.machine.hostid;
+        cfg.validate().expect(inputs);
+        big_stack(move || Machine::new(cfg))
+    }
+
+    /// The eaddr words the PROM reads from the Indigo2's EEPROM.
+    fn words(mac: [u8; 6]) -> [u16; 3] {
+        [u16::from_be_bytes([mac[0], mac[1]]), u16::from_be_bytes([mac[2], mac[3]]), u16::from_be_bytes([mac[4], mac[5]])]
+    }
+
+    #[test]
+    fn the_indy_and_indigo2_hold_the_identitys_address() {
+        for (inputs, mac) in [
+            ("", [0x08, 0x00, 0x69, 0xe2, 0x00, 0x00]),
+            ("emu_id = 42", [0x08, 0x00, 0x69, 0xe2, 0x02, 0xa0]),
+            ("hostid = \"69aabbcc\"", [0x08, 0x00, 0x69, 0xaa, 0xbb, 0xcc]),
+            ("serial = \"F9N102J0\"", [0x08, 0x00, 0x69, 0xe1, 0x02, 0xa0]),
+        ] {
+            let dir = scratch("ip22-identity");
+            let _ = std::fs::remove_file(dir.join("nvram"));
+            let _ = std::fs::remove_file(dir.join("nveeprom"));
+            let indy = machine(&dir, MachineProfile::IndyIp24, GraphicsBoard::Newport, inputs);
+            assert_eq!(indy.hpc3.rtc().eaddr(), mac, "Indy, {inputs}");
+            drop(indy);
+            let indigo2 = machine(&dir, MachineProfile::Indigo2Ip22, GraphicsBoard::Xz, inputs);
+            assert_eq!(indigo2.hpc3.eeprom().lock().get_data()[0x7d..=0x7f], words(mac), "Indigo2, {inputs}");
+            drop(indigo2);
+            let _ = std::fs::remove_file(dir.join("nveeprom"));
+            let ip28 = machine(&dir, MachineProfile::Indigo2Ip28, GraphicsBoard::SolidImpact, inputs);
+            assert_eq!(ip28.hpc3.eeprom().lock().get_data()[0x7d..=0x7f], words(mac), "IP28, {inputs}");
+            drop(ip28);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A saved NVRAM keeps its address whatever the inputs now say.
+    #[test]
+    fn a_saved_address_is_not_rewritten() {
+        let dir = scratch("ip22-saved");
+        let _ = std::fs::remove_file(dir.join("nvram"));
+        let first = machine(&dir, MachineProfile::IndyIp24, GraphicsBoard::Newport, "emu_id = 42");
+        first.hpc3.rtc().save_nvram(&dir.join("nvram").to_string_lossy()).unwrap();
+        drop(first);
+        let second = machine(&dir, MachineProfile::IndyIp24, GraphicsBoard::Newport, "emu_id = 43");
+        assert_eq!(second.hpc3.rtc().eaddr(), [0x08, 0x00, 0x69, 0xe2, 0x02, 0xa0]);
+        drop(second);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[cfg(test)]
 mod controller_lifetime_tests {
     use super::*;

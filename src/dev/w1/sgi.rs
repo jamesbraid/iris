@@ -113,6 +113,31 @@ pub fn o2_ethernet_address_part(mac: [u8; 6]) -> w1::Ds2502 {
     w1::Ds2502::new(0x09, u64::from_le_bytes(serial), &rev)
 }
 
+/// The station address a guest reads from the board's Ethernet-address part
+/// (family 0x91) on `bus`, the way Linux's `ioc3_get_eaddr_nic` does: match
+/// its ROM, read memory from 0, and take bytes 2 to 7 of the reversed stream.
+/// `None` when the bus has no such part. For tests of what a machine presents.
+#[cfg(test)]
+pub(crate) fn nic_address(bus: &mut w1::Bus) -> Option<[u8; 6]> {
+    let rom = bus.roms().into_iter().find(|r| r[0] == 0x91)?;
+    fn write(bus: &mut w1::Bus, b: u8) {
+        for i in 0..8 {
+            bus.slot(b >> i & 1 != 0);
+        }
+    }
+    assert!(bus.reset());
+    write(bus, 0x55);
+    rom.iter().for_each(|&b| write(bus, b));
+    write(bus, 0xf0);
+    write(bus, 0);
+    write(bus, 0);
+    let mut nic = [0u8; 14];
+    for i in (0..14).rev() {
+        nic[i] = (0..8).fold(0, |a, bit| a | (bus.slot(true) as u8) << bit);
+    }
+    nic[2..8].try_into().ok()
+}
+
 /// The synthetic ROM serial of the Ethernet-address part: the UniqueWare
 /// prefix 0x5e7 in its top twelve bits (what OpenBSD matches on), then the
 /// "EMU" marker and instance 0.

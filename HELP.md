@@ -98,7 +98,8 @@ address, which prevents networking from working.
 
 **You usually don't have to do anything.** Before boot, IRIS writes a MAC into
 a blank `eaddr` slot: `[network] mac` from `iris.toml` if you set one, otherwise
-`08:00:69:12:34:56`. It never overwrites an address that is already there.
+the address `[machine] emu_id` gives (`08:00:69:e2:00:00` for `emu_id` 0, the
+default; it was `08:00:69:12:34:56` before). It never overwrites an address that is already there.
 iris-gui does the same and offers a guided prompt. Set one yourself when you run
 more than one emulated machine on the same network:
 
@@ -689,7 +690,7 @@ cdrom = true
 mode = "nat"                # or "pcap" (--features pcap)
 # pcap_interface = "1"      # index, name, or '\Device\NPF_{...}' on Windows
 # nfs_pcap_ip = "192.168.1.250"   # PCAP only: LAN IP the NFS server answers on
-# mac = "08:00:69:12:34:56" # ec0 MAC, injected into blank NVRAM before boot
+# mac = "08:00:69:e2:00:00" # ec0 MAC, injected into blank NVRAM before boot (this is the default)
 # tftp_dir = "tftpboot"     # serve read-only over TFTP at the gateway
 # rsh_dir = "shared"        # `rsh <gateway> cat|ls|echo|pwd` on this dir, read-only
 

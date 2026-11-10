@@ -21,7 +21,7 @@ use std::sync::atomic::AtomicU64;
 
 use parking_lot::Mutex;
 
-use crate::config::MachineConfig;
+use crate::config::{MachineConfig, MachineProfile};
 use crate::gdb_stub::CpuDebug;
 use crate::dev::ps2::Ps2Controller;
 use crate::dev::serial_host::CiSerialBackend;
@@ -39,6 +39,15 @@ use crate::traits::{Device, MachineEvent};
 /// a thread with a large one, as `main.rs` and iris-gui do.
 pub fn build(cfg: MachineConfig) -> Result<Box<dyn Workstation>, String> {
     crate::machine::set_emulator_profile(cfg.machine.profile);
+    if let Ok(id) = cfg.identity() {
+        // The Indy and Indigo2 write the address into a blank NVRAM or EEPROM
+        // slot only, and the guest reads whatever the slot holds.
+        let kept = match cfg.machine.profile {
+            MachineProfile::IndyIp24 | MachineProfile::Indigo2Ip22 | MachineProfile::Indigo2Ip28 => "; an address already saved in NVRAM or EEPROM is kept",
+            _ => "",
+        };
+        eprintln!("iris: {id}{kept}");
+    }
     match cfg.machine.profile {
         // The O2 is its own machine (CRIME, MACE, GBE), not an MC/HPC3 one.
         crate::config::MachineProfile::O2Ip32 => Ok(Box::new(crate::ip32_machine::O2Machine::new(&cfg)?)),

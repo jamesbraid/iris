@@ -2477,6 +2477,13 @@ impl Ioc3 {
         Ioc3::new(Ioc3Config::octane(mac, octane2))
     }
 
+    /// The station address a guest reads from the chip's one-wire Ethernet
+    /// part.
+    #[cfg(test)]
+    pub(crate) fn nic_address(&self) -> Option<[u8; 6]> {
+        w1::sgi::nic_address(self.sh.st.lock().wire())
+    }
+
     /// Attach Fuel's independently owned flat select-0 system clock.
     pub fn attach_timekeeper(&self, clock: Arc<crate::dev::timekeeper::Timekeeper>) {
         assert!(!self.sh.st.lock().cfg.rtc, "indexed Dallas and flat Timekeeper populations conflict");

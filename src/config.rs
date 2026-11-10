@@ -269,10 +269,12 @@ pub struct DaynaportParams {
     pub subnet: NatSubnet,
 }
 
-/// Default Ethernet station address for `ec0` when `[network] mac` is unset.
-/// SGI's registered OUI (08:00:69) plus an arbitrary host part; matches the
-/// address used throughout `clanker/irix/networking.md` and CI test fixtures.
-pub const DEFAULT_MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
+/// Default Ethernet station address for `ec0` when nothing in `[machine]` or
+/// `[network]` names one: SGI's registered OUI (08:00:69) and the `emu_id` 0
+/// address of iris's identity layout (kind 2). A machine's own address comes
+/// from [`MachineConfig::identity`]; this is what a bare [`NetworkConfig`]
+/// holds.
+pub const DEFAULT_MAC: [u8; 6] = [0x08, 0x00, 0x69, 0xe2, 0x00, 0x00];
 
 /// Parse `"00:80:19:12:34:56"` (or `-` separated) into six octets.
 pub fn parse_mac(s: &str) -> Result<[u8; 6], String> {
@@ -401,8 +403,9 @@ pub struct NetworkConfig {
     /// mount it). None = NFS-in-PCAP not configured.
     pub nfs_pcap_ip: Option<std::net::Ipv4Addr>,
     /// Ethernet station address for `ec0`, backdoor-injected into NVRAM
-    /// (Indy) / serial EEPROM (Indigo2) before boot. Defaults to
-    /// [`DEFAULT_MAC`] when `[network] mac` is unset.
+    /// (Indy) / serial EEPROM (Indigo2) before boot. `[network] mac` when set,
+    /// else the address `[machine] emu_id`, `serial` and `hostid` give (see
+    /// [`MachineConfig::identity`]).
     pub mac: [u8; 6],
     /// Directory served read-only over TFTP at the gateway, for PROM network
     /// boot. None (the default) disables the TFTP server.
@@ -453,8 +456,12 @@ pub struct NetworkSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nfs_pcap_ip: Option<std::net::Ipv4Addr>,
     /// Ethernet station address for the built-in SEEQ controller (`ec0`), e.g.
-    /// "08:00:69:12:34:56" (SGI's registered OUI). Defaults to
-    /// `08:00:69:12:34:56` when unset. Real hardware has no way to leave this
+    /// "08:00:69:12:34:56" (SGI's registered OUI). Unset: the address that
+    /// `[machine] emu_id`, `serial` and `hostid` give, `08:00:69:e2:00:00`
+    /// for `emu_id` 0. On the Indy, Indigo2, O2, Octane and Origin 200 IRIX
+    /// takes its host id (`sysinfo -s`) from the last four bytes of this
+    /// address, and those machines refuse a `hostid` or `serial` that
+    /// disagrees with it. Real hardware has no way to leave this
     /// unset — every SGI ships with a MAC burned into NVRAM (Indy) or a serial
     /// EEPROM (Indigo2) — so iris backdoor-injects it into the emulated
     /// NVRAM/EEPROM before boot rather than requiring a guest-side `setenv`.
@@ -1142,6 +1149,28 @@ pub struct MachineSection {
     /// Processors fitted. More than one only on the Octane.
     #[serde(default = "default_cpus")]
     pub cpus: u8,
+    /// Mints the machine's system id (what `sysinfo -s` and `lmhostid`
+    /// print) in iris's own layout: 0 to 4095, 0 the default and a plainly
+    /// generic id. Machines with different ids can hold node-locked licenses
+    /// side by side. See [`crate::identity`].
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub emu_id: u32,
+    /// The system serial as a real unit has it written, 1 to 10 printable
+    /// characters (`M2100887`), which sets the system id. On the Origin 2000
+    /// and Onyx2 it must start with `K`. On the Indy, Indigo2, O2, Octane and
+    /// Origin 200 the id comes from the station address, so it must agree
+    /// with `hostid` and `[network] mac`. Unset: from `emu_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<String>,
+    /// The system id itself, 8 hex digits (`d2100887`). On the O2, Octane and
+    /// Origin 200 also 6 digits, the low 24 bits with the leading `69`
+    /// implied. Unset: from `emu_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostid: Option<String>,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 fn default_cpus() -> u8 {
@@ -1150,7 +1179,7 @@ fn default_cpus() -> u8 {
 
 impl Default for MachineSection {
     fn default() -> Self {
-        Self { profile: MachineProfile::default(), cpu: None, cache: CacheModel::default(), cpus: default_cpus() }
+        Self { profile: MachineProfile::default(), cpu: None, cache: CacheModel::default(), cpus: default_cpus(), emu_id: 0, serial: None, hostid: None }
     }
 }
 
@@ -2655,6 +2684,7 @@ impl MachineConfig {
         if let Some(ref mac) = self.network.mac {
             parse_mac(mac).map_err(|e| format!("network.mac: {}", e))?;
         }
+        self.identity()?.hostids(1)?;
         for (id, dev) in &self.scsi {
             // A CD-ROM may legitimately start with an empty tray (no path, no
             // discs) and have media loaded at runtime; any discs list is valid
@@ -2750,6 +2780,21 @@ impl MachineConfig {
         }
     }
 
+    /// The machine's system id and station address, from `[machine] emu_id`,
+    /// `serial` and `hostid` and `[network] mac`. Errors name the inputs that
+    /// disagree and the rule the machine's family applies.
+    pub fn identity(&self) -> Result<crate::identity::Identity, String> {
+        use crate::identity::{Family, Identity, KIND};
+        let family = match self.machine.profile {
+            MachineProfile::IndyIp24 | MachineProfile::Indigo2Ip22 | MachineProfile::Indigo2Ip28 => Family::AnyAddress,
+            MachineProfile::O2Ip32 | MachineProfile::OctaneIp30 | MachineProfile::Origin200Ip29 => Family::Address,
+            MachineProfile::Origin2000Ip27 | MachineProfile::Onyx2Ip27 => Family::Module,
+        };
+        let mac = self.network.mac.as_deref().map(|s| parse_mac(s).map_err(|e| format!("network.mac: {e}"))).transpose()?;
+        Identity::resolve(family, KIND, self.machine.emu_id, self.machine.serial.as_deref(), self.machine.hostid.as_deref(), mac)
+            .map_err(|e| format!("machine identity: {e}"))
+    }
+
     /// Extract network-related settings into a `NetworkConfig`.
     /// Parses `nat_subnet` from CIDR — safe to unwrap because `validate()` already accepted it.
     pub fn network(&self) -> NetworkConfig {
@@ -2758,9 +2803,10 @@ impl MachineConfig {
                 .expect("nat_subnet: validate() should have caught this");
             NatSubnet { gateway_ip, client_ip, netmask }
         });
-        let mac = self.network.mac.as_deref()
-            .map(|s| parse_mac(s).expect("network.mac: validate() should have caught this"))
-            .unwrap_or(DEFAULT_MAC);
+        // As with nat_subnet above, only validate() reports a bad identity; it
+        // runs it first, so a caller that skipped validate() panics here.
+        let mac = self.identity().and_then(|id| id.station(0))
+            .expect("machine identity: validate() should have caught this");
         NetworkConfig {
             nfs:          self.nfs.clone(),
             port_forward: self.port_forward.clone(),
@@ -3498,6 +3544,83 @@ mod export_tests {
         assert!(parse_mac("00:80:19:12:34").is_err());
         assert!(parse_mac("zz:80:19:12:34:56").is_err());
         assert!(parse_mac("01:80:19:12:34:56").is_err(), "multicast bit must be rejected");
+    }
+
+    fn identity_cfg(profile: &str, extra: &str) -> MachineConfig {
+        toml::from_str(&format!("[machine]\nprofile = \"{profile}\"\n{extra}")).expect("parse")
+    }
+
+    /// The default is the identity layout's emu_id 0, kind 2, and an explicit
+    /// `emu_id` moves it.
+    #[test]
+    fn the_default_station_address_is_the_identity_layout() {
+        let cfg = identity_cfg("octane_ip30", "");
+        assert_eq!(cfg.network().mac, DEFAULT_MAC);
+        assert_eq!(DEFAULT_MAC, crate::identity::default_mac(crate::identity::KIND, 0, 0).unwrap());
+        let cfg = identity_cfg("octane_ip30", "emu_id = 42\n");
+        assert_eq!(cfg.network().mac, [0x08, 0x00, 0x69, 0xe2, 0x02, 0xa0]);
+        assert_eq!(cfg.identity().unwrap().hostids(1).unwrap(), [0x69e2_02a0]);
+    }
+
+    /// `[network] mac` keeps working as it did on every machine.
+    #[test]
+    fn an_explicit_network_mac_is_the_station_address() {
+        let mut cfg = identity_cfg("indy_ip24", "");
+        cfg.network.mac = Some("08:00:69:aa:bb:cc".into());
+        cfg.validate().expect("an 08:00:69 address is valid on the Indy");
+        assert_eq!(cfg.network().mac, [0x08, 0x00, 0x69, 0xaa, 0xbb, 0xcc]);
+        let mut cfg = identity_cfg("o2_ip32", "");
+        cfg.network.mac = Some("00:80:19:aa:bb:cc".into());
+        let e = cfg.validate().unwrap_err();
+        assert!(e.contains("must start 08:00:69; use mac=08:00:69:aa:bb:cc or hostid=aabbcc"), "{e}");
+    }
+
+    #[test]
+    fn the_indy_and_indigo2_default_to_the_identity_layout() {
+        for profile in ["indy_ip24", "indigo2_ip22", "indigo2_ip28"] {
+            let mut cfg = identity_cfg(profile, "");
+            cfg.network.mac = Some("08:00:69:56:78:9a".into());
+            cfg.validate().unwrap();
+            let cfg = identity_cfg(profile, "");
+            cfg.validate().unwrap();
+            assert_eq!(cfg.network().mac, [0x08, 0x00, 0x69, 0xe2, 0x00, 0x00]);
+            assert_eq!(cfg.identity().unwrap().hostids(1).unwrap(), [0x69e2_0000]);
+        }
+    }
+
+    #[test]
+    fn serial_and_hostid_set_the_station_address_and_must_agree() {
+        let cfg = identity_cfg("o2_ip32", "hostid = \"100887\"\n");
+        cfg.validate().unwrap();
+        assert_eq!(cfg.network().mac, [0x08, 0x00, 0x69, 0x10, 0x08, 0x87]);
+        let cfg = identity_cfg("origin200_ip29", "serial = \"F9N102J0\"\n");
+        assert_eq!(cfg.network().mac, [0x08, 0x00, 0x69, 0xe1, 0x02, 0xa0]);
+        let mut cfg = identity_cfg("octane_ip30", "hostid = \"69aabbcc\"\n");
+        cfg.network.mac = Some("08:00:69:e1:02:a0".into());
+        let e = cfg.validate().unwrap_err();
+        assert!(e.starts_with("machine identity: mac=08:00:69:e1:02:a0 gives host id 69e102a0 but hostid=69aabbcc"), "{e}");
+        // The Origin 2000 reads a module serial, and only one that starts K.
+        let cfg = identity_cfg("origin2000_ip27", "serial = \"M2100887\"\n");
+        assert!(cfg.validate().unwrap_err().contains("must start with K"));
+        let cfg = identity_cfg("origin2000_ip27", "serial = \"K2100887\"\n");
+        cfg.validate().unwrap();
+        assert_eq!(cfg.identity().unwrap().hostids(1).unwrap(), [hostid_of("KKK2100887")]);
+        // emu_id is bounded.
+        let cfg = identity_cfg("indy_ip24", "emu_id = 4096\n");
+        assert!(cfg.validate().unwrap_err().contains("emu_id must be 0 to 4095, not 4096"));
+    }
+
+    fn hostid_of(text: &str) -> u32 {
+        crate::identity::hostid_from_text(text)
+    }
+
+    #[test]
+    fn the_identity_keys_round_trip_and_stay_out_of_a_default_file() {
+        let cfg = identity_cfg("o2_ip32", "emu_id = 7\nserial = \"F9N102J0\"\nhostid = \"69e102a0\"\n");
+        let back: MachineConfig = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!((back.machine.emu_id, back.machine.serial.as_deref(), back.machine.hostid.as_deref()), (7, Some("F9N102J0"), Some("69e102a0")));
+        let plain = toml::to_string_pretty(&MachineConfig::default()).unwrap();
+        assert!(!plain.contains("emu_id") && !plain.contains("hostid") && !plain.contains("serial ="), "{plain}");
     }
 
     #[test]

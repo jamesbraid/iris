@@ -13,6 +13,20 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Machine identity
+
+- Every machine takes `machine.emu_id`, `machine.serial` and `machine.hostid`, and
+  derives the system id IRIX reports (`sysinfo -s`, `lmhostid`) from them: the
+  station address on the Indy, Indigo2, O2, Octane and Origin 200, the module
+  serial on the Origin 2000 and Onyx2.
+- **The default Ethernet address changes** from `08:00:69:12:34:56` to
+  `08:00:69:e2:00:00` (the id for `emu_id` 0), so a new Indy, Indigo2, O2,
+  Octane or Origin 200 no longer shares a host id with every other iris
+  machine. A machine whose NVRAM or EEPROM already holds an address keeps it:
+  iris writes the address into a blank slot only. A DHCP reservation, a
+  node-locked license or a script that relied on the old default needs
+  `[network] mac = "08:00:69:12:34:56"` to keep it.
+
 ### R10000 family fixes, R12000 and R14000
 
 - The R10000 family has 44-bit virtual and 40-bit physical addresses, FrameMask and a 28-bit EntryLo PFN, picks the TLB refill vector by address space, invalidates overlapped TLB writes (Status.TS), and completes uncached stores nothing answers. Partial LWR keeps the upper word, and the cache diagnostics (Index Store Data, secondary tag mask, Config size) work.

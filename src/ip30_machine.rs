@@ -1251,6 +1251,34 @@ mod tests {
         assert!((4, 3) >= vpro_prom_needed(crate::config::GraphicsBoard::V6));
     }
 
+    /// IRIX takes the host id from the last four bytes of the address the
+    /// PROM reads from the IOC3's one-wire Ethernet part, so the id is the
+    /// one configured: `hostid`, or `serial` folded, or `emu_id`'s layout.
+    #[test]
+    fn the_ioc3_part_carries_the_configured_identity() {
+        use crate::config::{GraphicsBoard, MachineProfile};
+        use crate::display_stop_tests::{big_stack, config, scratch};
+        let dir = scratch("octane-identity");
+        for (inputs, mac, hostid) in [
+            ("", [0x08, 0x00, 0x69, 0xe2, 0x00, 0x00], 0x69e2_0000),
+            ("emu_id = 42", [0x08, 0x00, 0x69, 0xe2, 0x02, 0xa0], 0x69e2_02a0),
+            ("hostid = \"69aabbcc\"", [0x08, 0x00, 0x69, 0xaa, 0xbb, 0xcc], 0x69aa_bbcc),
+            ("hostid = \"100887\"", [0x08, 0x00, 0x69, 0x10, 0x08, 0x87], 0x6910_0887),
+            ("serial = \"F9N102J0\"", [0x08, 0x00, 0x69, 0xe1, 0x02, 0xa0], 0x69e1_02a0),
+        ] {
+            let mut cfg = config(&dir, MachineProfile::OctaneIp30, GraphicsBoard::None);
+            let set: crate::config::MachineConfig = toml::from_str(&format!("[machine]\n{inputs}\n")).unwrap();
+            cfg.machine.emu_id = set.machine.emu_id;
+            cfg.machine.serial = set.machine.serial;
+            cfg.machine.hostid = set.machine.hostid;
+            cfg.validate().expect(inputs);
+            assert_eq!(cfg.identity().unwrap().hostids(1).unwrap(), [hostid], "{inputs}");
+            let machine = big_stack(move || OctaneMachine::new(&cfg).expect("Octane"));
+            assert_eq!(machine.ioc3.nic_address(), Some(mac), "{inputs}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A dropped Octane frees its bus and with it the decode table: a
     /// process may have only a few dozen tables, and a test binary builds
     /// many machines.
