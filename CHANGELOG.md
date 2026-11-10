@@ -59,6 +59,10 @@ hashes are given where a change is easiest to understand by reading the commit.
   or CHD image, optionally copy-on-write; pin interrupts; saved in snapshots
   with the other disks ([docs/nvme.md](docs/nvme.md)).
 
+### Fibre Channel
+
+- `[fibre_channel]` fits a QLogic ISP2200 Fibre Channel adapter in a slot of an Octane's PCI module or shoehorn, with `[fibre_channel.disk.N]` tables (N the loop ID) for the disks on its private loop. IRIX 6.5.30 brings it up with its own driver and shows the disks as a SCSI controller of their own; no other guest has been tried. Only the host interface is modelled, not Fibre Channel itself, and a handful of replies are approximations ([docs/fibre-channel.md](docs/fibre-channel.md)). iris-gui fits the adapter and lists its disks.
+
 ### R10000 family fixes, R12000 and R14000
 
 - The R10000 family has 44-bit virtual and 40-bit physical addresses, FrameMask and a 28-bit EntryLo PFN, picks the TLB refill vector by address space, invalidates overlapped TLB writes (Status.TS), and completes uncached stores nothing answers. Partial LWR keeps the upper word, and the cache diagnostics (Index Store Data, secondary tag mask, Config size) work.
