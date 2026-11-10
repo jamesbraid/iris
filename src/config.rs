@@ -633,6 +633,76 @@ impl NvmeConfig {
     }
 }
 
+/// `[fibre_channel]`: a QLogic ISP2200 Fibre Channel adapter in a slot of an
+/// Octane's `[[xio_board]]`, with the disks on its private loop. See
+/// `docs/fibre-channel.md`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FibreChannelConfig {
+    /// The loop's disks, `[fibre_channel.disk.N]`, N the disk's loop ID (0 to
+    /// 125). The adapter takes the lowest loop ID no disk has, unless the
+    /// guest asks for a hard address.
+    #[serde(default, rename = "disk")]
+    pub disks: std::collections::BTreeMap<u8, FibreDiskConfig>,
+    /// Put the card behind a PCI-to-PCI bridge in the slot, as `[nvme] bridge`.
+    #[serde(default)]
+    pub bridge: bool,
+    /// Which `[[xio_board]]` holds the card, counting from 0. Unset: the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<usize>,
+    /// The slot on that board, its PCI device number. Unset: the first free one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<u8>,
+}
+
+/// One disk on the Fibre Channel loop. It is a `[scsi.N]` disk in every
+/// respect (image, overlay, write cache, and whatever else a disk table gains)
+/// with names of its own on the loop.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FibreDiskConfig {
+    #[serde(flatten)]
+    pub disk: ScsiDeviceConfig,
+    /// The disk's node name, 16 hex digits with or without colons. Unset: made
+    /// from the loop ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
+    /// The disk's port name, written as the node name is. Unset: made from
+    /// the loop ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_name: Option<String>,
+}
+
+impl FibreDiskConfig {
+    /// The node and port names this disk is fitted with, if either is set;
+    /// the unset one stays what the loop ID gives.
+    pub fn names(&self, loop_id: u8) -> Result<Option<(u64, u64)>, String> {
+        let parse = |what: &str, v: &Option<String>, default: u64| match v {
+            None => Ok(default),
+            Some(v) => parse_wwn(v).map_err(|e| format!("[fibre_channel.disk.{loop_id}] {what}: {e}")),
+        };
+        if self.node_name.is_none() && self.port_name.is_none() {
+            return Ok(None);
+        }
+        Ok(Some((
+            parse("node_name", &self.node_name, crate::dev::isp2200::node_wwn(loop_id))?,
+            parse("port_name", &self.port_name, crate::dev::isp2200::port_wwn(loop_id))?,
+        )))
+    }
+}
+
+/// A Fibre Channel name: 16 hex digits, colons between bytes allowed.
+pub fn parse_wwn(v: &str) -> Result<u64, String> {
+    let digits: String = v.chars().filter(|&c| c != ':').collect();
+    if digits.len() != 16 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("\"{v}\" is not 16 hex digits"));
+    }
+    // A name starts with its NAA type; 0 is no name at all.
+    let name = u64::from_str_radix(&digits, 16).map_err(|e| e.to_string())?;
+    if name == 0 {
+        return Err("a name of all zeros is no name".into());
+    }
+    Ok(name)
+}
+
 /// Emulated SGI machine profile (hardware layout scaffold).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -1991,6 +2061,10 @@ pub struct MachineConfig {
     /// NVM Express card (`[nvme]`).
     #[serde(default, skip_serializing_if = "NvmeConfig::is_default")]
     pub nvme: NvmeConfig,
+
+    /// Fibre Channel adapter and its loop (`[fibre_channel]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fibre_channel: Option<FibreChannelConfig>,
 }
 
 fn default_scsi_deferred_int() -> bool { true }
@@ -2207,6 +2281,7 @@ impl Default for MachineConfig {
             virtio_serial: VirtioSerialConfig::default(),
             xio_board: Vec::new(),
             nvme: NvmeConfig::default(),
+            fibre_channel: None,
         }
     }
 }
@@ -2332,6 +2407,45 @@ impl MachineConfig {
             }
             _ => Err("[nvme] needs a machine with PCI slots: the O2 or the Octane".into()),
         }
+    }
+
+    /// `[fibre_channel]`: the Octane's option boards are the only slots for
+    /// the card, and each disk must be a plain disk on a loop ID.
+    fn validate_fibre_channel(&self) -> Result<(), String> {
+        let Some(fc) = &self.fibre_channel else { return Ok(()) };
+        if self.machine.profile != MachineProfile::OctaneIp30 {
+            return Err("[fibre_channel] needs an Octane: it is the machine with option board slots".into());
+        }
+        let board = fc.board.unwrap_or(0);
+        let Some(b) = self.xio_board.get(board) else {
+            return Err(if self.xio_board.is_empty() {
+                "[fibre_channel] needs a [[xio_board]] to sit in: a pci-cage or a pci-shoehorn".into()
+            } else {
+                format!("[fibre_channel] board {board}: there are {} [[xio_board]] tables", self.xio_board.len())
+            });
+        };
+        if let Some(s) = fc.slot.filter(|s| !b.kind.slots().contains(s)) {
+            return Err(format!("[fibre_channel] slot {s}: the {} has slots {:?}", b.kind.label(), b.kind.slots()));
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for (&id, d) in &fc.disks {
+            let at = format!("[fibre_channel.disk.{id}]");
+            if id > crate::dev::isp2200::LOOP_ID_MAX {
+                return Err(format!("{at}: loop ID {id} is out of range (0 to {})", crate::dev::isp2200::LOOP_ID_MAX));
+            }
+            if d.disk.path.is_empty() {
+                return Err(format!("{at} needs a path"));
+            }
+            if d.disk.kind() != ScsiKind::Disk || d.disk.scratch {
+                return Err(format!("{at}: only a plain disk goes on the loop"));
+            }
+            // Two ports with one name are one port to a guest.
+            let port = d.names(id)?.map_or_else(|| crate::dev::isp2200::port_wwn(id), |n| n.1);
+            if !names.insert(port) {
+                return Err(format!("{at}: port name {port:016x} is another disk's"));
+            }
+        }
+        Ok(())
     }
 
     /// The serial channels' TCP ports (A, B), defaults filled in.
@@ -2506,6 +2620,7 @@ impl MachineConfig {
         self.validate_virtio_serial()?;
         self.xio_widgets()?;
         self.validate_nvme()?;
+        self.validate_fibre_channel()?;
         self.cpu_part()?;
         self.machine.profile.accepts_cpus(self.machine.cpus)?;
         if self.graphics.heads != 1 && self.graphics.heads != 2 {
@@ -3381,6 +3496,61 @@ mod export_tests {
         let mut o2 = octane(shoehorn);
         o2.machine.profile = MachineProfile::O2Ip32;
         assert!(o2.xio_widgets().unwrap_err().contains("needs an Octane"));
+    }
+
+    #[test]
+    fn a_fibre_channel_card_needs_a_board_and_disks_on_loop_ids() {
+        let octane = |t: &str| -> MachineConfig {
+            let mut c: MachineConfig =
+                toml::from_str(&format!("banks = [128, 0, 0, 0]\n[machine]\nprofile = \"octane_ip30\"\ncpu = \"r10000\"\n[graphics]\nboard = \"none\"\n{t}"))
+                    .expect("parse");
+            c.scsi.clear();
+            c
+        };
+        let cage = "[[xio_board]]\nkind = \"pci-cage\"\n";
+        let shoehorn = "[[xio_board]]\nkind = \"pci-shoehorn\"\n";
+        let fc = |extra: &str| format!("[fibre_channel]\n{extra}");
+        let err = octane(&fc("")).validate().unwrap_err();
+        assert!(err.contains("needs a [[xio_board]]"), "{err}");
+        octane(&format!("{cage}{}", fc(""))).validate().expect("a card with no disks");
+        octane(&format!("{cage}{}", fc("slot = 3\nbridge = true"))).validate().expect("the module's third slot");
+        let err = octane(&format!("{cage}{}", fc("slot = 4"))).validate().unwrap_err();
+        assert!(err.contains("slot 4") && err.contains("PCI module"), "{err}");
+        let err = octane(&format!("{shoehorn}{}", fc("board = 1"))).validate().unwrap_err();
+        assert!(err.contains("board 1"), "{err}");
+        let mut o2 = octane(&format!("{shoehorn}{}", fc("")));
+        o2.machine.profile = MachineProfile::O2Ip32;
+        assert!(o2.validate_fibre_channel().unwrap_err().contains("needs an Octane"));
+
+        let disk = |id: u32, extra: &str| format!("[fibre_channel.disk.{id}]\npath = \"d.img\"\n{extra}");
+        let ok = octane(&format!("{cage}{}{}", disk(5, "overlay = true\n"), disk(125, "")));
+        ok.validate().expect("loop IDs 5 and 125");
+        let fcc = ok.fibre_channel.as_ref().unwrap();
+        assert!(fcc.disks[&5].disk.overlay && fcc.disks.keys().copied().collect::<Vec<_>>() == [5, 125]);
+        let err = octane(&format!("{cage}{}", disk(126, ""))).validate().unwrap_err();
+        assert!(err.contains("loop ID 126"), "{err}");
+        let err = octane(&format!("{cage}[fibre_channel.disk.5]\n")).validate().unwrap_err();
+        assert!(err.contains("needs a path"), "{err}");
+        let err = octane(&format!("{cage}{}", disk(5, "cdrom = true\n"))).validate().unwrap_err();
+        assert!(err.contains("plain disk"), "{err}");
+        // Names: 16 hex digits, colons allowed, not zero, and not two ports'.
+        let named = octane(&format!("{cage}{}", disk(5, "node_name = \"20:00:00:e0:8b:12:34:56\"\nport_name = \"210000e08b123456\"\n")));
+        named.validate().expect("both spellings");
+        let d = &named.fibre_channel.as_ref().unwrap().disks[&5];
+        assert_eq!(d.names(5).unwrap(), Some((0x2000_00e0_8b12_3456, 0x2100_00e0_8b12_3456)));
+        let err = octane(&format!("{cage}{}", disk(5, "port_name = \"2100\"\n"))).validate().unwrap_err();
+        assert!(err.contains("16 hex digits"), "{err}");
+        let err = octane(&format!("{cage}{}", disk(5, "port_name = \"0000000000000000\"\n"))).validate().unwrap_err();
+        assert!(err.contains("all zeros"), "{err}");
+        let same = "port_name = \"2100000000000001\"\n";
+        let err = octane(&format!("{cage}{}{}", disk(5, same), disk(6, same))).validate().unwrap_err();
+        assert!(err.contains("another disk's"), "{err}");
+        // Setting one name leaves the other the loop ID's.
+        let one = octane(&format!("{cage}{}", disk(5, "node_name = \"2000000000000099\"\n")));
+        assert_eq!(
+            one.fibre_channel.unwrap().disks[&5].names(5).unwrap(),
+            Some((0x2000_0000_0000_0099, crate::dev::isp2200::port_wwn(5)))
+        );
     }
 
     #[test]
