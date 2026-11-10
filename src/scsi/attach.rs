@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use super::ScsiBus;
+use super::{AttachOptions, ScsiBus, ScsiInquiry};
 use crate::config::{DaynaportParams, MachineConfig, ScsiDeviceConfig};
 
 /// One `[scsi.N]` image table, for a snapshot manifest to record.
@@ -100,7 +100,16 @@ pub fn attach_from_config<'a>(
         // directory, so an interactive iris holding one and any number of CI
         // runs can share the image.
         let ci_overlay = (cfg.ci && dev.overlay && !cdrom).then(|| ScsiDeviceConfig::ci_overlay_path(key));
-        match bus.attach_device(id, &path, cdrom, discs, dev.overlay, ci_overlay.as_deref(), dev.write_cache) {
+        let identity = dev.identity_over(bus.identity(cdrom)).map_err(|e| format!("{at}: {e}"))?;
+        let opts = AttachOptions {
+            cdrom,
+            discs,
+            overlay: dev.overlay,
+            overlay_path: ci_overlay.clone(),
+            write_cache: dev.write_cache,
+            inquiry: ScsiInquiry { identity: Some(identity), serial: dev.serial_bytes() },
+        };
+        match bus.attach_device(id, &path, opts) {
             Ok(blocks) => {
                 if let Some(prefix) = log_prefix {
                     if path.is_empty() {
@@ -203,6 +212,64 @@ mod tests {
         assert_eq!(kinds, vec![(1, false), (4, true)]);
         assert_eq!(got.tables[0].size_bytes, 4096);
         for p in [a, iso] {
+            std::fs::remove_file(p).unwrap();
+        }
+    }
+    fn inquiry(b: &ScsiBus, id: u8) -> Vec<u8> {
+        let req = crate::scsi::ScsiRequest {
+            cdb: vec![crate::scsi::scsi_cmd::INQUIRY, 0, 0, 0, 255, 0],
+            data_len: crate::scsi::ScsiDataLength::Unlimited,
+            data_in: None,
+        };
+        b.request(id, &req).unwrap().unwrap().data
+    }
+
+    #[test]
+    fn a_table_can_say_who_its_drive_is() {
+        let (a, b, iso) = (image("who-a"), image("who-b"), image("who-iso"));
+        let mut cfg = MachineConfig::default();
+        cfg.scsi.clear();
+        cfg.scsi.insert(1, ScsiDeviceConfig {
+            vendor: Some("SEAGATE".into()),
+            product: Some("ST39102LW".into()),
+            revision: Some("0005".into()),
+            serial: Some("3JA0K1X4".into()),
+            ..table(&a, false, 0)
+        });
+        // Only the product is set: the vendor and revision stay the bus's.
+        cfg.scsi.insert(2, ScsiDeviceConfig { product: Some("OTHER".into()), ..table(&b, false, 0) });
+        cfg.scsi.insert(4, ScsiDeviceConfig { vendor: Some("TOSHIBA".into()), ..table(&iso, true, 0) });
+        let buses = buses();
+        attach_from_config(&cfg, None, &route(&buses)).unwrap();
+        let named = inquiry(&buses[0], 1);
+        assert_eq!(&named[8..16], b"SEAGATE ");
+        assert_eq!(&named[16..32], b"ST39102LW       ");
+        assert_eq!(&named[32..36], b"0005");
+        assert_eq!(named.len(), 36 + 8);
+        assert_eq!(&named[36..44], b"3JA0K1X4");
+        let vpd = |b: &ScsiBus, id: u8, page: u8| {
+            let req = crate::scsi::ScsiRequest {
+                cdb: vec![crate::scsi::scsi_cmd::INQUIRY, 1, page, 0, 255, 0],
+                data_len: crate::scsi::ScsiDataLength::Unlimited,
+                data_in: None,
+            };
+            b.request(id, &req).unwrap().unwrap()
+        };
+        assert_eq!(vpd(&buses[0], 1, 0x80).data, [&[0u8, 0x80, 0, 8][..], b"3JA0K1X4"].concat());
+        assert_eq!(vpd(&buses[0], 1, 0x00).data, vec![0, 0, 0, 2, 0, 0x80]);
+        assert_ne!(vpd(&buses[0], 1, 0x83).status, 0, "an unsupported page is refused");
+        // No serial: nothing changes, EVPD included.
+        assert_eq!(inquiry(&buses[0], 2).len(), 36);
+        assert_eq!(vpd(&buses[0], 2, 0x80).data.len(), 36);
+        let part = inquiry(&buses[0], 2);
+        assert_eq!(&part[8..16], &ID.vendor);
+        assert_eq!(&part[16..32], b"OTHER           ");
+        assert_eq!(&part[32..36], &ID.revision);
+        let cd = inquiry(&buses[0], 4);
+        assert_eq!(cd[0], 0x05, "still a CD-ROM");
+        assert_eq!(&cd[8..16], b"TOSHIBA ");
+        assert_eq!(&cd[16..32], &ID.product);
+        for p in [a, b, iso] {
             std::fs::remove_file(p).unwrap();
         }
     }

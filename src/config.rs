@@ -105,6 +105,26 @@ pub struct ScsiDeviceConfig {
     /// rejected there — see `MachineConfig::validate`.
     #[serde(default)]
     pub controller: u8,
+    /// Disks and CD-ROMs: the vendor INQUIRY reports, up to 8 ASCII characters,
+    /// padded with spaces. Unset, the target says what its machine's drives
+    /// say. Software that tells drive models apart (a vendor's storage driver,
+    /// say) reads this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    /// The product INQUIRY reports, up to 16 ASCII characters, padded with
+    /// spaces. Unset, the machine's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    /// The product revision INQUIRY reports, up to 4 ASCII characters, padded
+    /// with spaces. Unset, the machine's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// The unit serial number, up to 16 printable ASCII characters. Set, the
+    /// target reports it in standard INQUIRY data (the first 8 characters, in
+    /// the vendor-specific bytes after the revision) and in the unit serial
+    /// number page (VPD 0x80). Unset, it has none and INQUIRY is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<String>,
 }
 
 /// The `[scsi.N]` key, and the snapshot manifest's disk number, that names
@@ -138,8 +158,24 @@ impl Default for ScsiDeviceConfig {
             scratch: false,
             size_mb: None,
             controller: 0,
+            vendor: None,
+            product: None,
+            revision: None,
+            serial: None,
         }
     }
+}
+
+/// Errs when an INQUIRY string of at most `max` characters is too long or not
+/// printable ASCII.
+fn check_inquiry_text(name: &str, v: &str, max: usize) -> Result<(), String> {
+    if v.len() > max {
+        return Err(format!("{name} \"{v}\" is {} characters; INQUIRY holds {max}", v.len()));
+    }
+    if !v.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+        return Err(format!("{name} \"{v}\" must be printable ASCII"));
+    }
+    Ok(())
 }
 
 impl ScsiDeviceConfig {
@@ -154,6 +190,45 @@ impl ScsiDeviceConfig {
 
     pub fn is_cdrom(&self) -> bool { self.kind() == ScsiKind::Cdrom }
     pub fn is_daynaport(&self) -> bool { self.kind() == ScsiKind::Daynaport }
+
+    /// The unit serial number as INQUIRY reports it.
+    pub fn serial_bytes(&self) -> Option<Vec<u8>> {
+        self.serial.as_ref().map(|s| s.as_bytes().to_vec())
+    }
+
+    /// Errs on an INQUIRY string that is too long or not printable ASCII.
+    pub fn check_inquiry_strings(&self) -> Result<(), String> {
+        for (name, value, max) in [("vendor", &self.vendor, 8), ("product", &self.product, 16), ("revision", &self.revision, 4)] {
+            if let Some(v) = value {
+                check_inquiry_text(name, v, max)?;
+            }
+        }
+        match &self.serial {
+            Some(s) if s.is_empty() || s.len() > 16 || !s.bytes().all(|b| (0x20..0x7f).contains(&b)) => {
+                Err(format!("serial \"{s}\" must be 1 to 16 printable ASCII characters"))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// What INQUIRY reports: `base` (the machine's own for this kind of
+    /// target) with `vendor`, `product` and `revision` laid over it, each
+    /// padded with spaces to its field. Errs on a string that is too long or
+    /// not printable ASCII.
+    pub fn identity_over(&self, base: crate::scsi::ScsiIdentity) -> Result<crate::scsi::ScsiIdentity, String> {
+        fn field<const N: usize>(name: &str, value: &Option<String>, base: [u8; N]) -> Result<[u8; N], String> {
+            let Some(v) = value else { return Ok(base) };
+            check_inquiry_text(name, v, N)?;
+            let mut out = [b' '; N];
+            out[..v.len()].copy_from_slice(v.as_bytes());
+            Ok(out)
+        }
+        Ok(crate::scsi::ScsiIdentity {
+            vendor: field("vendor", &self.vendor, base.vendor)?,
+            product: field("product", &self.product, base.product)?,
+            revision: field("revision", &self.revision, base.revision)?,
+        })
+    }
 
     /// Where the `[scsi.KEY]` table puts this target, as (controller, id).
     /// Keys 1–15 are ids on `controller` (1–7 off the Octane; 0 unless the key says otherwise);
@@ -2668,6 +2743,12 @@ impl MachineConfig {
                     "scsi.{}: kind = \"daynaport\" is not available on the O2 (its Ethernet is built in)", key
                 ));
             }
+            if dev.is_daynaport() && (dev.vendor.is_some() || dev.product.is_some() || dev.revision.is_some() || dev.serial.is_some()) {
+                return Err(format!(
+                    "scsi.{}: vendor, product, revision and serial are INQUIRY strings of a disk or CD-ROM; a DaynaPort has its own", key
+                ));
+            }
+            dev.check_inquiry_strings().map_err(|e| format!("scsi.{}: {}", key, e))?;
             if dev.is_daynaport() && self.network.mode == NetMode::Stream {
                 return Err(format!(
                     "scsi.{}: kind = \"daynaport\" cannot join a stream segment: [network] stream names the onboard Ethernet's peer", key
@@ -3604,6 +3685,51 @@ mod export_tests {
         let back: MachineConfig = toml::from_str(&s).expect("deserialize");
         assert!(back.scsi[&1].write_cache && !back.scsi[&2].write_cache, "survives export:\n{s}");
         assert!(toml::from_str::<MachineConfig>("[scsi.1]\nwrite_cache = \"fast\"\n").is_err());
+    }
+
+    #[test]
+    fn scsi_inquiry_strings_round_trip_and_are_checked() {
+        let cfg: MachineConfig = toml::from_str(r#"
+            [scsi.1]
+            path = "a.raw"
+            vendor = "SEAGATE"
+            product = "ST39102LW"
+            revision = "0005"
+            serial = "3JA0K1X4"
+            [scsi.2]
+            path = "b.raw"
+        "#).expect("parse");
+        assert_eq!(cfg.scsi[&1].vendor.as_deref(), Some("SEAGATE"));
+        assert!(cfg.scsi[&2].vendor.is_none() && cfg.scsi[&2].product.is_none() && cfg.scsi[&2].revision.is_none());
+        let s = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(s.matches("vendor").count() == 1, "an unset string is not written:\n{s}");
+        let back: MachineConfig = toml::from_str(&s).expect("deserialize");
+        assert_eq!(back.scsi[&1].product.as_deref(), Some("ST39102LW"));
+        assert!(cfg.validate().is_ok());
+
+        let long = |key: &str, v: &str| {
+            let mut c = cfg.clone();
+            match key {
+                "vendor" => c.scsi.get_mut(&1).unwrap().vendor = Some(v.into()),
+                "product" => c.scsi.get_mut(&1).unwrap().product = Some(v.into()),
+                _ => c.scsi.get_mut(&1).unwrap().revision = Some(v.into()),
+            }
+            c.validate()
+        };
+        assert!(long("vendor", "NINECHARS").unwrap_err().contains("vendor"));
+        assert!(long("product", "SEVENTEEN CHARS XX").unwrap_err().contains("product"));
+        assert!(long("revision", "12345").unwrap_err().contains("revision"));
+        assert!(long("vendor", "caf\u{e9}").unwrap_err().contains("printable ASCII"));
+        assert!(long("vendor", "8CHARS!!").is_ok(), "exactly the field");
+        let serial = |v: &str| {
+            let mut c = cfg.clone();
+            c.scsi.get_mut(&1).unwrap().serial = Some(v.into());
+            c.validate()
+        };
+        assert_eq!(cfg.scsi[&1].serial.as_deref(), Some("3JA0K1X4"));
+        assert!(serial("0123456789ABCDEF").is_ok());
+        assert!(serial("0123456789ABCDEFG").unwrap_err().contains("serial"));
+        assert!(serial("").unwrap_err().contains("serial"));
     }
 
     /// `--no-write-cache` turns the cache off for every disk, whatever the file says.

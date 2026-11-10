@@ -10,9 +10,24 @@ use std::io;
 
 use parking_lot::{Mutex, MutexGuard};
 
-use super::{ScsiDevice, ScsiIdentity, ScsiRequest, ScsiResponse};
+use super::{ScsiDevice, ScsiIdentity, ScsiInquiry, ScsiRequest, ScsiResponse};
 use crate::block_node::{open_image, ChangerNode, ImageKind};
 use crate::dev::daynaport::DaynaPort;
+
+/// How [`ScsiBus::attach_device`] attaches an image. The default is a plain
+/// disk with no overlay, no write cache and the bus's own INQUIRY answer.
+#[derive(Default)]
+pub struct AttachOptions {
+    pub cdrom: bool,
+    /// A CD-ROM's changer list.
+    pub discs: Vec<String>,
+    /// Copy-on-write, to `overlay_path` or the default place ([`open_image`]).
+    pub overlay: bool,
+    pub overlay_path: Option<String>,
+    pub write_cache: bool,
+    /// What INQUIRY reports instead of the bus's own, and the unit serial.
+    pub inquiry: ScsiInquiry,
+}
 
 /// A device on a SCSI bus, as the controller drives it: a CDB goes in, data
 /// and a status come out.
@@ -144,6 +159,12 @@ impl ScsiBus {
         }
     }
 
+    /// What a disk (or, with `cdrom`, a CD-ROM) on this bus reports in INQUIRY
+    /// unless its table says otherwise.
+    pub fn identity(&self, cdrom: bool) -> ScsiIdentity {
+        if cdrom { self.identities.cdrom } else { self.identities.disk }
+    }
+
     /// Take the table, for a controller that has to hold it across a check
     /// and a command.
     pub fn lock(&self) -> MutexGuard<'_, Targets> {
@@ -171,29 +192,21 @@ impl ScsiBus {
     }
 
     /// Attach what a `[scsi.N]` table describes: the image at `path` (empty
-    /// for a CD-ROM with its tray empty), a CD-ROM's changer list `discs`,
-    /// and copy-on-write when `overlay` is set, to `overlay_path` or the
-    /// default place ([`open_image`]). The bus gives it its INQUIRY
-    /// identity. Returns the size in 512-byte blocks.
-    pub fn attach_device(
-        &self,
-        id: u8,
-        path: &str,
-        cdrom: bool,
-        discs: Vec<String>,
-        overlay: bool,
-        overlay_path: Option<&str>,
-        write_cache: bool,
-    ) -> io::Result<u64> {
-        let identity = if cdrom { self.identities.cdrom } else { self.identities.disk };
+    /// for a CD-ROM with its tray empty), as `opts` says. Returns the size in
+    /// 512-byte blocks.
+    pub fn attach_device(&self, id: u8, path: &str, opts: AttachOptions) -> io::Result<u64> {
+        let AttachOptions { cdrom, discs, overlay, overlay_path, write_cache, inquiry } = opts;
+        let overlay_path = overlay_path.as_deref();
+        let ScsiInquiry { identity, serial } = inquiry;
+        let identity = identity.unwrap_or_else(|| self.identity(cdrom));
         let dev = if cdrom && path.is_empty() {
             // A drive with its tray empty answers INQUIRY and reports no
             // medium; a disc is loaded into it later.
-            ScsiDevice::new_empty_cdrom(identity)
+            ScsiDevice::new_empty_cdrom(identity).with_serial(serial)
         } else {
             let kind = if cdrom { ImageKind::Cdrom } else { ImageKind::Disk };
             let node = open_image(path, kind, overlay, overlay_path)?;
-            ScsiDevice::new(node, cdrom, path.to_string(), discs, identity).with_write_cache(write_cache)
+            ScsiDevice::new(node, cdrom, path.to_string(), discs, identity).with_write_cache(write_cache).with_serial(serial)
         };
         let blocks = dev.size() / 512;
         self.attach(id, Box::new(dev))?;
@@ -203,14 +216,14 @@ impl ScsiBus {
     /// A raw image as a disk or CD-ROM, for the controllers' tests.
     #[cfg(test)]
     pub fn attach_image(&self, id: u8, path: &std::path::Path, cdrom: bool) -> io::Result<u64> {
-        self.attach_device(id, path.to_str().unwrap(), cdrom, Vec::new(), false, None, false)
+        self.attach_device(id, path.to_str().unwrap(), AttachOptions { cdrom, ..Default::default() })
     }
 
     /// A raw image as a disk that powers up with a write cache, for the
     /// controllers' tests.
     #[cfg(test)]
     pub fn attach_cached_image(&self, id: u8, path: &std::path::Path) -> io::Result<()> {
-        self.attach_device(id, path.to_str().unwrap(), false, Vec::new(), false, None, true).map(|_| ())
+        self.attach_device(id, path.to_str().unwrap(), AttachOptions { write_cache: true, ..Default::default() }).map(|_| ())
     }
 
     /// The caching page's WCE bit as MODE SENSE(6) reports it for the disk at
@@ -365,7 +378,7 @@ mod tests {
     }
 
     fn attach(b: &ScsiBus, id: u8, p: &std::path::Path, overlay: bool) -> io::Result<u64> {
-        b.attach_device(id, p.to_str().unwrap(), false, Vec::new(), overlay, None, false)
+        b.attach_device(id, p.to_str().unwrap(), AttachOptions { overlay, ..Default::default() })
     }
 
     fn image(tag: &str, blocks: usize) -> std::path::PathBuf {
@@ -412,7 +425,7 @@ mod tests {
         let b = bus(8);
         let p = image("wce", 8);
         for (id, on) in [(1, false), (2, true)] {
-            b.attach_device(id, p.to_str().unwrap(), false, Vec::new(), false, None, on).unwrap();
+            b.attach_device(id, p.to_str().unwrap(), AttachOptions { write_cache: on, ..Default::default() }).unwrap();
             assert_eq!(b.write_cache_reported(id), on, "write_cache = {on}");
         }
         std::fs::remove_file(p).unwrap();

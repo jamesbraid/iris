@@ -4,8 +4,7 @@ mod attach;
 mod bus;
 
 pub use attach::{attach_failed, attach_from_config, Attached, DaynaportRef, TableRef};
-pub use bus::{ScsiBus, ScsiIdentities, ScsiTarget, Targets};
-
+pub use bus::{AttachOptions, ScsiBus, ScsiIdentities, ScsiTarget, Targets};
 use crate::block_node::{Background, ChangerNode, Removable, BlockNode};
 
 /// Get the standard CDB length based on the opcode's group code
@@ -106,6 +105,15 @@ pub struct ScsiIdentity {
     pub revision: [u8; 4],
 }
 
+/// What a `[scsi.N]` table adds to a target's INQUIRY data: an identity that
+/// replaces the bus's own, and a unit serial number. Both are `None` unless
+/// the table sets them.
+#[derive(Clone, Debug, Default)]
+pub struct ScsiInquiry {
+    pub identity: Option<ScsiIdentity>,
+    pub serial: Option<Vec<u8>>,
+}
+
 /// What every machine's emulated disk reports in INQUIRY.
 pub const DISK_IDENTITY: ScsiIdentity = ScsiIdentity::new(b"SGI     ", b"IRIS EMUL DISK  ", b"1.0 ");
 
@@ -170,6 +178,11 @@ pub struct ScsiDevice {
     logical_block_size: u64,
     /// What INQUIRY reports (the attaching controller's choice).
     identity: ScsiIdentity,
+    /// The unit serial number, when the configuration gives one. Reported in
+    /// the vendor-specific bytes of standard INQUIRY data (36..44) and by the
+    /// unit serial number page (VPD 0x80). `None` leaves INQUIRY as it was:
+    /// 36 bytes, and every EVPD request answered with standard data.
+    serial: Option<Vec<u8>>,
     /// The caching page's WCE bit: the disk may acknowledge a write before it
     /// is stored. Starts as `power_on_write_cache`; a MODE SELECT can change it.
     write_cache: bool,
@@ -227,6 +240,7 @@ impl ScsiDevice {
             // HDD defaults to 512. dksc switches CD-ROM to 512 for EFS, back to 2048 for ISO.
             logical_block_size: if is_cdrom { 2048 } else { 512 },
             identity,
+            serial: None,
             write_cache: false,
             power_on_write_cache: false,
             background,
@@ -245,6 +259,7 @@ impl ScsiDevice {
             phys_block_size: CDROM_SECTOR,
             logical_block_size: 2048,
             identity,
+            serial: None,
             write_cache: false,
             power_on_write_cache: false,
             background: None,
@@ -256,6 +271,12 @@ impl ScsiDevice {
     pub fn with_write_cache(mut self, on: bool) -> Self {
         self.power_on_write_cache = on;
         self.write_cache = on;
+        self
+    }
+
+    /// Give the target a unit serial number (see the `serial` field).
+    pub fn with_serial(mut self, serial: Option<Vec<u8>>) -> Self {
+        self.serial = serial;
         self
     }
 
@@ -351,13 +372,31 @@ impl ScsiDevice {
         Ok(ScsiResponse { status: 0x00, data })
     }
 
-    fn exec_inquiry(&self, cdb: &[u8]) -> Result<ScsiResponse, std::io::Error> {
+    fn exec_inquiry(&mut self, cdb: &[u8]) -> Result<ScsiResponse, std::io::Error> {
         let alloc_len = cdb[4] as usize;
         let mut data = vec![0u8; 36];
         let lun = (cdb[1] >> 5) & 0x7;
+        let dev_type = if self.is_cdrom() { 0x05 } else { 0x00 };
+
+        // A target with a serial number answers the vital product data pages
+        // that carry it. Without one, EVPD is ignored as it always was.
+        if let (true, Some(serial), 0) = (cdb[1] & 1 != 0, &self.serial, lun) {
+            let page = match cdb[2] {
+                0x00 => vec![dev_type, 0x00, 0x00, 0x02, 0x00, 0x80],
+                0x80 => {
+                    let mut p = vec![dev_type, 0x80, 0x00, serial.len() as u8];
+                    p.extend_from_slice(serial);
+                    p
+                }
+                _ => return Ok(self.check_condition(0x05, 0x24, 0x00)), // Illegal Request: Invalid field in CDB
+            };
+            let mut page = page;
+            page.truncate(alloc_len);
+            return Ok(ScsiResponse { status: 0x00, data: page });
+        }
 
         if lun == 0 {
-            data[0] = if self.is_cdrom() { 0x05 } else { 0x00 };
+            data[0] = dev_type;
             data[1] = if self.is_cdrom() { 0x80 } else { 0x00 }; // RMB (Removable)
             data[2] = 0x02; // ANSI SCSI-2
             data[3] = 0x02; // SCSI-2 response format
@@ -365,12 +404,15 @@ impl ScsiDevice {
             data[8..16].copy_from_slice(&self.identity.vendor);
             data[16..32].copy_from_slice(&self.identity.product);
             data[32..36].copy_from_slice(&self.identity.revision);
-
-            /*println!("SCSI: INQUIRY LUN={} AllcLen={} Type={:02x} Vendor={} Product={} Rev={}",
-                lun, alloc_len, data[0],
-                String::from_utf8_lossy(&data[8..16]),
-                String::from_utf8_lossy(&data[16..32]),
-                String::from_utf8_lossy(&data[32..36]))*/
+            if let Some(serial) = &self.serial {
+                // The first eight characters, in the vendor-specific bytes
+                // right after the revision, as SCSI disks lay them out.
+                let mut field = [b' '; 8];
+                let n = serial.len().min(8);
+                field[..n].copy_from_slice(&serial[..n]);
+                data.extend_from_slice(&field);
+                data[4] = 39;
+            }
         } else {
             // SPC-2 8.2.5: PQ=011b (device server not capable of supporting a physical
             // device on this LUN), PDT=0x1F (unknown/no device type). Linux's
