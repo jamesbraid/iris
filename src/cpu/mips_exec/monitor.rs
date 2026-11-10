@@ -3386,14 +3386,17 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> MipsCpu<T, C> {
             "idleprof" => {
                 let sub = actual_args.first().copied().unwrap_or("report");
                 match sub {
+                    #[cfg(feature = "idleprof")]
                     "on" => {
                         self.idle_profile_arm();
                         writeln!(writer, "idleprof: armed (lock-free, histogram reset). Let the guest idle, then `stop; idleprof report`.").unwrap();
                     }
+                    #[cfg(feature = "idleprof")]
                     "off" => {
                         self.idle_profile_disarm();
                         writeln!(writer, "idleprof: disarmed.").unwrap();
                     }
+                    #[cfg(feature = "idleprof")]
                     "report" => {
                         let count = actual_args.get(1).and_then(|s| s.parse().ok()).unwrap_or(32);
                         let mut exec = self.try_lock_executor()?;
@@ -3454,7 +3457,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
     /// Dump the hottest sampled PCs and flag a likely idle-loop region: the
     /// smallest contiguous PC window (<=256 bytes) of always-interrupts-enabled
     /// samples that together account for the bulk of execution.
-    #[cfg(feature = "idle-pause")]
+    #[cfg(feature = "idleprof")]
     pub fn idle_profile_report(&mut self, top: usize, writer: &mut dyn Write) {
         let total = self.idle_profiler.total;
         if total == 0 {

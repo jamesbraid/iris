@@ -142,6 +142,11 @@ r5ksc_triton = ["r5ksc"]
 # in. OFF by default (the CPU thread spins) — opt in with --features idle-pause;
 # off keeps deterministic-clock and raw-benchmark builds simple.
 idle-pause = []
+# The `idleprof` monitor sampler (`idleprof on|off|report`): a PC histogram
+# taken on every instruction while armed. It costs a load and a branch per
+# instruction even when disarmed, so it is a developer tool apart from
+# idle-pause, which records nothing inside the instruction loop.
+idleprof = ["idle-pause"]
 # Transparent cache (docs/tcache-design.md): keep the whole cache tag/state
 # machine — line states, LRU, dirty bits, VCE, CACHE-instruction semantics —
 # but stop storing line *data* for cacheable RAM. Reads and writes go straight

@@ -401,7 +401,7 @@ impl TracebackBuffer {
     }
 }
 
-#[cfg(feature = "idle-pause")]
+#[cfg(feature = "idleprof")]
 /// Per-PC sampling counters: total times this PC was the about-to-execute PC,
 /// and how many of those had CPU interrupts enabled (IE=1, EXL=ERL=0).
 #[derive(Clone, Copy, Default)]
@@ -420,7 +420,7 @@ pub(super) struct IdleSample {
 ///   cpu stop; idleprof on; cont    # let the guest sit at an idle prompt
 ///   cpu stop; idleprof report      # dump the hottest PCs + IE%
 ///
-#[cfg(feature = "idle-pause")]
+#[cfg(feature = "idleprof")]
 /// The idle loop shows up as a small cluster of contiguous PCs that together
 /// dominate the samples with ie% == 100.
 #[derive(Default)]
@@ -434,7 +434,7 @@ pub(super) struct IdleProfiler {
     pub(super) hist: std::collections::HashMap<u64, IdleSample>,
 }
 
-#[cfg(feature = "idle-pause")]
+#[cfg(feature = "idleprof")]
 impl IdleProfiler {
     #[inline(always)]
     pub(super) fn sample(&mut self, pc: u64, ie: bool) {

@@ -1056,13 +1056,13 @@ pub struct MipsExecutor<T: Tlb, C: CpuModel> {
     /// production interpreter path.
     #[cfg(feature = "llstats")]
     pub ll_stats: Box<[LlSiteStats; LL_STATS_SLOTS]>,
-    #[cfg(feature = "idle-pause")]
+    #[cfg(feature = "idleprof")]
     idle_profiler: IdleProfiler,
-    #[cfg(feature = "idle-pause")]
+    #[cfg(feature = "idleprof")]
     pub idle_profile_on: Arc<AtomicBool>,
-    #[cfg(feature = "idle-pause")]
+    #[cfg(feature = "idleprof")]
     pub idle_profile_reset: Arc<AtomicBool>,
-    #[cfg(feature = "idle-pause")]
+    #[cfg(feature = "idleprof")]
     idle_profile_on_ptr: *const AtomicBool,
     pub symbols: Arc<Mutex<SymbolTable>>,
     pub breakpoints: Vec<Breakpoint>,
@@ -2466,7 +2466,7 @@ macro_rules! step_preamble {
         // Spin/idle-loop PC sampler. Armed lock-free via the shared atomic, so
         // the CPU is never paused/resumed to enable it (resuming corrupts a
         // live kernel). Inert (one relaxed load + branch) when disarmed.
-        #[cfg(feature = "idle-pause")]
+        #[cfg(feature = "idleprof")]
         if unsafe { &*$self.idle_profile_on_ptr }.load(Ordering::Relaxed) {
             if $self.idle_profile_reset.load(Ordering::Relaxed) {
                 $self.idle_profiler.reset();
@@ -2768,13 +2768,13 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             trace_writer: None,
             #[cfg(feature = "llstats")]
             ll_stats: Box::new([LlSiteStats { key: u64::MAX, ..Default::default() }; LL_STATS_SLOTS]),
-            #[cfg(feature = "idle-pause")]
+            #[cfg(feature = "idleprof")]
             idle_profiler: IdleProfiler::default(),
-            #[cfg(feature = "idle-pause")]
+            #[cfg(feature = "idleprof")]
             idle_profile_on: Arc::new(AtomicBool::new(false)),
-            #[cfg(feature = "idle-pause")]
+            #[cfg(feature = "idleprof")]
             idle_profile_reset: Arc::new(AtomicBool::new(false)),
-            #[cfg(feature = "idle-pause")]
+            #[cfg(feature = "idleprof")]
             idle_profile_on_ptr: std::ptr::null(),
             symbols: Arc::new(Mutex::new(SymbolTable::new())),
             breakpoints: vec![Breakpoint {
@@ -2897,7 +2897,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
     /// Re-sync raw atomic pointers after the shared Arcs are injected post-construction.
     /// (`cycles` has no equivalent — it's an inline `MipsCore` field now, always current.)
     pub fn rebind_atomic_ptrs(&mut self) {
-        #[cfg(feature = "idle-pause")]
+        #[cfg(feature = "idleprof")]
         { self.idle_profile_on_ptr = Arc::as_ptr(&self.idle_profile_on); }
         #[cfg(feature = "jitv2")]
         self.jitv2_bind_fast_lookup();
@@ -10450,9 +10450,9 @@ pub struct MipsCpu<T: Tlb, C: CpuModel> {
     debug: Arc<AtomicBool>,
     exception_mask: Arc<AtomicU32>,
     trace_file: Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
-    #[cfg(feature = "idle-pause")]
+    #[cfg(feature = "idleprof")]
     idle_profile_on: Arc<AtomicBool>,
-    #[cfg(feature = "idle-pause")]
+    #[cfg(feature = "idleprof")]
     idle_profile_reset: Arc<AtomicBool>,
 }
 
@@ -10481,9 +10481,9 @@ unsafe impl<T: Tlb, C: CpuModel> Sync for MipsCpu<T, C> {}
 impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> MipsCpu<T, C> {
     pub fn new(executor: MipsExecutor<T, C>) -> Self {
         let fasttick_count = executor.core.fasttick_count.clone();
-        #[cfg(feature = "idle-pause")]
+        #[cfg(feature = "idleprof")]
         let idle_profile_on = executor.idle_profile_on.clone();
-        #[cfg(feature = "idle-pause")]
+        #[cfg(feature = "idleprof")]
         let idle_profile_reset = executor.idle_profile_reset.clone();
 
         let executor_arc = Arc::new(Mutex::new(executor));
@@ -10509,9 +10509,9 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> MipsCpu<T, C> {
             debug: Arc::new(AtomicBool::new(false)),
             exception_mask: Arc::new(AtomicU32::new(0)),
             trace_file: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "idle-pause")]
+            #[cfg(feature = "idleprof")]
             idle_profile_on,
-            #[cfg(feature = "idle-pause")]
+            #[cfg(feature = "idleprof")]
             idle_profile_reset,
         }
     }
@@ -10519,14 +10519,14 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> MipsCpu<T, C> {
     /// Arm the idle-loop PC sampler without taking the executor lock (so the
     /// running CPU is never paused/resumed). Requests a histogram reset which
     /// the CPU thread performs on its next step.
-    #[cfg(feature = "idle-pause")]
+    #[cfg(feature = "idleprof")]
     pub fn idle_profile_arm(&self) {
         self.idle_profile_reset.store(true, Ordering::SeqCst);
         self.idle_profile_on.store(true, Ordering::SeqCst);
     }
 
     /// Disarm the sampler (lock-free).
-    #[cfg(feature = "idle-pause")]
+    #[cfg(feature = "idleprof")]
     pub fn idle_profile_disarm(&self) {
         self.idle_profile_on.store(false, Ordering::SeqCst);
     }
