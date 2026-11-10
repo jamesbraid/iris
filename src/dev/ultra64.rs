@@ -669,7 +669,7 @@ impl crate::attach::DeviceType for Ultra64Card {
                 // the RAMROM window: 0x1F500000-0x1F5FFFFF (16 x 64KB slots).
                 bus.map_gio(GIO_SLOT0_BASE, RAMROM_BASE - GIO_SLOT0_BASE, dev.clone(), "ultra64");
                 bus.map_gio(RAMROM_BASE, RAMROM_SIZE, dev.clone(), "ultra64");
-                ctx.devices.add("ultra64", crate::devices::Phase::Io, dev);
+                ctx.devices.add(&at.to_string(), crate::devices::Phase::Io, dev);
             }
             Err(e) => eprintln!("ultra64: failed to initialize ({e}); running without N64 dev board"),
         }

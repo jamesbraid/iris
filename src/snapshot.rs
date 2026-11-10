@@ -55,7 +55,17 @@ use toml::Value;
 /// levels in their own layout. A v5 reader would load none of it and leave
 /// every BAR unassigned under a running kernel, and a v6 reader does the
 /// same with a v5 snapshot, so both machines refuse the other schema.
-pub const SCHEMA_VERSION: u32 = 6;
+///
+/// v6 → v7: disks, their overlays and the state of placed devices are named
+/// by location (`hpc3.0.t1`, `xio15.pci0.0.t3`, `gio0`) where they were
+/// numbered by controller and target id (`id = 17`, `scsi1.overlay` in
+/// `ctrl1/`, `cow1.toml`) or by a fixed device name (`ultra64`, `virtio`).
+/// Each controller's overlays sit in a directory named by its location and
+/// one `cow.toml` lists every disk's dirty sectors by the disk's location.
+/// The O2 and the Octane refuse a v6 snapshot as they refuse every other
+/// schema. The Indy and Indigo2 read one, mapping the old numbers and names
+/// onto their locations (see `Ip22Machine::apply_snapshot`).
+pub const SCHEMA_VERSION: u32 = 7;
 
 const MANIFEST_FILE: &str = "snapshot.toml";
 
@@ -71,31 +81,25 @@ pub struct Snapshot {
 /// hashing multi-GB images.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskRef {
-    /// Controller * 16 + target id, for a disk on a numbered controller.
+    /// Controller * 16 + target id, as manifests before schema 7 numbered
+    /// a disk; read only, when `at` is absent.
     pub id: u8,
-    /// The location, for a disk with no controller number (an NVMe card's).
+    /// Where the disk is. Absent only in a manifest before schema 7.
     pub at: Option<crate::location::Location>,
     pub path: String,
     pub size_bytes: u64,
 }
 
 impl DiskRef {
-    /// The placed disks as a manifest numbers them: controller * 16 + target
-    /// id. CD-ROMs only when `cdroms`: the Indy and Indigo2 have always listed
-    /// them beside the disks, the O2 and Octane do not.
+    /// The placed disks, by location. CD-ROMs only when `cdroms`: the Indy and
+    /// Indigo2 have always listed them beside the disks, the O2 and Octane do
+    /// not.
     pub fn from_records(disks: &crate::disks::Disks, cdroms: bool) -> Vec<DiskRef> {
         let mut refs: Vec<DiskRef> = disks
             .records()
             .iter()
             .filter(|r| cdroms || !r.cdrom)
-            .map(|r| {
-                let slot = disks.topology().ctl_of(&r.at).zip(r.at.target());
-                let (id, at) = match slot {
-                    Some((ctl, id)) => (crate::config::scsi_slot(ctl, id), None),
-                    None => (0, Some(r.at.clone())),
-                };
-                DiskRef { id, at, path: r.path.clone(), size_bytes: r.size_bytes }
-            })
+            .map(|r| DiskRef { id: 0, at: Some(r.at.clone()), path: r.path.clone(), size_bytes: r.size_bytes })
             .collect();
         refs.sort_by(|a, b| (&a.at, a.id).cmp(&(&b.at, b.id)));
         refs
@@ -607,57 +611,34 @@ impl BinValue {
 
 // ---- scalar hex helpers ----
 
-/// Each card's disk's copy-on-write sets, by the card's location, as a
-/// snapshot read them.
-pub type CardOverlays = Vec<(crate::location::Location, Vec<(usize, Vec<u64>)>)>;
-
-/// Write each card's disk's overlay (an NVMe namespace's) into a directory
-/// named by the card's location, and its dirty sectors into
-/// `cow-<location>.toml`.
-pub fn export_card_overlays(snap: &Snapshot, disks: &crate::disks::Disks) -> Result<(), String> {
-    for (at, port) in disks.cards() {
-        let dir = snap.dir.join(at.to_string());
-        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let overlays = port.bus().export_overlays(&dir).map_err(|e| format!("COW overlay export ({at}): {e}"))?;
-        snap.write_toml(&format!("cow-{at}.toml"), &build_cow_table(overlays)).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-/// The card overlays a snapshot holds for the cards this machine has.
-pub fn read_card_overlays(snap: &Snapshot, disks: &crate::disks::Disks) -> CardOverlays {
-    disks
-        .cards()
-        .into_iter()
-        .filter_map(|(at, _)| Some((at.clone(), parse_cow_table(&snap.read_toml(&format!("cow-{at}.toml")).ok()?))))
-        .collect()
-}
-
-/// Put back what [`export_card_overlays`] wrote, from the snapshot in `dir`.
-pub fn import_card_overlays(dir: &std::path::Path, disks: &crate::disks::Disks, sets: &CardOverlays) -> Result<(), String> {
-    let cards = disks.cards();
-    for (at, sets) in sets {
-        let Some((_, port)) = cards.iter().find(|(c, _)| c == at) else { continue };
-        port.bus().import_overlays(&dir.join(at.to_string()), sets).map_err(|e| format!("COW overlay import ({at}): {e}"))?;
-    }
-    Ok(())
-}
-
-/// Inverse of `parse_cow_table`: build a `{"scsi<id>": [dirty sectors...]}`
-/// table from `export_overlays`'s output.
-pub(crate) fn build_cow_table(overlays: Vec<(usize, Vec<u64>)>) -> toml::Value {
+/// Inverse of `parse_cow_table`: build a `{"<location>": [dirty sectors...]}`
+/// table from `Disks::export_overlays`'s output.
+pub(crate) fn build_cow_table(overlays: crate::disks::OverlaySets) -> toml::Value {
     let mut tbl = toml::map::Map::new();
-    for (id, dirty) in overlays {
+    for (at, dirty) in overlays {
         let arr: Vec<toml::Value> = dirty.into_iter().map(|v| toml::Value::Integer(v as i64)).collect();
-        tbl.insert(format!("scsi{}", id), toml::Value::Array(arr));
+        tbl.insert(at.to_string(), toml::Value::Array(arr));
     }
     toml::Value::Table(tbl)
 }
 
-/// Parse a `cow.toml`/`cow1.toml`-shaped table (`{"scsi<id>": [dirty
+/// Parse a `cow.toml` (`{"<location>": [dirty sectors...]}`) into the sets
+/// `Disks::import_overlays` takes. Keys that are not locations are ignored.
+pub(crate) fn parse_cow_table(cow_toml: &toml::Value) -> crate::disks::OverlaySets {
+    let mut sets = Vec::new();
+    if let Some(tbl) = cow_toml.as_table() {
+        for (k, v) in tbl {
+            let (Ok(at), Some(arr)) = (k.parse::<crate::location::Location>(), v.as_array()) else { continue };
+            sets.push((at, arr.iter().filter_map(|x| x.as_integer().map(|i| i as u64)).collect()));
+        }
+    }
+    sets
+}
+
+/// Parse a schema 6 or older `cow.toml`/`cow1.toml`-shaped table (`{"scsi<id>": [dirty
 /// sectors...]}`) into `(id, dirty_sectors)` pairs. Shared by rollback
 /// capture and snapshot load so the two paths can't drift.
-pub(crate) fn parse_cow_table(cow_toml: &toml::Value) -> Vec<(usize, Vec<u64>)> {
+pub(crate) fn parse_legacy_cow_table(cow_toml: &toml::Value) -> Vec<(usize, Vec<u64>)> {
     let mut sets = Vec::new();
     if let Some(tbl) = cow_toml.as_table() {
         for (k, v) in tbl {
@@ -898,17 +879,28 @@ mod tests {
     /// as, and ids that are not `scsi<n>` keys are ignored.
     #[test]
     fn cow_tables_round_trip() {
-        let sets = vec![(1usize, vec![0u64, 7, 4096]), (4, vec![]), (12, vec![u32::MAX as u64 + 1])];
+        let at = |s: &str| s.parse::<crate::location::Location>().unwrap();
+        let mut sets = vec![(at("hpc3.0.t1"), vec![0u64, 7, 4096]), (at("hpc3.1.t4"), vec![]), (at("pci0.3"), vec![u32::MAX as u64 + 1])];
+        sets.sort();
         let table = build_cow_table(sets.clone());
         let mut parsed = parse_cow_table(&table);
         parsed.sort();
         assert_eq!(parsed, sets);
         let mut noisy = table.as_table().unwrap().clone();
-        noisy.insert("note".into(), toml::Value::String("x".into()));
-        noisy.insert("scsiX".into(), toml::Value::Array(vec![]));
+        noisy.insert("note x".into(), toml::Value::String("x".into()));
+        noisy.insert("hpc3.0.t2".into(), toml::Value::String("not a list".into()));
         let mut parsed = parse_cow_table(&toml::Value::Table(noisy));
         parsed.sort();
         assert_eq!(parsed, sets);
+    }
+
+    /// A schema 6 `cow.toml` still reads, by SCSI id.
+    #[test]
+    fn legacy_cow_tables_read_by_id() {
+        let t: toml::Value = toml::from_str("scsi1 = [0, 7]\nscsi4 = []\nnote = 1\n").unwrap();
+        let mut parsed = parse_legacy_cow_table(&t);
+        parsed.sort();
+        assert_eq!(parsed, vec![(1, vec![0, 7]), (4, vec![])]);
     }
 
     fn unique_tmp_dir(tag: &str) -> PathBuf {

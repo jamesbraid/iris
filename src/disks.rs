@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::location::Location;
+use crate::location::{Hop, Location};
 use crate::scsi::media::{CdromOptions, HddOptions};
 use crate::scsi::{ScsiBus, ScsiPort};
 use crate::scsi_monitor::ScsiTargets;
@@ -105,6 +105,9 @@ fn prepare_scratch(o: &HddOptions, at: &str) -> Option<PathBuf> {
     Some(path.to_path_buf())
 }
 
+/// Each disk's copy-on-write dirty sectors, by the disk's location.
+pub type OverlaySets = Vec<(Location, Vec<u64>)>;
+
 /// One disk or CD-ROM, as a snapshot manifest records it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaRecord {
@@ -196,10 +199,48 @@ impl Disks {
         Self::report(r, at, &o.path, ci_overlay.as_deref())
     }
 
-    /// The bound ports with no controller number: cards such as the NVMe,
-    /// whose disk is keyed by the card's own location.
-    pub fn cards(&self) -> Vec<(Location, Arc<ScsiPort>)> {
-        self.topology.buses::<ScsiPort>().into_iter().filter(|(at, _)| self.topology.ctl(at).is_none()).collect()
+    /// Where the disk at target `id` of the port at `port` is: its target
+    /// row, or for a card whose one disk has no target row (an NVMe), the
+    /// card itself.
+    fn disk_at(&self, port: &Location, id: usize) -> Location {
+        let target = port.join(Hop::t(id as u8));
+        if self.topology.has(&target) { target } else { port.clone() }
+    }
+
+    /// The port and target id of the disk at `at`: the inverse of `disk_at`.
+    fn port_of(&self, at: &Location) -> Option<(Location, Arc<ScsiPort>, usize)> {
+        if let Some(port) = self.topology.handle::<ScsiPort>(at) {
+            return Some((at.clone(), port, 0));
+        }
+        let parent = at.parent()?;
+        Some((parent.clone(), self.topology.handle::<ScsiPort>(&parent)?, at.target()? as usize))
+    }
+
+    /// Copy every disk's copy-on-write overlay into `dir`, one directory per
+    /// controller named by its location, and return each disk's dirty sectors
+    /// by the disk's location, for a snapshot.
+    pub fn export_overlays(&self, dir: &std::path::Path) -> io::Result<OverlaySets> {
+        let mut out = Vec::new();
+        for (port_at, port) in self.topology.buses::<ScsiPort>() {
+            let sub = dir.join(port_at.to_string());
+            std::fs::create_dir_all(&sub)?;
+            for (id, dirty) in port.bus().export_overlays(&sub)? {
+                out.push((self.disk_at(&port_at, id), dirty));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Put back the overlays `export_overlays` wrote. `dir_of` names the
+    /// directory a controller's overlays are in, given its location; a disk
+    /// with no entry in `sets` keeps its overlay, and an entry for a place
+    /// with no disk is ignored.
+    pub fn import_overlays(&self, dir_of: &dyn Fn(&Location) -> std::path::PathBuf, sets: &OverlaySets) -> io::Result<()> {
+        for (at, dirty) in sets {
+            let Some((port_at, port, id)) = self.port_of(at) else { continue };
+            port.bus().import_overlays(&dir_of(&port_at), &[(id, dirty.clone())])?;
+        }
+        Ok(())
     }
 
     fn record(&self, at: &Location, cdrom: bool, path: &str) {
@@ -538,5 +579,32 @@ mod tests {
         for f in [a, b] {
             std::fs::remove_file(f).unwrap();
         }
+    }
+
+    /// Overlays are written per controller location and read back by each
+    /// disk's location, on both controllers, where a target id alone would
+    /// name two files alike.
+    #[test]
+    fn overlays_export_and_import_by_location_across_both_controllers() {
+        let img = image("ov", 4096);
+        let (t, disks) = topo(vec![ctl(&[]), ctl(&[])]);
+        for c in ["hpc3.0", "hpc3.1"] {
+            t.scsi(&at(c), 3..=3, false);
+            let port = t.handle::<ScsiPort>(&at(c)).unwrap();
+            disks.attach_hdd(&port, &at(&format!("{c}.t3")), &HddOptions { overlay: true, ..disk(&img) }).unwrap();
+        }
+        let dir = std::env::temp_dir().join(format!("iris-disks-ov-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sets = disks.export_overlays(&dir).unwrap();
+        let named: Vec<String> = sets.iter().map(|s| s.0.to_string()).collect();
+        assert_eq!(named, ["hpc3.0.t3", "hpc3.1.t3"]);
+        for f in ["hpc3.0/scsi3.overlay", "hpc3.1/scsi3.overlay"] {
+            assert!(dir.join(f).exists(), "{f}");
+        }
+        disks.import_overlays(&|c| dir.join(c.to_string()), &sets).expect("both come back");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(format!("{img}.overlay"));
+        let _ = std::fs::remove_file(format!("{img}.overlay.dirty"));
+        std::fs::remove_file(img).unwrap();
     }
 }

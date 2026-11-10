@@ -628,14 +628,8 @@ impl O2Machine {
         chunks.bank_chunks[0] = put_bank_words(&store, &self.bus.ram)
             .map_err(|e| format!("CAS memory put: {e}"))?;
         snap.write_chunks_manifest(&chunks).map_err(|e| e.to_string())?;
-        for (i, ctl) in self.bus.scsi.lock().unwrap().iter().enumerate() {
-            let dir = snap.dir.join(format!("ctrl{i}"));
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            let overlays = ctl.export_overlays(&dir).map_err(|e| format!("COW overlay export (controller {i}): {e}"))?;
-            snap.write_toml(&format!("cow{i}.toml"), &crate::snapshot::build_cow_table(overlays))
-                .map_err(|e| e.to_string())?;
-        }
-        crate::snapshot::export_card_overlays(&snap, &self.disks)?;
+        let overlays = self.disks.export_overlays(&snap.dir).map_err(|e| format!("COW overlay export: {e}"))?;
+        snap.write_toml("cow.toml", &crate::snapshot::build_cow_table(overlays)).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -677,19 +671,14 @@ impl O2Machine {
             return Err(format!("snapshot memory is {} MB, this O2 has {} MB",
                 memory.len() >> 18, self.bus.ram.len() >> 20));
         }
-        let ctrls = self.bus.scsi.lock().unwrap().len();
-        let overlays = (0..ctrls)
-            .map(|i| snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::snapshot::parse_cow_table(&t)))
-            .collect();
+        let overlays = snap.read_toml("cow.toml").map(|t| crate::snapshot::parse_cow_table(&t)).unwrap_or_default();
         let mut board = toml::map::Map::new();
         for key in self.devices.keys() {
             board.insert(key.clone(), state(&key)?);
         }
-        let card_overlays = crate::snapshot::read_card_overlays(&snap, &self.disks);
         Ok(O2Snapshot {
             cpu: state("cpu")?,
             board: toml::Value::Table(board),
-            card_overlays,
             flash: snap.read_bin("flash.bin").map_err(|e| format!("flash.bin: {e}"))?,
             memory,
             overlays,
@@ -703,16 +692,11 @@ impl O2Machine {
         use crate::traits::Saveable;
         self.power_on_devices();
         self.cpu.load_state(&s.cpu)?;
-        crate::snapshot::import_card_overlays(&s.dir, &self.disks, &s.card_overlays)?;
+        self.disks.import_overlays(&|ctl| s.dir.join(ctl.to_string()), &s.overlays)
+            .map_err(|e| format!("COW overlay import: {e}"))?;
         self.devices.load(&s.board)?;
         self.bus.set_flash(&s.flash)?;
         self.bus.ram.restore_words(&s.memory)?;
-        for (i, ctl) in self.bus.scsi.lock().unwrap().iter().enumerate() {
-            if let Some(Some(sets)) = s.overlays.get(i) {
-                ctl.import_overlays(&s.dir.join(format!("ctrl{i}")), sets)
-                    .map_err(|e| format!("COW overlay import (controller {i}): {e}"))?;
-            }
-        }
         Ok(())
     }
 
@@ -740,10 +724,8 @@ struct O2Snapshot {
     board: toml::Value,
     flash: Vec<u8>,
     memory: Vec<u32>,
-    /// Each controller's copy-on-write sets, when the snapshot has them.
-    overlays: Vec<Option<Vec<(usize, Vec<u64>)>>>,
-    /// Each card's disk's copy-on-write sets (an NVMe's), by location.
-    card_overlays: crate::snapshot::CardOverlays,
+    /// Every disk's copy-on-write sets, by the disk's location.
+    overlays: crate::disks::OverlaySets,
     dir: std::path::PathBuf,
 }
 
@@ -1225,9 +1207,9 @@ mod device_tests {
         });
     }
 
-    /// The files a snapshot has always been: the CPU, the bus (`o2`), the boot
-    /// hook (`boot`), memory in the chunk store, the flash, and each
-    /// controller's overlays.
+    /// The files a snapshot holds: the CPU, the bus (`o2`), the boot hook
+    /// (`boot`), memory in the chunk store, the flash, one directory of
+    /// overlays per controller named by its location, and their `cow.toml`.
     #[test]
     fn o2_saved_files_keep_their_names() {
         o2(|m| {
@@ -1242,7 +1224,7 @@ mod device_tests {
                 .collect();
             names.sort();
             let _ = std::fs::remove_dir_all(&dir);
-            assert_eq!(names, ["boot.bin", "chunks.bin", "cow0.toml", "cow1.toml", "cpu.bin", "ctrl0", "ctrl1", "flash.bin", "o2.bin", "snapshot.toml"]);
+            assert_eq!(names, ["boot.bin", "chunks.bin", "cow.toml", "cpu.bin", "flash.bin", "o2.bin", "pci0.1", "pci0.2", "snapshot.toml"]);
         });
     }
 

@@ -92,12 +92,10 @@ struct RollbackCheckpoint {
     /// Snapshot directory (saves/<name>/) — re-used by rollback to reflink
     /// the COW overlays back into place.
     overlay_dir: std::path::PathBuf,
-    /// Per-SCSI-id dirty sector lists from cow.toml at the time of restore.
-    overlay_sets: Vec<(usize, Vec<u64>)>,
-    /// Same, for the second (fullhouse) SCSI controller — kept in a
-    /// separate list/subdirectory (see `capture_rollback_checkpoint`) since
-    /// controller 0 and controller 1 can each have a device at the same id.
-    overlay_sets1: Vec<(usize, Vec<u64>)>,
+    /// Each disk's dirty sectors at the time of restore, by location.
+    overlay_sets: crate::disks::OverlaySets,
+    /// The snapshot's schema, which says where its overlays are.
+    schema_version: u32,
 
     /// Native-endian RAM bank words. `bank_words[i].len() ==
     /// banks[i].size_bytes / 4` for present banks; populated for all four.
@@ -463,7 +461,7 @@ impl Ip22Machine {
             if let Some(dev) = testdev_override {
                 // A test device the caller built occupies gio0 like any other.
                 topology.claim(&gio0, "test_device", Family::Gio, false, "")?;
-                crate::dev::testdev::place(&board, &mut placed, dev.clone());
+                crate::dev::testdev::place(&board, &mut placed, &gio0, dev.clone());
                 topology.bind(&gio0, dev)?;
             }
             attach_devices(&cfg.placements()?, &cfg, Some(&mut Ctx { devices: &mut placed, disks: &disks }), &topology)
@@ -1110,19 +1108,18 @@ impl Ip22Machine {
         let framebuffers = self.board.rex3.as_ref()
             .map(|r| r.snapshot_framebuffers_inmem());
 
-        // Re-read cow.toml (and cow1.toml, for controller 1) so rollback
-        // knows which dirty sectors to import back. The files were just
-        // consumed by load_snapshot but they're tiny and re-reading from
-        // page cache is cheap (~µs).
+        // Re-read the dirty sector lists so rollback knows what to import
+        // back. The files were just consumed by load_snapshot but they're
+        // tiny and re-reading from page cache is cheap (~µs).
         let overlay_dir = self.saves.join(name);
         let snap = Snapshot::new(&overlay_dir);
-        let overlay_sets = snap.read_toml("cow.toml").map(|v| parse_cow_table(&v)).unwrap_or_default();
-        let overlay_sets1 = snap.read_toml("cow1.toml").map(|v| parse_cow_table(&v)).unwrap_or_default();
+        let schema_version = snap.read_manifest().ok().flatten().map_or(0, |m| m.schema_version);
+        let overlay_sets = Self::overlay_sets(&snap, schema_version);
 
         RollbackCheckpoint {
             overlay_dir,
             overlay_sets,
-            overlay_sets1,
+            schema_version,
             bank_words,
             framebuffers,
             cpu,
@@ -1154,18 +1151,12 @@ impl Ip22Machine {
             rex3.restore_framebuffers_inmem(rgb, aux);
         }
 
-        // Reflink the overlay back into place. saves/<name>/scsi*.overlay is
+        // Reflink the overlay back into place. The snapshot's overlays are
         // unchanged by guest writes (writes go to the live overlay), so this
         // can re-import directly.
-        self.hpc3.scsi().import_overlays(&cp.overlay_dir, &cp.overlay_sets)
+        let dir_of = |ctl: &Location| Self::overlay_dir(&cp.overlay_dir, cp.schema_version, ctl);
+        self.disks.import_overlays(&dir_of, &cp.overlay_sets)
             .map_err(|e| format!("rollback: COW overlay import: {}", e))?;
-        if let Some(dev) = self.hpc3.scsi1() {
-            // Controller 1's overlays live in a "ctrl1" subdirectory so a
-            // device at the same id on both controllers never collides on
-            // the same scsi<id>.overlay filename.
-            dev.import_overlays(&cp.overlay_dir.join("ctrl1"), &cp.overlay_sets1)
-                .map_err(|e| format!("rollback: COW overlay import (controller 1): {}", e))?;
-        }
         Ok(())
     }
 
@@ -1340,24 +1331,58 @@ impl Ip22Machine {
         }
         snap.write_chunks_manifest(&chunks).map_err(|e| e.to_string())?;
 
-        // COW overlays per SCSI device, plus a `cow.toml` with the dirty
-        // sector set for each one. Keeps the on-disk filesystem state
-        // consistent with the captured RAM.
-        let overlays = self.hpc3.scsi().export_overlays(&snap.dir)
+        // COW overlays, one directory per controller named by its location,
+        // plus a `cow.toml` with each disk's dirty sector set. Keeps the
+        // on-disk filesystem state consistent with the captured RAM.
+        let overlays = self.disks.export_overlays(&snap.dir)
             .map_err(|e| format!("COW overlay export: {}", e))?;
         snap.write_toml("cow.toml", &build_cow_table(overlays))
             .map_err(|e| e.to_string())?;
-        if let Some(dev) = self.hpc3.scsi1() {
-            // Own subdirectory + cow1.toml so controller 1 never collides
-            // with controller 0's scsi<id>.overlay filenames.
-            let ctrl1_dir = snap.dir.join("ctrl1");
-            std::fs::create_dir_all(&ctrl1_dir).map_err(|e| e.to_string())?;
-            let overlays1 = dev.export_overlays(&ctrl1_dir)
-                .map_err(|e| format!("COW overlay export (controller 1): {}", e))?;
-            snap.write_toml("cow1.toml", &build_cow_table(overlays1))
-                .map_err(|e| e.to_string())?;
-        }
         Ok(())
+    }
+
+    /// Where a snapshot of `schema` keeps the overlays of the controller at
+    /// `ctl`: a directory named by its location, or before schema 7 the
+    /// snapshot directory itself for controller 0 and `ctrl1` for the
+    /// second.
+    fn overlay_dir(dir: &std::path::Path, schema: u32, ctl: &Location) -> std::path::PathBuf {
+        if schema >= 7 {
+            return dir.join(ctl.to_string());
+        }
+        match ctl.last().map(|h| h.number()) {
+            Some(1) => dir.join("ctrl1"),
+            _ => dir.to_path_buf(),
+        }
+    }
+
+    /// Each disk's dirty sectors a snapshot of `schema` holds, by location.
+    /// Before schema 7, `cow.toml` keyed controller 0's disks `scsi<id>` and
+    /// `cow1.toml` controller 1's.
+    fn overlay_sets(snap: &Snapshot, schema: u32) -> crate::disks::OverlaySets {
+        if schema >= 7 {
+            return snap.read_toml("cow.toml").map(|v| parse_cow_table(&v)).unwrap_or_default();
+        }
+        let mut sets = Vec::new();
+        for (ctl, file) in [(0u8, "cow.toml"), (1, "cow1.toml")] {
+            let Ok(t) = snap.read_toml(file) else { continue };
+            let at = Location::root().join(Hop::hpc3()).join(Hop::pos(ctl));
+            for (id, dirty) in crate::snapshot::parse_legacy_cow_table(&t) {
+                sets.push((at.join(Hop::t(id as u8)), dirty));
+            }
+        }
+        sets
+    }
+
+    /// The file a snapshot before schema 7 kept the state saved under `key`
+    /// in: a card in a GIO slot was named by its type, not its slot.
+    fn legacy_state_file(&self, key: &str) -> String {
+        let Ok(at) = key.parse::<Location>() else { return key.to_owned() };
+        match self.disks.topology().placed(&at).as_deref() {
+            Some("ultra64") => "ultra64".into(),
+            Some("test_device") => "testdev".into(),
+            Some("virtio_serial") => "virtio".into(),
+            _ => key.to_owned(),
+        }
     }
 
     /// Restore full machine snapshot from `saves/<name>/`. CPU is auto-started
@@ -1469,15 +1494,19 @@ impl Ip22Machine {
                     // dist/ dir), so a path-only difference is a warning, not fatal —
                     // a disk's identity for restore is its id + size, not its path.
                     for d in &m.disks {
-                        match self.disk_refs().iter().find(|c| c.id == d.id) {
+                        // Before schema 7 a disk was controller * 16 + id.
+                        let at = d.at.clone().unwrap_or_else(|| {
+                            Location::root().join(Hop::hpc3()).join(Hop::pos(d.id / 16)).join(Hop::t(d.id % 16))
+                        });
+                        match self.disk_refs().iter().find(|c| c.at.as_ref() == Some(&at)) {
                             None => fatal.push(format!(
-                                "snapshot disk SCSI {} ('{}') is not configured in this run", d.id, d.path)),
+                                "snapshot disk {at} ('{}') is not configured in this run", d.path)),
                             Some(cur) if cur.size_bytes != d.size_bytes => fatal.push(format!(
-                                "SCSI {} ('{}') size differs: snapshot {} bytes vs current {} bytes",
-                                d.id, d.path, d.size_bytes, cur.size_bytes)),
+                                "{at} ('{}') size differs: snapshot {} bytes vs current {} bytes",
+                                d.path, d.size_bytes, cur.size_bytes)),
                             Some(cur) if cur.path != d.path => eprintln!(
-                                "load_snapshot: SCSI {} path differs: snapshot '{}' vs current '{}' (same size — continuing)",
-                                d.id, d.path, cur.path),
+                                "load_snapshot: {at} path differs: snapshot '{}' vs current '{}' (same size — continuing)",
+                                d.path, cur.path),
                             Some(_) => {}
                         }
                     }
@@ -1515,7 +1544,8 @@ impl Ip22Machine {
         let cpu = snap.read_state("cpu", schema_version).map_err(|e| e.to_string())?;
         let mut state = toml::map::Map::new();
         for (key, optional) in self.devices.expected() {
-            match snap.read_state(&key, schema_version) {
+            let file = if schema_version < 7 { self.legacy_state_file(&key) } else { key.clone() };
+            match snap.read_state(&file, schema_version) {
                 Ok(v) => {
                     state.insert(key, v);
                 }
@@ -1567,17 +1597,10 @@ impl Ip22Machine {
 
         // COW overlays — best-effort for backward compatibility with
         // snapshots saved before overlay capture was added.
-        if let Ok(cow_toml) = snap.read_toml("cow.toml") {
-            let sets = parse_cow_table(&cow_toml);
-            self.hpc3.scsi().import_overlays(&snap.dir, &sets)
+        if snap.read_toml("cow.toml").is_ok() {
+            let dir_of = |ctl: &Location| Self::overlay_dir(&snap.dir, schema_version, ctl);
+            self.disks.import_overlays(&dir_of, &Self::overlay_sets(&snap, schema_version))
                 .map_err(|e| format!("COW overlay import: {}", e))?;
-            if let Some(dev) = self.hpc3.scsi1() {
-                if let Ok(cow1_toml) = snap.read_toml("cow1.toml") {
-                    let sets1 = parse_cow_table(&cow1_toml);
-                    dev.import_overlays(&snap.dir.join("ctrl1"), &sets1)
-                        .map_err(|e| format!("COW overlay import (controller 1): {}", e))?;
-                }
-            }
         } else {
             eprintln!("load_snapshot: no cow.toml in snapshot — overlays left unchanged");
         }
@@ -1937,14 +1960,14 @@ mod snapshot_tests {
         names.iter().map(|n| n.to_string()).collect()
     }
 
-    /// Per machine the files, and their names, are the ones the snapshots have
-    /// always had, and every key the devices save is a file. An IMPACT board
-    /// has no state yet, so it writes no `mgras` file.
+    /// Per machine the files and their names, every key the devices save a
+    /// file, and one overlay directory per controller named by its location.
+    /// An IMPACT board has no state yet, so it writes no `mgras` file.
     #[test]
     fn the_saved_files_keep_their_names() {
         let base = ["snapshot.toml", "chunks.bin", "cpu.bin", "mc.bin", "ioc.bin", "scc.bin", "pit.bin", "ps2.bin",
-            "rtc.bin", "eeprom.bin", "scsi.bin", "seeq.bin", "hpc3.bin", "cow.toml"];
-        let second_scsi = ["scsi1.bin", "cow1.toml", "ctrl1"];
+            "rtc.bin", "eeprom.bin", "scsi.bin", "seeq.bin", "hpc3.bin", "cow.toml", "hpc3.0"];
+        let second_scsi = ["scsi1.bin", "hpc3.1"];
         for (kind, extra) in [
             (Kind::Indy, vec!["rex3.bin"]),
             (Kind::Indigo2, [&["rex3.bin"][..], &second_scsi].concat()),
@@ -1965,6 +1988,52 @@ mod snapshot_tests {
                 assert_eq!(stems, keys, "{kind:?}");
             });
         }
+    }
+
+    /// A schema 6 snapshot, which numbered disks controller * 16 + id and kept
+    /// controller 0's overlays beside the manifest and controller 1's in
+    /// `ctrl1` with `cow1.toml`, still loads, and its overlays come back on
+    /// the disks at their locations.
+    #[test]
+    fn an_indigo2_loads_a_schema_6_snapshot() {
+        on_machine(Kind::Indigo2, "schema6", |m| {
+            m.write_snapshot("s").unwrap();
+            let dir = m.saves.join("s");
+            let cow_new = std::fs::read_to_string(dir.join("cow.toml")).unwrap();
+            // Turn it into the schema 6 layout.
+            let snap = Snapshot::new(&dir);
+            let mut man = snap.read_manifest().unwrap().unwrap();
+            man.schema_version = 6;
+            for d in &mut man.disks {
+                let at = d.at.take().unwrap();
+                d.id = at.parent().unwrap().last().unwrap().number() * 16 + at.target().unwrap();
+            }
+            snap.write_manifest(&man).unwrap();
+            let mut legacy = [toml::Table::new(), toml::Table::new()];
+            for (at, dirty) in crate::snapshot::parse_cow_table(&toml::from_str(&cow_new).unwrap()) {
+                let ctl = at.parent().unwrap().last().unwrap().number() as usize;
+                let list = toml::Value::Array(dirty.into_iter().map(|d| toml::Value::Integer(d as i64)).collect());
+                legacy[ctl].insert(format!("scsi{}", at.target().unwrap()), list);
+            }
+            snap.write_toml("cow.toml", &toml::Value::Table(legacy[0].clone())).unwrap();
+            snap.write_toml("cow1.toml", &toml::Value::Table(legacy[1].clone())).unwrap();
+            std::fs::create_dir_all(dir.join("ctrl1")).unwrap();
+            for (ctl, to) in [("hpc3.0", dir.clone()), ("hpc3.1", dir.join("ctrl1"))] {
+                for f in std::fs::read_dir(dir.join(ctl)).unwrap().flatten() {
+                    std::fs::rename(f.path(), to.join(f.file_name())).unwrap();
+                }
+                std::fs::remove_dir(dir.join(ctl)).unwrap();
+            }
+            load(m, "s").expect("a schema 6 snapshot loads");
+            // The overlays went back on the disks they were taken from.
+            let out = m.saves.join("again");
+            std::fs::create_dir_all(&out).unwrap();
+            let mut again = m.disks.export_overlays(&out).unwrap();
+            let mut want = crate::snapshot::parse_cow_table(&toml::from_str(&cow_new).unwrap());
+            again.sort();
+            want.sort();
+            assert_eq!(again, want);
+        });
     }
 
     /// A snapshot from before the second SCSI controller existed has no

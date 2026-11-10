@@ -13,6 +13,16 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Snapshots name disks and cards by location
+
+- A snapshot records each disk by its location, keeps each controller's
+  overlays in a directory named by the controller's location with one
+  `cow.toml` for all of them, and saves a placed card's state under its
+  location (`gio0`, `xio15.pci0.4`). The snapshot schema goes to 7.
+- The Indy and Indigo2 still load their older snapshots: disk numbers,
+  `ctrl1/`, `cow1.toml` and the GIO cards' old names are mapped onto their
+  locations. The O2 and the Octane load only schema 7 snapshots, as they
+  have always loaded only their own schema.
 ### Devices are configured by location
 
 - Every device is an entry of the array named for its type, with `at` saying

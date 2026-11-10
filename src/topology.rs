@@ -182,6 +182,18 @@ impl Topology {
         Ok(t)
     }
 
+    /// Whether `at` is a row.
+    pub fn has(&self, at: &Location) -> bool {
+        self.rows.lock().contains_key(at)
+    }
+
+    /// The device type placed at `at`, if any.
+    pub fn placed(&self, at: &Location) -> Option<String> {
+        let rows = self.rows.lock();
+        let taken = rows.get(at)?.taken.as_deref()?;
+        Some(taken.split(' ').next().unwrap_or(taken).to_owned())
+    }
+
     /// The controller number of the row `at`, if it is a numbered controller.
     pub fn ctl(&self, at: &Location) -> Option<u8> {
         self.rows.lock().get(at)?.ctl

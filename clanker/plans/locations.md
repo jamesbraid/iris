@@ -1,15 +1,15 @@
 # Plan: devices placed by location
 
-Status: **in progress.** The machine-sharing refactor it builds on (Control,
-GuestNet, Devices, Disks, Ip22Board) is the stack below it. Steps 1 to 3
+Status: **built.** The machine-sharing refactor it builds on (Control,
+GuestNet, Devices, Disks, Ip22Board) is the stack below it. All four steps
 of the order of work below are built: locations, the socket map, the `rows`
 hook, the device list, the SCSI, GIO, PCI and XIO device types, with every
-machine placing its disks and cards through the map, `--list-slots`, and the
-config by location (`[[TYPE]]` entries, `--device`, migration, the GUI).
-The IP27 machines place their disks; their XIO and PCI rows wait for the
-IP27 work. The earlier attempt placed SCSI
-disks and GIO cards by location but could not place anything below a PCI
-card; the `rows` hook fixes that.
+machine placing its disks and cards through the map, `--list-slots`, the
+config by location (`[[TYPE]]` entries, `--device`, migration, the GUI) and
+snapshots by location (schema 7). The IP27 machines place their disks;
+their XIO and PCI rows wait for the IP27 work. The earlier attempt placed
+SCSI disks and GIO cards by location but could not place anything below a
+PCI card; the `rows` hook fixes that.
 
 ## Goal
 
@@ -157,10 +157,13 @@ devices is an error.
 ## Snapshots
 
 Disks, overlays and placed devices' state are keyed by location; the schema
-goes one above trunk's. The O2 and the Octane already refuse older schemas
+goes one above trunk's, to 7. Each controller's overlays sit in a directory
+named by its location, with one `cow.toml` keyed by disk location; a card
+whose one disk has no target row (an NVMe) is keyed by the card itself. The O2 and the Octane already refuse older schemas
 and keep doing so. The Indy-family reads older schemas today and keeps
-doing so: its loader maps `scsiN` and `ctrlN/` to `hpc3.C.tT` and the fixed
-device names to their locations before loading.
+doing so: its loader maps disk numbers, `scsiN` keys, `ctrl1/` and `cow1.toml` to
+`hpc3.C.tT`, and the GIO cards' old state names (`ultra64`, `testdev`,
+`virtio`) to their slots, before loading.
 
 ## Order of work
 

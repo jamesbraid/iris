@@ -268,7 +268,7 @@ impl crate::attach::DeviceType for VirtioSerialGio {
             Arc::new(super::BusMemory(bus.phys.clone())),
         ));
         bus.map_gio(base, WINDOW as u32, dev.clone(), "virtio-serial");
-        ctx.devices.add("virtio", crate::devices::Phase::Io, dev);
+        ctx.devices.add(&at.to_string(), crate::devices::Phase::Io, dev);
         Ok(vec![])
     }
 }

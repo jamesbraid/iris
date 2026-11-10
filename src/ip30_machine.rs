@@ -819,8 +819,6 @@ fn snapshot_refusal_for(impact: bool, vpro: bool, cpus: usize) -> Option<String>
 /// The `machine` an Octane snapshot's manifest names.
 pub(crate) const SNAPSHOT_MACHINE: &str = "octane_ip30";
 
-/// One SCSI controller's copy-on-write sets: each target's dirty sectors.
-type OverlaySets = Vec<(usize, Vec<u64>)>;
 
 /// A snapshot read and checked, ready to put into the machine.
 struct OctaneSnapshot {
@@ -828,9 +826,8 @@ struct OctaneSnapshot {
     board: toml::Value,
     flash: Vec<u8>,
     memory: Vec<u32>,
-    overlays: [Option<OverlaySets>; 2],
-    /// Each card's disk's (an NVMe's), by the card's location.
-    card_overlays: crate::snapshot::CardOverlays,
+    /// Every disk's copy-on-write sets, by the disk's location.
+    overlays: crate::disks::OverlaySets,
     dir: std::path::PathBuf,
 }
 
@@ -883,14 +880,8 @@ impl OctaneMachine {
             chunks.bank_chunks[0].extend(put_words_as_chunks(&store, words).map_err(|e| format!("CAS memory put: {e}"))?);
         }
         snap.write_chunks_manifest(&chunks).map_err(io)?;
-        for (i, ctl) in self.scsi.iter().enumerate() {
-            let dir = snap.dir.join(format!("ctrl{i}"));
-            std::fs::create_dir_all(&dir).map_err(io)?;
-            let overlays = ctl.bus().export_overlays(&dir)
-                .map_err(|e| format!("COW overlay export (controller {i}): {e}"))?;
-            snap.write_toml(&format!("cow{i}.toml"), &crate::snapshot::build_cow_table(overlays)).map_err(io)?;
-        }
-        crate::snapshot::export_card_overlays(&snap, &self.disks)?;
+        let overlays = self.disks.export_overlays(&snap.dir).map_err(|e| format!("COW overlay export: {e}"))?;
+        snap.write_toml("cow.toml", &crate::snapshot::build_cow_table(overlays)).map_err(io)?;
         Ok(())
     }
 
@@ -935,23 +926,19 @@ impl OctaneMachine {
         if memory.len() != fitted {
             return Err(format!("snapshot memory is {} MiB, this Octane has {} MiB", memory.len() >> 18, fitted >> 18));
         }
-        let overlays = std::array::from_fn(|i| {
-            snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::snapshot::parse_cow_table(&t))
-        });
+        let overlays = snap.read_toml("cow.toml").map(|t| crate::snapshot::parse_cow_table(&t)).unwrap_or_default();
         // Checked here, before the machine is touched, rather than when the
         // part is loaded.
         let flash = snap.read_bin("flash.bin").map_err(|e| format!("flash.bin: {e}"))?;
         if flash.len() != self.flash.size() {
             return Err(format!("saved flash is {} bytes, this Octane's holds {}", flash.len(), self.flash.size()));
         }
-        let card_overlays = crate::snapshot::read_card_overlays(&snap, &self.disks);
         Ok(OctaneSnapshot {
             cpu: state("cpu")?,
             board: state("octane")?,
             flash,
             memory,
             overlays,
-            card_overlays,
             dir: snap.dir,
         })
     }
@@ -966,13 +953,8 @@ impl OctaneMachine {
         // The overlays first: an import can take minutes, and the devices
         // count their deadlines from their load, so they load last, just
         // before the machine starts.
-        for (i, ctl) in self.scsi.iter().enumerate() {
-            if let Some(sets) = &s.overlays[i] {
-                ctl.bus().import_overlays(&s.dir.join(format!("ctrl{i}")), sets)
-                    .map_err(|e| format!("COW overlay import (controller {i}): {e}"))?;
-            }
-        }
-        crate::snapshot::import_card_overlays(&s.dir, &self.disks, &s.card_overlays)?;
+        self.disks.import_overlays(&|ctl| s.dir.join(ctl.to_string()), &s.overlays)
+            .map_err(|e| format!("COW overlay import: {e}"))?;
         self.devices.load(&s.board)?;
         Self::sync_links(&self.phys, &self.xbow);
         Ok(())
