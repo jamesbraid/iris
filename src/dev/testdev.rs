@@ -502,6 +502,49 @@ impl Saveable for TestDevice {
     }
 }
 
+/// What a `test_device` entry takes: where it writes its machine-state dump.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestDeviceOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dump: Option<String>,
+}
+
+/// The bare-metal test device in GIO expansion slot 0. It is bound at its
+/// own row, where the machine finds it to give it the CPU state it dumps.
+pub struct TestDeviceType;
+
+impl crate::attach::DeviceType for TestDeviceType {
+    const NAME: &'static str = "test_device";
+    const FAMILY: crate::topology::Family = crate::topology::Family::Gio;
+    type Owner = crate::ip22_bus::Ip22Bus;
+    type Options = TestDeviceOptions;
+
+    fn new(
+        o: TestDeviceOptions,
+        ctx: &mut crate::attach::Ctx,
+        bus: &std::sync::Arc<crate::ip22_bus::Ip22Bus>,
+        at: &crate::location::Location,
+    ) -> Result<crate::attach::Handles, String> {
+        if at.hops() != [crate::location::Hop::gio(0)] {
+            return Err("the test device decodes gio0 only".into());
+        }
+        let path = o.dump.unwrap_or_else(|| DEFAULT_DUMP_PATH.to_string());
+        eprintln!("iris: test device enabled at {TEST_DEV_BASE:#010x}, dumps to {path}");
+        let dev = std::sync::Arc::new(TestDevice::new(path));
+        place(bus, ctx.devices, dev.clone());
+        Ok(vec![(None, dev)])
+    }
+}
+
+/// Map a test device in GIO expansion slot 0, which is empty on a stock Indy
+/// and otherwise answers with a GIO timeout, and register it for snapshots.
+/// The key is optional because snapshots from before it existed lack it.
+pub fn place(bus: &crate::ip22_bus::Ip22Bus, devices: &mut crate::devices::Devices, dev: std::sync::Arc<TestDevice>) {
+    bus.map_gio(TEST_DEV_BASE, TEST_DEV_SIZE, dev.clone(), "test device");
+    devices.add_optional("testdev", crate::devices::Phase::Io, dev);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

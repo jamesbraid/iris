@@ -36,6 +36,11 @@ pub struct Placement {
     pub opts: toml::Table,
 }
 
+/// The options of a device type that takes none: any key is an error.
+#[derive(Default, serde::Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoOptions {}
+
 /// What a device type's constructor may reach.
 pub struct Ctx<'a> {
     pub devices: &'a mut Devices,

@@ -238,6 +238,41 @@ impl Resettable for VirtioMmio {
     }
 }
 
+/// virtio-serial on a GIO expansion slot of the Indy or Indigo2: the 64 KB
+/// window at the slot's base, on the slot's interrupt line, mastering the
+/// bus through it.
+pub struct VirtioSerialGio;
+
+impl crate::attach::DeviceType for VirtioSerialGio {
+    const NAME: &'static str = "virtio_serial";
+    const FAMILY: crate::topology::Family = crate::topology::Family::Gio;
+    type Owner = crate::ip22_bus::Ip22Bus;
+    type Options = super::console::VirtioSerialOptions;
+
+    fn check(o: &Self::Options, _: &crate::config::MachineConfig) -> Result<(), String> {
+        o.check()
+    }
+
+    fn new(
+        o: Self::Options,
+        ctx: &mut crate::attach::Ctx,
+        bus: &Arc<crate::ip22_bus::Ip22Bus>,
+        at: &crate::location::Location,
+    ) -> Result<crate::attach::Handles, String> {
+        let slot = bus.gio_slot(at)?;
+        let base = crate::dev::ioc::GIO_SLOT_BASES[slot as usize];
+        eprintln!("iris: virtio-serial at {base:#010x}");
+        let dev = Arc::new(VirtioMmio::new(
+            super::console::from_ports(&o.ports),
+            bus.gio_irq(slot),
+            Arc::new(super::BusMemory(bus.phys.clone())),
+        ));
+        bus.map_gio(base, WINDOW as u32, dev.clone(), "virtio-serial");
+        ctx.devices.add("virtio", crate::devices::Phase::Io, dev);
+        Ok(vec![])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

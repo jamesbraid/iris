@@ -2700,6 +2700,47 @@ impl MachineConfig {
             };
             out.push(crate::attach::Placement { device: device.into(), at: ctl.join(crate::location::Hop::t(id)), opts });
         }
+        out.extend(self.card_placements()?);
+        Ok(out)
+    }
+
+    /// The cards the older tables describe, as placements: `[ultra64]`,
+    /// `test_device` and `[virtio_serial]` in a GIO slot.
+    fn card_placements(&self) -> Result<Vec<crate::attach::Placement>, String> {
+        use crate::location::{Hop, Location};
+        let mut out = Vec::new();
+        let mut put = |device: &str, at: Location, opts: toml::Table| {
+            out.push(crate::attach::Placement { device: device.into(), at, opts });
+        };
+        let gio = |n| Location::root().join(Hop::gio(n));
+        let ip22 = self.machine.profile.board().is_some();
+        if self.ultra64.enabled && ip22 {
+            put("ultra64", gio(0), toml::Table::new());
+        }
+        if self.test_device && ip22 {
+            let mut opts = toml::Table::new();
+            if let Some(d) = &self.test_device_dump {
+                opts.insert("dump".into(), d.clone().into());
+            }
+            put("test_device", gio(0), opts);
+        }
+        if self.virtio_serial.enabled {
+            let mut opts = toml::Table::new();
+            if !self.virtio_serial.ports.is_empty() {
+                let ports = toml::Value::try_from(&self.virtio_serial.ports).map_err(|e| e.to_string())?;
+                opts.insert("port".into(), ports);
+            }
+            let at = match self.machine.profile {
+                _ if ip22 => Some(gio(match self.virtio_serial.slot {
+                    VirtioGioSlot::Exp0 => 0,
+                    VirtioGioSlot::Exp1 => 1,
+                })),
+                _ => None,
+            };
+            if let Some(at) = at {
+                put("virtio_serial", at, opts);
+            }
+        }
         Ok(out)
     }
 

@@ -24,6 +24,7 @@ use crate::location::{Hop, Location};
 pub enum Family {
     Scsi,
     Pci,
+    Gio,
 }
 
 impl Family {
@@ -32,6 +33,7 @@ impl Family {
         match self {
             Family::Scsi => "SCSI device",
             Family::Pci => "PCI card",
+            Family::Gio => "GIO card",
         }
     }
 
@@ -40,6 +42,7 @@ impl Family {
         match self {
             Family::Scsi => "SCSI target",
             Family::Pci => "PCI card position",
+            Family::Gio => "GIO slot",
         }
     }
 }

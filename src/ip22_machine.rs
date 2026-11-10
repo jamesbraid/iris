@@ -37,7 +37,7 @@ use crate::disks::Disks;
 use crate::attach::{attach_devices, Ctx};
 use crate::location::{Hop, Location};
 use crate::scsi::ScsiPort;
-use crate::topology::{Row, Topology};
+use crate::topology::{Family, Row, Topology};
 use crate::guest_net::GuestNet;
 use crate::workstation::{SystemController, Workstation};
 
@@ -145,38 +145,10 @@ pub(crate) struct LiveCheckpoint {
     state: toml::Value,
 }
 
-/// The test device and the ultra64 dev board both decode GIO expansion slot 0,
-/// so only one of them can exist. Panics rather than exiting: `Ip22Machine::new`
-/// already panics on bad input, and a host that embeds IRIS catches that
-/// (`iris-gui`'s worker wraps construction in `catch_unwind`) — killing the
-/// application over a configuration mistake is not a choice a library gets to
-/// make for its caller.
-fn check_testdev_slot_free(ultra64_present: bool) {
-    if ultra64_present {
-        panic!("--test-device and the ultra64 dev board both claim GIO slot 0");
-    }
-}
-
-/// virtio-serial's GIO slot must not be one another device decodes: the
-/// Ultra64 board and `--test-device` take slot 0, the second Newport head
-/// slot 1. Panics for the same reason `check_testdev_slot_free` does.
-fn check_virtio_slot_free(slot: crate::dev::ioc::GioSlot, ultra64: bool, testdev: bool, head1: bool) {
-    use crate::dev::ioc::GioSlot;
-    match slot {
-        GioSlot::Exp0 if ultra64 || testdev => {
-            panic!("[virtio_serial] slot = \"exp0\" is taken by the ultra64 board or --test-device; use \"exp1\"")
-        }
-        GioSlot::Exp1 if head1 => {
-            panic!("[virtio_serial] slot = \"exp1\" is taken by the second graphics head; use \"exp0\"")
-        }
-        _ => {}
-    }
-}
-
 impl Ip22Machine {
     /// The places an Indy or Indigo2 has: the HPC3 with its one or two
-    /// WD33C93A SCSI controllers, each with targets 1 to 7, and the graphics
-    /// slot. Touches no hardware.
+    /// WD33C93A SCSI controllers, each with targets 1 to 7, the graphics
+    /// slot and the two GIO expansion slots. Touches no hardware.
     pub(crate) fn fill(cfg: &MachineConfig, t: &Topology) {
         let at = |hops: &[Hop]| hops.iter().fold(Location::root(), |l, h| l.join(*h));
         let add = |l: Location, row: Row| t.add(l, row).expect("rows are added once");
@@ -188,6 +160,14 @@ impl Ip22Machine {
             t.scsi(&ctl, 1..=7, true);
         }
         add(at(&[Hop::gfx()]), Row::fixed("graphics").onboard(cfg.graphics_board().as_str()));
+        add(at(&[Hop::gio(0)]), Row::offering("GIO slot 0", Family::Gio));
+        // The second Newport head, when it is built, decodes slot 1.
+        let head1 = !cfg.headless && cfg.graphics.heads >= 2;
+        add(at(&[Hop::gio(1)]), if head1 {
+            Row::fixed("GIO slot 1").onboard("graphics (head 2)")
+        } else {
+            Row::offering("GIO slot 1", Family::Gio)
+        });
     }
 
     /// Bind the controllers the HPC3 built to their rows. A DaynaPort is built
@@ -231,7 +211,11 @@ impl Ip22Machine {
         testdev_override: Option<Arc<crate::dev::testdev::TestDevice>>,
     ) -> Self {
         // The rig takes any part: `MachineConfig::cpu_part` looks at this.
-        cfg.test_device |= testdev_override.is_some();
+        // A test device the caller built takes gio0 in place of one built
+        // from the config.
+        if testdev_override.is_some() {
+            cfg.test_device = false;
+        }
         // Capture config flags that are needed after the local `cfg` binding
         // is shadowed later in this function.
         let ci_enabled = cfg.ci;
@@ -378,20 +362,9 @@ impl Ip22Machine {
             None => { hpc3.rtc().backdoor_set_mac_if_blank(cfg.network().mac); }
         }
 
-        // Every disk, CD-ROM and DaynaPort, on the controllers' rows; a
-        // target that will not attach ends the run (see `attach_failed`).
-        // Placed here, while the MachineConfig `cfg` is still in scope (it is
-        // shadowed by the CPU config below).
         let topology = Arc::new(Topology::fill_for(&cfg));
         Self::bind_scsi(&topology, &hpc3);
         let disks = Disks::new(topology.clone()).with_ci(cfg.ci);
-        let mut placed = Devices::new();
-        if let Err(e) = cfg.placements(&topology)
-            .and_then(|p| attach_devices(&p, &cfg, Some(&mut Ctx { devices: &mut placed, disks: &disks }), &topology))
-        {
-            eprintln!("iris: fatal: {e}");
-            std::process::exit(1);
-        }
         let nvram_provenance = cfg.nvram.clone();
 
         // REX3 Graphics — Newport only; skipped in headless mode or when non-Newport board selected.
@@ -458,19 +431,6 @@ impl Ip22Machine {
             _ => None,
         };
 
-        // N64 development board (Ultra64) — GIO slot 0 at 0x1F400000
-        let ultra64: Option<Arc<crate::dev::ultra64::Ultra64>> = if cfg.ultra64.enabled {
-            match crate::dev::ultra64::Ultra64::new(ioc.irq_line(crate::dev::ioc::IocInterrupt::GioExp0)) {
-                Ok(dev) => Some(Arc::new(dev)),
-                Err(e)  => {
-                    eprintln!("ultra64: failed to initialize ({e}); running without N64 dev board");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         // VINO (Video-In, No Out) — GIO64 at 0x1F080000
         let vino = crate::dev::vino::Vino::new();
         vino.set_irq(ioc.irq_line(crate::dev::ioc::IocInterrupt::VideoVsync));
@@ -479,69 +439,40 @@ impl Ip22Machine {
         // `cfg` is shadowed by MipsCpuConfig further down; grab this first.
         let cheritest_hook = cfg.cheritest_dump_hook;
 
-        // Bare-metal test device (--test-device): default off, and refused
-        // alongside the ultra64 dev board, which claims the same GIO slot.
-        let testdev = if let Some(dev) = testdev_override {
-            check_testdev_slot_free(
-                ultra64.is_some(),
-            );
-            Some(dev)
-        } else if cfg.test_device {
-            check_testdev_slot_free(
-                ultra64.is_some(),
-            );
-            let path = cfg.test_device_dump.clone()
-                .unwrap_or_else(|| crate::dev::testdev::DEFAULT_DUMP_PATH.to_string());
-            eprintln!("iris: test device enabled at {:#010x}, dumps to {}",
-                      crate::dev::testdev::TEST_DEV_BASE, path);
-            Some(Arc::new(crate::dev::testdev::TestDevice::new(path)))
-        } else {
-            None
-        };
-
         let phys = Physical::new(banks.into());
-
-        // virtio-serial (`[virtio_serial]`): GIO expansion slot 0 or 1, on the
-        // line the IOC gives that slot (the Indy's two direct pins, or the
-        // Indigo2's EXT_IO fan-out). It masters the bus through `phys`.
-        let virtio = if cfg.virtio_serial.enabled {
-            use crate::config::VirtioGioSlot;
-            use crate::dev::ioc::{GioSlot, IocInterrupt, GIO_SLOT_BASES, GIO_SLOT_MAP, profile_idx};
-            let slot = match cfg.virtio_serial.slot {
-                VirtioGioSlot::Exp0 => GioSlot::Exp0,
-                VirtioGioSlot::Exp1 => GioSlot::Exp1,
-            };
-            check_virtio_slot_free(slot, ultra64.is_some(), testdev.is_some(), rex3_head1.is_some());
-            let source = match (guinness, slot) {
-                (true, GioSlot::Exp0) => IocInterrupt::GioExp0,
-                (true, _) => IocInterrupt::GioExp1,
-                (false, s) => GIO_SLOT_MAP[profile_idx(false)][s as usize].retrace,
-            };
-            let base = GIO_SLOT_BASES[slot as usize];
-            eprintln!("iris: virtio-serial at {base:#010x}");
-            let dev = crate::dev::virtio::mmio::VirtioMmio::new(
-                crate::dev::virtio::console::from_config(&cfg.virtio_serial),
-                ioc.irq_line(source),
-                Arc::new(crate::dev::virtio::BusMemory(phys.clone())),
-            );
-            Some((Arc::new(dev), base))
-        } else {
-            None
-        };
 
         let board = Arc::new(Ip22Bus::new(phys.clone(), Ip22Devices {
             rex3: rex3.clone(),
             rex3_head1: rex3_head1.clone(),
             gr2: gr2.clone(),
             mgras: mgras.clone(),
-            ultra64,
-            testdev,
-            virtio,
             vino,
             mc: mc.clone(),
             hpc3: hpc3.clone(),
             prom: prom_port,
-        }, board_spec.ram));
+        }, board_spec.ram, guinness));
+
+        // Every disk, CD-ROM, DaynaPort and GIO card, on its row; a target
+        // that will not attach ends the run (see `attach_failed`). Placed
+        // here, while the MachineConfig `cfg` is still in scope (it is
+        // shadowed by the CPU config below).
+        topology.bind(&Location::root(), board.clone()).expect("the root takes its handle once");
+        let mut placed = Devices::new();
+        let gio0 = Location::root().join(Hop::gio(0));
+        let placing = (|| {
+            if let Some(dev) = testdev_override {
+                // A test device the caller built occupies gio0 like any other.
+                topology.claim(&gio0, "test_device", Family::Gio, false, "")?;
+                crate::dev::testdev::place(&board, &mut placed, dev.clone());
+                topology.bind(&gio0, dev)?;
+            }
+            attach_devices(&cfg.placements(&topology)?, &cfg, Some(&mut Ctx { devices: &mut placed, disks: &disks }), &topology)
+        })();
+        if let Err(e) = placing {
+            eprintln!("iris: fatal: {e}");
+            std::process::exit(1);
+        }
+        let testdev = topology.handle::<crate::dev::testdev::TestDevice>(&gio0);
 
         // Connect Physical to MC (for VDMA)
         mc.set_phys(phys.clone());
@@ -698,9 +629,9 @@ impl Ip22Machine {
         // Must happen before hpc3.scsi().start() (called later, from
         // Ip22Machine::start) actually spawns the worker thread that reads it.
         status.set_cpu_cycles(cpu.cycles_ptr());
-        if let Some(td) = &board.testdev { td.attach_core(cpu.core_ptr()); }
+        if let Some(td) = &testdev { td.attach_core(cpu.core_ptr()); }
         if cheritest_hook {
-            if board.testdev.is_none() {
+            if testdev.is_none() {
                 eprintln!("iris: --cheritest-dump-hook needs --test-device; ignoring");
             } else {
                 cpu.set_cheritest_dump_hook(true);
@@ -766,9 +697,7 @@ impl Ip22Machine {
         if let Some(rex3) = &board.rex3_head1 { devices.add_optional("rex3_head1", Phase::Display, rex3.clone()); }
         if let Some(gr2) = &board.gr2 { devices.add_optional("gr2", Phase::Display, gr2.clone()); }
         if let Some(mgras) = &board.mgras { devices.add_optional("mgras", Phase::Display, mgras.clone()); }
-        if let Some(td) = &board.testdev { devices.add_optional("testdev", Phase::Io, td.clone()); }
-        if let Some(u64) = &board.ultra64 { devices.add("ultra64", Phase::Io, u64.clone()); }
-        if let Some(v) = &board.virtio { devices.add("virtio", Phase::Io, v.clone()); }
+        devices.append(placed);
 
         // Setup Monitor
         let monitor = Monitor::new(monitor_port);
@@ -2321,5 +2250,63 @@ mod placement_tests {
             let out = String::from_utf8(buf.lock().clone()).unwrap();
             assert_eq!(out.lines().collect::<Vec<_>>(), t.lines());
         });
+    }
+
+    fn probe(cfg: &MachineConfig, all: &[(&str, &str, &str)]) -> Result<(), String> {
+        let t = Topology::fill_for(cfg);
+        let all: Vec<crate::attach::Placement> = all
+            .iter()
+            .map(|(d, at, o)| crate::attach::Placement { device: (*d).into(), at: loc(at), opts: toml::from_str(o).unwrap() })
+            .collect();
+        crate::attach::attach_devices(&all, cfg, None, &t)
+    }
+
+    /// The two cards that decode gio0 exclude each other by the claim.
+    #[test]
+    fn ultra64_and_test_device_at_gio0_are_a_claim_error() {
+        let cfg = MachineConfig::default();
+        assert_eq!(probe(&cfg, &[("ultra64", "gio0", ""), ("test_device", "gio0", "")]).unwrap_err(), "error: gio0: taken by ultra64");
+        assert_eq!(probe(&cfg, &[("ultra64", "gio0", ""), ("virtio_serial", "gio0", "")]).unwrap_err(), "error: gio0: taken by ultra64");
+        probe(&cfg, &[("ultra64", "gio0", ""), ("virtio_serial", "gio1", "")]).unwrap();
+    }
+
+    /// With a second head built, gio1 is its slot; headless builds none.
+    #[test]
+    fn virtio_at_gio1_with_two_heads_is_a_claim_error_and_headless_is_not() {
+        let mut cfg = MachineConfig::default();
+        cfg.graphics.heads = 2;
+        let e = probe(&cfg, &[("virtio_serial", "gio1", "")]).unwrap_err();
+        assert!(e.starts_with("error: gio1: not a place for add-in devices (onboard graphics (head 2))"), "{e}");
+        cfg.headless = true;
+        probe(&cfg, &[("virtio_serial", "gio1", "")]).unwrap();
+    }
+
+    /// The port rules of virtio-serial hold for a placed card.
+    #[test]
+    fn virtio_port_rules_are_kept() {
+        let cfg = MachineConfig::default();
+        let try_ports = |text: &str| probe(&cfg, &[("virtio_serial", "gio1", text)]);
+        let many = |n: usize| (0..n).map(|i| format!("[[port]]\nname = \"p{i}\"\n")).collect::<String>();
+        try_ports(&many(31)).unwrap();
+        assert!(try_ports(&many(32)).unwrap_err().contains("at most 31"));
+        assert!(try_ports("[[port]]\ntcp_port = 1\nsocket = \"/x\"\n").unwrap_err().contains("exclusive"));
+        assert!(try_ports("[[port]]\nname = \"\"\n").unwrap_err().contains("1 to 200 bytes"));
+        assert!(try_ports("[[port]]\nname = \"a\"\n[[port]]\nname = \"a\"\n").unwrap_err().contains("used twice"));
+    }
+
+    /// The older tables land in the GIO slots.
+    #[test]
+    fn ultra64_test_device_and_virtio_tables_become_placements() {
+        let mut cfg = MachineConfig::default();
+        cfg.scsi.clear();
+        cfg.ultra64.enabled = true;
+        cfg.virtio_serial.enabled = true;
+        let got: Vec<String> = cfg.placements(&Topology::fill_for(&cfg)).unwrap().iter().map(|p| format!("{} {}", p.device, p.at)).collect();
+        assert_eq!(got, ["ultra64 gio0", "virtio_serial gio1"]);
+        cfg.ultra64.enabled = false;
+        cfg.test_device = true;
+        cfg.virtio_serial.enabled = false;
+        let got: Vec<String> = cfg.placements(&Topology::fill_for(&cfg)).unwrap().iter().map(|p| format!("{} {}", p.device, p.at)).collect();
+        assert_eq!(got, ["test_device gio0"]);
     }
 }

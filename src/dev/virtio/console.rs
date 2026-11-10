@@ -372,17 +372,55 @@ impl VirtioDevice for Console {
 /// The default port when `[virtio_serial]` lists none.
 pub const DEFAULT_TCP_PORT: u16 = 8890;
 
-/// Build the console device a `[virtio_serial]` section describes, with its
+/// What a `virtio_serial` entry takes: its ports, in order. None is one
+/// console port on TCP 127.0.0.1:8890.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtioSerialOptions {
+    #[serde(default, rename = "port", skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<crate::config::VirtioSerialPort>,
+}
+
+impl VirtioSerialOptions {
+    /// Two queues per port and the control pair, in a 64-bit notify mask; a
+    /// port serves one host end; names are 1 to 200 bytes and unique.
+    pub fn check(&self) -> Result<(), String> {
+        let ports = &self.ports;
+        if ports.len() > 31 {
+            return Err(format!("virtio_serial has {} ports (at most 31)", ports.len()));
+        }
+        for (i, p) in ports.iter().enumerate() {
+            if p.tcp_port.is_some() && p.socket.is_some() {
+                return Err(format!("virtio_serial port {i}: tcp_port and socket are exclusive"));
+            }
+            if p.name.as_deref().is_some_and(|n| n.is_empty() || n.len() > 200) {
+                return Err(format!("virtio_serial port {i}: name must be 1 to 200 bytes"));
+            }
+            if ports[..i].iter().any(|q| q.name.is_some() && q.name == p.name) {
+                return Err(format!("virtio_serial port {i}: name {:?} is used twice", p.name.as_deref().unwrap_or("")));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Build the console device a `[virtio_serial]` section describes: the
+/// Octane builds its own until it places the card.
+pub fn from_config(cfg: &crate::config::VirtioSerialConfig) -> super::VirtioCore {
+    from_ports(&cfg.ports)
+}
+
+/// Build the console device a `virtio_serial` entry describes, with its
 /// host ends bound and its input pump running. A port whose socket cannot be
 /// made is left wired to nothing, with the reason on stderr.
-pub fn from_config(cfg: &crate::config::VirtioSerialConfig) -> super::VirtioCore {
+pub fn from_ports(ports: &[crate::config::VirtioSerialPort]) -> super::VirtioCore {
     use super::backend::{tcp_port, unix_port, NullPort};
     let default_port = [crate::config::VirtioSerialPort {
         console: true,
         tcp_port: Some(DEFAULT_TCP_PORT),
         ..Default::default()
     }];
-    let specs: &[crate::config::VirtioSerialPort] = if cfg.ports.is_empty() { &default_port } else { &cfg.ports };
+    let specs: &[crate::config::VirtioSerialPort] = if ports.is_empty() { &default_port } else { ports };
     let ports = specs
         .iter()
         .enumerate()
