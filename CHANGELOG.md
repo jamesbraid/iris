@@ -202,7 +202,7 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ### SCSI: INQUIRY strings per target
 
-- A `[scsi.N]` table takes `vendor`, `product`, `revision` and `serial` (at most 8, 16, 4 and 16 printable ASCII characters), so one drive can tell software it is something other than the machine's `IRIS EMUL DISK`. A key left out keeps the machine's own answer. A serial shows up in INQUIRY data and the unit serial number page (VPD 0x80); without one, INQUIRY is byte for byte what it was. A DaynaPort rejects all four keys. iris-gui has a text box for each.
+- A `[scsi.N]` table takes `vendor`, `product`, `revision` and `serial` (at most 8, 16, 4 and 16 printable ASCII characters), so one drive can tell software it is something other than the machine's `IRIS EMUL DISK`. A key left out keeps the machine's own answer. A serial shows up in INQUIRY data (the first 8 characters at byte 36, NUL-filled through byte 55) and the unit serial number page (VPD 0x80); without one, INQUIRY is byte for byte what it was. A DaynaPort rejects all four keys. iris-gui has a text box for each.
 
 ### Onyx2
 
