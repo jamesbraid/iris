@@ -49,7 +49,11 @@
 //! gates a forced packet is unknown; the model does not gate it.
 //!
 //! Direct64 DMA address bit 55 is the swap attribute and bit 19 of a Device
-//! register the 32-bit direct window's (established bit names). A swap is
+//! register the 32-bit direct window's (established bit names). The
+//! window's sense is the one the public drivers and the Bridge and direct64
+//! paths here use: set, a card's bytes keep their addresses; clear, its
+//! 32-bit values are kept and a byte moves to the address with the low two
+//! bits flipped (inferred for the PIC from those). A swap is
 //! taken to exchange byte positions within each bus data phase, a 32-bit
 //! word or, for a slot that drives REQ64#, a 64-bit doubleword (inferred
 //! from the sibling XBridge). Each whole aligned unit reaches memory as one
@@ -125,7 +129,9 @@ const REQUEST_TIMEOUT_RESET: u64 = 0xfffff;
 const DIRECT_MAP_SUPPORTED: u64 = 0x1ffff | (0xf << 20);
 const DEVICE_MASK: u64 = 0x1858_3fff;
 const DEVICE_RESET: [u64; DEVICES as usize] = [0x1800_1000, 0x1800_1002, 0x1800_1004, 0x1800_1005];
-const DEVICE_SWAP: u64 = 1 << 19;
+/// Device register bit 19: set, the 32-bit direct window keeps byte
+/// addresses; clear, it keeps 32-bit values.
+const DEVICE_ADDRESS_ORDER: u64 = 1 << 19;
 const DEVICE_STREAM: u64 = 1 << 13;
 const DEVICE_WIDE: u64 = 1 << 22;
 const DEVICE_MEMORY: u64 = 1 << 12;
@@ -1126,9 +1132,9 @@ impl Head {
         };
         let widget = ((direct >> 20) & 0xf) as u8;
         let target = ((direct & 0x1ffff) << 31) | (at & 0x7fff_ffff);
-        if attributes & DEVICE_SWAP != 0 {
-            // A swapped slot puts each byte at its address with the low two
-            // bits flipped.
+        if attributes & DEVICE_ADDRESS_ORDER == 0 {
+            // With the bit clear the slot keeps each 32-bit value, so a byte
+            // lands at its address with the low two bits flipped.
             return self.send_flipped(source, widget, target, chunk, write, 3, |_, _| true);
         }
         let mut done = 0;
