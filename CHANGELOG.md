@@ -13,6 +13,13 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### VPro: 24-bit X images after an index window
+
+- 4Dwm's minimised Console icon on the IRIX 6.5.30 desktop showed lime
+  instead of its purple and grey. An X image put by DMA right after drawing
+  in a colour-index window was packed as that window's 2-byte field; it now
+  keeps the 4-byte field its header names.
+
 ### Indy and Indigo2 chime on the first boot
 
 - A new or blank `nvram.bin` (Indy) or `nveeprom.bin` (Indigo2) made the first
