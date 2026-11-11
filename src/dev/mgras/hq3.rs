@@ -140,11 +140,9 @@ pub struct Eram {
 /// into another slot).
 const GL_WORDS: usize = std::mem::size_of::<super::gl::Gl>().div_ceil(4);
 const PARSER_WORDS: usize = 6 + CFIFO_KEEP;
-/// The host DMA engine's and raster interface's registers are context
-/// state too (the HAG and REIF context RAMs): the kernel installs a page
-/// table for one process's transfer, and another process's switch-in must
-/// not leave it in place when the first comes back (snoop's pixel
-/// transfers ran through a parked table and scribbled on low memory).
+/// The host DMA engine's transfer registers and the raster interface's
+/// registers are kept with the context; the page-table bases are not (see
+/// `load_context`).
 const IF_WORDS: usize = 0x80 + 0x10;
 const SLOT_RECORD_WORDS: usize = GL_WORDS + PARSER_WORDS + IF_WORDS;
 /// IRIX 6.5.22's slot size (MgrasGlContextAlloc; slots traced 0x17C7 words
@@ -737,7 +735,13 @@ impl Hq3Engine {
         }
         self.cfifo[0] = Cfifo::load(&rec[GL_WORDS..]);
         let ifr = &rec[GL_WORDS + PARSER_WORDS..];
-        self.dma_regs.copy_from_slice(&ifr[..0x80]);
+        // Only the transfer registers below the page-table bases come back.
+        // The pool and display-list page tables (0x820 up) are one set for
+        // the board: the IRIX 6.5.13f and 6.5.30m kernels' context save
+        // sends working registers, not table bases, and the load the kernel
+        // starts writes none of them. So a table a GL client installed is
+        // still in place when the X server's context returns.
+        self.dma_regs[..dma::TABLE_BASE].copy_from_slice(&ifr[..dma::TABLE_BASE]);
         self.raster_if_regs.copy_from_slice(&ifr[0x80..IF_WORDS]);
         self.gl.te_dirty = 1;
     }

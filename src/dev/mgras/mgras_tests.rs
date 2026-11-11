@@ -673,6 +673,25 @@ fn gl_setup_window(m: &Mgras, w: u32, h: u32, clear: [f32; 3]) {
     fifo_token(m, 0xBA, &[f(clear[0]), f(clear[1]), f(clear[2]), f(1.0)]);
 }
 
+/// The host DMA page tables are one set for the board, not part of a
+/// context: a pool 0 table a GL client installs is still there when the
+/// context that had another one switches back in. This is why the X server's
+/// root repaint after Flame exits copies through Flame's freed table.
+#[test]
+fn dma_page_tables_survive_a_context_switch() {
+    const POOL0_TABLE: u32 = 0x21;
+    let m = live_board();
+    x_server(&m);
+    switch_to_gl_context(&m, SLOT_A, 0, 0, 100, 100);
+    fifo_dma(&m, POOL0_TABLE, 0x3cb8_800c);
+    switch_to_gl_context(&m, SLOT_B, 200, 0, 100, 100);
+    fifo_dma(&m, POOL0_TABLE, 0x49a4_c00c);
+    switch_to_gl_context(&m, SLOT_A, 0, 0, 100, 100);
+    assert_eq!(read(&m, 32, 0x50300 + 4 * POOL0_TABLE) as u32, 0x49a4_c00c,
+        "the table B installed stays after A switches back in");
+    m.stop_engines();
+}
+
 /// Two GL contexts, each with its own window and clear colour, switched in
 /// and out: each clear lands in its own window in its own colour (window
 /// and GL state belong to the context, not the board), and the X server's
