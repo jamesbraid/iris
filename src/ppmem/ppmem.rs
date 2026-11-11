@@ -642,9 +642,9 @@ impl BusDevice for Arc<PpMemory> {
 
 /// Store a word a CPU reads while it runs: its inline region bitmap and, on a
 /// cached view, the key. The reader is that CPU's own thread, which takes no
-/// lock; the writer can be another node's processor re-laying this window. An
-/// atomic store at `Relaxed` is the same instruction as a plain one on the
-/// hosts this runs on, and keeps the race defined.
+/// lock; the writer can be another node's processor re-laying this window. A
+/// `Release` store is the same instruction as a plain one on x86-64, and
+/// keeps the race defined and a key ordered after the bitmap stored before it.
 ///
 /// `p` must be a live, 8-byte-aligned `u64` that is only otherwise accessed
 /// atomically (every consumer declares its word `AtomicU64`).
@@ -652,7 +652,7 @@ impl BusDevice for Arc<PpMemory> {
 fn publish_word(p: *mut u64, v: u64) {
     // SAFETY: the callers' sinks are `AtomicU64::as_ptr` of a live field, or
     // the space's own boxed word.
-    unsafe { AtomicU64::from_ptr(p) }.store(v, Ordering::Relaxed);
+    unsafe { AtomicU64::from_ptr(p) }.store(v, Ordering::Release);
 }
 
 /// [`publish_word`]'s load.
@@ -800,10 +800,15 @@ struct OwnBitmap(Box<u64>);
 //     the CPUs do, bar a stopped world.
 //   * The guard is never on a hit path. A load, store or fetch goes through
 //     the CPU's inline `MipsCore::ppmem_bitmap` word (an `AtomicU64`, read
-//     `Relaxed`), its decode-cache key (the same) and its view's base pointer, neither of which goes through
-//     here. The words a remap publishes to a running CPU (bitmap and key) are
-//     atomics, stored `Relaxed` by `publish_word`: the CPU needs no ordering between the
-//     bitmap and the window it covers, because the window is never unmapped.
+//     `Relaxed`), its decode-cache key (read `Acquire`) and its view's base
+//     pointer, none of which goes through here. The words a remap publishes
+//     to a running CPU (bitmap and key) are atomics stored `Release` by
+//     `publish_word`. The CPU needs no ordering between the bitmap and the
+//     window it covers, because the window is never unmapped. It does need
+//     the key to be no newer than the bitmap it reads after it, or a decode
+//     entry filled from an old bitmap would carry a new key and outlive the
+//     change: the key is stored `Release` after the bitmap and read
+//     `Acquire` before it.
 //   * Device threads (MC-DMA, seeq, VINO) reach RAM through `BusDevice` on the
 //     individual `PpMemory` banks. They read the bitmap through
 //     `Physical::bitmap`, an atomic load.
@@ -899,7 +904,7 @@ impl PpMemSpace {
     ///
     /// # Safety
     /// `ptr` must stay valid for the space's life, and must be an
-    /// `AtomicU64` the view's CPU thread reads atomically (`Relaxed`).
+    /// `AtomicU64` the view's CPU thread reads atomically (`Acquire`).
     pub unsafe fn add_key_sink(&self, v: usize, ptr: *mut u64) {
         if ptr.is_null() {
             return;

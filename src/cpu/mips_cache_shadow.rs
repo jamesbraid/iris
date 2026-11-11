@@ -869,7 +869,10 @@ impl<
             let r = self.downstream.read32(a);
             if r.is_ok() { Ok(r.data) } else { Err(r.status) }
         };
-        let key = self.tc_key.load(Ordering::Relaxed);
+        // Acquire, and read before the bitmap `host` tests: a key published
+        // after a bitmap implies that bitmap, so an entry filled below never
+        // carries a newer key than the bitmap it was filled from.
+        let key = self.tc_key.load(Ordering::Acquire);
         // A page's words straight from the window, if it maps the page.
         let host = |page: u64| match self.ram(page) {
             Some(window) if !window.is_null() => unsafe { window.add(page as usize) as *const u32 },
