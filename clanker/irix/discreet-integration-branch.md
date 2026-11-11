@@ -20,6 +20,13 @@ change a part and rebuild.
    desktop repaint after Flame exits copies through Flame's freed table
    and comes out black, as the guest gets on hardware.
 
+5. `hostinput: learn a glyph's hotspot from the shape change, not from the
+   last glyph`: the monitor's `ptr x y` put the cursor glyph's tip where the
+   pointer should be. Pointer shapes differ (a crosshair's hotspot is its
+   centre, an arrow's its tip) and a shape's hotspot was guessed from the
+   previous shape's, so clicks on small targets missed by several pixels.
+   `ptr hot <hx> <hy>` states a hotspot by hand.
+
 The Octane clock fix (techomancer/iris#501) is already in upstream main
 (`374416e2`), so it is not carried.
 
@@ -31,6 +38,7 @@ git checkout -B discreet-integration up/main
 git cherry-pick 98ccc122 a288676d a2fc2fde      # discreet-scsi-identity
 git cherry-pick <the isp12160 test fix>
 git cherry-pick <the mgras page-table change>
+git cherry-pick <the hostinput hotspot change>
 ```
 
 Cherry-picks keep each part reviewable alone and drop out by themselves once

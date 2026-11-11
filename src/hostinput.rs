@@ -8,12 +8,18 @@
 //! uses it), and correct until the pointer sits on the target. The hardware
 //! knows the glyph's top-left, not its hotspot. A hotspot is known exactly
 //! when the pointer is pinned in the top-left corner (X keeps the pointer on
-//! screen, so it is at 0,0), which the first move does once, or when a new
-//! shape appears after a move small enough that X does not accelerate it
-//! (the pointer then moved exactly that far). Until then a new shape's
-//! hotspot is guessed as its tip plus the offset the known shapes showed.
-//! Only the top and left edges pin reliably: the size X uses can differ
-//! from the board's visible size by a few pixels.
+//! screen, so it is at 0,0), which the first move does once, or when the
+//! glyph changes shape across a move small enough that X does not accelerate
+//! it (the pointer then moved exactly that far, so whichever of the two
+//! shapes is known gives the other). A shape's hotspot belongs to the shape,
+//! not to the board: an arrow's is its tip, a crosshair's its centre. So a
+//! move that ends on a shape not seen before walks back toward where it
+//! began in small steps until the shape changes, which teaches the new
+//! shape's hotspot, and then steers to the target again. Only when no shape
+//! change turns up is the hotspot a guess (the glyph's tip); the monitor
+//! says so, and `ptr hot` states it. Only the top and left edges pin
+//! reliably: the size X uses can differ from the board's visible size by a
+//! few pixels.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -44,6 +50,10 @@ const STALL_LIMIT: Duration = Duration::from_millis(3000);
 /// Moves this small (mickeys) are sent exactly: under X's acceleration
 /// threshold, they move the pointer as far as they say.
 const EXACT_STEP: i32 = 3;
+/// Exact steps a move spends looking for a shape change to learn the
+/// target glyph's hotspot from, and the time it gets for them.
+const PROBE_STEPS: u32 = 120;
+const PROBE_TIME: Duration = Duration::from_secs(4);
 
 pub struct HostInput {
     display: Option<Arc<dyn GfxDisplay>>,
@@ -52,8 +62,6 @@ pub struct HostInput {
     buttons: AtomicU8,
     /// Hotspots seen exactly, by glyph shape.
     hotspots: Mutex<HashMap<u64, (i32, i32)>>,
-    /// Hotspot minus tip of the last shape learnt: the guess for a new one.
-    bias: Mutex<(i32, i32)>,
     /// Pixels the pointer moves per mickey on a large move (X's
     /// acceleration), learnt as moves are made.
     gain: Mutex<f32>,
@@ -77,7 +85,6 @@ impl HostInput {
             ps2,
             buttons: AtomicU8::new(0),
             hotspots: Mutex::new(HashMap::new()),
-            bias: Mutex::new((0, 0)),
             gain: Mutex::new(1.0),
             seek: Mutex::new(()),
         }
@@ -125,13 +132,25 @@ impl HostInput {
         }
     }
 
-    /// The hotspot of a glyph: seen exactly, or else guessed.
+    /// The hotspot of a glyph: seen exactly, or else guessed as its tip.
     pub fn hotspot(&self, c: &HwCursor) -> (i32, i32) {
-        self.known_hotspot(c).unwrap_or_else(|| {
-            let (tx, ty) = c.tip();
-            let (bx, by) = *self.bias.lock();
-            (tx + bx, ty + by)
-        })
+        self.known_hotspot(c).unwrap_or_else(|| c.tip())
+    }
+
+    /// Whether the glyph's hotspot was seen, not guessed.
+    pub fn hotspot_known(&self, c: &HwCursor) -> bool {
+        self.known_hotspot(c).is_some()
+    }
+
+    /// State the hotspot of the glyph now showing, for a shape no move could
+    /// learn it from. Returns the glyph it was set for.
+    pub fn set_hotspot(&self, hot: (i32, i32)) -> Result<HwCursor, String> {
+        let c = self.cursor().ok_or("cursor off")?;
+        if !hotspot_plausible(&c, hot) {
+            return Err(format!("hotspot {},{} is outside the {}x{} glyph", hot.0, hot.1, c.size, c.size));
+        }
+        self.hotspots.lock().insert(c.shape_key(), hot);
+        Ok(c)
     }
 
     fn known_hotspot(&self, c: &HwCursor) -> Option<(i32, i32)> {
@@ -143,8 +162,31 @@ impl HostInput {
             return;
         }
         self.hotspots.lock().insert(c.shape_key(), hot);
-        let (tx, ty) = c.tip();
-        *self.bias.lock() = (hot.0 - tx, hot.1 - ty);
+    }
+
+    /// The glyph changed from `c` to `n` across a step of exactly `s` pixels:
+    /// the pointer moved that far, so one shape's hotspot gives the other's.
+    fn learn_across(&self, c: &HwCursor, n: &HwCursor, s: (i32, i32)) {
+        match (self.known_hotspot(c), self.known_hotspot(n)) {
+            (Some((hx, hy)), None) => {
+                let (px, py) = (c.x + hx + s.0, c.y + hy + s.1);
+                self.learn(n, (px - n.x, py - n.y));
+            }
+            (None, Some((hx, hy))) => {
+                let (px, py) = (n.x + hx - s.0, n.y + hy - s.1);
+                self.learn(c, (px - c.x, py - c.y));
+            }
+            _ => {}
+        }
+    }
+
+    /// " (hotspot guessed)" while the glyph showing has no seen hotspot, for
+    /// the monitor to say that a position is only as good as the guess.
+    fn guess_note(&self) -> &'static str {
+        match self.cursor() {
+            Some(c) if !self.hotspot_known(&c) => " (hotspot guessed: ptr hot <x> <y> states it)",
+            _ => "",
+        }
     }
 
     /// Where the pointer is, by the hardware cursor; None while it is off.
@@ -164,7 +206,11 @@ impl HostInput {
             // Once: pin the pointer in the corner to know a hotspot exactly.
             self.calibrate_locked()?;
         }
-        let deadline = Instant::now() + timeout;
+        let mut deadline = Instant::now() + timeout;
+        // Where the move began, to walk back toward when the target glyph's
+        // hotspot is not known.
+        let origin = self.pointer();
+        let (mut probing, mut probes_left) = (false, PROBE_STEPS);
         let (mut tx, mut ty) = (x, y);
         let mut stalls = [0u32; 2];
         let mut last_motion = Instant::now();
@@ -185,13 +231,36 @@ impl HostInput {
             let (tx, ty) = (far_edge[0].map_or(tx, |e| tx.min(e)), far_edge[1].map_or(ty, |e| ty.min(e)));
             let c = self.cursor_settled().ok_or("the hardware cursor is off (no X server yet?)")?;
             let (hx, hy) = self.hotspot(&c);
+            if probing && self.hotspot_known(&c) {
+                probing = false;
+            }
             let (ex, ey) = (tx - (c.x + hx), ty - (c.y + hy));
-            if ex == 0 && ey == 0 {
-                return Ok(MoveResult::Reached);
+            if !probing && ex == 0 && ey == 0 {
+                match origin {
+                    Some(_) if probes_left > 0 && !self.hotspot_known(&c) => {
+                        // On the target, but only by a guessed hotspot.
+                        probing = true;
+                        deadline = deadline.max(Instant::now() + PROBE_TIME);
+                    }
+                    _ => return Ok(MoveResult::Reached),
+                }
             }
             if Instant::now() >= deadline {
                 return Ok(MoveResult::Short(ex, ey));
             }
+            let (ex, ey) = match origin.filter(|_| probing) {
+                Some((ox, oy)) => {
+                    probes_left -= 1;
+                    let (dx, dy) = (ox - (c.x + hx), oy - (c.y + hy));
+                    if probes_left == 0 || (dx == 0 && dy == 0) {
+                        // Back where it began and no shape change: guess.
+                        (probing, probes_left) = (false, 0);
+                        continue;
+                    }
+                    (dx.clamp(-EXACT_STEP, EXACT_STEP), dy.clamp(-EXACT_STEP, EXACT_STEP))
+                }
+                None => (ex, ey),
+            };
             let gain = *self.gain.lock();
             let step = |e: i32| -> i32 {
                 if e.abs() <= EXACT_STEP {
@@ -241,17 +310,14 @@ impl HostInput {
             let (mx, my) = match &now_at {
                 Some(n) if n.mask == c.mask => (n.x - c.x, n.y - c.y),
                 Some(n) => {
-                    // A new shape. After an unaccelerated step from a known
-                    // shape the pointer moved exactly (sx, sy): that gives
-                    // the new hotspot.
-                    if sx.abs() <= EXACT_STEP && sy.abs() <= EXACT_STEP && self.known_hotspot(n).is_none() {
-                        if let Some((ohx, ohy)) = self.known_hotspot(&c) {
-                            // Let X finish the move before reading the glyph.
-                            std::thread::sleep(Duration::from_millis(5));
-                            if let Some(n) = self.cursor().filter(|m| m.mask == n.mask) {
-                                let (px, py) = (c.x + ohx + sx, c.y + ohy + sy);
-                                self.learn(&n, (px - n.x, py - n.y));
-                            }
+                    // A new shape. After an unaccelerated step the pointer
+                    // moved exactly (sx, sy): that gives the hotspot of
+                    // whichever shape was not known.
+                    if sx.abs() <= EXACT_STEP && sy.abs() <= EXACT_STEP {
+                        // Let X finish the move before reading the glyph.
+                        std::thread::sleep(Duration::from_millis(5));
+                        if let Some(n) = self.cursor().filter(|m| m.mask == n.mask) {
+                            self.learn_across(&c, &n, (sx, sy));
                         }
                     }
                     stalls = [0; 2];
@@ -521,7 +587,7 @@ fn num<T: std::str::FromStr>(args: &[&str], i: usize, what: &str) -> Result<T, S
 }
 
 const SCREEN_HELP: &str = "screen info | screen cursor | screen shot <file.png> [x y w h] | screen pix <x> <y> | screen wait [quiet_ms] [timeout_ms]";
-const PTR_HELP: &str = "ptr pos | ptr move <x> <y> | ptr click <x> <y> [left|middle|right] [count] | ptr down|up [button] | ptr drag <x1> <y1> <x2> <y2> [button] | ptr rel <dx> <dy> | ptr calibrate";
+const PTR_HELP: &str = "ptr pos | ptr move <x> <y> | ptr click <x> <y> [left|middle|right] [count] | ptr down|up [button] | ptr drag <x1> <y1> <x2> <y2> [button] | ptr rel <dx> <dy> | ptr calibrate | ptr hot <hx> <hy>";
 const KEY_HELP: &str = "key <name>[+<name>...] [down|up] | key type <text> | key names";
 
 impl crate::traits::Device for HostInput {
@@ -550,8 +616,8 @@ impl crate::traits::Device for HostInput {
                 match self.cursor() {
                     Some(c) => {
                         let (hx, hy) = self.hotspot(&c);
-                        out(&mut w, format!("cursor glyph at {},{} size {} hotspot {hx},{hy} -> pointer {},{}",
-                            c.x, c.y, c.size, c.x + hx, c.y + hy));
+                        out(&mut w, format!("cursor glyph at {},{} size {} hotspot {hx},{hy}{} -> pointer {},{}",
+                            c.x, c.y, c.size, if self.hotspot_known(&c) { "" } else { " (guessed)" }, c.x + hx, c.y + hy));
                     }
                     None => out(&mut w, "cursor off".into()),
                 }
@@ -562,8 +628,8 @@ impl crate::traits::Device for HostInput {
             ("screen", "cursor") => {
                 let c = self.cursor().ok_or("cursor off")?;
                 let (hx, hy) = self.hotspot(&c);
-                out(&mut w, format!("glyph at {},{} size {} shape {:016x} hotspot {hx},{hy} (tip {:?})",
-                    c.x, c.y, c.size, c.shape_key(), c.tip()));
+                out(&mut w, format!("glyph at {},{} size {} shape {:016x} hotspot {hx},{hy} ({}, tip {:?})",
+                    c.x, c.y, c.size, c.shape_key(), if self.hotspot_known(&c) { "seen" } else { "guessed" }, c.tip()));
                 for (y, m) in c.mask.iter().enumerate() {
                     let row: String = (0..c.size).map(|x| match (m >> x & 1 != 0, (x as i32, y as i32) == (hx, hy)) {
                         (_, true) => '@',
@@ -619,7 +685,7 @@ impl crate::traits::Device for HostInput {
                 let (x, y) = (num(args, 1, "x")?, num(args, 2, "y")?);
                 self.move_to_exact(x, y)?;
                 let (px, py) = self.pointer().unwrap_or((x, y));
-                out(&mut w, format!("pointer at {px} {py}"));
+                out(&mut w, format!("pointer at {px} {py}{}", self.guess_note()));
                 Ok(())
             }
             ("ptr", "click") => {
@@ -629,7 +695,7 @@ impl crate::traits::Device for HostInput {
                 self.move_to_exact(x, y)?;
                 self.click(b, n.clamp(1, 3));
                 let (px, py) = self.pointer().unwrap_or((x, y));
-                out(&mut w, format!("clicked at {px} {py}"));
+                out(&mut w, format!("clicked at {px} {py}{}", self.guess_note()));
                 Ok(())
             }
             ("ptr", "down") | ("ptr", "up") => {
@@ -657,6 +723,12 @@ impl crate::traits::Device for HostInput {
                 let (dx, dy) = (num(args, 1, "dx")?, num(args, 2, "dy")?);
                 self.nudge(dx, dy);
                 out(&mut w, format!("sent {dx} {dy}"));
+                Ok(())
+            }
+            ("ptr", "hot") => {
+                let hot = (num(args, 1, "hx")?, num(args, 2, "hy")?);
+                let c = self.set_hotspot(hot)?;
+                out(&mut w, format!("glyph {:016x} hotspot {},{}", c.shape_key(), hot.0, hot.1));
                 Ok(())
             }
             ("ptr", "calibrate") => {
@@ -708,6 +780,171 @@ mod tests {
         other[4] = 1;
         let d = HwCursor { x: 0, y: 0, size: 32, mask: other };
         assert_ne!(c.shape_key(), d.shape_key());
+    }
+
+    /// A stand-in for a board and the X server on it: the guest pointer is
+    /// real state here, the glyph is drawn from it, and the glyph's shape
+    /// depends on where the pointer is, as it does over different windows.
+    struct FakeX {
+        screen: Mutex<crate::disp::Rex3Screen>,
+        renderer: Mutex<Option<Box<dyn crate::dev::ng1::rex3::Renderer>>>,
+        stop: crate::gfx_display::DisplayStop,
+        /// The pointer, which only the "guest" thread moves.
+        pointer: Mutex<(i32, i32)>,
+        /// The pointer is over an arrow from this x to the next 100 pixels.
+        arrow_from: i32,
+    }
+
+    /// Glyph rows of an arrow (tip at the top left) or of the X cursor.
+    fn fake_mask(arrow: bool) -> Vec<u64> {
+        let mut mask = vec![0u64; 32];
+        for y in 0..16 {
+            mask[y] = if arrow { (1u64 << (y + 1)) - 1 } else { 0x8001 >> (y.min(15 - y)) & 0xffff | 1 << y };
+        }
+        mask
+    }
+
+    impl FakeX {
+        const ARROW_HOT: (i32, i32) = (0, 0);
+        const X_HOT: (i32, i32) = (7, 7);
+
+        fn new(start: (i32, i32), arrow_from: i32) -> Arc<Self> {
+            let mut screen = crate::disp::Rex3Screen::new();
+            (screen.width, screen.height) = (800, 600);
+            Arc::new(Self {
+                screen: Mutex::new(screen),
+                renderer: Mutex::new(None),
+                stop: Default::default(),
+                pointer: Mutex::new(start),
+                arrow_from,
+            })
+        }
+
+        fn over_arrow(&self, x: i32) -> bool {
+            (self.arrow_from..self.arrow_from + 100).contains(&x)
+        }
+
+        /// The server: read mouse packets, accelerate the big ones, keep the
+        /// pointer on the screen.
+        fn serve(self: &Arc<Self>, ps2: &Arc<Ps2Controller>, quit: &Arc<std::sync::atomic::AtomicBool>) -> std::thread::JoinHandle<()> {
+            let (x, ps2, quit) = (self.clone(), ps2.clone(), quit.clone());
+            std::thread::spawn(move || {
+                while !quit.load(Ordering::Relaxed) {
+                    let Some(b0) = ps2.pop_from(true) else {
+                        std::thread::sleep(Duration::from_micros(200));
+                        continue;
+                    };
+                    let (b1, b2) = loop {
+                        if let (Some(a), Some(b)) = (ps2.pop_from(true), ps2.pop_from(true)) {
+                            break (a, b);
+                        }
+                    };
+                    let axis = |v: u8, neg: bool| {
+                        let d = v as i32 - if neg { 256 } else { 0 };
+                        if d.abs() > EXACT_STEP { d * 2 } else { d }
+                    };
+                    let (dx, dy) = (axis(b1, b0 & 0x10 != 0), -axis(b2, b0 & 0x20 != 0));
+                    let mut p = x.pointer.lock();
+                    *p = ((p.0 + dx).clamp(0, 799), (p.1 + dy).clamp(0, 599));
+                }
+            })
+        }
+    }
+
+    impl crate::gfx_display::GfxDisplay for FakeX {
+        fn display_stop(&self) -> &crate::gfx_display::DisplayStop { &self.stop }
+        fn renderer_slot(&self) -> &Mutex<Option<Box<dyn crate::dev::ng1::rex3::Renderer>>> { &self.renderer }
+        fn screen(&self) -> &Mutex<crate::disp::Rex3Screen> { &self.screen }
+        fn request_screenshot(&self) {}
+        fn cycles(&self) -> crate::cpu::mips_core::CyclesPtr { crate::cpu::mips_core::CyclesPtr::dangling() }
+        fn hw_cursor(&self) -> Option<HwCursor> {
+            let (px, py) = *self.pointer.lock();
+            let arrow = self.over_arrow(px);
+            let (hx, hy) = if arrow { Self::ARROW_HOT } else { Self::X_HOT };
+            Some(HwCursor { x: px - hx, y: py - hy, size: 32, mask: fake_mask(arrow) })
+        }
+    }
+
+    /// A HostInput on a fake X server with the pointer at `start`, and the
+    /// server's thread to stop and join when the test ends.
+    fn on_fake_x(start: (i32, i32), arrow_from: i32)
+        -> (Arc<FakeX>, HostInput, Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>) {
+        let ps2 = Arc::new(Ps2Controller::new(None));
+        crate::traits::Device::start(&*ps2);
+        ps2.write_to(0xF4, true); // enable streaming
+        assert_eq!(ps2.pop_from(true), Some(0xFA));
+        let x = FakeX::new(start, arrow_from);
+        let quit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server = x.serve(&ps2, &quit);
+        let hi = HostInput::new(Some(x.clone()), ps2);
+        (x, hi, quit, server)
+    }
+
+    #[test]
+    fn fake_shapes_differ() {
+        assert_ne!(fake_mask(true), fake_mask(false));
+        assert_eq!(fake_mask(true)[0], 1);
+    }
+
+    /// A move that ends on a glyph not seen before still puts the pointer's
+    /// hotspot on the target: the hotspot is learnt from the shape change on
+    /// the way, not borrowed from the shape the move began on.
+    #[test]
+    fn move_onto_a_new_shape_hits_the_target() {
+        let (x, hi, quit, server) = on_fake_x((600, 400), 200);
+        // Calibrates on the X cursor, then ends on the arrow's region.
+        hi.move_to_exact(230, 90).unwrap();
+        assert_eq!(*x.pointer.lock(), (230, 90), "the real pointer, not the glyph's origin");
+        let arrow = x.hw_cursor().unwrap();
+        assert!(hi.hotspot_known(&arrow));
+        assert_eq!(hi.hotspot(&arrow), FakeX::ARROW_HOT);
+        // Back across the border and on again, now both shapes are known.
+        hi.move_to_exact(500, 300).unwrap();
+        assert_eq!(*x.pointer.lock(), (500, 300));
+        hi.move_to_exact(250, 100).unwrap();
+        assert_eq!(*x.pointer.lock(), (250, 100));
+        quit.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+    }
+
+    /// With no shape change to learn from, the hotspot stays a guess (the
+    /// glyph's tip), and the move says it got there by that guess.
+    #[test]
+    fn a_shape_that_never_changes_stays_a_guess() {
+        let (x, hi, quit, server) = on_fake_x((260, 300), 200);
+        // Only the X cursor's hotspot is known.
+        hi.hotspots.lock().insert(fake_x_key(), FakeX::X_HOT);
+        let t = Instant::now();
+        // Arrow to arrow: nothing on the way to teach the arrow's shape.
+        hi.move_to_exact(240, 280).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(6), "probing is bounded");
+        let c = x.hw_cursor().unwrap();
+        assert!(!hi.hotspot_known(&c));
+        assert_eq!(hi.guess_note(), " (hotspot guessed: ptr hot <x> <y> states it)");
+        assert_eq!(hi.pointer(), Some((240, 280)));
+        // The arrow's tip is its hotspot here, so the guess is right.
+        assert_eq!(*x.pointer.lock(), (240, 280));
+        quit.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+    }
+
+    fn fake_x_key() -> u64 {
+        HwCursor { x: 0, y: 0, size: 32, mask: fake_mask(false) }.shape_key()
+    }
+
+    /// `ptr hot` states a hotspot for a glyph no move could learn, and moves
+    /// then use it; one outside the glyph is refused.
+    #[test]
+    fn a_stated_hotspot_is_used() {
+        let (x, hi, quit, server) = on_fake_x((600, 300), 200);
+        hi.hotspots.lock().insert(fake_x_key(), FakeX::X_HOT);
+        assert!(hi.set_hotspot((40, 3)).is_err());
+        assert_eq!(hi.set_hotspot((7, 6)).unwrap().x, 593);
+        hi.move_to_exact(500, 200).unwrap();
+        // The stated hotspot is one pixel above the real one.
+        assert_eq!(*x.pointer.lock(), (500, 201));
+        quit.store(true, Ordering::Relaxed);
+        server.join().unwrap();
     }
 
     #[test]
