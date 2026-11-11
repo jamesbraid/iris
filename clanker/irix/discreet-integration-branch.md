@@ -15,6 +15,10 @@ change a part and rebuild.
    re-install its disk configuration in the middle of a write.
 3. One test fix: the ISP12160 disc-status test still called the old
    seven-argument `attach_device`.
+4. `mgras: keep the host DMA page tables across a context switch`: the
+   HQ3 pool page tables are one set for the board, so the X server's
+   desktop repaint after Flame exits copies through Flame's freed table
+   and comes out black, as the guest gets on hardware.
 
 The Octane clock fix (techomancer/iris#501) is already in upstream main
 (`374416e2`), so it is not carried.
@@ -26,6 +30,7 @@ git fetch up
 git checkout -B discreet-integration up/main
 git cherry-pick 98ccc122 a288676d a2fc2fde      # discreet-scsi-identity
 git cherry-pick <the isp12160 test fix>
+git cherry-pick <the mgras page-table change>
 ```
 
 Cherry-picks keep each part reviewable alone and drop out by themselves once
