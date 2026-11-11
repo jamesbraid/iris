@@ -26,6 +26,14 @@ change a part and rebuild.
    centre, an arrow's its tip) and a shape's hotspot was guessed from the
    previous shape's, so clicks on small targets missed by several pixels.
    `ptr hot <hx> <hy>` states a hotspot by hand.
+6. `mgras: read the back buffer from page A when a window has no second page`
+   and `mgras: show page A when a buffer-B window ID has no second page`: on
+   a one-engine board a deep double-buffered visual gets a second page of 0,
+   which is empty. Drawing already uses page A for that case, but the back
+   buffer read and the scan-out did not, so Flame's screen save and restore
+   came back black. Both reads now take page A, through one XMAP helper.
+   This approximates a board whose second colour page does not exist; it is
+   not a claim about what the hardware shows after a swap.
 
 The Octane clock fix (techomancer/iris#501) is already in upstream main
 (`374416e2`), so it is not carried.
@@ -39,6 +47,7 @@ git cherry-pick 98ccc122 a288676d a2fc2fde      # discreet-scsi-identity
 git cherry-pick <the isp12160 test fix>
 git cherry-pick <the mgras page-table change>
 git cherry-pick <the hostinput hotspot change>
+git cherry-pick 21a515f54 56bddb5e6              # mgras page A for back buffer and scan-out
 ```
 
 Cherry-picks keep each part reviewable alone and drop out by themselves once
