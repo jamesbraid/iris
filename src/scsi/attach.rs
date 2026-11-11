@@ -245,8 +245,12 @@ mod tests {
         assert_eq!(&named[8..16], b"SEAGATE ");
         assert_eq!(&named[16..32], b"ST39102LW       ");
         assert_eq!(&named[32..36], b"0005");
-        assert_eq!(named.len(), 36 + 8);
+        // The serial fills 36 to 43 here; the rest of 36 to 55 is NUL, not
+        // space, so a reader that treats the area as a C string stops after it.
+        assert_eq!(named.len(), 56);
+        assert_eq!(named[4] as usize, named.len() - 5);
         assert_eq!(&named[36..44], b"3JA0K1X4");
+        assert_eq!(&named[44..56], &[0u8; 12]);
         let vpd = |b: &ScsiBus, id: u8, page: u8| {
             let req = crate::scsi::ScsiRequest {
                 cdb: vec![crate::scsi::scsi_cmd::INQUIRY, 1, page, 0, 255, 0],
@@ -272,5 +276,22 @@ mod tests {
         for p in [a, b, iso] {
             std::fs::remove_file(p).unwrap();
         }
+    }
+
+    #[test]
+    fn a_short_serial_is_followed_by_nuls_not_spaces() {
+        let a = image("short-serial");
+        let mut cfg = MachineConfig::default();
+        cfg.scsi.clear();
+        cfg.scsi.insert(1, ScsiDeviceConfig { serial: Some("AB".into()), ..table(&a, false, 0) });
+        let buses = buses();
+        attach_from_config(&cfg, None, &route(&buses)).unwrap();
+        let got = inquiry(&buses[0], 1);
+        assert_eq!(got.len(), 56);
+        assert_eq!(&got[36..38], b"AB");
+        assert_eq!(&got[38..56], &[0u8; 18], "bytes 38 to 55 are NUL");
+        // The identity fields keep SPC's space padding.
+        assert_eq!(&got[8..16], &ID.vendor);
+        std::fs::remove_file(a).unwrap();
     }
 }

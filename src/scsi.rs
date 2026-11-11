@@ -205,6 +205,11 @@ impl Drop for ScsiDevice {
 /// A CD-ROM's physical sector (Yellow Book).
 pub const CDROM_SECTOR: u64 = 2048;
 
+/// Standard INQUIRY bytes 36 to 55, the vendor-specific area. The unused part
+/// of the serial's field is NUL, not space: SPC space-fills only the vendor,
+/// product and revision fields. Ported from hw/mips/sgi/scsi-hd-inquiry.c in
+/// jamesbraid/qemu-sgi-origami.
+const INQUIRY_VENDOR_SPECIFIC_LEN: usize = 20;
 const SCSI_BUFFER_SIZE: usize = 0x4000; // 16KB (16384 bytes)
 
 impl ScsiDevice {
@@ -406,12 +411,16 @@ impl ScsiDevice {
             data[32..36].copy_from_slice(&self.identity.revision);
             if let Some(serial) = &self.serial {
                 // The first eight characters, in the vendor-specific bytes
-                // right after the revision, as SCSI disks lay them out.
-                let mut field = [b' '; 8];
+                // right after the revision, as SCSI disks lay them out. The
+                // rest of bytes 36 to 55 is NUL: SPC gives that area no
+                // padding rule (space fill belongs to the vendor, product and
+                // revision fields), and a driver that compares it as a
+                // NUL-terminated string needs the NUL after the serial.
+                let mut field = [0u8; INQUIRY_VENDOR_SPECIFIC_LEN];
                 let n = serial.len().min(8);
                 field[..n].copy_from_slice(&serial[..n]);
                 data.extend_from_slice(&field);
-                data[4] = 39;
+                data[4] = (data.len() - 5) as u8;
             }
         } else {
             // SPC-2 8.2.5: PQ=011b (device server not capable of supporting a physical

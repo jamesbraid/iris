@@ -221,7 +221,7 @@ keys is set. See the [Origin 2000 guide](docs/origin2000-ip27.md).
 | `scsi.<ID>.vendor` | `the machine's own` | Up to 8 printable ASCII characters INQUIRY reports as the vendor, padded with spaces. Disks and CD-ROMs. |
 | `scsi.<ID>.product` | `the machine's own` | Up to 16 characters INQUIRY reports as the product. |
 | `scsi.<ID>.revision` | `the machine's own` | Up to 4 characters INQUIRY reports as the product revision. |
-| `scsi.<ID>.serial` | `none` | Up to 16 printable ASCII characters: the unit serial number. Set, INQUIRY reports its first 8 characters after the revision (bytes 36 to 43) and the unit serial number page (VPD 0x80) carries all of it. Unset, INQUIRY is unchanged. |
+| `scsi.<ID>.serial` | `none` | Up to 16 printable ASCII characters: the unit serial number. Set, INQUIRY reports its first 8 characters after the revision (bytes 36 to 43), then NULs through byte 55 (no space padding), and the unit serial number page (VPD 0x80) carries all of it. Unset, INQUIRY is unchanged. |
 
 IDs are 1–7, or 1–15 on the Octane's wide ISP1040 buses. The key is a slot: `[scsi.N]` with N 1–7 is id N on controller 0
 (or on `controller`, when set), and N = 16 + id is that id on controller 1,
