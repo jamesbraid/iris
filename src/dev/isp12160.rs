@@ -328,7 +328,7 @@ mod tests {
     fn disc_status_flattens_the_second_channels_target_ids() {
         let bus0 = Isp12160::new_bus();
         let bus1 = Isp12160::new_bus();
-        bus1.attach_device(1, "", true, Vec::new(), false, None, false).unwrap();
+        bus1.attach_device(1, "", crate::scsi::AttachOptions { cdrom: true, ..Default::default() }).unwrap();
         let isp = Isp12160::new(bus0, bus1);
 
         let status = DiscChanger::disc_status(&isp);
