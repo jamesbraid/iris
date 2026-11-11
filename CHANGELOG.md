@@ -219,6 +219,10 @@ hashes are given where a change is easiest to understand by reading the commit.
   through the ppmem window, so the second node's processor no longer takes the
   bus path for every cached access and runs as fast as the first.
 
+### QLogic adapters' interrupt line
+
+- The ISP1040 and the ISP12160 (the Octane's and the Origin's SCSI, and the Fuel's and the Tezro's) change their interrupt state and drive the line in one hold of the state lock, and write the line only when the level changes (and once more after the bus attaches them or a snapshot loads). There is no guest-visible change: the parents already ignored a repeated level. It removes the second lock the ISP1040 took and a line write on every register access.
+
 ### Onyx2
 
 - `machine.profile = "onyx2_ip27"` runs the stock IP27 PROM on one or two Hub
