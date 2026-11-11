@@ -21,6 +21,7 @@ impl<T: Device> TestBoard<T> {
     /// Take ownership of a board. Wrap it before `start()`: the threads keep
     /// the address it has from then on.
     pub(crate) fn new(board: Arc<T>) -> Self {
+        crate::deadlock_watch::start();
         Self(board)
     }
 }

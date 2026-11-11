@@ -68,6 +68,19 @@ See "Comparing two builds" in [bench/README.md](bench/README.md).
 `bench/irix/` is the other half: real workloads under a booted IRIX (filesystem,
 buffer cache, IRIX's own tools, X on REX3), driven over `iris-ci`.
 
+**Lock-order deadlock detection** — device tests drive interrupt lines while
+holding their own lock, and a regression there shows up as a hang. With the
+`deadlock-detect` feature, `parking_lot` records lock waits and a watchdog
+aborts the test process, printing each thread's backtrace, when it finds a
+cycle. Off by default because it adds work to every `parking_lot` lock and
+unlock; keep it off the timing suites. It sees `parking_lot` locks only, and
+only in tests whose fixture calls `deadlock_watch::start()`.
+
+```sh
+cargo test --release --lib --features deadlock-detect
+cargo test --release --lib --features deadlock-detect deadlock_watch -- --ignored   # aborts on purpose
+```
+
 **GPU parity tests** — with the `wgpu` feature, the host-GPU raster path
 (`src/wgpu`, `src/dev/odyssey/wgpu`) is checked against the CPU pipeline: the
 same triangles, shaded fragments and clears go through both, and the two board

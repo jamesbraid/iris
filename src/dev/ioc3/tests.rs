@@ -109,6 +109,7 @@ impl Rig {
     }
 
     fn with(c: Ioc3) -> Rig {
+        crate::deadlock_watch::start();
         let mem = TestMem::new();
         c.state().connect_dma(mem.clone());
         c.attached();

@@ -168,6 +168,14 @@ cache-ecc = []
 # Always built now; this flag does nothing and is kept so command lines that
 # still pass `--features decode-cache` keep working.
 decode-cache = []
+# Lock-order deadlock detection for the lib tests (src/deadlock_watch.rs):
+# parking_lot records every lock wait and a watchdog thread aborts the test
+# process, with backtraces, on a cycle. Opt in with `--features deadlock-detect`.
+# Cargo features are per invocation, so every crate and binary that invocation
+# builds carries it, including the iris binaries the integration tests spawn;
+# it adds bookkeeping to every parking_lot lock and unlock, so keep it off the
+# timing suites.
+deadlock-detect = ["parking_lot/deadlock_detection"]
 default = ["tlbvmap", "rexdiag"]
 # Conservative Newport framebuffer damage tracking and partial GL uploads.
 # Off by default so the REX3 processor retains its original hot path.

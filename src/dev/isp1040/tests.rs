@@ -62,6 +62,7 @@ fn image(name: &str, blocks: usize) -> std::path::PathBuf {
 
 impl<P: IspPart> Rig<P> {
     fn on(isp: Isp<P>) -> Self {
+        crate::deadlock_watch::start();
         let mem = FakeMem::new();
         Device::start(&isp);
         isp.state().connect_dma(mem.clone());

@@ -79,6 +79,7 @@ impl BusDevice for Bytes {
 const RAM_SIZE: usize = 1 << 20;
 
 fn hub(cpus: u8, ni_revision: u8) -> Arc<Hub> {
+    crate::deadlock_watch::start();
     let cfg = HubConfig { cpus, ni_revision, ..Default::default() };
     let hub = Hub::new(cfg, Arc::new(|| 0));
     hub.set_space(Space::Memory, Ram::new(RAM_SIZE, 0));

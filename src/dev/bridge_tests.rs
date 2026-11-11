@@ -164,6 +164,7 @@ impl Rig {
     }
 
     fn with_host(host: XtalkHost) -> Self {
+        crate::deadlock_watch::start();
         let sink = Arc::new(Sink::default());
         let mem = Arc::new(Mem::new());
         Rig { bridge: Bridge::new(Upstream::single(host, mem.clone(), sink.clone()), &crate::ip30::PCI0), sink, mem }
