@@ -13,6 +13,14 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Octane sounds start cleanly
+
+- RAD1 now holds back the first 20 ms of each sound before the host hears
+  it, as HAL2 already did. The card makes its frames on its own clock in
+  10 ms batches, while the host takes a whole period at a time, so the start
+  of every Octane sound broke up. A sound shorter than 20 ms still plays
+  whole when it ends.
+
 ### Newport: experimental live rendering on the host GPU
 
 - A `rex-gpu` build renders Newport's flat fills on the host GPU when

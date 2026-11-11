@@ -301,6 +301,34 @@ struct Sink {
     host_failed_at: Option<Instant>,
     wav: Option<Wav>,
     tap: Option<Arc<Mutex<Vec<i16>>>>,
+    /// The start of a run of output, held back from the host until it is
+    /// `PREBUF_MS` long, and the rate it was made at.
+    prebuf: Vec<i16>,
+    prebuf_rate: u32,
+    /// The lead is built: frames go straight to the host until the run ends.
+    primed: bool,
+}
+
+/// How much of each run of output is held back before the host hears any
+/// of it, the same lead as HAL2's prebuffer. The card makes each frame only
+/// when its clock says it is due, so with no lead the host ring holds no
+/// more than the pump's last interval, while the host takes a whole period
+/// at each callback and plays silence for what is missing: the start of
+/// every sound broke up. 20 ms covers a 512-frame period at 48 kHz, the
+/// PulseAudio period iris asks for.
+const PREBUF_MS: usize = 20;
+
+/// Send frames the card made at `rate` Hz to the host stream.
+fn host_push((out, rs): &mut (HostOut, Resampler), pcm: &[i16], rate: u32) {
+    if pcm.is_empty() {
+        return;
+    }
+    if rs.in_rate != rate {
+        *rs = Resampler::new(rate, out.stream_rate);
+    }
+    for p in pcm.chunks_exact(PCM_CHANNELS) {
+        rs.push(p[0], p[1], &mut out.producer);
+    }
 }
 
 /// How long to wait before trying to open the host stream again.
@@ -323,12 +351,20 @@ impl Sink {
         } else {
             pcm
         };
-        if let Some((out, rs)) = self.host.as_mut() {
-            if rs.in_rate != rate {
-                *rs = Resampler::new(rate, out.stream_rate);
-            }
-            for p in host_pcm.chunks_exact(PCM_CHANNELS) {
-                rs.push(p[0], p[1], &mut out.producer);
+        if let Some(host) = self.host.as_mut() {
+            if self.primed {
+                host_push(host, host_pcm, rate);
+            } else {
+                // Frames held at another rate go out first, at their own.
+                if self.prebuf_rate != rate {
+                    host_push(host, &std::mem::take(&mut self.prebuf), self.prebuf_rate);
+                    self.prebuf_rate = rate;
+                }
+                self.prebuf.extend_from_slice(host_pcm);
+                if self.prebuf.len() >= rate as usize * PCM_CHANNELS * PREBUF_MS / 1000 {
+                    host_push(host, &std::mem::take(&mut self.prebuf), rate);
+                    self.primed = true;
+                }
             }
         }
         if let Some(w) = self.wav.as_mut() {
@@ -338,6 +374,16 @@ impl Sink {
             t.lock().extend_from_slice(pcm);
         }
         self.host.as_ref().map(|(out, _)| (out.producer.slots(), out.producer.buffer().capacity()))
+    }
+
+    /// The run of output is over: what is held plays now, so a sound
+    /// shorter than the lead is not lost, and the next run builds its own.
+    fn end_run(&mut self) {
+        if let Some(host) = self.host.as_mut() {
+            host_push(host, &self.prebuf, self.prebuf_rate);
+        }
+        self.prebuf.clear();
+        self.primed = false;
     }
 }
 
@@ -994,7 +1040,7 @@ impl Inner {
             }
             None => {
                 let wav = std::env::var_os("IRIS_OCTANE_AUDIO_WAV").and_then(|p| Wav::create(&p));
-                *sink = Some(Sink { host, host_failed_at: failed_at, wav, tap: None });
+                *sink = Some(Sink { host, host_failed_at: failed_at, wav, tap: None, prebuf: Vec::new(), prebuf_rate: 0, primed: false });
             }
         }
     }
@@ -1105,6 +1151,7 @@ impl Inner {
         }
         *s = State::new(now);
         s.status_gen = gen;
+        self.end_output_run();
     }
 
     fn startup_index(off: u32) -> Option<usize> {
@@ -1568,6 +1615,19 @@ impl Inner {
             // Stop where the sample clock has got to.
             self.sync_chan(s, idx, now);
             s.chan[idx].running = false;
+            if idx == CH_OUT {
+                self.end_output_run();
+            }
+        }
+    }
+
+    /// The output has stopped. Called where it stops (a write clearing the
+    /// enable bit, the end of a transfer, a failed DMA, a reset), not on
+    /// every sync of a stopped channel, so no extra sink lock is taken on
+    /// the paths that move frames.
+    fn end_output_run(&self) {
+        if let Some(sink) = self.sink.lock().as_mut() {
+            sink.end_run();
         }
     }
 
@@ -1620,6 +1680,9 @@ impl Inner {
             });
             if !ok {
                 crate::dlog!(LogModule::Rad1, "rad1: {} DMA at {:#x} + {:#x} failed", info.name, c.base, c.offset);
+                if info.output {
+                    self.end_output_run();
+                }
                 return false;
             }
             if info.output {
@@ -1644,6 +1707,9 @@ impl Inner {
             s.advance_pos(idx, n as u32);
             frames -= n;
             if done && !s.descriptor_end(idx) {
+                if info.output {
+                    self.end_output_run();
+                }
                 break;
             }
         }
