@@ -229,6 +229,31 @@ that way.
 Without the V12 the machine has no graphics.
 Machine snapshots are unsupported.
 
+## What persists, and what the guest sees of the IO9
+
+The PROM's environment (`nvram` in IRIX, `printenv` in the PROM monitor) lives
+in the `nvram` file, the DS1744 window in the IOC4's BAR, not in the flash. A
+byte the processor stores there is written to the file at once. In a run on a
+fresh flash and a copy of the shared IRIX disk, `nvram srvaddr` and
+`nvram gateaddr` set in IRIX changed `nvram.bin` and left `flash.bin` alone,
+and after `halt -p` (which ends the iris process) and a new start over the same
+files the PROM monitor's `printenv` returned both values. `netaddr` only looks
+like a lost write: during the next boot the guest set it to the address of
+`tg0` (192.168.0.2 on that disk), over the value set by hand. That the guest's
+network setup does this is inferred from the value; it was not traced.
+`reboot` returns to the PROM with all four processors found and the
+diagnostics passing.
+
+The two serial ports IRIX lists, `ttyd3` and `ttyd4`, are IOC4 ports 0 and 1,
+which listen on `serial_port_a` and `serial_port_b`: text written to each
+device arrived on its own port. No IRIX device was seen for ports 2 and 3.
+
+The IOC4's ATA channel is not modelled beyond the readback word the PROM
+probes. IRIX's `hinv` lists "Integral SCSI controller 2: Version IDE
+(ATA/ATAPI) IOC4" with no drive behind it, and a CD or DVD reaches the guest
+only as a `cdrom = true` SCSI device. The model fits no USB controller on the
+IO9.
+
 ## Source basis
 
 The board composition follows the project's BSD-licensed QEMU SGI models in
