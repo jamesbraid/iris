@@ -122,6 +122,20 @@ impl<S> IrqGuard<'_, S> {
         self.guard.1.0 = None;
     }
 
+    /// Take the line low and high again, if the state holds it high and the
+    /// line was last written high: an event the state cannot show as a
+    /// change, because the line never got to rest low between the two. The
+    /// controller sees a fall and a rise, in that order, before the lock is
+    /// let go. Otherwise the line has a rise or a fall owing, or none, and
+    /// the next drive gives it.
+    pub fn retrigger(&mut self) {
+        let Some(line) = self.line.get() else { return };
+        if self.guard.1.0 == Some(true) && (self.level)(&self.guard.0) {
+            line.set(false);
+            line.set(true);
+        }
+    }
+
     /// Wait on `cv`, which lets go of the lock.
     pub fn wait(&mut self, cv: &Condvar) {
         self.drive();
@@ -275,6 +289,26 @@ mod irq_mutex_tests {
         drop(dev.lock(&line));
         *dev.lock(&line) = false;
         assert_eq!(probe.writes(), [true, false]);
+    }
+
+    #[test]
+    fn retriggering_a_high_line_falls_and_rises() {
+        let (probe, line, dev) = device();
+        *dev.lock(&line) = true;
+        dev.lock(&line).retrigger();
+        drop(dev.lock(&line));
+        assert_eq!(probe.writes(), [true, false, true]);
+    }
+
+    #[test]
+    fn retriggering_a_line_that_is_not_high_leaves_it_to_the_drive() {
+        let (probe, line, dev) = device();
+        let mut g = dev.lock(&line);
+        g.retrigger();
+        *g = true;
+        g.retrigger();
+        drop(g);
+        assert_eq!(probe.writes(), [true]);
     }
 
     #[test]
