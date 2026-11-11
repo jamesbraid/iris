@@ -1989,7 +1989,10 @@ impl Gl {
             // 12-bit pairs: both buffers are halves of A's page (the read
             // field below picks the half), whatever DRB's B page says.
             let back = (self.read_back != 0) != (self.swapped != 0) && !self.rgb12_pair() && !self.ci_pair();
-            (w & !0x3FF) | if back { b } else { a }
+            // No second page (a deep double-buffered visual on a one-engine
+            // board): drawing to the back buffer lands in A (`draw_pointers`),
+            // so the read does too, not in the empty page 0.
+            (w & !0x3FF) | if back && b != 0 { b } else { a }
         };
         sink.rss_write(re::DRBPOINTERS, drb, false);
         if stencil {

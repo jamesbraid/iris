@@ -2113,6 +2113,25 @@ fn gl_read_pixels_component_order(rgba: bool) {
     m.stop_engines();
 }
 
+/// A window whose DRBpointers has no second page (what GL gets for a deep
+/// double-buffered visual on a one-engine board): drawing to GL_BACK lands in
+/// page A, so reading GL_BACK has to read A too. Flint saves and restores
+/// screen areas through a back-buffer read, and a read of the empty page 0
+/// wipes the area to black.
+#[test]
+fn gl_read_back_buffer_of_a_window_with_no_second_page() {
+    let m = gl_board([0.0, 0.0, 0.0]);
+    fifo_token(&m, 0x49, &[4, 1, 0]);
+    fifo_token(&m, 0x44, &[2, 0, 0x405]);
+    gl_color4(&m, [1.0, 0.5, 0.25, 1.0]);
+    gl_full_quad(&m);
+    let px = gl_px(&m, 30, 40);
+    assert_ne!(px, 0, "the quad drew");
+    let got = gl_read_one(&m, 30, 40, 0, 0x0088_0080 | 1 << 22, 4);
+    assert_eq!(got, [px as u8, (px >> 8) as u8, (px >> 16) as u8, 255], "GL_BACK reads what GL_BACK drew");
+    m.stop_engines();
+}
+
 /// SEND_PIXELS honours the scissor box (the desks overview draws each
 /// miniature under its own) and shrinking zooms (nearest source pixel).
 #[test]
