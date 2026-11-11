@@ -45,6 +45,7 @@ use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use super::Core;
+use crate::irq::IrqMutex;
 use crate::dev::dp83840::Dp83840;
 use crate::dev::dp83843::Dp83843;
 use crate::dev::ics1890::Ics1890;
@@ -293,10 +294,6 @@ fn dma_write(dma: &dyn PciDma, addr: u64, data: &[u8]) -> bool {
 
 struct State {
     regs: [u32; NREGS],
-    /// Where the PCI pin is driven, which happens under this lock: the
-    /// registers change and the pin follows in one step, so the Bridge sees
-    /// the edges the registers made, in order.
-    core: Arc<Core>,
     /// Sources raised while the same status bit was already set and
     /// unacknowledged: the guest's next write-one-to-clear of that bit must
     /// turn into a real edge for this one too rather than clearing both.
@@ -306,24 +303,24 @@ struct State {
     /// Apart from its index: an index-only write must not disarm.
     rx_timer_armed: bool,
     phy: Box<dyn MiiPhy>,
-    /// The level last driven onto the pin.
-    irq_asserted: bool,
+    /// A write left the pin to take a fall and a rise: the caller applies it
+    /// through the guard (`IrqGuard::retrigger`) and clears it.
+    reedge: bool,
     frame: Vec<u8>,
     tx_frames: u64,
     rx_frames: u64,
 }
 
 impl State {
-    fn new(phy: Box<dyn MiiPhy>, core: Arc<Core>) -> Self {
+    fn new(phy: Box<dyn MiiPhy>) -> Self {
         Self {
             regs: [0; NREGS],
-            core,
             int_deferred: 0,
             mii_data: MII_ABSENT,
             mii_data_w: 0,
             rx_timer_armed: false,
             phy,
-            irq_asserted: false,
+            reedge: false,
             frame: vec![0; FRAME_MAX],
             tx_frames: 0,
             rx_frames: 0,
@@ -337,7 +334,6 @@ impl State {
         self.mii_data = MII_ABSENT;
         self.mii_data_w = 0;
         self.rx_timer_armed = false;
-        self.update_irq();
         self.frame.fill(0);
         self.tx_frames = 0;
         self.rx_frames = 0;
@@ -355,26 +351,10 @@ impl State {
         self.get(INT_STATUS) & self.get(INT_ENABLE) != 0
     }
 
-    fn drive(&self, level: bool) {
-        if let Some(line) = self.core.inta.get() {
-            line.set(level);
-        }
-    }
-
-    /// Put the pin where the registers say, if that moved it.
-    fn update_irq(&mut self) {
-        let level = self.output();
-        if level != self.irq_asserted {
-            self.irq_asserted = level;
-            self.drive(level);
-        }
-    }
-
     fn raise_int(&mut self, sources: u32) {
         let status = self.get(INT_STATUS);
         self.int_deferred |= status & sources;
         self.set(INT_STATUS, status | sources);
-        self.update_irq();
     }
 
     /// The engine reset keeps the ring bases: the power-on diagnostic
@@ -392,7 +372,6 @@ impl State {
         self.mii_data = MII_ABSENT;
         self.mii_data_w = 0;
         self.rx_timer_armed = false;
-        self.update_irq();
     }
 
     fn mac_loopback(&self) -> bool {
@@ -639,7 +618,6 @@ impl State {
                 let deferred = self.int_deferred & val;
                 self.set(INT_STATUS, self.get(INT_STATUS) & !val);
                 self.int_deferred &= !val;
-                self.update_irq();
                 if deferred != 0 {
                     // A completion landed on one of these bits after the
                     // driver's read but before this acknowledge: restoring the
@@ -647,20 +625,14 @@ impl State {
                     // rather than the single write silently absorbing both.
                     // All three public drivers write back what they read.
                     self.set(INT_STATUS, self.get(INT_STATUS) | deferred);
-                    if self.irq_asserted && self.output() {
-                        // Other sources held the pin up through the
-                        // acknowledge: it still takes a fall and a rise.
-                        self.drive(false);
-                        self.drive(true);
-                    } else {
-                        self.update_irq();
-                    }
+                    // If the pin was high through the acknowledge (other
+                    // sources held it), it still takes a fall and a rise.
+                    self.reedge = true;
                 }
             }
             INT_ENABLE => {
                 // Enabling a set source must raise the line; OpenBSD relies on it.
                 self.set(off, val);
-                self.update_irq();
             }
             MII_CONTROL => {
                 let phy = ((val >> 5) & 0x1f) as u8;
@@ -745,7 +717,7 @@ impl State {
 pub struct Ioc3Eth {
     mac: [u8; 6],
     core: Arc<Core>,
-    st: Mutex<State>,
+    st: IrqMutex<State>,
     link: Mutex<Option<crate::net::Rings>>,
     rx_wake: Mutex<Option<Arc<crate::net::Wake>>>,
     /// Between `start` and `stop`; the NAT engine watches it too.
@@ -779,8 +751,8 @@ impl Ioc3Eth {
     fn with_phy(core: Arc<Core>, mac: [u8; 6], phy: Box<dyn MiiPhy>) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             mac,
-            core: core.clone(),
-            st: Mutex::new(State::new(phy, core)),
+            core,
+            st: IrqMutex::new(State::new(phy), State::output),
             link: Mutex::new(None),
             rx_wake: Mutex::new(None),
             running: Arc::new(AtomicBool::new(false)),
@@ -810,7 +782,7 @@ impl Ioc3Eth {
     /// A machine reset: the MAC's registers and the PHY as at power-on,
     /// the interrupt dropped. The network link stays.
     pub fn reset(&self) {
-        self.st.lock().power_on();
+        self.st.lock(&self.core.inta).power_on();
         self.wake_rx();
     }
 
@@ -822,14 +794,13 @@ impl Ioc3Eth {
     /// pin is first connected or the parent's state was just restored. The
     /// Bridge ignores a level it already has.
     pub(super) fn republish(&self) {
-        let st = self.st.lock();
-        st.drive(st.irq_asserted);
+        self.st.lock(&self.core.inta).forget();
     }
 
     /// Raise interrupt sources as the receive path does, for tests.
     #[cfg(test)]
     pub(super) fn raise_for_test(&self, sources: u32) {
-        self.st.lock().raise_int(sources);
+        self.st.lock(&self.core.inta).raise_int(sources);
     }
 
     fn send(&self, frames: Vec<Vec<u8>>) {
@@ -893,7 +864,7 @@ impl Ioc3Eth {
             let timeout = {
                 let Some(this) = me.upgrade() else { return };
                 let now = Instant::now();
-                let mut st = this.st.lock();
+                let mut st = this.st.lock(&this.core.inta);
                 st.phy.sync(now);
                 st.phy.deadline().and_then(|d| d.checked_duration_since(now)).unwrap_or(RX_IDLE)
             };
@@ -920,13 +891,13 @@ impl Ioc3Eth {
 
     /// The packet backend's cable state; the PHY reports it as link status.
     pub fn set_backend_link(&self, up: bool) {
-        self.st.lock().phy.set_backend_link(up, Instant::now());
+        self.st.lock(&self.core.inta).phy.set_backend_link(up, Instant::now());
         self.wake_rx();
     }
 
     /// Frames sent and received so far.
     pub fn counts(&self) -> (u64, u64) {
-        let s = self.st.lock();
+        let s = self.st.lock(&self.core.inta);
         (s.tx_frames, s.rx_frames)
     }
 
@@ -947,7 +918,7 @@ impl Ioc3Eth {
                 let mut link = self.link.lock();
                 let Some(link) = link.as_mut() else { break };
                 {
-                    let mut st = self.st.lock();
+                    let mut st = self.st.lock(&self.core.inta);
                     st.phy.sync(Instant::now());
                     if !st.rx_ready() {
                         break;
@@ -958,7 +929,7 @@ impl Ioc3Eth {
             };
             moved = true;
             {
-                let mut st = self.st.lock();
+                let mut st = self.st.lock(&self.core.inta);
                 if st.rx_ready() && st.rx_filter(&frame) {
                     st.deliver(&*dma, &frame, false);
                     self.blink(crate::dev::ng1::rex3::Rex3::HB_ENET_RX);
@@ -1043,7 +1014,7 @@ impl Ioc3Eth {
     /// Replace the Octane's transceiver with one whose negotiation ends at
     /// once, for tests of a whole machine.
     pub(crate) fn negotiate_at_once(&self) {
-        self.st.lock().phy = Box::new(Ics1890::new(PHY_ADDR, Duration::ZERO));
+        self.st.lock(&self.core.inta).phy = Box::new(Ics1890::new(PHY_ADDR, Duration::ZERO));
     }
 }
 
@@ -1053,7 +1024,7 @@ impl Ioc3Eth {
         if !(MAC_CONTROL..=MII_DATA_W).contains(&off) || off & 3 != 0 {
             return 0;
         }
-        self.st.lock().read(off, Instant::now())
+        self.st.lock(&self.core.inta).read(off, Instant::now())
     }
 
     /// A 32-bit write of the MAC register at `off`.
@@ -1065,9 +1036,12 @@ impl Ioc3Eth {
         let mut wire = Vec::new();
         let mut wake = false;
         {
-            let mut st = self.st.lock();
+            let mut st = self.st.lock(&self.core.inta);
             let before = st.phy.deadline();
             st.write(off, val, Instant::now(), &*dma, &mut wire, &mut wake);
+            if std::mem::take(&mut st.reedge) {
+                st.retrigger();
+            }
             // A negotiation started or ended: the receive thread's wait moves.
             wake |= st.phy.deadline() != before;
         }
@@ -1085,7 +1059,7 @@ impl Ioc3Eth {
 // process only.
 impl Saveable for Ioc3Eth {
     fn save_state(&self) -> toml::Value {
-        let st = self.st.lock();
+        let st = self.st.lock(&self.core.inta);
         StateTable::new()
             .u32s("regs", &{
                 let mut regs = st.regs;
@@ -1098,7 +1072,6 @@ impl Saveable for Ioc3Eth {
             .u16("mii_data_w", st.mii_data_w)
             .bool("rx_timer_armed", st.rx_timer_armed)
             .value("phy", st.phy.save_state(Instant::now()))
-            .bool("irq_asserted", st.irq_asserted)
             .u64("tx_frames", st.tx_frames)
             .u64("rx_frames", st.rx_frames)
             .build()
@@ -1107,7 +1080,7 @@ impl Saveable for Ioc3Eth {
     /// Called with the block stopped.
     fn load_state(&self, v: &toml::Value) -> Result<(), String> {
         {
-            let mut st = self.st.lock();
+            let mut st = self.st.lock(&self.core.inta);
             st.phy.load_state(field(v, "phy")?, Instant::now()).map_err(|e| format!("phy: {e}"))?;
             st.regs = field_u32s(v, "regs")?;
             st.int_deferred = field_u32(v, "int_deferred")?;
@@ -1116,11 +1089,9 @@ impl Saveable for Ioc3Eth {
             st.rx_timer_armed = field_bool(v, "rx_timer_armed")?;
             st.tx_frames = field_u64(v, "tx_frames")?;
             st.rx_frames = field_u64(v, "rx_frames")?;
-            field_bool(v, "irq_asserted")?;
             // The pin is where the loaded registers put it, whatever it was
             // left at.
-            st.irq_asserted = st.output();
-            st.drive(st.irq_asserted);
+            st.forget();
         }
         Ok(())
     }
