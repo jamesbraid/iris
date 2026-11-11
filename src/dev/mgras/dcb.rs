@@ -301,6 +301,18 @@ impl Xmap {
         }
     }
 
+    /// The page a window ID with its `BUF_SELECT` bit set shows: B, or A
+    /// when the pointers hold no second page (a deep double-buffered visual
+    /// on a one-engine board, where drawing already treats it as one
+    /// buffer and the swap has nothing else to show).
+    pub fn back_page(&self) -> u32 {
+        let dib = self.dib_pointers();
+        match (dib >> 10) & 0x3FF {
+            0 => dib & 0x3FF,
+            b => b,
+        }
+    }
+
     /// Display mode of window ID `did` (`MAIN_MODE`, index `did * 4`).
     pub fn main_mode(&self, did: u32) -> u32 {
         self.regs.get(key(xmap::MAIN_MODE, did << 2))

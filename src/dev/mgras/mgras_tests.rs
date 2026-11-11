@@ -2132,6 +2132,28 @@ fn gl_read_back_buffer_of_a_window_with_no_second_page() {
     m.stop_engines();
 }
 
+/// The scan-out of a window ID that shows buffer B while the XMAP's DIB has
+/// no second page: it shows A, where the window's drawing went, not the
+/// empty page 0 (a black screen for Flint's deep double-buffered visual on
+/// the one-engine board).
+#[test]
+fn scanout_of_buffer_b_with_no_second_page_shows_a() {
+    let m = gl_board([0.0, 0.0, 0.0]);
+    gl_color4(&m, [1.0, 0.5, 0.25, 1.0]);
+    gl_full_quad(&m);
+    let px = gl_px(&m, 30, 40);
+    assert_ne!(px, 0, "the quad drew");
+    {
+        let mut f = m.front();
+        // Window ID 0 in an RGB format, showing B; A is the drawn page.
+        f.dcb.xmap.set_modes(0, 0x415, 0);
+        f.dcb.xmap.set_scanout(1, 0x240, 0);
+    }
+    let frame = m.snapshot_frame();
+    assert_eq!(frame.main[(1023 - 40) * super::frame::W + 30] & 0xFF_FFFF, px);
+    m.stop_engines();
+}
+
 /// SEND_PIXELS honours the scissor box (the desks overview draws each
 /// miniature under its own) and shrinking zooms (nearest source pixel).
 #[test]

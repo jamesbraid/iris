@@ -127,7 +127,7 @@ impl Frame {
         // buffer B. The window-ID runs are decoded below; this pass needs
         // them first, so decode them before the planes.
         let select = dcb.xmap.buf_select();
-        let back = Buffer::new(dcb.xmap.dib_pointers() >> 10, Kind::Wide, rss.reg(rss::reg::DRBSIZE));
+        let back = Buffer::new(dcb.xmap.back_page(), Kind::Wide, rss.reg(rss::reg::DRBSIZE));
         let mut runs = Vec::with_capacity(64);
         for y in 0..h {
             dcb.vc3.main_did_runs(y, &mut runs);
