@@ -476,6 +476,18 @@ mod tests {
         for w in [i(0x0F, 0, T6, 0x8820), i(0x0D, T6, T6, 0x1008), (T6 << 21) | 0x08, 0] {
             payload.extend_from_slice(&w.to_be_bytes());
         }
+        bare_elf(payload)
+    }
+
+    /// A bare-metal program that never exits: one branch to itself, which
+    /// jitv2 keeps inside compiled code.
+    fn never_exits_elf() -> Vec<u8> {
+        bare_elf([0x1000_FFFFu32, 0].iter().flat_map(|w| w.to_be_bytes()).collect())
+    }
+
+    /// `payload` as a big-endian MIPS ELF with one segment, loaded and entered
+    /// at 0x88200000.
+    fn bare_elf(payload: Vec<u8>) -> Vec<u8> {
         let vaddr: u32 = 0x8820_0000;
         let mut v = vec![0u8; 84];
         v[0..4].copy_from_slice(b"\x7fELF");
@@ -499,6 +511,18 @@ mod tests {
     /// Run `clock_spin_elf` once on a machine built the way the runner builds
     /// one. Returns what it printed.
     fn run_clock_spin(deterministic: bool) -> Vec<u8> {
+        run_guest(clock_spin_elf(), deterministic, Duration::from_secs(60)).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Run `elf` until it stores to EXIT, or for `limit`, and return what it
+    /// printed. Err if it did not exit, or if the machine did not stop after.
+    ///
+    /// The machine is stopped on every path, and the caller waits a bounded
+    /// time for that: a CPU that cannot be stopped makes this return an error
+    /// rather than hang the test for good. A failed run leaves that thread
+    /// and its spinning CPU behind; the test process exits regardless.
+    fn run_guest(elf: Vec<u8>, deterministic: bool, limit: Duration) -> Result<Vec<u8>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
@@ -512,21 +536,36 @@ mod tests {
                     cfg.jitv2.compile = JitCompile::Sync;
                 }
                 let mut machine = Box::new(Machine::new_with_testdev(cfg, Some(testdev)));
-                machine.load_elf_bytes(&clock_spin_elf(), "clock-spin.elf").expect("load");
+                machine.load_elf_bytes(&elf, "guest.elf").expect("load");
                 machine.start();
                 machine.cpu_start();
                 let started = Instant::now();
-                while !done.load(Ordering::Acquire) {
-                    assert!(started.elapsed() < Duration::from_secs(60), "the guest never exited");
+                while !done.load(Ordering::Acquire) && started.elapsed() < limit {
                     std::thread::sleep(Duration::from_millis(5));
                 }
+                let exited = done.load(Ordering::Acquire);
                 machine.stop();
                 let out = sink.lock().clone();
-                out
+                let _ = tx.send(if exited { Ok(out) } else { Err(format!("the guest never exited in {limit:?}")) });
             })
-            .expect("spawn")
-            .join()
-            .expect("the machine panicked")
+            .expect("spawn");
+        // A panic in the thread drops the sender, which ends the wait at once.
+        match rx.recv_timeout(limit + Duration::from_secs(30)) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("the machine did not stop".into()),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("the machine panicked".into()),
+        }
+    }
+
+    /// A guest that never exits must fail the run, not hang it: the machine
+    /// stops when the wait gives up, and if it could not, the wait is bounded
+    /// anyway. Compiled at once where jitv2 can be told to, since a CPU
+    /// spinning in compiled code is the one that used to ignore a stop.
+    #[test]
+    fn a_guest_that_never_exits_fails_the_run_rather_than_hanging_it() {
+        let err = run_guest(never_exits_elf(), !cfg!(feature = "lightning"), Duration::from_secs(1))
+            .expect_err("a guest that never exits cannot succeed");
+        assert!(err.contains("never exited"), "{err}");
     }
 
     /// Deterministic mode makes a guest that sizes its work by time do the
