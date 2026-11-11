@@ -236,6 +236,19 @@ pub struct Pi {
     weak: Weak<Self>,
 }
 
+/// What a processor's three lines say of its inputs: bit 0 the first pending
+/// bank through its mask, bit 1 the second, bit 2 the comparator when it is
+/// pending and enabled. A function of plain values, so the loom model drives
+/// the same rule `Pi::outputs` does.
+fn levels(pending: [u64; 2], masks: [u64; 2], comparator: bool) -> u64 {
+    u64::from(pending[0] & masks[0] != 0) | u64::from(pending[1] & masks[1] != 0) << 1 | u64::from(comparator) << 2
+}
+
+/// The edges that take lines from `have` to `want`: `(rising, falling)`.
+fn edges(want: u64, have: u64) -> (u64, u64) {
+    (want & !have, have & !want)
+}
+
 impl Pi {
     /// `cpus` is how many processor sockets the node populates (1 or 2) and
     /// `cpu_base` the global index of its slice A, which PI_CPU_NUM subtracts
@@ -364,10 +377,9 @@ impl Pi {
     /// 1 bank 1 through its mask, bit 2 the comparator when enabled. Called
     /// with `lines` held, so no input moves while they are read.
     fn outputs(&self, slot: usize) -> u64 {
-        let (m0, m1) = (self.mask[slot * 2].load(Ordering::Acquire), self.mask[slot * 2 + 1].load(Ordering::Acquire));
-        u64::from(self.pend[0].load(Ordering::Acquire) & m0 != 0)
-            | u64::from(self.pend[1].load(Ordering::Acquire) & m1 != 0) << 1
-            | u64::from(self.rt_pending[slot].load(Ordering::Acquire) && self.rt_enable[slot].load(Ordering::Acquire)) << 2
+        let masks = [self.mask[slot * 2].load(Ordering::Acquire), self.mask[slot * 2 + 1].load(Ordering::Acquire)];
+        let pending = [self.pend[0].load(Ordering::Acquire), self.pend[1].load(Ordering::Acquire)];
+        levels(pending, masks, self.rt_pending[slot].load(Ordering::Acquire) && self.rt_enable[slot].load(Ordering::Acquire))
     }
 
     /// Reset processor `slice`: raise bit 63 of its interrupt word, which the
@@ -421,19 +433,20 @@ impl Pi {
                 stall();
             }
         }
-        if want & !have != 0 {
-            word.fetch_or((want & !have) << CAUSE_SHIFT, Ordering::SeqCst);
+        let (rising, falling) = edges(want, have);
+        if rising != 0 {
+            word.fetch_or(rising << CAUSE_SHIFT, Ordering::SeqCst);
             #[cfg(test)]
-            for line in (0..3).filter(|l| (want & !have) >> l & 1 != 0) {
+            for line in (0..3).filter(|l| rising >> l & 1 != 0) {
                 self.rises[s * 3 + line].fetch_add(1, Ordering::SeqCst);
             }
             #[cfg(feature = "idle-pause")]
             crate::cpu::idle_park::wake();
         }
-        if have & !want != 0 {
-            word.fetch_and(!((have & !want) << CAUSE_SHIFT), Ordering::SeqCst);
+        if falling != 0 {
+            word.fetch_and(!(falling << CAUSE_SHIFT), Ordering::SeqCst);
             #[cfg(test)]
-            for line in (0..3).filter(|l| (have & !want) >> l & 1 != 0) {
+            for line in (0..3).filter(|l| falling >> l & 1 != 0) {
                 self.falls[s * 3 + line].fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -773,3 +786,157 @@ impl BusDevice for Pi {
 
 #[cfg(test)]
 mod tests;
+
+/// The line protocol under every interleaving of two writers and a lock-free
+/// reader, checked by loom (see the module comment of `crate::pci::intx` for
+/// running it). The model is `Pi::change` and `write_lines` over loom's lock
+/// and atomics, driving the real [`levels`] and [`edges`] (the lock sequence is
+/// transcribed: `Pi::change` takes a `parking_lot` mutex and std atomics that
+/// loom cannot schedule): the lock orders an
+/// input store, the sample of the lines and their write, and only changed
+/// lines are written. It checks the one thing the lock buys: a line is written
+/// to a level the registers hold at the instant of the write, so the edges
+/// the parent sees alternate, end at the final inputs, and none comes from a
+/// stale sample.
+///
+/// `RUSTFLAGS="--cfg loom" cargo test --release --lib loom_tests`
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::{edges, levels, CAUSE_SHIFT, LINE_MASK};
+    use loom::sync::atomic::{AtomicU64, Ordering::*};
+    use loom::sync::{Arc, Mutex};
+    use loom::thread;
+
+    struct Rig {
+        lines: Mutex<()>,
+        pend: AtomicU64,
+        mask: AtomicU64,
+        /// Bit 0 the comparator's pending flag, bit 1 its enable.
+        comparator: AtomicU64,
+        /// A processor's interrupt word, lines at `CAUSE_SHIFT`.
+        word: AtomicU64,
+        /// Every edge written: the line and whether it rose.
+        log: Mutex<Vec<(u64, bool)>>,
+    }
+
+    impl Rig {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                lines: Mutex::new(()),
+                pend: AtomicU64::new(0),
+                mask: AtomicU64::new(0),
+                comparator: AtomicU64::new(0),
+                word: AtomicU64::new(0),
+                log: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn registers(&self) -> u64 {
+            levels([self.pend.load(Acquire), 0], [self.mask.load(Acquire), 0], self.comparator.load(Acquire) == 3)
+        }
+
+        /// `Pi::change`: store an input and write the lines it moved.
+        fn change(&self, input: impl FnOnce(&Self)) {
+            let _lines = self.lines.lock().unwrap();
+            input(self);
+            self.write();
+        }
+
+        /// `Pi::write_lines`: the sample, then the edges. After each write
+        /// the registers must still say what was written.
+        fn write(&self) {
+            let want = self.registers();
+            let have = (self.word.load(SeqCst) >> CAUSE_SHIFT) & LINE_MASK;
+            let (rising, falling) = edges(want, have);
+            if rising != 0 {
+                self.word.fetch_or(rising << CAUSE_SHIFT, SeqCst);
+                assert_eq!(self.registers() & rising, rising, "a line rose that the registers no longer held");
+            }
+            if falling != 0 {
+                self.word.fetch_and(!(falling << CAUSE_SHIFT), SeqCst);
+                assert_eq!(self.registers() & falling, 0, "a line fell that the registers held again");
+            }
+            let mut log = self.log.lock().unwrap();
+            for line in (0..3).map(|l| 1u64 << l) {
+                if rising & line != 0 {
+                    log.push((line, true));
+                }
+                if falling & line != 0 {
+                    log.push((line, false));
+                }
+            }
+        }
+
+        /// Writers done: each line's edges alternate from a rise, and the
+        /// word is the OR of the final inputs.
+        fn settled(&self) {
+            let log = self.log.lock().unwrap();
+            for line in (0..3).map(|l| 1u64 << l) {
+                let mine: Vec<bool> = log.iter().filter(|e| e.0 == line).map(|e| e.1).collect();
+                assert!(mine.iter().enumerate().all(|(i, &rose)| rose == (i % 2 == 0)), "line {line:#x}: {mine:?}");
+            }
+            assert_eq!((self.word.load(SeqCst) >> CAUSE_SHIFT) & LINE_MASK, self.registers(), "{log:?}");
+        }
+    }
+
+    /// Two writers and a reader that takes no lock, as a processor polling
+    /// the pending bank and the mask does. `end` is the registers when the
+    /// writers are done.
+    fn run(writer_a: fn(&Rig), writer_b: fn(&Rig), end: u64) {
+        let mut model = loom::model::Builder::new();
+        model.preemption_bound = Some(4);
+        model.check(move || {
+            let rig = Rig::new();
+            let a = {
+                let rig = rig.clone();
+                thread::spawn(move || writer_a(&rig))
+            };
+            let b = {
+                let rig = rig.clone();
+                thread::spawn(move || writer_b(&rig))
+            };
+            // The reader sees only registers and a word with no stray bits.
+            let word = rig.word.load(Acquire);
+            let _ = (rig.pend.load(Acquire), rig.mask.load(Acquire), rig.comparator.load(Acquire));
+            assert_eq!(word & !(LINE_MASK << CAUSE_SHIFT), 0);
+            a.join().unwrap();
+            b.join().unwrap();
+            rig.settled();
+            assert_eq!(rig.registers(), end);
+        });
+    }
+
+    /// A pending bit pulses behind a mask another writer opens and the
+    /// comparator it raises: the lines end at the final inputs.
+    #[test]
+    fn two_writers_end_with_the_final_inputs() {
+        run(
+            |r| {
+                r.change(|r| r.pend.store(1, Release));
+                r.change(|r| r.pend.store(0, Release));
+            },
+            |r| {
+                r.change(|r| r.mask.store(1, Release));
+                r.change(|r| r.comparator.store(3, Release));
+            },
+            0b100,
+        );
+    }
+
+    /// The same inputs ending with every one clear: no line is left high.
+    #[test]
+    fn two_writers_that_clear_everything_leave_every_line_low() {
+        run(
+            |r| {
+                r.change(|r| r.mask.store(1, Release));
+                r.change(|r| r.pend.store(1, Release));
+                r.change(|r| r.pend.store(0, Release));
+            },
+            |r| {
+                r.change(|r| r.comparator.store(3, Release));
+                r.change(|r| r.comparator.store(0, Release));
+            },
+            0,
+        );
+    }
+}
