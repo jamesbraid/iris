@@ -3,9 +3,9 @@
 //!
 //! This is the Octane variant of our RAD1 model: the register file the
 //! driver's start-up programs, the free-running UST counter and its control
-//! word, the DMA descriptor words, status-DMA control and the analog output
-//! enable. Behaviour that no source establishes is kept as the model
-//! has it, and flagged below.
+//! word, the DMA descriptor words, status-DMA control, the analog output
+//! enable and the AES3 and ADAT output enables. Behaviour that no source
+//! establishes is kept as the model has it, and flagged below.
 //!
 //! Approximations kept from the model:
 //!
@@ -32,6 +32,11 @@
 //!   use of bits [23:8] are the model's inference, not confirmed.
 //! * The AES3 subcode channel runs at 48000/192 Hz with empty records: no
 //!   capture times them, the rate is inferred from the record layout.
+//! * The AES3 and ADAT outputs run like the analog output at 44.1 kHz and
+//!   publish their positions and status pointers, but the card has no host
+//!   voice for them: their frames are read from the ring and dropped. Which
+//!   clock paces them is unknown. IRIX 6.5.13f's mixer reads their status
+//!   pointers; a zero pointer made it spin in its fill loop.
 //! * UST ticks every 960 ns, a selected board policy; the physical rate is
 //!   unmeasured.
 //! * The sample clock, UST and status schedule run on host wall time, less
@@ -105,14 +110,27 @@ const RING_STATUS: RingRegs = [0x500, 0x528, 0x504, 0x4b4, 0x4b8, 0x4bc];
 const RING_INPUT: RingRegs = [0x4d0, 0x510, 0x4d4, 0x400, 0x404, 0x408];
 const RING_OUTPUT: RingRegs = [0x4f8, 0x524, 0x4fc, 0x40c, 0x410, 0x414];
 const RING_AES_SUB: RingRegs = [0x4e0, 0x518, 0x4e4, 0x448, 0x44c, 0x450];
-const RINGS: [RingRegs; 4] = [RING_STATUS, RING_INPUT, RING_OUTPUT, RING_AES_SUB];
+/// The digital outputs' set A low and high words and control are three
+/// separate registers each, set B sits in descriptor RAM entries 3 and 5.
+const RING_AES_OUT: RingRegs = [0x4f0, 0x520, 0x4f4, 0x424, 0x428, 0x42c];
+const RING_ADAT_OUT: RingRegs = [0x4e8, 0x51c, 0x4ec, 0x43c, 0x440, 0x444];
+const RINGS: [RingRegs; 6] = [RING_STATUS, RING_INPUT, RING_OUTPUT, RING_AES_SUB, RING_AES_OUT, RING_ADAT_OUT];
 
 /// The start-up words: stored and read back. Unsupported interfaces stay
 /// disabled (see the refused values in [`Rad1::write`]).
-const STARTUP_OFFSETS: [u32; 26] = [
+const STARTUP_WORDS: usize = 24;
+const STARTUP_OFFSETS: [u32; STARTUP_WORDS] = [
     0x44, 0x48, 0x4c, 0x50, 0x54, 0x70, 0x74, 0x78, 0x7c, 0x80, 0x88, 0x8c, 0x90, 0xa0, 0xa4,
-    0xa8, 0xac, 0xb0, 0xb4, 0xb8, 0xbc, 0x4c0, 0x4c8, 0x4d8, 0x4e8, 0x4f0,
+    0xa8, 0xac, 0xb0, 0xb4, 0xb8, 0xbc, 0x4c0, 0x4c8, 0x4d8,
 ];
+/// The control words of the rings IRIX 6.5.13f programs for the digital
+/// outputs: 4 KiB for AES3, 16 KiB for ADAT, with the channel type in bits 6:3.
+const AES_OUT_LIMIT: u32 = 0xffff_f018;
+const ADAT_OUT_LIMIT: u32 = 0xffff_c028;
+/// The AES3 and ADAT output enables: bit 0 runs the output, the other
+/// bits are stored.
+const REG_ADAT_OUT_EN: u32 = 0x50;
+const REG_AES_OUT_EN: u32 = 0x54;
 
 const SUBCODE_FIRST: u32 = 0x1000;
 const SUBCODE_LAST: u32 = 0x1218;
@@ -410,12 +428,14 @@ impl Wav {
     }
 }
 
-/// Channel types, as indices into [`State::chan`]. Only the three the
+/// Channel types, as indices into [`State::chan`]. Only the five the
 /// Octane supports are modelled.
 const CH_IN: usize = 0;
 const CH_OUT: usize = 1;
 const CH_AES_SUB: usize = 2;
-const NUM_CH: usize = 3;
+const CH_AES_OUT: usize = 3;
+const CH_ADAT_OUT: usize = 4;
+const NUM_CH: usize = 5;
 /// The generator the analog output uses until 0x58 names one.
 const OUT_DEFAULT_CG: usize = 1;
 
@@ -446,7 +466,7 @@ struct ChanInfo {
 
 /// Pointer words in a status slot for the channel types the Octane does not
 /// run: written as zero.
-const SLOT_PTR_UNUSED: [u64; 5] = [0x00, 0x08, 0x18, 0x28, 0x30];
+const SLOT_PTR_UNUSED: [u64; 3] = [0x00, 0x08, 0x18];
 
 const CHAN_INFO: [ChanInfo; NUM_CH] = [
     ChanInfo {
@@ -463,6 +483,16 @@ const CHAN_INFO: [ChanInfo; NUM_CH] = [
         name: "AES3-input subcode", ring: RING_AES_SUB, tag: 6, frame_bytes: 256,
         enable_bit: SUBCODE_ENABLE_BIT, output: false, clockgen: None, freq: FREQ_AES_SUB, pos_a: 0x10,
         pos_a_shift: 4, pos_b: 0x10, pos_b_shift: 18, pos_b_parent: true, slot_ptr: 0x20,
+    },
+    ChanInfo {
+        name: "AES3 output", ring: RING_AES_OUT, tag: 3, frame_bytes: 8, enable_bit: ENABLE_BIT,
+        output: true, clockgen: None, freq: FREQ_ANALOG, pos_a: 0x24, pos_a_shift: 18, pos_b: 0x28,
+        pos_b_shift: 18, pos_b_parent: false, slot_ptr: 0x30,
+    },
+    ChanInfo {
+        name: "ADAT output", ring: RING_ADAT_OUT, tag: 5, frame_bytes: 32, enable_bit: ENABLE_BIT,
+        output: true, clockgen: None, freq: FREQ_ANALOG, pos_a: 0x1c, pos_a_shift: 18, pos_b: 0x20,
+        pos_b_shift: 18, pos_b_parent: false, slot_ptr: 0x28,
     },
 ];
 
@@ -497,7 +527,7 @@ struct Desc {
 }
 
 struct State {
-    startup: [u32; 26],
+    startup: [u32; STARTUP_WORDS],
     subcode: [u64; SUBCODE_WORDS],
     dma_bank: [u32; DMA_BANK_WORDS],
     sample_pos: [u32; POS_WORDS],
@@ -538,7 +568,7 @@ struct State {
 impl State {
     fn new(now: i64) -> Self {
         Self {
-            startup: [0; 26],
+            startup: [0; STARTUP_WORDS],
             subcode: [0; SUBCODE_WORDS],
             dma_bank: [0; DMA_BANK_WORDS],
             sample_pos: [0; POS_WORDS],
@@ -653,14 +683,9 @@ impl State {
     }
 
     fn ring_running(&self, ring: &RingRegs) -> bool {
-        if *ring == RING_INPUT {
-            self.chan[CH_IN].running
-        } else if *ring == RING_OUTPUT {
-            self.chan[CH_OUT].running
-        } else if *ring == RING_AES_SUB {
-            self.chan[CH_AES_SUB].running
-        } else {
-            self.status_running
+        match CHAN_INFO.iter().position(|info| info.ring == *ring) {
+            Some(idx) => self.chan[idx].running,
+            None => self.status_running,
         }
     }
 
@@ -1180,7 +1205,7 @@ impl Inner {
             if let Some(i) = Self::startup_index(off) {
                 let refused = match off {
                     0x44 => 5,
-                    0x48 | 0x50 | 0x54 => 1,
+                    0x48 => 1,
                     _ => 0,
                 };
                 if val & refused != 0 {
@@ -1204,6 +1229,17 @@ impl Inner {
                         return None;
                     }
                     self.enable_write(s, CH_AES_SUB, val, now);
+                } else if off == REG_ADAT_OUT_EN || off == REG_AES_OUT_EN {
+                    // ADAT and AES3 output control: bit 0 runs the output.
+                    let (idx, ring, limit) = if off == REG_ADAT_OUT_EN {
+                        (CH_ADAT_OUT, &RING_ADAT_OUT, ADAT_OUT_LIMIT)
+                    } else {
+                        (CH_AES_OUT, &RING_AES_OUT, AES_OUT_LIMIT)
+                    };
+                    if val & ENABLE_BIT != 0 && !s.chan[idx].running && !s.ring_valid(ring, false, limit) {
+                        return None;
+                    }
+                    self.enable_write(s, idx, val, now);
                 }
                 s.startup[i] = val;
                 match off {
@@ -1622,7 +1658,7 @@ impl Inner {
                 crate::dlog!(LogModule::Rad1, "rad1: {} DMA at {:#x} + {:#x} failed", info.name, c.base, c.offset);
                 return false;
             }
-            if info.output {
+            if idx == CH_OUT {
                 let samples = &mut pcm[..n as usize * PCM_CHANNELS];
                 frames_to_pcm(buf, samples, ANALOG_WORDS);
                 if let Some(sink) = self.sink.lock().as_mut() {

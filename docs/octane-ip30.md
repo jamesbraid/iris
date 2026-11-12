@@ -229,6 +229,8 @@ through its event channel. `HACKING.md` lists the thread names.
 - ISP1040: the firmware never runs; some mailbox commands are accepted
   without effect and noted.
 - RAD audio input records silence; only the analog output reaches the host.
+  The AES3 and ADAT outputs run (positions and status pointers) but their
+  frames are dropped; which clock paces them is unknown.
 - Board identity records carry made-up barcodes and serial numbers.
 - Snapshots (the monitor's `save` and `load`, iris-ci's `save`, `restore` and
   `rollback`) cover a one-processor Octane without a graphics board; a

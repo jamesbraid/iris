@@ -27,14 +27,14 @@ fn rd(r: &Rad1, off: u32) -> u32 {
     r.bar_read(0, off, 4)
 }
 
-const STARTUP: [(u32, u32); 28] = [
+const STARTUP: [(u32, u32); 26] = [
     (0x44, 0xa0000008), (0x48, 0x10), (0x4c, 0x03000000), (0x50, 0x60000000),
     (0x54, 0x4000000c), (0x70, 0x1440), (0x74, 0x08000010), (0x78, 0x00fac688),
     (0x7c, 0xd6d6d6d6), (0x80, 0xffe20000), (0x88, 3), (0x8c, 2), (0x90, 2),
     (0xa0, 0x02000001), (0xa4, 0x12345678), (0xa8, 1), (0xac, 2), (0xb0, 3),
     (0xb4, 4), (0xb8, 0x9fffffff), (0xbc, 0x9fffffff), (0x4c0, 0xa000c000),
     (0x4c8, 0xa000c800), (0x4d0, 0xa000d000), (0x4d8, 0xa000d800),
-    (0x4e0, 0xa000e000), (0x4e8, 0xa000e800), (0x4f0, 0xa000f000),
+    (0x4e0, 0xa000e000),
 ];
 
 #[test]
@@ -1461,5 +1461,89 @@ fn a_corrupt_save_is_refused_naming_the_field() {
         edit(v.as_table_mut().unwrap());
         let e = card().load_state(&v).expect_err(want);
         assert!(e.contains(want), "{want}: got {e}");
+    }
+}
+
+/// IRIX's 4 KiB AES3 ring and 16 KiB ADAT ring: control words 0xfffff018 and
+/// 0xffffc028 (the next-descriptor tags 3 and 5 sit in bits 6:3).
+const AES_OUT_CTRL: u32 = 0xffff_f018;
+const ADAT_OUT_CTRL: u32 = 0xffff_c028;
+
+#[test]
+fn digital_outputs_run_and_publish_their_pointers() {
+    let (r, ram) = dma_card();
+    start_ust(&r);
+    let (aes, adat) = (0x10_0000u32, 0x20_0000u32);
+    // The start-up words leave both outputs stopped.
+    wr(&r, 0x50, 0x6000_0000);
+    wr(&r, 0x54, 0x4000_0000);
+
+    // A ring of the wrong size for the output, or a set B that differs from
+    // set A, starts nothing.
+    program(&r, &RING_ADAT_OUT, adat, 0xffff_f028);
+    wr(&r, 0x50, 0x6000_0001);
+    assert_eq!(rd(&r, 0x50), 0x6000_0000, "ADAT enable with an AES3-sized ring");
+    program(&r, &RING_AES_OUT, aes, AES_OUT_CTRL);
+    wr(&r, 0x424, aes + 0x1000);
+    wr(&r, 0x54, 0x4000_0001);
+    assert_eq!(rd(&r, 0x54), 0x4000_0000, "AES3 enable with a differing set B");
+
+    program(&r, &RING_AES_OUT, aes, AES_OUT_CTRL);
+    program(&r, &RING_ADAT_OUT, adat, ADAT_OUT_CTRL);
+    // Set A's low words are descriptor words, not start-up storage.
+    assert_eq!(rd(&r, 0x4f4), AES_OUT_CTRL);
+    assert_eq!(rd(&r, 0x4e8), adat);
+    wr(&r, 0x54, 0x4000_0001);
+    wr(&r, 0x50, 0x6000_0001);
+    assert_eq!(rd(&r, 0x54), 0x4000_0001);
+    assert_eq!(rd(&r, 0x50), 0x6000_0001);
+    assert_eq!(r.state.lock().chan[CH_AES_OUT].len, 0x1000);
+    assert_eq!(r.state.lock().chan[CH_ADAT_OUT].len, 0x4000);
+
+    // One frame is due at 22676 ns, not 22675.
+    at(&r, 22_675);
+    assert_eq!(rd(&r, 0x24) >> 18, 0);
+    assert_eq!(rd(&r, 0x1c) >> 18, 0);
+    at(&r, 22_676);
+    assert_eq!(rd(&r, 0x24) >> 18, 1);
+    assert_eq!(rd(&r, 0x1c) >> 18, 1);
+
+    // A running ring cannot be reprogrammed.
+    wr(&r, 0x4f0, 0xa000_b000);
+    assert_eq!(rd(&r, 0x4f0), aes);
+    wr(&r, 0x444, 0xffff_f028);
+    assert_eq!(rd(&r, 0x444), ADAT_OUT_CTRL);
+
+    // 25 ms: past a lap of each 512-frame ring. A and B count alike.
+    at(&r, 25_000_000);
+    let count = 1102;
+    for pos in [0x24, 0x28, 0x1c, 0x20] {
+        assert_eq!(rd(&r, pos) >> 18, count, "position {pos:#x}");
+    }
+    assert_eq!(rd(&r, 0x2c), 0, "the analog output is not running");
+
+    // The status slot carries each pointer, and none is left zero.
+    wr(&r, 0x500, 0x30_0000);
+    wr(&r, 0x504, 0xffff_fffc);
+    wr(&r, 0x5c, 0x40001);
+    let (aes_ptr, adat_ptr) = (word(&ram, 0x30_0000 + 0x30), word(&ram, 0x30_0000 + 0x28));
+    assert_eq!(aes_ptr, aes + count * 8 % 0x1000);
+    assert_eq!(adat_ptr, adat + count * 32 % 0x4000);
+    assert_eq!(word(&ram, 0x30_0000 + 0x38), 0);
+
+    // Disabling holds the count and the pointer; the other bits are kept.
+    wr(&r, 0x54, 0x4000_000c);
+    wr(&r, 0x50, 0x6000_0000);
+    assert_eq!(rd(&r, 0x54), 0x4000_000c);
+    at(&r, 26_000_000);
+    assert_eq!(rd(&r, 0x24) >> 18, count);
+    assert_eq!(rd(&r, 0x1c) >> 18, count);
+    wr(&r, 0x5c, 0x40001);
+    assert_eq!(word(&ram, 0x30_0000 + 0x30), aes_ptr);
+    assert_eq!(word(&ram, 0x30_0000 + 0x28), adat_ptr);
+
+    r.reset();
+    for off in [0x24, 0x1c, 0x4f0, 0x444] {
+        assert_eq!(rd(&r, off), 0, "{off:#x}");
     }
 }

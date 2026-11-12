@@ -55,7 +55,14 @@ use toml::Value;
 /// levels in their own layout. A v5 reader would load none of it and leave
 /// every BAR unassigned under a running kernel, and a v6 reader does the
 /// same with a v5 snapshot, so both machines refuse the other schema.
-pub const SCHEMA_VERSION: u32 = 6;
+///
+/// v6 → v7: the Octane's RAD1 keeps its start-up store at 24 words where it
+/// kept 26, and its channel list at five entries where it kept three. A v6
+/// reader expects the old counts and cannot load a v7 snapshot as saved, and
+/// a v7 reader cannot load a v6 one either, so the Octane refuses both. The
+/// O2 shares the constant and refuses v6 snapshots too, though its own layout
+/// is unchanged.
+pub const SCHEMA_VERSION: u32 = 7;
 
 const MANIFEST_FILE: &str = "snapshot.toml";
 
