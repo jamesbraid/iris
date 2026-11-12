@@ -14,6 +14,11 @@
 //! (`GfxDisplay::gpu`). Threading follows the GL renderer's rules: make the
 //! presenter on the thread that owns the window, present from the board's
 //! display thread.
+//!
+//! A run with no window (`ci` mode) presents into a texture instead
+//! ([`Presenter::offscreen`]): the same layers, the same passes, with only
+//! the surface's acquire and present left out, so what the window costs
+//! and does can be run and counted without one.
 
 use std::sync::Arc;
 
@@ -55,11 +60,48 @@ struct Layer {
     last: Quad,
 }
 
-/// The window's surface and what draws into it.
+/// What a presenter draws into.
+enum Target {
+    /// A window's surface.
+    Window { surface: wgpu::Surface<'static>, config: wgpu::SurfaceConfiguration },
+    /// A texture the window's size, for a run with no window, and the last
+    /// frame's submission: it is waited on after the next is submitted, so
+    /// at most two frames are in flight, as the window's frame latency
+    /// allows.
+    Offscreen { texture: wgpu::Texture, last: Option<wgpu::SubmissionIndex> },
+}
+
+impl Target {
+    fn size(&self) -> (u32, u32) {
+        match self {
+            Target::Window { config, .. } => (config.width, config.height),
+            Target::Offscreen { texture, .. } => (texture.width(), texture.height()),
+        }
+    }
+}
+
+/// The format of an offscreen target: plain, as the window's is chosen.
+const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+fn offscreen_texture(gpu: &Gpu, width: u32, height: u32) -> wgpu::Texture {
+    gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("present offscreen"),
+        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: OFFSCREEN_FORMAT,
+        // Copied from only by a test or a tool that wants the pixels.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+
+/// The window's surface (or the texture standing in for it) and what
+/// draws into it.
 pub struct Presenter {
     gpu: Arc<Gpu>,
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
+    target: Target,
     opaque: wgpu::RenderPipeline,
     blended: wgpu::RenderPipeline,
     frame: Layer,
@@ -137,7 +179,28 @@ impl Presenter {
             color_space: Default::default(),
         };
         surface.configure(&gpu.device, &config);
+        Self::with_target(gpu, Target::Window { surface, config }, format, (frame_w, frame_h), (status_w, status_rows))
+    }
 
+    /// A presenter with no window, drawing into a texture `width` x
+    /// `height` pixels; otherwise as `new`.
+    pub fn offscreen(
+        gpu: &Arc<Gpu>,
+        (width, height): (u32, u32),
+        frame: (u32, u32),
+        status: (u32, u32),
+    ) -> Result<Presenter, String> {
+        let target = Target::Offscreen { texture: offscreen_texture(gpu, width, height), last: None };
+        Self::with_target(gpu, target, OFFSCREEN_FORMAT, frame, status)
+    }
+
+    fn with_target(
+        gpu: &Arc<Gpu>,
+        target: Target,
+        format: wgpu::TextureFormat,
+        (frame_w, frame_h): (u32, u32),
+        (status_w, status_rows): (u32, u32),
+    ) -> Result<Presenter, String> {
         let device = &gpu.device;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("present layer"),
@@ -271,8 +334,7 @@ impl Presenter {
         gpu.check()?;
         Ok(Presenter {
             gpu: Arc::clone(gpu),
-            surface,
-            config,
+            target,
             opaque,
             blended,
             frame,
@@ -295,10 +357,16 @@ impl Presenter {
     /// The window's new size in pixels.
     pub fn resize(&mut self, width: u32, height: u32) {
         let (w, h) = (width.max(1), height.max(1));
-        if (w, h) != (self.config.width, self.config.height) {
-            self.config.width = w;
-            self.config.height = h;
-            self.surface.configure(&self.gpu.device, &self.config);
+        if (w, h) == self.target.size() {
+            return;
+        }
+        match &mut self.target {
+            Target::Window { surface, config } => {
+                config.width = w;
+                config.height = h;
+                surface.configure(&self.gpu.device, config);
+            }
+            Target::Offscreen { texture, .. } => *texture = offscreen_texture(&self.gpu, w, h),
         }
     }
 
@@ -322,38 +390,45 @@ impl Presenter {
         if fw == 0 || fh == 0 {
             return Ok(());
         }
-        // A texture the surface calls suboptimal (the window changed size
-        // under it, as while its border is dragged) is given back before the
-        // surface is configured again: wgpu refuses to configure a surface
-        // with a texture of its outstanding, and that refusal left the
-        // surface stale for every frame after. One retry on the fresh
-        // configuration; a frame that still cannot be had is skipped.
-        let mut target = None;
-        for attempt in 0..2 {
-            match self.surface.get_current_texture() {
-                wgpu::CurrentSurfaceTexture::Success(t) => {
-                    target = Some(t);
-                    break;
-                }
-                wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
-                    if attempt == 1 {
-                        // Still suboptimal on the fresh configuration: the
-                        // window moved again; draw it, the next frame catches up.
-                        target = Some(t);
-                        break;
+        let (surface_texture, view) = match &self.target {
+            Target::Window { surface, config } => {
+                // A texture the surface calls suboptimal (the window changed size
+                // under it, as while its border is dragged) is given back before the
+                // surface is configured again: wgpu refuses to configure a surface
+                // with a texture of its outstanding, and that refusal left the
+                // surface stale for every frame after. One retry on the fresh
+                // configuration; a frame that still cannot be had is skipped.
+                let mut target = None;
+                for attempt in 0..2 {
+                    match surface.get_current_texture() {
+                        wgpu::CurrentSurfaceTexture::Success(t) => {
+                            target = Some(t);
+                            break;
+                        }
+                        wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                            if attempt == 1 {
+                                // Still suboptimal on the fresh configuration: the
+                                // window moved again; draw it, the next frame catches up.
+                                target = Some(t);
+                                break;
+                            }
+                            drop(t);
+                            surface.configure(&self.gpu.device, config);
+                        }
+                        wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                            surface.configure(&self.gpu.device, config);
+                            return Ok(());
+                        }
+                        wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
+                        wgpu::CurrentSurfaceTexture::Validation => return self.gpu.check(),
                     }
-                    drop(t);
-                    self.surface.configure(&self.gpu.device, &self.config);
                 }
-                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                    self.surface.configure(&self.gpu.device, &self.config);
-                    return Ok(());
-                }
-                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
-                wgpu::CurrentSurfaceTexture::Validation => return self.gpu.check(),
+                let Some(target) = target else { return Ok(()) };
+                let view = target.texture.create_view(&Default::default());
+                (Some(target), view)
             }
-        }
-        let Some(target) = target else { return Ok(()) };
+            Target::Offscreen { texture, .. } => (None, texture.create_view(&Default::default())),
+        };
 
         let mut enc = self.gpu.encoder("present");
         match frame {
@@ -384,16 +459,16 @@ impl Presenter {
         }
         self.upload(&self.status, status, stride, fw, self.status_rows);
 
-        let p = Placement::letterbox(fw as f32, fh as f32, self.status_rows as f32, self.config.width as f32, self.config.height as f32);
+        let (ww, wh) = self.target.size();
+        let p = Placement::letterbox(fw as f32, fh as f32, self.status_rows as f32, ww as f32, wh as f32);
         let integer = p.scale == p.scale.round() && p.scale >= 1.0;
         let r = p.frame;
-        let win = (self.config.width as f32, self.config.height as f32);
+        let win = (ww as f32, wh as f32);
         let q = &*self.gpu;
         place(q, win, &mut self.frame, r, fw, fh);
         place(q, win, &mut self.overlay, r, fw, fh);
         place(q, win, &mut self.status, [r[0], r[3], r[2], r[3] + p.status], fw, self.status_rows);
 
-        let view = target.texture.create_view(&Default::default());
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("present"),
@@ -420,9 +495,15 @@ impl Presenter {
             pass.set_bind_group(0, group(&self.status, integer), &[]);
             pass.draw(0..6, 0..1);
         }
-        self.gpu.submit(enc);
-        self.gpu.queue.present(target);
+        let submitted = self.gpu.submit(enc);
         self.frames += 1;
+        if let Some(t) = surface_texture {
+            self.gpu.queue.present(t);
+        } else if let Target::Offscreen { last, .. } = &mut self.target {
+            if let Some(previous) = last.replace(submitted) {
+                return self.gpu.wait(Some(previous));
+            }
+        }
         self.gpu.check()
     }
 }
@@ -445,7 +526,48 @@ fn place(gpu: &Gpu, (ww, wh): (f32, f32), layer: &mut Layer, r: [f32; 4], w: u32
 
 #[cfg(test)]
 mod tests {
-    use super::Placement;
+    use super::{Frame, Placement, Presenter, Target};
+    use crate::wgpu::{Gpu, GpuOptions};
+
+    /// The offscreen target is drawn as the window's surface is: a 4 x 4
+    /// frame from a buffer on the device at the top of a target that fits
+    /// it at 1x, the status bar's row under it. Needs a GPU (or lavapipe);
+    /// skips without one.
+    #[test]
+    fn an_offscreen_presenter_draws_the_frame_and_the_status_bar() {
+        let gpu = match Gpu::new(&GpuOptions::default()) {
+            Ok(g) => g,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        let mut p = Presenter::offscreen(&gpu, (4, 5), (4, 4), (4, 1)).expect("an offscreen presenter");
+        let words: Vec<u32> = (0..16).map(|i| 0x0011_2200 | i).collect();
+        let frame = gpu.buffer("test frame", 64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+        gpu.write(&frame, 0, bytemuck::cast_slice(&words));
+        let status = [0xff66_5544u32; 4];
+        for _ in 0..3 {
+            p.present(Frame::Gpu { buffer: &frame, width: 4, height: 4 }, None, &status, 4).expect("present");
+        }
+        assert_eq!(p.frames, 3);
+
+        let Target::Offscreen { texture, .. } = &p.target else { unreachable!("an offscreen presenter") };
+        let out = gpu.buffer("test readback", 256 * 5, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+        let mut enc = gpu.encoder("test readback");
+        enc.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo { buffer: &out, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256), rows_per_image: Some(5) } },
+            wgpu::Extent3d { width: 4, height: 5, depth_or_array_layers: 1 },
+        );
+        gpu.submit(enc);
+        out.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+        gpu.wait(None).expect("readback");
+        let bytes = out.slice(..).get_mapped_range().expect("mapped").to_vec();
+        let texel = |x: usize, y: usize| <[u8; 4]>::try_from(&bytes[y * 256 + x * 4..][..4]).unwrap();
+        for (i, &w) in words.iter().enumerate() {
+            let (x, y) = (i % 4, i / 4);
+            assert_eq!(texel(x, y), [0x11, 0x22, w as u8, 0xff], "frame texel ({x}, {y})");
+        }
+        assert_eq!(texel(2, 4), [0x44, 0x55, 0x66, 0xff], "the status bar");
+    }
 
     /// The GL renderer's letterbox: a 1280 x 1024 frame with a 16-row bar in
     /// a window of exactly that size is drawn at 1x from the top left, and in

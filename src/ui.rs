@@ -765,11 +765,9 @@ impl Renderer for GlRenderer {
 #[cfg(feature = "wgpu")]
 struct WgpuRenderer {
     presenter: crate::wgpu::Presenter,
-    window_size: Arc<Mutex<Option<(u32, u32)>>>,
-    resize_request: Arc<Mutex<Option<ResizeRequest>>>,
-    event_proxy: EventLoopProxy<()>,
-    scale: u32,
-    display_res: Arc<Mutex<(u32, u32)>>,
+    /// The window, or None when the presenter draws into a texture
+    /// instead (`draw_offscreen`).
+    window: Option<WindowLink>,
     compositor: SwCompositor,
     /// Newport's planes composed on the presenter's device; None until the
     /// first such frame, or when it cannot be made (then `compositor`).
@@ -783,8 +781,45 @@ struct WgpuRenderer {
     board_device: bool,
 }
 
+/// What the wgpu renderer shares with its window's event thread.
+#[cfg(feature = "wgpu")]
+struct WindowLink {
+    /// The window's new size, set by the event thread.
+    size: Arc<Mutex<Option<(u32, u32)>>>,
+    resize_request: Arc<Mutex<Option<ResizeRequest>>>,
+    event_proxy: EventLoopProxy<()>,
+    scale: u32,
+    display_res: Arc<Mutex<(u32, u32)>>,
+}
+
 #[cfg(feature = "wgpu")]
 impl WgpuRenderer {
+    /// A renderer presenting through `presenter` for `display`, in `window`
+    /// or offscreen.
+    fn new(display: &Arc<dyn GfxDisplay>, presenter: crate::wgpu::Presenter, window: Option<WindowLink>) -> WgpuRenderer {
+        let board_device = display.gpu().is_some_and(|g| Arc::ptr_eq(&g, presenter.gpu()));
+        WgpuRenderer { presenter, window, compositor: SwCompositor::new(), ng1: None, readback: Vec::new(), failed: false, board_device }
+    }
+
+    /// The device to present on: the board's when it draws on one, so a
+    /// frame it composes there stays on it, else one of its own.
+    fn device(display: &Arc<dyn GfxDisplay>) -> Result<Arc<crate::wgpu::Gpu>, String> {
+        match display.gpu() {
+            Some(g) => Ok(g),
+            None => crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default()),
+        }
+    }
+
+    /// Take the window's new size, and give it the frame's.
+    fn follow_window(&mut self, width: u32, height: u32) {
+        if let Some(window) = &self.window {
+            if let Some((w, h)) = window.size.lock().take() {
+                self.presenter.resize(w, h);
+            }
+            *window.display_res.lock() = (width, height);
+        }
+    }
+
     fn report(&mut self, r: Result<(), String>) {
         if let Err(e) = r {
             if !self.failed {
@@ -812,10 +847,7 @@ impl Renderer for WgpuRenderer {
         if width == 0 || height == 0 {
             return;
         }
-        if let Some((w, h)) = self.window_size.lock().take() {
-            self.presenter.resize(w, h);
-        }
-        *self.display_res.lock() = (width as u32, height as u32);
+        self.follow_window(width as u32, height as u32);
         let prebuilt = screen.prebuilt;
         // Newport's planes: composed on the GPU, presented from there, read
         // back only for screenshots and VNC (`need_readback`).
@@ -879,11 +911,18 @@ impl Renderer for WgpuRenderer {
     }
 
     fn resize(&mut self, width: usize, height: usize) {
-        // As the GL renderer: publish the resolution, ask the event thread
-        // to snap the window (never touch the window from here).
-        *self.display_res.lock() = (width as u32, height as u32);
-        *self.resize_request.lock() = Some(ResizeRequest::Scale(self.scale));
-        let _ = self.event_proxy.send_event(());
+        match &self.window {
+            // As the GL renderer: publish the resolution, ask the event thread
+            // to snap the window (never touch the window from here).
+            Some(window) => {
+                *window.display_res.lock() = (width as u32, height as u32);
+                *window.resize_request.lock() = Some(ResizeRequest::Scale(window.scale));
+                let _ = window.event_proxy.send_event(());
+            }
+            // Offscreen, the texture takes the size the window snaps to at
+            // scale 1.
+            None => self.presenter.resize(width as u32, (height + STATUS_BAR_HEIGHT) as u32),
+        }
     }
 
     fn compositor_status(&self) -> String {
@@ -909,10 +948,7 @@ impl Renderer for WgpuRenderer {
         if width == 0 || height == 0 {
             return;
         }
-        if let Some((w, h)) = self.window_size.lock().take() {
-            self.presenter.resize(w, h);
-        }
-        *self.display_res.lock() = (width, height);
+        self.follow_window(width, height);
         let ov = if overlay.active() { Some(overlay.render_pixels(&screen.overlay_source())) } else { None };
         let sb = sbtex.render_pixels(status, stats, width as usize);
         let r = self.presenter.present(crate::wgpu::Frame::Gpu { buffer: frame, width, height }, ov, sb, crate::disp::FB_STRIDE);
@@ -941,10 +977,7 @@ impl Renderer for WgpuRenderer {
         if overlay.active() {
             return Err("resident debug overlays require a raw-plane observation".into());
         }
-        if let Some((w, h)) = self.window_size.lock().take() {
-            self.presenter.resize(w, h);
-        }
-        *self.display_res.lock() = (width, height);
+        self.follow_window(width, height);
         let sb = sbtex.render_pixels(status, stats, width as usize);
         self.presenter.present(
             crate::wgpu::Frame::Gpu { buffer: frame, width, height },
@@ -953,6 +986,25 @@ impl Renderer for WgpuRenderer {
             crate::disp::FB_STRIDE,
         )
     }
+}
+
+/// Present `display`'s frames through the wgpu renderer with no window,
+/// into a texture the window's size: `ci` mode with `renderer = "wgpu"`.
+/// The board composes and presents as it would for the window, on the GPU
+/// when it draws there, so that path runs and can be measured on a machine
+/// with no display; nothing is read back.
+#[cfg(feature = "wgpu")]
+pub fn draw_offscreen(display: &Arc<dyn GfxDisplay>) -> Result<(), String> {
+    let gpu = WgpuRenderer::device(display)?;
+    let presenter = crate::wgpu::Presenter::offscreen(
+        &gpu,
+        (1280, 1024 + STATUS_BAR_HEIGHT as u32),
+        (crate::disp::FB_STRIDE as u32, crate::disp::FB_MAX_H as u32),
+        (crate::disp::FB_STRIDE as u32, STATUS_BAR_HEIGHT as u32),
+    )?;
+    eprintln!("iris: presenting offscreen with wgpu on {}", gpu.caps.adapter);
+    *display.renderer_slot().lock() = Some(Box::new(WgpuRenderer::new(display, presenter, None)));
+    Ok(())
 }
 
 struct MouseDelta {
@@ -1165,10 +1217,7 @@ impl Ui {
         attrs: WindowAttributes,
         scale: u32,
     ) -> Result<(Arc<Window>, Arc<Mutex<Option<(u32, u32)>>>, Arc<Mutex<Option<ResizeRequest>>>, Arc<Mutex<(u32, u32)>>), String> {
-        let gpu = match display.gpu() {
-            Some(g) => g,
-            None => crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default())?,
-        };
+        let gpu = WgpuRenderer::device(display)?;
         #[allow(deprecated)]
         let window = Arc::new(event_loop.create_window(attrs).map_err(|e| format!("create the window: {e}"))?);
         let size = window.inner_size();
@@ -1183,20 +1232,14 @@ impl Ui {
         let window_size = Arc::new(Mutex::new(None));
         let resize_request = Arc::new(Mutex::new(None));
         let display_res = Arc::new(Mutex::new((1280u32, 1024u32)));
-        let renderer = WgpuRenderer {
-            presenter,
-            window_size: window_size.clone(),
+        let link = WindowLink {
+            size: window_size.clone(),
             resize_request: resize_request.clone(),
             event_proxy: event_loop.create_proxy(),
             scale,
             display_res: display_res.clone(),
-            compositor: SwCompositor::new(),
-            ng1: None,
-            readback: Vec::new(),
-            failed: false,
-            board_device: display.gpu().is_some_and(|g| Arc::ptr_eq(&g, &gpu)),
         };
-        *display.renderer_slot().lock() = Some(Box::new(renderer));
+        *display.renderer_slot().lock() = Some(Box::new(WgpuRenderer::new(display, presenter, Some(link))));
         Ok((window, window_size, resize_request, display_res))
     }
 

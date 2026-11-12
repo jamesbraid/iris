@@ -152,6 +152,9 @@ hashes are given where a change is easiest to understand by reading the commit.
 - `vpro frames [reset]` reports the VPro display thread's frames: how many it
   composed, how many it skipped because nothing on screen changed, how many it
   presented and from where, and how long a frame took.
+- In `ci` mode with no window, `renderer = "wgpu"` now presents each frame into
+  an offscreen texture the way the window would, so the windowed display path
+  runs and can be measured on a machine with no display.
 
 ### Serial logs append on every machine
 

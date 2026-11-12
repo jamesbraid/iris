@@ -199,6 +199,14 @@ fn main() {
             eprintln!("iris: no graphics board fitted: running on the serial console, no window");
         } else if ci_enabled {
             eprintln!("iris: --ci mode (REX3 rendering to offscreen buffer, no window)");
+            // The wgpu renderer presents into a texture instead, so the
+            // board takes the path it takes for the window.
+            #[cfg(feature = "wgpu")]
+            if let (iris::config::UiRenderer::Wgpu, Some(display)) = (ui_renderer, machine.get_display()) {
+                if let Err(e) = iris::ui::draw_offscreen(&display) {
+                    eprintln!("iris: the wgpu renderer is unavailable ({e}); presenting nothing");
+                }
+            }
         }
         // Park the main thread so background threads (CPU, REX3 refresh,
         // CI socket) keep running. `quit` via the CI socket calls

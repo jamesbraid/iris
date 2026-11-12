@@ -937,6 +937,68 @@ fn the_gpu_scanout_composes_only_a_changed_frame() {
     }
 }
 
+/// The display thread's frame as the wgpu window runs it, with the
+/// renderer presenting into a texture instead (`ci` mode with
+/// `renderer = "wgpu"`): each frame is composed on the GPU and presented
+/// from there, an idle one is neither composed nor presented except at the
+/// idle refresh, and a change composes exactly the frames it needs (it needs
+/// `VPRO_GPU=1`).
+#[cfg(feature = "wgpu")]
+#[test]
+fn the_offscreen_wgpu_renderer_presents_on_the_gpu_only_what_changed() {
+    use crate::dev::odyssey::display::Display;
+    use crate::dev::odyssey::mmio::BoardLocks;
+    use crate::dev::odyssey::reader::FrameCounts;
+    use crate::dev::odyssey::Odyssey;
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::Arc;
+
+    if !gpu_unit_tests() {
+        return;
+    }
+    let (mut s, _) = board("v12");
+    cursor_load(&mut s, 2, 3);
+    cursor_entry(&mut s, cursor::CONTROL, 1);
+    let locks = BoardLocks::new(s);
+    let display = Arc::new(Display::new(crate::disp::StatusSource::detached()));
+    display.attach_registers(locks.shared.clone());
+    let gfx: Arc<dyn crate::gfx_display::GfxDisplay> = display.clone();
+    crate::ui::draw_offscreen(&gfx).expect("an offscreen presenter on the board's device");
+
+    // Twelve idle frames hold exactly two idle refreshes, whatever the
+    // phase; a presented change starts the count again.
+    let run = |change: fn(&mut Board)| {
+        change(locks.test_board());
+        locks.test_board().raster_wait();
+        display.reader.lock().counts = FrameCounts::default();
+        display.stats.reset();
+        for _ in 0..12 {
+            Odyssey::frame(&locks, &display);
+        }
+        let st = &display.stats;
+        (display.reader.lock().counts, st.presented_gpu.load(Relaxed), st.presented.load(Relaxed))
+    };
+    let idle = |c: FrameCounts| FrameCounts { unchanged: 12 - c.composed, ..c };
+    let (first, _, _) = run(|_| {});
+    assert!(first.composed >= 1, "the first frames are composed: {first:?}");
+    assert_eq!(run(|_| {}), (idle(FrameCounts::default()), 2, 0), "an idle screen presents only at the idle refresh, from the GPU");
+
+    let (counts, on_gpu, from_screen) = run(|s| cursor_entry(s, cursor::POSITION, 9 << 16 | 4));
+    assert_eq!(counts, idle(FrameCounts { composed: 1, unchanged: 0 }), "a register change composes one frame");
+    assert_eq!((on_gpu, from_screen), (2, 0), "the changed frame and the idle refresh six frames on, both from the GPU");
+
+    let (counts, on_gpu, from_screen) = run(|s| rgb_fill(s, 0xff, 0, 0, 100, 100, 110, 110));
+    assert_eq!(counts, idle(FrameCounts { composed: 1, unchanged: 0 }), "a draw composes one frame");
+    assert_eq!((on_gpu, from_screen), (2, 0), "the drawn frame and the idle refresh six frames on, both from the GPU");
+
+    // A new video mode: the renderer resizes its target, as it snaps the
+    // window, and the frame is composed once and presented from the GPU.
+    let (counts, on_gpu, from_screen) = run(|s| s.set_scanout_size(1024, 768));
+    assert_eq!(counts, idle(FrameCounts { composed: 1, unchanged: 0 }), "a new mode composes one frame");
+    assert_eq!((on_gpu, from_screen), (2, 0), "the new mode's frame and the idle refresh, from the GPU");
+    display.stop();
+}
+
 /// A store to the board, whatever register or command it is, tells the
 /// display once it has been processed.
 #[test]
