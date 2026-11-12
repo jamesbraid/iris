@@ -699,8 +699,10 @@ fn the_ps2_receive_holds_three_behind_the_clamp() {
     r.w32(K_TX, 0xf4); // enable scanning
     let _ = r.r32(K_RX);
     r.w32(reg::INT_STATUS, int::KEYBOARD);
+    r.wire(1);
     type_keys(&r);
     assert_ne!(r.r32(reg::INT_STATUS) & int::KEYBOARD, 0);
+    r.wire(2);
     let first = r.r32(K_RX);
     assert_eq!(first & (VALID[0] | VALID[1] | VALID[2]), VALID[0] | VALID[1] | VALID[2]);
     assert_eq!(first & KBC_RX_OVERFLOW, 0, "nothing lost");
@@ -718,6 +720,15 @@ impl Rig {
     fn settle(&self, ms: u64) {
         std::thread::sleep(Duration::from_millis(ms));
         self.c.service();
+    }
+
+    /// Let `chars` PS/2 character times pass, playing the timers each: a
+    /// queued character lands a character time after the previous one, and a
+    /// late catch-up spaces the next from when it ran.
+    fn wire(&self, chars: u32) {
+        for _ in 0..chars {
+            self.settle(5);
+        }
     }
 }
 
@@ -772,26 +783,65 @@ fn ps2_acknowledge_without_a_read_goes_quiet() {
     assert!(!keyboard_latched(&r), "no read, so nothing was released to signal");
 }
 
-/// A release pending at save resumes the stopped keyboard after the load, and
-/// a chip with none pending saves no release.
+/// A character waiting on its character time at save lands after the load,
+/// and a chip with none waiting saves no pacing keys.
 #[test]
-fn ps2_pending_resume_survives_a_snapshot() {
+fn ps2_pending_character_survives_a_snapshot() {
+    let pending = |v: &toml::Value| v["chip"]["kbc"]["port0"].get("waiting").is_some();
     let src = Rig::new();
     src.w32(CTRL, KBC_K_CLAMP_1);
     src.w32(K_TX, 0xff);
-    assert!(src.c.save_state()["chip"]["kbc"].get("resume").is_none(), "nothing released yet");
+    assert!(!pending(&src.c.save_state()), "the clamp holds the self-test byte, nothing is waiting");
     let _ = src.r32(K_RX);
     let v = src.c.save_state();
-    assert!(v["chip"]["kbc"].get("resume").is_some(), "the release is pending");
+    assert!(pending(&v), "the self-test byte waits on its time");
 
     let dst = Rig::new();
     dst.c.load_state(&v).unwrap();
-    assert!(dst.c.sh.kbd.as_ref().unwrap().deadline().is_some(), "the release is pending again");
+    assert!(dst.c.sh.kbd.as_ref().unwrap().deadline().is_some(), "the wait is pending again");
     dst.w32(reg::INT_STATUS, int::KEYBOARD);
     dst.settle(5);
-    assert!(keyboard_latched(&dst), "the release ran after the load");
+    assert!(keyboard_latched(&dst), "the character landed after the load");
     assert_eq!((dst.r32(K_RX) >> 16) & 0xff, 0xaa);
-    assert!(dst.c.save_state()["chip"]["kbc"].get("resume").is_none(), "and is spent");
+    assert!(!pending(&dst.c.save_state()), "and nothing waits now");
+}
+
+/// Characters the host queued together land a character time apart, however
+/// late the catch-up runs, never together.
+#[test]
+fn ps2_characters_land_one_at_a_time() {
+    let r = Rig::new();
+    r.w32(K_TX, 0xf4);
+    let _ = r.r32(K_RX);
+    r.wire(1);
+    type_keys(&r);
+    // The first lands at once, alone.
+    assert_eq!(r.r32(K_RX) & (VALID[0] | VALID[1] | VALID[2]), VALID[2]);
+    assert_eq!(r.r32(K_RX), 0, "the next is still in the keyboard");
+    r.settle(5);
+    assert_eq!(r.r32(K_RX) & (VALID[0] | VALID[1] | VALID[2]), VALID[2], "one more, not the rest");
+}
+
+/// The race a host flood hit, from the host's side: a character pushed within
+/// a character time of the previous one does not land in the few
+/// microseconds between the driver's last read and its acknowledge.
+#[test]
+fn ps2_a_character_does_not_land_between_the_read_and_the_acknowledge() {
+    let r = Rig::new();
+    r.w32(K_TX, 0xf4);
+    let _ = r.r32(K_RX);
+    r.w32(reg::INT_STATUS, int::KEYBOARD);
+    r.wire(1);
+    let ps2 = r.c.ps2();
+    ps2.push_kb(winit::keyboard::KeyCode::KeyA, true);
+    ps2.push_kb(winit::keyboard::KeyCode::KeyB, true);
+    assert_ne!(r.r32(K_RX) & VALID[2], 0, "the first character");
+    assert_eq!(r.r32(K_RX), 0, "the driver's last, empty read");
+    r.w32(reg::INT_STATUS, int::KEYBOARD);
+    assert!(!keyboard_latched(&r), "the acknowledge cleared the latch with nothing behind it");
+    r.settle(5);
+    assert!(keyboard_latched(&r), "the next character signals after it");
+    assert_ne!(r.r32(K_RX) & VALID[2], 0);
 }
 
 #[test]
@@ -799,7 +849,9 @@ fn the_ps2_receive_overflows_without_a_clamp() {
     let r = Rig::new();
     r.w32(K_TX, 0xf4);
     let _ = r.r32(K_RX);
+    r.wire(1);
     type_keys(&r);
+    r.wire(5);
     let v = r.r32(K_RX);
     assert_ne!(v & KBC_RX_OVERFLOW, 0, "a fourth character was lost");
 }
@@ -832,6 +884,7 @@ fn a_host_key_latches_the_interrupt_without_a_guest_access() {
     let _ = r.r32(K_RX);
     r.w32(reg::INT_STATUS, int::KEYBOARD);
     assert!(!r.superio.level());
+    r.wire(1);
     r.c.ps2().push_kb(winit::keyboard::KeyCode::KeyA, true);
     assert!(r.superio.level(), "the SuperIO line rose from the host thread");
 }
@@ -2211,7 +2264,11 @@ fn the_fuel_ioc3_delivers_keyboard_and_mouse_traffic_across_reset() {
         assert_ne!(v & (1 << 27), 0, "the mouse answers from its own port");
         // Enable scanning, then inject a key from the host.
         r.w32(K_TX, 0xf4);
-        while r.r32(K_RX) & VALID[2] != 0 {}
+        // The keyboard's self-test byte and the acknowledges, and the mouse's
+        // ID byte, come a character time apart: let them all land, then
+        // drain both ports.
+        r.wire(4);
+        let _ = (r.r32(K_RX), r.r32(M_RX));
         r.w32(reg::INT_STATUS, int::KEYBOARD);
         r.c.ps2().push_kb(winit::keyboard::KeyCode::KeyA, true);
         assert_ne!(r.r32(reg::INT_STATUS) & int::KEYBOARD, 0, "a key latches the interrupt");

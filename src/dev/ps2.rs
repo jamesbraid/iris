@@ -527,6 +527,12 @@ impl Ps2Controller {
         !self.state.lock().rx_queue.is_empty()
     }
 
+    /// Whether the keyboard (or, with `mouse`, the mouse) has a byte queued
+    /// that its port has not taken yet.
+    pub fn queued_from(&self, mouse: bool) -> bool {
+        self.state.lock().rx_queue.iter().any(|(_, src)| matches!(src, Ps2Source::Keyboard) != mouse)
+    }
+
     /// Whether the guest has turned the mouse on: until it has, moves and
     /// clicks are dropped.
     pub fn mouse_enabled(&self) -> bool {

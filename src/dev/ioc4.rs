@@ -315,7 +315,7 @@ impl St {
     /// the keyboard source if a character arrived.
     fn kbc_fill(&mut self) {
         let ps2 = self.ps2.clone();
-        if self.kbc.fill_all(&ps2) {
+        if self.kbc.fill_all(&ps2, Instant::now()) {
             self.other_pending |= OTHER_KEYBOARD;
         }
     }
@@ -331,10 +331,10 @@ impl St {
         if off == ioc3_kbc::reg::CONTROL { raw & !KBC_STATUS } else { raw & KBC_RX_MASK }
     }
 
-    /// Let a device the clamp stopped send again once its character time has
-    /// passed, and latch the keyboard source if that brought a character. An
-    /// acknowledge does not run this first (`write32` leaves it to a later
-    /// access or the timer), so it cannot swallow what the release makes.
+    /// Let the characters whose time has come land, and latch the keyboard
+    /// source if that brought one. An acknowledge does not run this first
+    /// (`write32` leaves it to a later access or the timer), so it cannot
+    /// swallow what the release makes.
     fn kbc_catch_up(&mut self, now: Instant) {
         let ps2 = self.ps2.clone();
         if self.kbc.catch_up(now, &ps2) {
@@ -343,7 +343,8 @@ impl St {
     }
 
     fn kbc_write(&mut self, off: u32, val: u32) {
-        self.kbc_catch_up(Instant::now());
+        let now = Instant::now();
+        self.kbc_catch_up(now);
         let mut val = val;
         if off == ioc3_kbc::reg::CONTROL {
             // The status bits read clear; a write that differs is a guest
@@ -354,7 +355,7 @@ impl St {
             val &= !KBC_STATUS;
         }
         let ps2 = self.ps2.clone();
-        if self.kbc.write(off, val, &ps2) {
+        if self.kbc.write(off, val, &ps2, now) {
             self.other_pending |= OTHER_KEYBOARD;
         }
     }

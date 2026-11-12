@@ -10,12 +10,15 @@
 //! before the lock is tried, so either the device's thread gets the lock or
 //! the holder sees the flag.
 //!
-//! A device that a clamp stopped is let go one character time after the read
-//! that emptied the holding, not inside the read. IRIX reads until the
-//! register comes back empty and then acknowledges; a character that arrived
-//! inside that read would latch its interrupt just before the acknowledge
-//! cleared it, and the port would sit with the character held and nothing to
-//! signal it. The status bit stays a plain write-one-to-clear latch.
+//! Characters reach a holding at the speed of the wire, one per
+//! [`CHAR_TIME`](crate::dev::ioc3_kbc::CHAR_TIME) on each port, and a device that a clamp stopped is let go a
+//! character time after the read that emptied the holding, not inside the
+//! read. IRIX reads until the register comes back empty and then
+//! acknowledges; a character that arrived in the few microseconds between
+//! the last read and the acknowledge would latch its interrupt just before
+//! the acknowledge cleared it, and the port would sit with the character
+//! held and nothing to signal it. The status bit stays a plain
+//! write-one-to-clear latch.
 //!
 //! Ported from hw/misc/sgi-ioc3.c and hw/input/sgi-ioc3-kbc.c in
 //! jamesbraid/qemu-sgi-origami.
@@ -26,12 +29,12 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 
-use super::{due, int, until, usize_field, Core};
+use super::{int, usize_field, Core};
 use crate::dev::deadline::{decode, encode};
-use crate::dev::ioc3_kbc::RESUME_DELAY;
+use crate::dev::ioc3_kbc::Pacer;
 use crate::dev::ps2::Ps2Controller;
 use crate::irq::{InterruptController, IrqLine};
-use crate::snapshot::{field, field_bool, field_u32, field_u64, field_u8s, StateTable};
+use crate::snapshot::{field, field_bool, field_u32, field_u8s, StateTable};
 use crate::traits::Device;
 
 pub(super) const KBC_CONTROL: u32 = 0x9c;
@@ -54,6 +57,8 @@ struct KbcPort {
     data: [u8; KBC_RX_SLOTS],
     count: usize,
     overflow: bool,
+    /// When the port's device may send its next character.
+    pace: Pacer,
 }
 
 
@@ -61,8 +66,6 @@ struct KbcPort {
 struct Kbc {
     control: u32,
     port: [KbcPort; 2],
-    /// When a clamp released by a read lets the stopped devices send again.
-    resume: Option<Instant>,
 }
 
 /// A PS/2 device model's "data waiting" line, which tells the controller a
@@ -83,8 +86,9 @@ pub(super) struct Kbd {
     st: Mutex<Kbc>,
     /// A character arrived while an access held the controller.
     dirty: AtomicBool,
-    /// `Kbc::resume`, encoded, where the timers and a lock-free check see it.
-    resume_due: AtomicU64,
+    /// The earliest of the ports' deadlines, encoded, where the timers and a
+    /// lock-free check see it. Published after every access that can move one.
+    wake_due: AtomicU64,
 }
 
 impl Kbd {
@@ -95,7 +99,7 @@ impl Kbd {
             // Host key and mouse events are accepted from the start (this
             // only sets a flag); `stop` and `start` follow the chip's.
             Device::start(&*ps2);
-            Kbd { core, ps2, st: Mutex::new(Kbc::default()), dirty: AtomicBool::new(false), resume_due: AtomicU64::new(0) }
+            Kbd { core, ps2, st: Mutex::new(Kbc::default()), dirty: AtomicBool::new(false), wake_due: AtomicU64::new(0) }
         })
     }
 
@@ -105,42 +109,47 @@ impl Kbd {
 
     pub(super) fn read(&self, a: u32) -> u32 {
         let mut st = self.st.lock();
-        self.resume_if_due(&mut st, Instant::now());
-        self.read_locked(&mut st, a)
+        self.land_if_due(&mut st, Instant::now());
+        let v = self.read_locked(&mut st, a);
+        self.publish(&st);
+        v
     }
 
     pub(super) fn write(&self, a: u32, val: u32) {
         let mut st = self.st.lock();
-        self.resume_if_due(&mut st, Instant::now());
+        self.land_if_due(&mut st, Instant::now());
         self.write_locked(&mut st, a, val);
+        self.publish(&st);
     }
 
-    /// When the stopped devices are next let go, for the timers.
+    /// When a queued character is next due, for the timers.
     pub(super) fn deadline(&self) -> Option<Instant> {
-        decode(self.resume_due.load(Ordering::SeqCst))
+        decode(self.wake_due.load(Ordering::SeqCst))
     }
 
-    /// Let the stopped devices send if their character time has passed. The
-    /// check is lock-free, so an access that finds nothing pending costs a
-    /// load.
+    /// Let the characters whose time has come land. The check is lock-free,
+    /// so an access that finds nothing pending costs a load.
     pub(super) fn catch_up(&self, now: Instant) {
         if self.deadline().is_some_and(|d| d <= now) {
             let mut st = self.st.lock();
-            self.resume_if_due(&mut st, now);
+            self.land_if_due(&mut st, now);
+            self.publish(&st);
         }
     }
 
-    fn resume_if_due(&self, st: &mut Kbc, now: Instant) {
-        if st.resume.is_some_and(|d| d <= now) {
-            self.set_resume(st, None);
-            self.fill(st, 0);
-            self.fill(st, 1);
+    fn land_if_due(&self, st: &mut Kbc, now: Instant) {
+        if Self::next_due(st).is_some_and(|d| d <= now) {
+            self.fill(st, 0, now);
+            self.fill(st, 1, now);
         }
     }
 
-    fn set_resume(&self, st: &mut Kbc, at: Option<Instant>) {
-        st.resume = at;
-        self.resume_due.store(encode(at), Ordering::SeqCst);
+    fn next_due(st: &Kbc) -> Option<Instant> {
+        st.port.iter().filter_map(|p| p.pace.deadline()).min()
+    }
+
+    fn publish(&self, st: &Kbc) {
+        self.wake_due.store(encode(Self::next_due(st)), Ordering::SeqCst);
     }
 
     /// A device raised its line. If an access holds the controller (possibly
@@ -157,8 +166,10 @@ impl Kbd {
             if self.dirty.load(Ordering::SeqCst) {
                 if let Some(mut st) = self.st.try_lock() {
                     if self.dirty.swap(false, Ordering::SeqCst) {
-                        self.fill(&mut st, 0);
-                        self.fill(&mut st, 1);
+                        let now = Instant::now();
+                        self.fill(&mut st, 0, now);
+                        self.fill(&mut st, 1, now);
+                        self.publish(&st);
                     }
                 }
             }
@@ -180,30 +191,26 @@ impl Kbd {
     pub(super) fn reset(&self) {
         let mut st = self.st.lock();
         *st = Kbc::default();
-        self.set_resume(&mut st, None);
+        self.publish(&st);
     }
 
-    /// The pending release is saved as the time it has left, like the chip's
-    /// other host-time deadlines. The key is new; a snapshot without it had
-    /// no release pending.
+    /// Each port's pacing is saved as the time it has left, like the chip's
+    /// other host-time deadlines, in keys a snapshot from before them lacks
+    /// and an idle port omits.
     pub(super) fn save_state(&self, now: Instant) -> toml::Value {
         let st = self.st.lock();
         let mut kbc = StateTable::new();
         kbc.u32("control", st.control)
-            .value("port0", st.port[0].save_state())
-            .value("port1", st.port[1].save_state());
-        if st.resume.is_some() {
-            kbc.u64("resume", until(st.resume, now));
-        }
+            .value("port0", st.port[0].save_state(now))
+            .value("port1", st.port[1].save_state(now));
         kbc.build()
     }
 
     pub(super) fn load_state(&self, v: &toml::Value, now: Instant) -> Result<(), String> {
         let mut st = self.st.lock();
         st.control = field_u32(v, "control")?;
-        st.port = [KbcPort::load_state(field(v, "port0")?)?, KbcPort::load_state(field(v, "port1")?)?];
-        let left = if v.get("resume").is_some() { field_u64(v, "resume")? } else { 0 };
-        self.set_resume(&mut st, due(left, now));
+        st.port = [KbcPort::load_state(field(v, "port0")?, now)?, KbcPort::load_state(field(v, "port1")?, now)?];
+        self.publish(&st);
         Ok(())
     }
 
@@ -218,21 +225,24 @@ impl Kbd {
         }
     }
 
-    /// Move what the device has sent into this port's holding, up to what
-    /// the clamp allows. A clamped port stops with its clock held low and
-    /// the rest still in the device; an unclamped one loses the surplus and
-    /// says so through the overflow flag. Every character that arrives
-    /// latches the keyboard interrupt (a model choice: per character rather
-    /// than a level over the holding).
-    fn fill(&self, st: &mut Kbc, port: usize) {
+    /// Move what the device has sent into this port's holding at the speed
+    /// of the wire: one character, then the next a [`CHAR_TIME`](crate::dev::ioc3_kbc::CHAR_TIME) later. A
+    /// clamped port stops with its clock held low and the rest still in the
+    /// device; an unclamped one loses the surplus (each loss still takes its
+    /// time) and says so through the overflow flag. Every character that
+    /// arrives latches the keyboard interrupt (a model choice: per character
+    /// rather than a level over the holding).
+    fn fill(&self, st: &mut Kbc, port: usize, now: Instant) {
         let clamp = Self::clamp(st, port);
         let mut arrived = false;
         loop {
-            if clamp != 0 && st.port[port].count >= clamp {
+            let p = &mut st.port[port];
+            let full = clamp != 0 && p.count >= clamp;
+            if !p.pace.admit(now, self.ps2.queued_from(port == 1), full) {
                 break;
             }
             let Some(byte) = self.ps2.pop_from(port == 1) else { break };
-            let p = &mut st.port[port];
+            p.pace.landed(now);
             if p.count >= KBC_RX_SLOTS {
                 p.overflow = true;
                 continue;
@@ -247,7 +257,8 @@ impl Kbd {
     }
 
     /// Report what the port holds, oldest character in the highest slot, and
-    /// empty the holding; the clamp releases with it.
+    /// empty the holding; the clamp releases with it, and the stopped device
+    /// sends again a [`CHAR_TIME`](crate::dev::ioc3_kbc::CHAR_TIME) later, not inside this read.
     fn receive(&self, st: &mut Kbc, port: usize) -> u32 {
         let p = st.port[port];
         let mut val = 0u32;
@@ -262,13 +273,10 @@ impl Kbd {
         if p.overflow {
             val |= KBC_RX_OVERFLOW;
         }
-        st.port[port] = KbcPort::default();
-        // The stopped device needs a character time to clock its next byte
-        // out (an approximation, see RESUME_DELAY), so it resumes after the
-        // driver's acknowledge, not inside this read.
-        if p.count != 0 && st.resume.is_none() && self.ps2.queued() {
-            self.set_resume(st, Some(Instant::now() + RESUME_DELAY));
-        }
+        st.port[port] = KbcPort { pace: p.pace, ..KbcPort::default() };
+        // Arms the restart of a device the clamp stopped (an approximation,
+        // see CHAR_TIME), so its character follows the driver's acknowledge.
+        self.fill(st, port, Instant::now());
         val
     }
 
@@ -285,14 +293,16 @@ impl Kbd {
         match a {
             KBC_CONTROL => {
                 st.control = val & KBC_CONTROL_MASK;
-                // Releasing a clamp lets a stopped device send again.
-                self.fill(st, 0);
-                self.fill(st, 1);
+                // Releasing a clamp lets a stopped device start again.
+                let now = Instant::now();
+                self.fill(st, 0, now);
+                self.fill(st, 1, now);
             }
             KBC_KBD_TRANSMIT | KBC_AUX_TRANSMIT => {
                 self.ps2.write_to(val as u8, a == KBC_AUX_TRANSMIT);
-                self.fill(st, 0);
-                self.fill(st, 1);
+                let now = Instant::now();
+                self.fill(st, 0, now);
+                self.fill(st, 1, now);
             }
             _ => {}
         }
@@ -300,18 +310,18 @@ impl Kbd {
 }
 
 impl KbcPort {
-    fn save_state(&self) -> toml::Value {
-        StateTable::new()
-            .u8s("data", &self.data)
-            .u64("count", self.count as u64)
-            .bool("overflow", self.overflow)
-            .build()
+    fn save_state(&self, now: Instant) -> toml::Value {
+        let mut t = StateTable::new();
+        t.u8s("data", &self.data).u64("count", self.count as u64).bool("overflow", self.overflow);
+        self.pace.save_into(&mut t, now);
+        t.build()
     }
-    fn load_state(v: &toml::Value) -> Result<Self, String> {
+    fn load_state(v: &toml::Value, now: Instant) -> Result<Self, String> {
         Ok(Self {
             data: field_u8s(v, "data")?,
             count: usize_field(v, "count", KBC_RX_SLOTS)?,
             overflow: field_bool(v, "overflow")?,
+            pace: Pacer::load(v, now)?,
         })
     }
 }

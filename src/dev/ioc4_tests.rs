@@ -176,6 +176,15 @@ impl Rig {
         self.c.service();
     }
 
+    /// Let `chars` PS/2 character times pass, playing the timers each: a
+    /// queued character lands a character time after the previous one, and a
+    /// late catch-up spaces the next from when it ran.
+    fn wire(&self, chars: u32) {
+        for _ in 0..chars {
+            self.settle(5);
+        }
+    }
+
     /// Play the timers until `done`, a millisecond of host time apart.
     fn until(&self, what: &str, done: impl Fn(&Rig) -> bool) {
         for _ in 0..3000 {
@@ -1412,14 +1421,17 @@ fn the_ps2_adapter_presents_the_controller() {
     r.w32(KBC_KBD_TRANSMIT, 0xff00_0000);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0x80fa_0000);
     r.w32(KBC_KBD_TRANSMIT, 0xff);
+    r.wire(2);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0xc0fa_aa00);
     assert_eq!(r.r32(KBC_CONTROL) & KBC_WRITE_PENDING, 0);
     // QEMU's keyboard scans again after the reset command; this core waits
     // for the driver's enable, as the O2's and Octane's PROMs give it.
     r.w32(KBC_KBD_TRANSMIT, 0xf4);
+    r.wire(1);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0x80fa_0000);
     r.w32(reg::OTHER_PENDING, KBC_IRQ);
 
+    r.wire(1);
     key(&r, KeyA, true);
     assert_eq!(r.r32(reg::OTHER_PENDING) & KBC_IRQ, KBC_IRQ);
     assert!(!r.pin.level(), "pending but not enabled");
@@ -1450,19 +1462,24 @@ fn the_ps2_adapter_presents_the_controller() {
     assert!(!r.pin.level());
 
     r.w32(KBC_AUX_TRANSMIT, 0xff);
+    r.wire(2);
     assert_eq!(r.r32(KBC_AUX_RECEIVE), 0xe0fa_aa00);
     assert_eq!(r.r32(KBC_CONTROL) & KBC_WRITE_PENDING, 0);
     r.w32(reg::OTHER_PENDING, KBC_IRQ);
     r.w32(KBC_AUX_TRANSMIT, 0xf4);
+    r.wire(1);
     assert_eq!(r.r32(KBC_AUX_RECEIVE), 0x80fa_0000);
     r.w32(reg::OTHER_PENDING, KBC_IRQ);
+    r.wire(1);
     r.c.ps2().push_mouse_input(1, 4, 0, 0);
+    r.wire(2);
     assert_eq!(r.r32(KBC_AUX_RECEIVE), 0xe009_0400);
 
     r.c.reset();
     assert_eq!((r.r32(KBC_CONTROL), r.r32(KBC_KBD_RECEIVE), r.r32(KBC_AUX_RECEIVE)), (0, 0, 0));
     assert_eq!((r.r32(reg::OTHER_PENDING) & KBC_IRQ, r.r32(reg::OTHER_ENABLE_SET) & KBC_IRQ), (0, 0));
     r.w32(KBC_KBD_TRANSMIT, 0xff);
+    r.wire(1);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0xc0fa_aa00);
 }
 
@@ -1495,6 +1512,33 @@ fn ps2_drain_then_acknowledge_takes_the_late_character() {
     assert!(!latched(&r));
 }
 
+/// Ports test_ps2_characters_are_paced: characters the host queued together
+/// reach the holding a character time apart, and the one behind a read lands
+/// after the acknowledge of it.
+#[test]
+fn ps2_characters_are_paced() {
+    use winit::keyboard::KeyCode::{KeyA, KeyB, KeyC};
+    let latched = |r: &Rig| r.r32(reg::OTHER_PENDING) & KBC_IRQ != 0;
+    let r = Rig::new();
+    r.w32(KBC_KBD_TRANSMIT, 0xf4);
+    let _ = r.r32(KBC_KBD_RECEIVE);
+    r.w32(reg::OTHER_PENDING, KBC_IRQ);
+    r.wire(1);
+    for k in [KeyA, KeyB, KeyC] {
+        key(&r, k, true);
+    }
+    assert_eq!(r.r32(KBC_KBD_RECEIVE) & 0xe000_0000, 0x8000_0000, "the first lands at once, alone");
+    r.w32(reg::OTHER_PENDING, KBC_IRQ);
+    assert!(!latched(&r));
+    r.settle(5);
+    assert!(latched(&r), "the second signals after the acknowledge");
+    assert_eq!(r.r32(KBC_KBD_RECEIVE) & 0xe000_0000, 0x8000_0000, "alone again");
+    r.w32(reg::OTHER_PENDING, KBC_IRQ);
+    r.settle(5);
+    assert!(latched(&r));
+    assert_eq!(r.r32(KBC_KBD_RECEIVE) & 0xe000_0000, 0x8000_0000);
+}
+
 /// Ports test_ps2_ports_present: every IOC4 has both ports; there is no
 /// switch to leave them unplugged.
 #[test]
@@ -1502,6 +1546,7 @@ fn both_ps2_ports_are_always_fitted() {
     let r = Rig::with(Ioc4Config::bare(Ioc4Clock::Mhz33));
     r.w32(KBC_KBD_TRANSMIT, 0xff);
     r.w32(KBC_AUX_TRANSMIT, 0xff);
+    r.wire(2);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0xc0fa_aa00);
     assert_eq!(r.r32(KBC_AUX_RECEIVE), 0xe0fa_aa00);
 }
@@ -1544,6 +1589,7 @@ fn the_ps2_driver_sequence() {
     assert_eq!(r.r32(KBC_AUX_RECEIVE), 0);
     // As in the adapter test: this keyboard model needs the driver's enable.
     r.w32(KBC_KBD_TRANSMIT, 0xf4);
+    r.wire(1);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0x80fa_0000);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0);
     r.w32(reg::OTHER_PENDING, KBC_IRQ);
@@ -1551,6 +1597,7 @@ fn the_ps2_driver_sequence() {
     assert!(!r.pin.level());
 
     // Press and release: three characters, one per read under the clamp.
+    r.wire(1);
     key(&r, KeyA, true);
     key(&r, KeyA, false);
     assert!(r.pin.level());
@@ -1567,16 +1614,20 @@ fn the_ps2_driver_sequence() {
 
     // Clamp after three: the same press and release arrive in one read.
     r.w32(KBC_CONTROL, 0x0040_0000);
+    r.wire(1);
     key(&r, KeyA, true);
     key(&r, KeyA, false);
+    r.wire(2);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0xe01c_f01c);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0);
 
     // No clamp: a fourth character is lost and the flag is not reported.
     r.w32(KBC_CONTROL, 0);
+    r.wire(1);
     for k in [KeyA, KeyB, KeyC, KeyD] {
         key(&r, k, true);
     }
+    r.wire(3);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0xe01c_3221);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0);
 }
@@ -1607,6 +1658,7 @@ fn a_host_key_raises_the_pin_without_a_guest_access() {
     let _ = r.r32(KBC_KBD_RECEIVE);
     r.w32(reg::OTHER_PENDING, KBC_IRQ);
     assert!(!r.pin.level());
+    r.wire(1);
     key(&r, winit::keyboard::KeyCode::KeyA, true);
     assert!(r.pin.level());
 }
