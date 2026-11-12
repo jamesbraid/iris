@@ -3975,3 +3975,86 @@ fn real_board_fogtest() {
     m.stop_engines();
     assert!(bad.is_empty(), "more than 3 levels from the board: {bad:?}");
 }
+
+/// A display control bus store: `width` bytes of `data` to register select
+/// `crs` of device `dev`, riding in the top bytes of the 32-bit access.
+fn dcb_write(m: &Mgras, dev: u32, crs: u32, width: u32, data: u32) {
+    let off = 0x60000 + (dev << 10) + (crs << 7) + ((width & 3) << 3);
+    write(m, 32, off, ((data as u64) << (8 * (4 - width))) & 0xFFFF_FFFF);
+}
+
+/// Load a VC3 timing whose frame is `lines` lines of 840 VC3 clocks (six
+/// 127-clock entries and a 78-clock one ending the line), with the RAMDAC
+/// PLL at r = 2, v = 4, control 0x91: a 107.25 MHz pixel clock, so a VC3
+/// clock of 53.625 MHz.
+fn load_timing(m: &Mgras, lines: &[u16]) {
+    const DAC: u32 = 6;
+    const VC3: u32 = 8;
+    for (reg, v) in [(0x0c, 2), (0x0f, 4), (0x09, 0x91)] {
+        dcb_write(m, DAC, 0, 2, reg);
+        dcb_write(m, DAC, 2, 1, v);
+    }
+    let vc3_reg = |r: u32, v: u32| dcb_write(m, VC3, 0, 3, (r << 16) | v);
+    let sram = |addr: u32, words: &[u16]| {
+        vc3_reg(7, addr);
+        for &w in words {
+            dcb_write(m, VC3, 3, 2, w as u32);
+        }
+    };
+    sram(0x100, &[0x7F80, 0x7F80, 0x7F80, 0x7F80, 0x7F80, 0x7F80, 0xCE80]);
+    let mut frame = Vec::new();
+    for &n in lines {
+        frame.extend([0x100, n]);
+    }
+    frame.extend([0, 0]);
+    sram(0x200, &frame);
+    vc3_reg(0, 0x200);
+}
+
+/// The retrace period follows the timing the guest loads: 1065 lines of
+/// 840 clocks at 53.625 MHz is the stock 1280x1024 frame, 59.94 Hz, and a
+/// frame twice as long (two runs of 1065 lines, as a 30 Hz format makes)
+/// retraces half as often. Smoke loads such a format and counts retraces as
+/// video frames, so a 60 Hz retrace makes it drop twice the frames it
+/// should.
+#[test]
+fn retrace_period_follows_the_vc3_timing() {
+    let m = live_board();
+    let ns = |m: &Mgras| m.retrace_period().as_nanos() as i64;
+    load_timing(&m, &[1065, 1065]);
+    assert!((ns(&m) - 33_365_035).abs() < 1_000, "30 Hz table: {} ns", ns(&m));
+    load_timing(&m, &[1065]);
+    assert!((ns(&m) - 16_682_517).abs() < 1_000, "60 Hz table: {} ns", ns(&m));
+    m.stop_engines();
+}
+
+/// Without a usable table (none loaded, or one whose line never ends) the
+/// board runs the stock 60 Hz frame.
+#[test]
+fn retrace_period_without_a_timing_is_the_stock_frame() {
+    let m = live_board();
+    assert!((m.retrace_period().as_nanos() as i64 - 16_682_517).abs() < 1_000);
+    load_timing(&m, &[1065]);
+    // The line's last entry loses its end bit: the walk runs off the table.
+    dcb_write(&m, 8, 0, 3, (7 << 16) | 0x106);
+    dcb_write(&m, 8, 3, 2, 0x4E80);
+    assert!((m.retrace_period().as_nanos() as i64 - 16_682_517).abs() < 1_000);
+    m.stop_engines();
+}
+
+/// A table whose frame lasts minutes (here about 100 s) is waited out like
+/// any other, but must not hold up shutdown: the refresh thread leaves its
+/// wait promptly when the display stops.
+#[test]
+fn a_huge_retrace_period_does_not_hold_up_stop() {
+    let m = live_board();
+    m.start_display();
+    // 100 lines of 65535 repeats of 840 clocks at 53.625 MHz: about 103 s.
+    load_timing(&m, &[65535; 100]);
+    assert!(m.retrace_period() > std::time::Duration::from_secs(60));
+    // Let the thread finish the frame it is in and start waiting out the long one.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let t = std::time::Instant::now();
+    m.stop_display();
+    assert!(t.elapsed() < std::time::Duration::from_secs(5), "stop took {:?}", t.elapsed());
+}
