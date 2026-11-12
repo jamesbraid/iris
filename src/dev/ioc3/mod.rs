@@ -776,6 +776,11 @@ impl Shared {
                 }
                 // Write-one-to-clear; level-following bits ignore the write.
                 self.core.clear_bits(val & !int::LEVELS);
+                if val & int::KEYBOARD != 0 {
+                    if let Some(k) = &self.kbd {
+                        k.acknowledged();
+                    }
+                }
             }
             reg::INT_ENABLE_SET => self.core.enable(val),
             reg::INT_ENABLE_CLR => self.core.disable(val),

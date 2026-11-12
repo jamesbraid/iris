@@ -10,6 +10,13 @@
 //! before the lock is tried, so either the device's thread gets the lock or
 //! the holder sees the flag.
 //!
+//! The interrupt-status bit latches per character, and an acknowledgement
+//! that finds a character still held leaves the bit set (see
+//! [`Kbd::acknowledged`]). Approximation: whether the silicon holds the
+//! source as a level over the holdings or as a pulse per character is not
+//! established; this reading never strands a character the guest has not
+//! read, and never raises the bit once the holdings are empty.
+//!
 //! Ported from hw/misc/sgi-ioc3.c in jamesbraid/qemu-sgi-origami.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -120,6 +127,18 @@ impl Kbd {
             if !self.dirty.load(Ordering::SeqCst) || self.st.is_locked() {
                 break;
             }
+        }
+    }
+
+    /// The guest wrote the keyboard status bit back. The bit stands for a
+    /// character in a holding that the guest has not read, so one still held
+    /// when the acknowledgement lands keeps it: it arrived after the driver's
+    /// last read, and a cleared bit would leave it unsignalled, with the
+    /// holding full and every later character blocked behind it.
+    pub(super) fn acknowledged(&self) {
+        let st = self.st.lock();
+        if st.port.iter().any(|p| p.count != 0) {
+            self.core.set_bits(int::KEYBOARD);
         }
     }
 

@@ -710,6 +710,34 @@ fn the_ps2_receive_holds_three_behind_the_clamp() {
     assert_ne!((second >> 16) & 0xff, (first >> 16) & 0xff, "and are not a replay");
 }
 
+/// IRIX reads each receive register until it comes back empty and then
+/// writes the status bit back. A mouse packet the host sends between that
+/// last empty read and the acknowledgement lands in the holding, and the
+/// acknowledgement must not discard its interrupt: nothing else would
+/// signal it, the full holding stops later packets from arriving, and the
+/// pointer is dead until a key press makes the driver read again.
+#[test]
+fn an_acknowledge_keeps_the_interrupt_of_a_packet_that_arrived_after_the_last_read() {
+    let r = Rig::new();
+    r.w32(CTRL, KBC_K_CLAMP_3 | KBC_M_CLAMP_3);
+    r.w32(M_TX, 0xf4); // enable reporting
+    let _ = r.r32(M_RX);
+    r.w32(reg::INT_STATUS, int::KEYBOARD);
+    // The driver's pass: the packet's first read, then the empty one.
+    r.c.ps2().push_mouse_input(1, 0, 0, 0);
+    assert_ne!(r.r32(M_RX) & VALID[2], 0);
+    assert_eq!(r.r32(M_RX), 0);
+    // The next packet (the release) arrives before the acknowledgement.
+    r.c.ps2().push_mouse_input(0, 0, 0, 0);
+    r.w32(reg::INT_STATUS, int::KEYBOARD);
+    assert_ne!(r.r32(reg::INT_STATUS) & int::KEYBOARD, 0, "the waiting packet still has its interrupt");
+    assert_ne!(r.r32(M_RX) & VALID[2], 0, "and it is in the holding");
+    // Read to empty and acknowledge: nothing is left to signal.
+    assert_eq!(r.r32(M_RX), 0);
+    r.w32(reg::INT_STATUS, int::KEYBOARD);
+    assert_eq!(r.r32(reg::INT_STATUS) & int::KEYBOARD, 0);
+}
+
 #[test]
 fn the_ps2_receive_overflows_without_a_clamp() {
     let r = Rig::new();
