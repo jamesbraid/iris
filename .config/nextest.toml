@@ -18,6 +18,22 @@ default-filter = 'test(/::ci_clock_/)'
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 20 }
 
+# The tests `cargo ci-gpu` runs on a GPU (.github/workflows/wgpu.yml): the
+# shared wgpu layer and presenter, and the VPro display through the GPU
+# scan-out and the offscreen wgpu renderer. The VPro golden scenes stay out:
+# two of them differ from their goldens on the GPU unit by one colour step.
+[profile.ci-gpu]
+default-filter = 'test(/^wgpu::|^dev::odyssey::tests::display::/)'
+# Each test opens its own device. lavapipe refuses some ("parent device is
+# lost") when dozens open at once, as on a many-core host; four, a hosted
+# runner's count, pass.
+test-threads = 4
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 20 }
+
+[profile.ci-gpu.junit]
+path = "junit.xml"
+
 # The threaded device tests that the nightly ThreadSanitizer run covers
 # (.github/workflows/tsan.yml). Add a test to a device module with one of these
 # names and it joins the run; the workflow lists nothing.

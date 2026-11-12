@@ -9,6 +9,11 @@ ci-test = "ci-nextest --profile ci"
 ci-test-default = "nextest run --workspace --profile ci"
 # The nightly instruction-driven clock tests, which need their own build.
 ci-clock = "ci-nextest --profile ci-clock --features ci_clock,idle-pause"
+# The wgpu raster unit, scan-out and presenter on a GPU, or on lavapipe where
+# there is none. Run with VPRO_GPU=1 so the VPro test boards draw there; the
+# ci-gpu profile picks the tests. --bins builds iris itself with the feature,
+# which no other check does.
+ci-gpu = "nextest run -p iris --lib --bins --features wgpu --profile ci-gpu"
 # The loom concurrency models, built under --cfg loom. A flag, not RUSTFLAGS, so
 # no environment is needed; cargo keeps the loom build beside the normal one in
 # the same target directory.
