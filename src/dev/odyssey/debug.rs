@@ -94,6 +94,7 @@ pub(super) const HELP: &[&str] = &[
     "vpro unimp                      offsets and command words reported as not modelled",
     "vpro refusals [reset]           bus refusals by reason and register",
     "vpro gpu [trace on|off]         the GPU raster unit's counters; trace counts readbacks by cause",
+    "vpro frames [reset]             display frames: composed, unchanged, presented, frame time",
     "vpro trace <file> [fifo,draw,cpu,dma|all]   annotated trace (gputrace builds); alone: its state",
     "vpro trace flush|off            write the trace out / close it",
     "vpro rec [<file>|mark|off]      replayable recording: start, mark, stop; alone: its state",
@@ -287,6 +288,12 @@ impl Odyssey {
                 self.gpu_run(|g| g.trace_waits(on)).ok_or("the raster unit is the CPU's (gpu off)")?;
                 format!("gpu readback tracing {}\n", if on { "on" } else { "off" })
             }
+            ["frames"] => self.frames_text(),
+            ["frames", "reset"] => {
+                self.display.reader.lock().counts = Default::default();
+                self.display.stats.reset();
+                String::new()
+            }
             ["refusals"] => {
                 let mut v = Vec::new();
                 self.state.refusals.report(&mut v).map_err(|e| e.to_string())?;
@@ -323,6 +330,22 @@ impl Odyssey {
             out.push_str(&format!("  gpu scanout: {frames} frames composed, {} MiB read back\n", bytes >> 20));
         }
         Some(out)
+    }
+
+    fn frames_text(&self) -> String {
+        use std::sync::atomic::Ordering::Relaxed;
+        let c = self.display.reader.lock().counts;
+        let st = &self.display.stats;
+        let frames = st.frames.load(Relaxed);
+        format!(
+            "display: {frames} frames, {} us average, {} us longest\n  composed {}, unchanged {}\n  presented {} ({} from the GPU)\n",
+            st.busy_ns.load(Relaxed) / frames.max(1) / 1000,
+            st.worst_ns.load(Relaxed) / 1000,
+            c.composed,
+            c.unchanged,
+            st.presented.load(Relaxed) + st.presented_gpu.load(Relaxed),
+            st.presented_gpu.load(Relaxed),
+        )
     }
 
     fn status_text(&self) -> Result<String, String> {

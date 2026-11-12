@@ -365,7 +365,7 @@ impl Device for Odyssey {
     fn register_commands(&self) -> Vec<(String, String)> {
         vec![(
             "vpro".to_string(),
-            "VPro (Odyssey) graphics: status|regs|fifo|state|geom|tex|win|mem|backend|lut|dispmode|cursor|pix|raw|peek|shot|fbdump|hash|unimp|refusals|gpu|trace|rec (vpro help)".to_string(),
+            "VPro (Odyssey) graphics: status|regs|fifo|state|geom|tex|win|mem|backend|lut|dispmode|cursor|pix|raw|peek|shot|fbdump|hash|unimp|refusals|gpu|frames|trace|rec (vpro help)".to_string(),
         )]
     }
 
@@ -390,9 +390,11 @@ impl Device for Odyssey {
                 .spawn(move || {
                     let mut next = std::time::Instant::now();
                     while running.load(Ordering::Acquire) {
+                        let began = std::time::Instant::now();
                         Odyssey::frame(&state, &display);
-                        next += FRAME_PERIOD;
                         let now = std::time::Instant::now();
+                        display.stats.frame_took((now - began).as_nanos() as u64);
+                        next += FRAME_PERIOD;
                         if next > now {
                             std::thread::sleep(next - now);
                         } else {

@@ -9,7 +9,7 @@ use super::consts::{
 };
 use super::fifo::display_fifo_pending;
 use super::reader::{DisplayRegs, DisplayShared, ScanoutReader};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
@@ -47,6 +47,37 @@ pub(super) struct Display {
     /// Consumers (VNC) that read `screen.rgba` every frame
     /// (`GfxDisplay::set_capture`): while any does, frames are read back.
     capture: AtomicU32,
+    /// What the display thread did, for the monitor (`vpro frames`).
+    pub stats: DisplayStats,
+}
+
+/// Frames the display thread ran and presented, and the time they took.
+/// Relaxed counts: only the display thread adds to them, and the monitor
+/// resets them (`vpro frames reset`).
+#[derive(Default)]
+pub(super) struct DisplayStats {
+    /// Frames presented from `screen`, and from a buffer on the GPU.
+    pub presented: AtomicU64,
+    pub presented_gpu: AtomicU64,
+    /// Frames run, and their time in all and the longest, in nanoseconds.
+    pub frames: AtomicU64,
+    pub busy_ns: AtomicU64,
+    pub worst_ns: AtomicU64,
+}
+
+impl DisplayStats {
+    /// A frame that took `ns`.
+    pub(super) fn frame_took(&self, ns: u64) {
+        self.frames.fetch_add(1, Ordering::Relaxed);
+        self.busy_ns.fetch_add(ns, Ordering::Relaxed);
+        self.worst_ns.fetch_max(ns, Ordering::Relaxed);
+    }
+
+    pub(super) fn reset(&self) {
+        for c in [&self.presented, &self.presented_gpu, &self.frames, &self.busy_ns, &self.worst_ns] {
+            c.store(0, Ordering::Relaxed);
+        }
+    }
 }
 
 struct Local {
@@ -72,6 +103,7 @@ impl Display {
             status,
             shared: OnceLock::new(),
             capture: AtomicU32::new(0),
+            stats: DisplayStats::default(),
         }
     }
 
@@ -111,6 +143,7 @@ impl Display {
                 local.size = (w, h);
             }
             let stats = self.status.snapshot(std::time::Instant::now(), display_fifo_pending());
+            self.stats.presented_gpu.fetch_add(1, Ordering::Relaxed);
             renderer.present_gpu_frame(frame, width, height, &mut screen, &mut local.overlay, &mut local.status, &mut local.texture, &stats);
         }
     }
@@ -178,6 +211,7 @@ impl Display {
             }
         }
         *self.shown.lock() = (width, height);
+        self.stats.presented.fetch_add(1, Ordering::Relaxed);
         screen.frame_seq = screen.frame_seq.wrapping_add(1);
         // RCtrl+PrintScreen (ui.rs): save the screen as it is presented.
         if self.screenshot.swap(false, Ordering::AcqRel) {

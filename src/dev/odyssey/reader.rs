@@ -420,6 +420,16 @@ pub(super) enum Composed {
     InTarget,
 }
 
+/// What the reader did with the frames asked of it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct FrameCounts {
+    /// Composed again: the board marked the display, or a register, the
+    /// mode or the displayed buffer had changed.
+    pub composed: u64,
+    /// Not composed: nothing it reads had changed.
+    pub unchanged: u64,
+}
+
 /// The display's own state: the presented frame and the retrace clock.
 /// Only the display thread (or a test standing in for it) uses it.
 #[derive(Default)]
@@ -453,6 +463,8 @@ pub(super) struct ScanoutReader {
     /// Whether `frame` holds the screen's order (else 0x00RRGGBB, as the
     /// GPU scan-out's readback gives it).
     pub frame_abgr: bool,
+    /// For the monitor (`vpro frames`).
+    pub counts: FrameCounts,
 }
 
 impl ScanoutReader {
@@ -541,6 +553,7 @@ impl ScanoutReader {
         let now = (self.mode_gen, self.snap_gen, displayed);
         if let Some((was, buffer, w, h)) = &self.gpu_composed {
             if !marked && *was == now {
+                self.counts.unchanged += 1;
                 return Some((buffer.clone(), *w, *h, false));
             }
         }
@@ -553,6 +566,7 @@ impl ScanoutReader {
         match composed {
             Ok(buffer) => {
                 self.gpu_composed = Some((now, buffer.clone(), w, h));
+                self.counts.composed += 1;
                 Some((buffer, w, h, true))
             }
             Err(e) => {
@@ -595,8 +609,10 @@ impl ScanoutReader {
         self.snap_gen = shared.regs.snapshot(&mut self.snap, self.snap_gen);
         let now = Some((self.mode_gen, self.snap_gen, displayed));
         if !marked && self.composed == now {
+            self.counts.unchanged += 1;
             return Composed::No;
         }
+        self.counts.composed += 1;
         self.composed = now;
         #[cfg(feature = "wgpu")]
         {

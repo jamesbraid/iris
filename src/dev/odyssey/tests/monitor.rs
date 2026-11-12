@@ -90,13 +90,38 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 fn help_names_every_subcommand_and_a_bad_one_gets_the_usage() {
     let v = board();
     let help = ok(&v, "help");
-    for sub in ["status", "regs", "fifo", "state", "geom", "tex", "win", "mem", "backend", "lut", "dispmode", "cursor", "pix", "raw", "peek", "shot", "fbdump", "hash", "unimp", "refusals", "trace", "rec"] {
+    for sub in ["status", "regs", "fifo", "state", "geom", "tex", "win", "mem", "backend", "lut", "dispmode", "cursor", "pix", "raw", "peek", "shot", "fbdump", "hash", "unimp", "refusals", "gpu", "frames", "trace", "rec"] {
         assert!(help.lines().any(|l| l.starts_with(&format!("vpro {sub}")) || l.starts_with(&format!("vpro [{sub}]"))), "help lacks {sub}:\n{help}");
     }
     let err = vpro(&v, "bogus").expect_err("an unknown subcommand fails");
     assert!(err.contains("vpro pix <x> <y>"), "{err}");
     assert_eq!(v.register_commands().len(), 1);
     assert!(v.register_commands()[0].1.contains("vpro help"));
+}
+
+/// `vpro frames` says what the display did with each frame, and `reset`
+/// zeroes the counts.
+#[test]
+fn frames_counts_what_the_display_did_with_each_frame() {
+    let v = board();
+    for _ in 0..12 {
+        Odyssey::frame(&v.state, &v.display);
+    }
+    let text = ok(&v, "frames");
+    // The first frame is composed; the other eleven are unchanged. The first
+    // is presented, and so is the idle refresh six frames after it.
+    assert!(text.contains("composed 1, unchanged 11"), "{text}");
+    assert!(text.contains("presented 2 (0 from the GPU)"), "{text}");
+    assert_eq!(ok(&v, "frames reset"), "");
+    let text = ok(&v, "frames");
+    assert!(text.contains("composed 0, unchanged 0") && text.contains("presented 0"), "{text}");
+    // A command's mark composes one frame.
+    pixel_write(v.state.test_board(), 5, 5, 0x1122_3344);
+    for _ in 0..12 {
+        Odyssey::frame(&v.state, &v.display);
+    }
+    let text = ok(&v, "frames");
+    assert!(text.contains("composed 1, unchanged 11"), "{text}");
 }
 
 #[test]

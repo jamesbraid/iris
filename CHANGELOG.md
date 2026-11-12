@@ -147,6 +147,11 @@ hashes are given where a change is easiest to understand by reading the commit.
 - Texture and image uploads from `GL_UNSIGNED_SHORT_5_6_5` data and with
   `GL_UNPACK_SWAP_BYTES` set come out in the right colours; piglit's
   `texture-packed-formats` passes.
+### Display counters
+
+- `vpro frames [reset]` reports the VPro display thread's frames: how many it
+  composed, how many it skipped because nothing on screen changed, how many it
+  presented and from where, and how long a frame took.
 
 ### Serial logs append on every machine
 
