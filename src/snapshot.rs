@@ -62,7 +62,13 @@ use toml::Value;
 /// a v7 reader cannot load a v6 one either, so the Octane refuses both. The
 /// O2 shares the constant and refuses v6 snapshots too, though its own layout
 /// is unchanged.
-pub const SCHEMA_VERSION: u32 = 7;
+///
+/// v7 → v8: the Octane's RAD1 runs its UST counter on the guest's progress
+/// and saves the guest clock and the points its position stamps are placed
+/// between. A v7 reader does not know those fields and a v8 reader needs
+/// them, so the Octane refuses both. The O2 shares the constant and refuses v7
+/// snapshots too, though its own layout is unchanged.
+pub const SCHEMA_VERSION: u32 = 8;
 
 const MANIFEST_FILE: &str = "snapshot.toml";
 

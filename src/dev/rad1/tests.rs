@@ -1547,3 +1547,119 @@ fn digital_outputs_run_and_publish_their_pointers() {
         assert_eq!(rd(&r, off), 0, "{off:#x}");
     }
 }
+
+/// A card whose UST follows a cycle counter the test moves, as the machine
+/// wires the CPU's. The counter lives for the rest of the process.
+struct Guest(*mut u64);
+
+impl Guest {
+    fn set(&self, cycles: u64) {
+        unsafe { std::ptr::write_volatile(self.0, cycles) };
+    }
+}
+
+fn guest_card_at(r: &Rad1, first: u64) -> Guest {
+    let p = Box::leak(Box::new(first));
+    r.set_cpu_cycles(CyclesPtr::new(p));
+    Guest(p)
+}
+
+fn guest_card() -> (Rad1, Guest) {
+    let r = card();
+    let g = guest_card_at(&r, 0);
+    (r, g)
+}
+
+/// UST counts the guest's cycles at 10 ns each, whatever the card's own
+/// clock says: a delay spun between two reads is as long as the
+/// instructions it ran, which the host's speed does not change.
+#[test]
+fn ust_follows_guest_cycles_and_not_the_card_clock() {
+    let (r, g) = guest_card();
+    start_ust(&r);
+    assert_eq!(rd(&r, 0x30), 0);
+    // The card clock leaps a second and the guest ran nothing.
+    at(&r, 1_000_000_000);
+    assert_eq!(rd(&r, 0x30), 0, "no guest progress, no ticks");
+    // 400 instructions are 4 us: four ticks, with the card clock still.
+    let first = rd(&r, 0x30);
+    g.set(400);
+    assert_eq!(rd(&r, 0x30).wrapping_sub(first), 4);
+    // 96 cycles are exactly one 960 ns tick.
+    g.set(400 + 96 * 1000);
+    assert_eq!(rd(&r, 0x30).wrapping_sub(first), 4 + 1000);
+    // The enable protocol holds the count as before.
+    wr(&r, 0x40, 0x02);
+    let held = rd(&r, 0x30);
+    g.set(1 << 40);
+    assert_eq!(rd(&r, 0x30), held, "stopped");
+}
+
+#[test]
+fn ust_is_monotonic_as_the_guest_and_card_clocks_move_unevenly() {
+    let (r, g) = guest_card();
+    start_ust(&r);
+    let (mut cycles, mut card_ns, mut last) = (0u64, 0i64, 0u32);
+    let mut x = 0x2545_f491_4f6c_dd1d_u64;
+    for _ in 0..2000 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        cycles += x % 5000;
+        card_ns += (x >> 20) as i64 % 40_000;
+        g.set(cycles);
+        at(&r, card_ns);
+        let ust = rd(&r, 0x30);
+        assert!(ust >= last, "UST went from {last} to {ust}");
+        last = ust;
+    }
+    assert!(last > 0);
+}
+
+/// The latch in a position word is the UST at the frame's boundary: with
+/// the guest running at twice the card's clock the stamp is the guest time
+/// at the boundary, and later stamps never fall behind an earlier one.
+#[test]
+fn position_stamps_are_guest_time_at_the_boundary_and_never_go_back() {
+    let (r, _ram) = dma_card();
+    let g2 = guest_card_at(&r, 0);
+    start_ust(&r);
+    program(&r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
+    wr(&r, 0x58, 0x2000_0001);
+    // 10 ms of card time (441 frames) with 20 ms of guest time.
+    g2.set(2_000_000);
+    at(&r, 10_000_000);
+    let a = rd(&r, 0x2c);
+    assert_eq!(a >> 18, 441);
+    assert_eq!(a & 0x3ffff, (20_000_000 / 960) as u32 & 0x3ffff);
+    // The guest then idles at half the card's speed; the stamp holds or moves on.
+    g2.set(2_000_000 + 100_000);
+    at(&r, 20_000_000);
+    let b = rd(&r, 0x2c);
+    assert_eq!(b >> 18, 882);
+    assert!(b & 0x3ffff >= a & 0x3ffff, "stamp {:#x} behind {:#x}", b & 0x3ffff, a & 0x3ffff);
+    // And a direct read agrees with the stamp's timeline.
+    assert!(rd(&r, 0x30) & 0x3ffff >= b & 0x3ffff);
+}
+
+/// A restored card continues from the saved counter when the loading run's
+/// cycle count starts from another origin, and adds nothing for the time
+/// between the save and the load.
+#[test]
+fn ust_survives_a_snapshot_round_trip_across_cycle_origins() {
+    use crate::traits::Saveable;
+    let (src, g) = guest_card();
+    start_ust(&src);
+    g.set(96 * 700);
+    at(&src, 3_000_000);
+    let saved = rd(&src, 0x30);
+    assert_eq!(saved, 700);
+    let v = src.save_state();
+
+    let dst = card();
+    let g2 = guest_card_at(&dst, 123_456_789);
+    dst.load_state(&v).expect("load_state");
+    assert_eq!(rd(&dst, 0x30), saved, "no ticks across the load");
+    g2.set(123_456_789 + 96 * 25);
+    assert_eq!(rd(&dst, 0x30), saved + 25, "the guest's progress counts on");
+}

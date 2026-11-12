@@ -552,6 +552,7 @@ impl OctaneMachine {
             }
         }
         status.set_cpu_cycles(cpu.cycles_ptr());
+        rad.set_cpu_cycles(cpu.cycles_ptr());
         status.set_count_hz(cpu.count_hz_atomic());
         for (c, tick) in cpus.iter().zip(&ticks).skip(1) {
             status.add_cpu_stats(c.cycles_ptr(), tick.clone());

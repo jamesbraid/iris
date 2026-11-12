@@ -39,9 +39,12 @@
 //!   pointers; a zero pointer made it spin in its fill loop.
 //! * UST ticks every 960 ns, a selected board policy; the physical rate is
 //!   unmeasured.
-//! * The sample clock, UST and status schedule run on host wall time, less
-//!   the time the machine was stopped; they are not tied to the emulated
-//!   CPU's progress.
+//! * The sample clock and status schedule run on host wall time, less the
+//!   time the machine was stopped. UST runs on the guest's progress instead
+//!   (see "UST and the sample clock" below), so a delay the guest spins
+//!   between two UST reads is measured in the instructions it executed, as
+//!   on the 195 MHz processor the driver was written for, and not in the
+//!   host's time, which the JIT spends far faster.
 //! * Hold-up approximation, an emulator policy with no hardware
 //!   counterpart: while continuous status runs, a completion more than one
 //!   interval late means the host held up the timer thread that also
@@ -59,6 +62,32 @@
 //!   The model fails the bus access instead, which the PCI bus layer here
 //!   cannot express.
 //!
+//! # UST and the sample clock
+//!
+//! The UST counter reads `guest_ns / 960`, where `guest_ns` is the CPU's
+//! `hot.cycles` at 10 ns a cycle: one cycle per retired instruction, and,
+//! while the CPU sleeps in an idle park or a stall, one per 10 ns of host
+//! time. That is the guest clock `NS_PER_GUEST_CYCLE` names under
+//! `ci_clock` and the instruction-stepped O2 `MaceUst` use (the running O2
+//! reads the host clock instead), so in idle UST follows the wall and
+//! while the guest computes it follows the instructions it retires. QEMU takes UST from `QEMU_CLOCK_VIRTUAL`, which
+//! is the same thing under `-icount`; the 960 ns period and the enable
+//! protocol are unchanged from there. A card built with no CPU wired (unit
+//! tests) uses its own clock for UST instead.
+//!
+//! The sample clock stays on wall time so the host stream is fed at the
+//! rate it drains. The two clocks therefore drift apart while the guest runs
+//! faster or slower than 100 MIPS. What IRIX reads as a pair stays
+//! consistent: a position word's UST latch is the UST a read at the frame's
+//! boundary would have returned, found by placing the boundary (a card
+//! clock time) between the last two moments the card saw both clocks
+//! ([`State::guest_at`]) and never going backwards. The latch is therefore
+//! the guest time at which that frame's sample boundary passed, not the
+//! boundary's wall time divided by 960 ns; over a long stretch the frames
+//! per UST tick follow the guest's speed, not 44.1 kHz. The counter itself is
+//! monotonic (the guest clock only moves forward and a restored card
+//! continues from the saved value), and the stamps never run backwards.
+//!
 //! Ported from hw/audio/sgi-rad1-audio.c in jamesbraid/qemu-sgi-origami.
 
 use std::ops::Deref;
@@ -71,6 +100,7 @@ use std::time::{Duration, Instant};
 use crate::config::AudioConfig;
 use crate::devlog::LogModule;
 use crate::host_audio::{HostOut, Resampler};
+use crate::cpu::mips_core::CyclesPtr;
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
 use crate::snapshot::{field, field_bool, field_u32, field_u32s, field_u64, field_u64_vec, field_u64s, field_u8, StateTable};
 use crate::traits::{Device, Saveable};
@@ -175,6 +205,9 @@ const STATUS_ONESHOT_START: u32 = 0x40001;
 const STATUS_STOP: u32 = 0x1fffc;
 
 const UST_NS_PER_TICK: i64 = 960;
+/// Nanoseconds of guest time one `hot.cycles` count stands for; the rate the
+/// CPU's idle pacing and `ci_clock` already use.
+const GUEST_NS_PER_CYCLE: i64 = 10;
 /// Most of the card's clock held back for hold-ups, and the share of an
 /// interval won back per on-time completion (see [`Inner::absorb_stall`]).
 const STALL_MAX_NS: i64 = 200_000_000;
@@ -550,7 +583,14 @@ struct State {
     ust_phase: i64,
     ust_enabled: bool,
     ust_armed: bool,
+    /// Guest time of the last UST update, in guest nanoseconds.
     ust_last_ns: i64,
+    /// The last two moments the card saw the card clock and the guest clock
+    /// together, as (card ns, guest ns); and the latest guest time a
+    /// position stamp has used. See [`State::guest_at`].
+    anchor_prev: (i64, i64),
+    anchor_last: (i64, i64),
+    stamp_floor: i64,
     /// Bumped whenever the status schedule is replaced, so a stale timer
     /// callback notices and ends.
     status_gen: u64,
@@ -566,7 +606,7 @@ struct State {
 }
 
 impl State {
-    fn new(now: i64) -> Self {
+    fn new(now: i64, guest: i64) -> Self {
         Self {
             startup: [0; STARTUP_WORDS],
             subcode: [0; SUBCODE_WORDS],
@@ -585,7 +625,10 @@ impl State {
             ust_phase: 0,
             ust_enabled: false,
             ust_armed: false,
-            ust_last_ns: now,
+            ust_last_ns: guest,
+            anchor_prev: (now, guest),
+            anchor_last: (now, guest),
+            stamp_floor: guest,
             status_gen: 0,
             status_interval: 0,
             status_start_ns: 0,
@@ -597,7 +640,40 @@ impl State {
         }
     }
 
-    /// The UST counter as it will read at `ns`, for stamping a position.
+    /// Note that the card clock read `card` while the guest clock read
+    /// `guest`. Both only move forward.
+    fn observe(&mut self, card: i64, guest: i64) {
+        let (lc, lg) = self.anchor_last;
+        if card < lc {
+            return;
+        }
+        let guest = guest.max(lg);
+        if card > lc {
+            self.anchor_prev = self.anchor_last;
+        }
+        self.anchor_last = (card, guest);
+    }
+
+    /// The guest time of a card clock time. A frame boundary lies between
+    /// the card's last two looks at both clocks, so the guest time it fell
+    /// at is found along the line between them; a boundary before those
+    /// is taken at one for one from the earlier, and one after at one for
+    /// one from the later. Stamps never go backwards.
+    fn guest_at(&mut self, card: i64) -> i64 {
+        let ((pc, pg), (lc, lg)) = (self.anchor_prev, self.anchor_last);
+        let g = if card >= lc {
+            lg + (card - lc)
+        } else if card >= pc && lc > pc {
+            pg + ((card - pc) as i128 * (lg - pg) as i128 / (lc - pc) as i128) as i64
+        } else {
+            pg - (pc - card)
+        };
+        self.stamp_floor = self.stamp_floor.max(g);
+        self.stamp_floor
+    }
+
+    /// The UST counter as it will read at guest time `ns`, for stamping a
+    /// position.
     fn ust_at(&self, ns: i64) -> u32 {
         let mut ticks = self.ust_phase;
         if self.ust_enabled {
@@ -644,7 +720,8 @@ impl State {
         Self::add_field(self.pos(info.pos_a), info.pos_a_shift, frames);
         if info.pos_a_shift == 18 {
             let boundary = c.start_ns + self.rate(idx).ns_for(c.frames);
-            let ust = self.ust_at(boundary);
+            let guest = self.guest_at(boundary);
+            let ust = self.ust_at(guest);
             let a = self.pos(info.pos_a);
             *a = (*a & !UST_LATCH_MASK) | (ust & UST_LATCH_MASK);
         }
@@ -657,7 +734,8 @@ impl State {
         self.dma_bank[((reg - DMA_BANK_FIRST) / 4) as usize]
     }
 
-    /// Advance the UST counter to `now`. It counts only while enabled.
+    /// Advance the UST counter to guest time `now`. It counts only while
+    /// enabled.
     fn ust_update(&mut self, now: i64) {
         if self.ust_enabled && now > self.ust_last_ns {
             let total = now - self.ust_last_ns + self.ust_phase;
@@ -827,6 +905,11 @@ impl Rad1 {
 }
 
 impl Rad1 {
+    /// Give the card the CPU's cycle counter, which its UST follows.
+    pub fn set_cpu_cycles(&self, cycles: CyclesPtr) {
+        let _ = self.inner.cycles.set(cycles);
+    }
+
     /// Name the card's state lock in the lock registry, which holds only a
     /// weak reference to it.
     pub fn register_locks(&self) {
@@ -856,6 +939,15 @@ pub struct Inner {
     /// [`Inner::absorb_stall`]), and the latest time it has handed out.
     stalled_ns: AtomicI64,
     seen_ns: AtomicI64,
+    /// The CPU's cycle counter, once wired: the guest clock UST follows.
+    /// `guest_base` carries a restored card's UST on from where it was
+    /// saved (a new run's cycle count starts from its own zero),
+    /// `guest_resume` asks the next read to set it, and `guest_seen` is the
+    /// latest guest time handed out.
+    cycles: OnceLock<CyclesPtr>,
+    guest_base: AtomicI64,
+    guest_resume: AtomicI64,
+    guest_seen: AtomicI64,
     /// Held across each timer callback's work, so a stop can wait one out.
     tick_pass: Mutex<()>,
     timers: OnceLock<Arc<TimerManager>>,
@@ -892,12 +984,16 @@ impl Inner {
                 [Bar::Mem(BAR0_SIZE), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused],
                 0,
             )),
-            state: Mutex::new(State::new(0)),
+            state: Mutex::new(State::new(0, 0)),
             start: Instant::now(),
             fake_ns: AtomicI64::new(i64::MIN),
             stopped_ns: AtomicI64::new(0),
             stalled_ns: AtomicI64::new(0),
             seen_ns: AtomicI64::new(i64::MIN),
+            cycles: OnceLock::new(),
+            guest_base: AtomicI64::new(0),
+            guest_resume: AtomicI64::new(i64::MIN),
+            guest_seen: AtomicI64::new(i64::MIN),
             stopped_at: Mutex::new(None),
             tick_pass: Mutex::new(()),
             timers: OnceLock::new(),
@@ -1024,6 +1120,27 @@ impl Inner {
         }
     }
 
+    /// The guest's clock in nanoseconds: its cycle count at 10 ns a cycle,
+    /// or the card's own clock `now` where no CPU is wired. Never goes
+    /// backwards.
+    fn guest_time(&self, now: i64) -> i64 {
+        let Some(cycles) = self.cycles.get() else { return now };
+        let c = (cycles.get() as i64).saturating_mul(GUEST_NS_PER_CYCLE);
+        let resume = self.guest_resume.swap(i64::MIN, Ordering::SeqCst);
+        if resume != i64::MIN {
+            self.guest_base.store(resume - c, Ordering::SeqCst);
+        }
+        let g = c.saturating_add(self.guest_base.load(Ordering::SeqCst));
+        self.guest_seen.fetch_max(g, Ordering::SeqCst).max(g)
+    }
+
+    /// The guest clock, noted against the card clock `now` for stamping.
+    fn guest(&self, s: &mut State, now: i64) -> i64 {
+        let g = self.guest_time(now);
+        s.observe(now, g);
+        g
+    }
+
     fn now(&self) -> i64 {
         let at = self.stopped_at.lock();
         let t = self.clock_locked(&at);
@@ -1128,7 +1245,7 @@ impl Inner {
                 tm.remove(id);
             }
         }
-        *s = State::new(now);
+        *s = State::new(now, self.guest_time(now));
         s.status_gen = gen;
     }
 
@@ -1180,7 +1297,8 @@ impl Inner {
             }
         }
         if off == REG_UST_COUNTER && width == 4 {
-            s.ust_update(now);
+            let g = self.guest(&mut s, now);
+            s.ust_update(g);
             return s.ust_count;
         }
         crate::dlog!(LogModule::Rad1, "rad1: unsupported {width}-byte BAR0 read at {off:#x}");
@@ -1290,21 +1408,22 @@ impl Inner {
         }
         if off == REG_UST_CONTROL && width == 4 {
             self.sync_all(s, now);
+            let g = self.guest(s, now);
             match val {
                 0x0e => {
-                    s.ust_update(now);
+                    s.ust_update(g);
                     s.ust_enabled = false;
                     s.ust_armed = true;
                     return Some(());
                 }
                 0x0a if s.ust_armed => {
-                    s.ust_update(now);
+                    s.ust_update(g);
                     s.ust_enabled = true;
                     s.ust_armed = false;
                     return Some(());
                 }
                 0x02 => {
-                    s.ust_update(now);
+                    s.ust_update(g);
                     s.ust_enabled = false;
                     s.ust_armed = false;
                     return Some(());
@@ -1546,7 +1665,8 @@ impl Inner {
             let v = match reg {
                 0x04..=0x2c => s.sample_pos[((reg - POS_FIRST) / 4) as usize],
                 REG_UST_COUNTER => {
-                    s.ust_update(now);
+                    let g = self.guest(s, now);
+                    s.ust_update(g);
                     s.ust_count
                 }
                 _ => 0, // sync status
@@ -1693,6 +1813,7 @@ impl Inner {
         if !c.running || now <= c.start_ns {
             return;
         }
+        self.guest(s, now);
         let due = s.rate(idx).frames_in(now - c.start_ns);
         if due > c.frames && !self.chan_move(s, idx, due - c.frames) {
             s.chan[idx].running = false;
@@ -1787,11 +1908,13 @@ fn mute_from_word(w: u8) -> Result<Option<bool>, String> {
 // the time held back, and the load sets the stopped time so the clock
 // resumes at the saved instant, as the machine's other clocks do. The
 // timers are armed again when the card starts. The host audio stream is
-// this process's own and is not saved.
+// this process's own and is not saved. UST follows the guest clock; the
+// save records that clock and the load has the next read continue from it.
 impl Saveable for Rad1 {
     fn save_state(&self) -> toml::Value {
         let i = &self.inner;
         let now = i.now();
+        let guest = i.guest_time(now);
         let s = i.state.lock();
         let chans = s.chan.iter().map(|c| {
             StateTable::new()
@@ -1814,6 +1937,12 @@ impl Saveable for Rad1 {
             .collect();
         StateTable::new()
             .u64("clock_ns", now as u64)
+            .u64("guest_ns", guest as u64)
+            .u64("anchor_prev_card", s.anchor_prev.0 as u64)
+            .u64("anchor_prev_guest", s.anchor_prev.1 as u64)
+            .u64("anchor_last_card", s.anchor_last.0 as u64)
+            .u64("anchor_last_guest", s.anchor_last.1 as u64)
+            .u64("stamp_floor", s.stamp_floor as u64)
             .u64("stalled_ns", i.stalled_ns.load(Ordering::SeqCst) as u64)
             .u32s("startup", &s.startup)
             .u64s("subcode", &s.subcode)
@@ -1855,6 +1984,7 @@ impl Saveable for Rad1 {
             return Err(format!("subcode: {} words, expected {SUBCODE_WORDS}", subcode.len()));
         }
         let saved_now = field_u64(v, "clock_ns")? as i64;
+        let saved_guest = field_u64(v, "guest_ns")? as i64;
         let saved_stalled = field_u64(v, "stalled_ns")? as i64;
         let out_cg = field_u64(v, "out_cg")? as usize;
         if out_cg >= NUM_CG {
@@ -1908,6 +2038,9 @@ impl Saveable for Rad1 {
             ust_enabled: field_bool(v, "ust_enabled")?,
             ust_armed: field_bool(v, "ust_armed")?,
             ust_last_ns: field_u64(v, "ust_last_ns")? as i64,
+            anchor_prev: (field_u64(v, "anchor_prev_card")? as i64, field_u64(v, "anchor_prev_guest")? as i64),
+            anchor_last: (field_u64(v, "anchor_last_card")? as i64, field_u64(v, "anchor_last_guest")? as i64),
+            stamp_floor: field_u64(v, "stamp_floor")? as i64,
             status_gen: field_u64(v, "status_gen")?,
             status_interval: field_u32(v, "status_interval")?,
             status_start_ns: field_u64(v, "status_start_ns")? as i64,
@@ -1939,6 +2072,13 @@ impl Saveable for Rad1 {
             i.stopped_ns.store(since_start - saved_now - saved_stalled, Ordering::SeqCst);
         }
         i.seen_ns.store(saved_now, Ordering::SeqCst);
+        // The guest clock reads `saved_guest` again at its next look, so no
+        // UST ticks pass across the save and load; the cycle count of the
+        // run that loads it starts from its own origin.
+        i.guest_seen.store(i64::MIN, Ordering::SeqCst);
+        if i.cycles.get().is_some() {
+            i.guest_resume.store(saved_guest, Ordering::SeqCst);
+        }
         Ok(())
     }
 }
