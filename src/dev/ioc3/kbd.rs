@@ -10,17 +10,28 @@
 //! before the lock is tried, so either the device's thread gets the lock or
 //! the holder sees the flag.
 //!
-//! Ported from hw/misc/sgi-ioc3.c in jamesbraid/qemu-sgi-origami.
+//! A device that a clamp stopped is let go one character time after the read
+//! that emptied the holding, not inside the read. IRIX reads until the
+//! register comes back empty and then acknowledges; a character that arrived
+//! inside that read would latch its interrupt just before the acknowledge
+//! cleared it, and the port would sit with the character held and nothing to
+//! signal it. The status bit stays a plain write-one-to-clear latch.
+//!
+//! Ported from hw/misc/sgi-ioc3.c and hw/input/sgi-ioc3-kbc.c in
+//! jamesbraid/qemu-sgi-origami.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::Instant;
 
 use parking_lot::Mutex;
 
-use super::{int, usize_field, Core};
+use super::{due, int, until, usize_field, Core};
+use crate::dev::deadline::{decode, encode};
+use crate::dev::ioc3_kbc::RESUME_DELAY;
 use crate::dev::ps2::Ps2Controller;
 use crate::irq::{InterruptController, IrqLine};
-use crate::snapshot::{field, field_bool, field_u32, field_u8s, StateTable};
+use crate::snapshot::{field, field_bool, field_u32, field_u64, field_u8s, StateTable};
 use crate::traits::Device;
 
 pub(super) const KBC_CONTROL: u32 = 0x9c;
@@ -50,6 +61,8 @@ struct KbcPort {
 struct Kbc {
     control: u32,
     port: [KbcPort; 2],
+    /// When a clamp released by a read lets the stopped devices send again.
+    resume: Option<Instant>,
 }
 
 /// A PS/2 device model's "data waiting" line, which tells the controller a
@@ -70,6 +83,8 @@ pub(super) struct Kbd {
     st: Mutex<Kbc>,
     /// A character arrived while an access held the controller.
     dirty: AtomicBool,
+    /// `Kbc::resume`, encoded, where the timers and a lock-free check see it.
+    resume_due: AtomicU64,
 }
 
 impl Kbd {
@@ -80,7 +95,7 @@ impl Kbd {
             // Host key and mouse events are accepted from the start (this
             // only sets a flag); `stop` and `start` follow the chip's.
             Device::start(&*ps2);
-            Kbd { core, ps2, st: Mutex::new(Kbc::default()), dirty: AtomicBool::new(false) }
+            Kbd { core, ps2, st: Mutex::new(Kbc::default()), dirty: AtomicBool::new(false), resume_due: AtomicU64::new(0) }
         })
     }
 
@@ -90,12 +105,42 @@ impl Kbd {
 
     pub(super) fn read(&self, a: u32) -> u32 {
         let mut st = self.st.lock();
+        self.resume_if_due(&mut st, Instant::now());
         self.read_locked(&mut st, a)
     }
 
     pub(super) fn write(&self, a: u32, val: u32) {
         let mut st = self.st.lock();
+        self.resume_if_due(&mut st, Instant::now());
         self.write_locked(&mut st, a, val);
+    }
+
+    /// When the stopped devices are next let go, for the timers.
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        decode(self.resume_due.load(Ordering::SeqCst))
+    }
+
+    /// Let the stopped devices send if their character time has passed. The
+    /// check is lock-free, so an access that finds nothing pending costs a
+    /// load.
+    pub(super) fn catch_up(&self, now: Instant) {
+        if self.deadline().is_some_and(|d| d <= now) {
+            let mut st = self.st.lock();
+            self.resume_if_due(&mut st, now);
+        }
+    }
+
+    fn resume_if_due(&self, st: &mut Kbc, now: Instant) {
+        if st.resume.is_some_and(|d| d <= now) {
+            self.set_resume(st, None);
+            self.fill(st, 0);
+            self.fill(st, 1);
+        }
+    }
+
+    fn set_resume(&self, st: &mut Kbc, at: Option<Instant>) {
+        st.resume = at;
+        self.resume_due.store(encode(at), Ordering::SeqCst);
     }
 
     /// A device raised its line. If an access holds the controller (possibly
@@ -133,22 +178,32 @@ impl Kbd {
     }
 
     pub(super) fn reset(&self) {
-        *self.st.lock() = Kbc::default();
+        let mut st = self.st.lock();
+        *st = Kbc::default();
+        self.set_resume(&mut st, None);
     }
 
-    pub(super) fn save_state(&self) -> toml::Value {
+    /// The pending release is saved as the time it has left, like the chip's
+    /// other host-time deadlines. The key is new; a snapshot without it had
+    /// no release pending.
+    pub(super) fn save_state(&self, now: Instant) -> toml::Value {
         let st = self.st.lock();
         let mut kbc = StateTable::new();
         kbc.u32("control", st.control)
             .value("port0", st.port[0].save_state())
             .value("port1", st.port[1].save_state());
+        if st.resume.is_some() {
+            kbc.u64("resume", until(st.resume, now));
+        }
         kbc.build()
     }
 
-    pub(super) fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+    pub(super) fn load_state(&self, v: &toml::Value, now: Instant) -> Result<(), String> {
         let mut st = self.st.lock();
         st.control = field_u32(v, "control")?;
         st.port = [KbcPort::load_state(field(v, "port0")?)?, KbcPort::load_state(field(v, "port1")?)?];
+        let left = if v.get("resume").is_some() { field_u64(v, "resume")? } else { 0 };
+        self.set_resume(&mut st, due(left, now));
         Ok(())
     }
 
@@ -208,9 +263,12 @@ impl Kbd {
             val |= KBC_RX_OVERFLOW;
         }
         st.port[port] = KbcPort::default();
-        // The stopped device resumes inside this read; the part takes a
-        // character time (an approximation).
-        self.fill(st, port);
+        // The stopped device needs a character time to clock its next byte
+        // out (an approximation, see RESUME_DELAY), so it resumes after the
+        // driver's acknowledge, not inside this read.
+        if p.count != 0 && st.resume.is_none() && self.ps2.queued() {
+            self.set_resume(st, Some(Instant::now() + RESUME_DELAY));
+        }
         val
     }
 

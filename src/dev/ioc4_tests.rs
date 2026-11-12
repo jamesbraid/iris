@@ -1466,6 +1466,35 @@ fn the_ps2_adapter_presents_the_controller() {
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0xc0fa_aa00);
 }
 
+/// The driver reads the receive register, then acknowledges the keyboard
+/// source. The keyboard a clamp stopped sends its next character a character
+/// time later, so the interrupt it makes lands after the acknowledge instead
+/// of being swallowed by it. A guest that acknowledges and never reads goes
+/// quiet, and what a release brought stays held across an acknowledge.
+#[test]
+fn ps2_drain_then_acknowledge_takes_the_late_character() {
+    const K_CLAMP_1: u32 = 0x0010_0000;
+    let latched = |r: &Rig| r.r32(reg::OTHER_PENDING) & KBC_IRQ != 0;
+    let r = Rig::new();
+    r.w32(KBC_CONTROL, K_CLAMP_1);
+    r.w32(KBC_KBD_TRANSMIT, 0xff);
+    assert_eq!(r.r32(KBC_KBD_RECEIVE), 0x80fa_0000, "the acknowledge byte first");
+    r.w32(reg::OTHER_PENDING, KBC_IRQ);
+    assert!(!latched(&r), "the acknowledge cleared the latch");
+    r.settle(5);
+    assert!(latched(&r), "the self-test byte signals once it arrives");
+    r.w32(reg::OTHER_PENDING, KBC_IRQ);
+    r.settle(5);
+    assert!(!latched(&r), "the latch is only cleared by the acknowledge");
+    assert_eq!(r.r32(KBC_KBD_RECEIVE), 0x80aa_0000, "and the held character is still there to read");
+
+    // Acknowledge with no read: quiet.
+    r.w32(KBC_KBD_TRANSMIT, 0xff);
+    r.w32(reg::OTHER_PENDING, KBC_IRQ);
+    r.settle(5);
+    assert!(!latched(&r));
+}
+
 /// Ports test_ps2_ports_present: every IOC4 has both ports; there is no
 /// switch to leave them unplugged.
 #[test]
@@ -1508,6 +1537,8 @@ fn the_ps2_driver_sequence() {
     assert_eq!(r.r32(reg::OTHER_PENDING) & KBC_IRQ, KBC_IRQ);
     r.w32(reg::OTHER_ENABLE_CLR, KBC_IRQ);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0x80fa_0000);
+    assert_eq!(r.r32(KBC_KBD_RECEIVE), 0, "the keyboard needs a character time to send the next");
+    r.settle(5);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0x80aa_0000);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0);
     assert_eq!(r.r32(KBC_AUX_RECEIVE), 0);
@@ -1525,7 +1556,9 @@ fn the_ps2_driver_sequence() {
     assert!(r.pin.level());
     r.w32(reg::OTHER_ENABLE_CLR, KBC_IRQ);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0x801c_0000);
+    r.settle(5);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0x80f0_0000);
+    r.settle(5);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0x801c_0000);
     assert_eq!(r.r32(KBC_KBD_RECEIVE), 0);
     r.w32(reg::OTHER_PENDING, KBC_IRQ);

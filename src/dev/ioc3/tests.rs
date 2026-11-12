@@ -704,10 +704,94 @@ fn the_ps2_receive_holds_three_behind_the_clamp() {
     let first = r.r32(K_RX);
     assert_eq!(first & (VALID[0] | VALID[1] | VALID[2]), VALID[0] | VALID[1] | VALID[2]);
     assert_eq!(first & KBC_RX_OVERFLOW, 0, "nothing lost");
-    // The read released the clamp; the stopped keyboard resumed.
+    // The read released the clamp; the stopped keyboard resumes a character
+    // time later.
+    assert_eq!(r.r32(K_RX), 0, "not inside the read");
+    r.settle(5);
     let second = r.r32(K_RX);
     assert_ne!(second & VALID[2], 0, "the rest were held back, not dropped");
     assert_ne!((second >> 16) & 0xff, (first >> 16) & 0xff, "and are not a replay");
+}
+
+/// Wait out `ms` of host time, then play the timers.
+impl Rig {
+    fn settle(&self, ms: u64) {
+        std::thread::sleep(Duration::from_millis(ms));
+        self.c.service();
+    }
+}
+
+fn keyboard_latched(r: &Rig) -> bool {
+    r.r32(reg::INT_STATUS) & int::KEYBOARD != 0
+}
+
+/// The driver reads the receive register, then acknowledges. The keyboard a
+/// clamp stopped sends its next character a character time later, so its
+/// interrupt lands after the acknowledge instead of being swallowed by it.
+/// Inside the read it landed before, the acknowledge cleared it, and the
+/// character sat held with nothing to signal it.
+#[test]
+fn ps2_drain_then_acknowledge_takes_the_late_character() {
+    let r = Rig::new();
+    r.w32(CTRL, KBC_K_CLAMP_1);
+    r.w32(K_TX, 0xff);
+    assert_eq!((r.r32(K_RX) >> 16) & 0xff, 0xfa, "the acknowledge byte first");
+    r.w32(reg::INT_STATUS, int::KEYBOARD);
+    assert!(!keyboard_latched(&r), "the acknowledge cleared the latch");
+    r.settle(5);
+    assert!(keyboard_latched(&r), "the self-test byte signals once it arrives");
+    assert_eq!((r.r32(K_RX) >> 16) & 0xff, 0xaa);
+}
+
+/// The characters a release brought stay held across an acknowledge: the
+/// status bit is a latch and nothing else.
+#[test]
+fn ps2_resumed_backlog_survives_an_acknowledge() {
+    let r = Rig::new();
+    r.w32(CTRL, KBC_K_CLAMP_1);
+    r.w32(K_TX, 0xff);
+    let _ = r.r32(K_RX);
+    r.settle(5);
+    assert!(keyboard_latched(&r));
+    r.w32(reg::INT_STATUS, int::KEYBOARD);
+    assert!(!keyboard_latched(&r), "the acknowledge clears the bit and the bit stays clear");
+    r.settle(5);
+    assert!(!keyboard_latched(&r));
+    assert_eq!((r.r32(K_RX) >> 16) & 0xff, 0xaa, "the held character is still there to read");
+}
+
+/// A guest that acknowledges and never reads goes quiet.
+#[test]
+fn ps2_acknowledge_without_a_read_goes_quiet() {
+    let r = Rig::new();
+    r.w32(CTRL, KBC_K_CLAMP_1);
+    r.w32(K_TX, 0xff);
+    assert!(keyboard_latched(&r));
+    r.w32(reg::INT_STATUS, int::KEYBOARD);
+    r.settle(5);
+    assert!(!keyboard_latched(&r), "no read, so nothing was released to signal");
+}
+
+/// A release pending at save resumes the stopped keyboard after the load, and
+/// a chip with none pending saves no release.
+#[test]
+fn ps2_pending_resume_survives_a_snapshot() {
+    let src = Rig::new();
+    src.w32(CTRL, KBC_K_CLAMP_1);
+    src.w32(K_TX, 0xff);
+    assert!(src.c.save_state()["chip"]["kbc"].get("resume").is_none(), "nothing released yet");
+    let _ = src.r32(K_RX);
+    let v = src.c.save_state();
+    assert!(v["chip"]["kbc"].get("resume").is_some(), "the release is pending");
+
+    let dst = Rig::new();
+    dst.c.load_state(&v).unwrap();
+    assert!(dst.c.sh.kbd.as_ref().unwrap().deadline().is_some(), "the release is pending again");
+    dst.w32(reg::INT_STATUS, int::KEYBOARD);
+    dst.settle(5);
+    assert!(keyboard_latched(&dst), "the release ran after the load");
+    assert_eq!((dst.r32(K_RX) >> 16) & 0xff, 0xaa);
+    assert!(dst.c.save_state()["chip"]["kbc"].get("resume").is_none(), "and is spent");
 }
 
 #[test]

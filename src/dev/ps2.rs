@@ -522,6 +522,11 @@ impl Ps2Controller {
         Some(byte)
     }
 
+    /// Whether either device has a byte queued that no port has taken yet.
+    pub fn queued(&self) -> bool {
+        !self.state.lock().rx_queue.is_empty()
+    }
+
     /// Whether the guest has turned the mouse on: until it has, moves and
     /// clicks are dropped.
     pub fn mouse_enabled(&self) -> bool {

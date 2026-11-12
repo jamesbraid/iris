@@ -63,7 +63,8 @@
 //! names, its `sgi_ioc4_sdma_*` callbacks are the chip's `SerialDmaHost`, and
 //! the ring engine is `ioc_serial_dma.rs` (QEMU's `sgi-ioc-serial-dma.c`).
 //!
-//! Ported from hw/misc/sgi-ioc4.c in jamesbraid/qemu-sgi-origami.
+//! Ported from hw/misc/sgi-ioc4.c and hw/input/sgi-ioc3-kbc.c in
+//! jamesbraid/qemu-sgi-origami.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -323,15 +324,26 @@ impl St {
     /// adapter presents it: no write-pending or other status, and none of
     /// the IOC3-only receive flags.
     fn kbc_read(&mut self, off: u32) -> u32 {
+        let now = Instant::now();
+        self.kbc_catch_up(now);
         let ps2 = self.ps2.clone();
-        let (raw, arrived) = self.kbc.read(off, &ps2);
-        if arrived {
-            self.other_pending |= OTHER_KEYBOARD;
-        }
+        let raw = self.kbc.read(off, &ps2, now);
         if off == ioc3_kbc::reg::CONTROL { raw & !KBC_STATUS } else { raw & KBC_RX_MASK }
     }
 
+    /// Let a device the clamp stopped send again once its character time has
+    /// passed, and latch the keyboard source if that brought a character. An
+    /// acknowledge does not run this first (`write32` leaves it to a later
+    /// access or the timer), so it cannot swallow what the release makes.
+    fn kbc_catch_up(&mut self, now: Instant) {
+        let ps2 = self.ps2.clone();
+        if self.kbc.catch_up(now, &ps2) {
+            self.other_pending |= OTHER_KEYBOARD;
+        }
+    }
+
     fn kbc_write(&mut self, off: u32, val: u32) {
+        self.kbc_catch_up(Instant::now());
         let mut val = val;
         if off == ioc3_kbc::reg::CONTROL {
             // The status bits read clear; a write that differs is a guest
@@ -360,6 +372,7 @@ impl St {
             d[K_TX_DELAY + p] = self.sdma.tx_delay_deadline(p);
             d[K_LOOP + p] = self.sdma.loop_deadline(p);
         }
+        d[K_PS2] = self.kbc.deadline();
         d
     }
 
@@ -476,7 +489,9 @@ impl St {
     // ----- control registers -----
 
     fn read32(&mut self, a: u32) -> u32 {
-        self.sdma_catch_up(Instant::now());
+        let now = Instant::now();
+        self.sdma_catch_up(now);
+        self.kbc_catch_up(now);
         if let Some(r) = sdma_decode(a) {
             let (sdma, mut host) = self.sdma_engine_split();
             return match r {
@@ -620,7 +635,9 @@ const RX_IDLE: Duration = Duration::from_millis(2);
 const K_RX: usize = 0;
 const K_TX_DELAY: usize = PORTS;
 const K_LOOP: usize = 2 * PORTS;
-const KINDS: usize = 3 * PORTS;
+/// A PS/2 device a clamp stopped, let go one character time after a read.
+const K_PS2: usize = 3 * PORTS;
+const KINDS: usize = K_PS2 + 1;
 type Deadlines = [Option<Instant>; KINDS];
 
 /// Lock order: `gate`, then `line_order`, then `st`; `armed` and `line` are
@@ -717,7 +734,11 @@ impl Shared {
             return TimerReturn::Delete;
         }
         sh.timers.fired(kind, due);
-        sh.with_st(|st| st.sdma_catch_up(Instant::now()));
+        sh.with_st(|st| {
+            let now = Instant::now();
+            st.sdma_catch_up(now);
+            st.kbc_catch_up(now);
+        });
         TimerReturn::Delete
     }
 
@@ -749,6 +770,7 @@ impl Shared {
                 st.uart_changed(p);
             }
             st.sdma_catch_up(Instant::now());
+            st.kbc_catch_up(Instant::now());
             for p in 0..PORTS {
                 st.sdma_run(p);
             }

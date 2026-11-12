@@ -508,7 +508,8 @@ const K_RX: usize = 0;
 const K_TX_DELAY: usize = 2;
 const K_INT_OUT: usize = 4;
 const K_NVRAM: usize = 5;
-const KINDS: usize = 6;
+const K_PS2: usize = 6;
+const KINDS: usize = 7;
 type Deadlines = [Option<Instant>; KINDS];
 
 /// Lock order: `gate`, then a child's lock (the serial engine's before the
@@ -568,7 +569,8 @@ impl Shared {
 
     /// The host-time deadlines the chip holds, for the timers: the serial
     /// receive timers, transmit delays, the interrupt output while its status
-    /// bit can reach the line, and the NVRAM file's debounce.
+    /// bit can reach the line, the NVRAM file's debounce and the PS/2
+    /// controller's release of a stopped device.
     fn deadlines(&self) -> Deadlines {
         let mut d = [None; KINDS];
         for (p, s) in self.serial.iter().enumerate() {
@@ -582,6 +584,7 @@ impl Shared {
             d[K_INT_OUT] = decode(self.io_due.load(Ordering::SeqCst));
         }
         d[K_NVRAM] = self.rtc.as_ref().and_then(|r| r.due());
+        d[K_PS2] = self.kbd.as_ref().and_then(|k| k.deadline());
         d
     }
 
@@ -664,6 +667,9 @@ impl Shared {
             s.catch_up(now);
         }
         self.io_catch_up(now);
+        if let Some(k) = &self.kbd {
+            k.catch_up(now);
+        }
     }
 
     fn io_catch_up(&self, now: Instant) {
@@ -710,6 +716,7 @@ impl Shared {
         }
         self.io_catch_up(now);
         if let Some(k) = &self.kbd {
+            k.catch_up(now);
             k.poke_for_test();
         }
         self.after();
@@ -734,6 +741,9 @@ impl Shared {
                 let now = Instant::now();
                 for s in self.serial.iter().flatten() {
                     s.catch_up(now);
+                }
+                if let Some(k) = &self.kbd {
+                    k.catch_up(now);
                 }
                 self.core.status()
             }
@@ -774,6 +784,9 @@ impl Shared {
                 for s in self.serial.iter().flatten() {
                     s.catch_up(now);
                 }
+                // The PS/2 release is left pending on purpose: an acknowledge
+                // that lands after the guest's read must not run it first and
+                // swallow the arrival it makes.
                 // Write-one-to-clear; level-following bits ignore the write.
                 self.core.clear_bits(val & !int::LEVELS);
             }
@@ -1474,7 +1487,7 @@ impl Shared {
             t.value("sdma", sdma.build());
         }
         if let Some(k) = &self.kbd {
-            t.value("kbc", k.save_state());
+            t.value("kbc", k.save_state(now));
         }
         if let (Some(sio), Some(par)) = (&self.sio, &self.parallel) {
             let mut p = StateTable::new();
@@ -1525,7 +1538,7 @@ impl Shared {
             }
         }
         if let Some(k) = &self.kbd {
-            k.load_state(field(v, "kbc")?)?;
+            k.load_state(field(v, "kbc")?, now)?;
         }
         if let (Some(sio), Some(par)) = (&self.sio, &self.parallel) {
             let p = field(v, "parallel")?;
