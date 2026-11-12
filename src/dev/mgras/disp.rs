@@ -204,9 +204,22 @@ pub fn save_png(path: &str, frame: &[u32], width: usize, height: usize) -> Resul
     out.write_image_data(&rows).map_err(|e| e.to_string())
 }
 
+/// Longest the refresh thread sleeps without looking at `running` and the
+/// video timing again.
+const RETRACE_WAIT_SLICE: std::time::Duration = std::time::Duration::from_millis(10);
+
 impl Mgras {
+    /// How long a displayed frame lasts, retrace to retrace: what the video
+    /// timing the guest loaded gives (a format change can halve the rate),
+    /// or the stock 1280x1024 frame, 894,600 VC3 clocks at 53.625 MHz
+    /// (59.94 Hz), before a timing is loaded.
+    ///
+    /// Ported from hw/misc/sgi-mgras-display.c in jamesbraid/qemu-sgi-origami.
+    pub(super) fn retrace_period(&self) -> std::time::Duration {
+        self.front_view().dcb.retrace_period().unwrap_or(std::time::Duration::from_nanos(16_682_517))
+    }
+
     pub(super) fn refresh_loop(self: &Arc<Self>) {
-        let frame = std::time::Duration::from_micros(16_667);
         {
             let mut screen = self.screen.lock();
             (screen.width, screen.height) = frame::DEFAULT_SIZE;
@@ -231,6 +244,7 @@ impl Mgras {
 
         while self.running.load(Ordering::Relaxed) {
             let start = std::time::Instant::now();
+            let frame = self.retrace_period();
             // Both queues: the HQ3's usually drains at once, and the backlog
             // waits in front of the raster engines.
             let stats = self.status.snapshot(start, self.hq_fifo.len() + self.rss_fifo.len());
@@ -343,8 +357,16 @@ impl Mgras {
                 std::thread::sleep(std::time::Duration::from_micros(500));
                 self.set_line(Line::Retrace, false);
             }
-            if let Some(rest) = frame.checked_sub(start.elapsed()) {
-                std::thread::sleep(rest);
+            // Wait out the rest of the frame in short slices. A table that
+            // gives a huge period (garbage, or half written) is waited out
+            // as the board would, but shutdown does not wait with it, and
+            // a corrected table takes effect within a slice, as the period
+            // is derived again on each one.
+            let mut frame = frame;
+            while self.running.load(Ordering::Relaxed) {
+                let Some(rest) = frame.checked_sub(start.elapsed()) else { break };
+                std::thread::sleep(rest.min(RETRACE_WAIT_SLICE));
+                frame = self.retrace_period();
             }
         }
         // The renderer's GL state belongs to this thread (its context is

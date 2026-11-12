@@ -169,7 +169,24 @@ impl Dac {
     pub fn set_pixmask(&mut self, v: u32) {
         self.regs.insert(DAC_PIXMASK, v);
     }
+
+    /// The pixel clock the PLL makes from its 33 MHz reference, as a
+    /// fraction in Hz: `33 MHz * (4 * (v + 2) + control[7:6]) / ((r + 2) *
+    /// 2^control[5:4] * 2^control[2])`, from registers 0x0c (r), 0x0f (v)
+    /// and 0x09 (control), which the address register holds in its high
+    /// byte. IRIX programs r = 2, v = 4, control 0x91: 107.25 MHz. The
+    /// relation is inferred from the rates SGI's timing files record. The
+    /// board can select another reference, which no shipped timing file
+    /// does; that reference's rate is unknown and not modelled.
+    ///
+    /// Ported from hw/misc/sgi-mgras-display.c in jamesbraid/qemu-sgi-origami.
+    pub fn pixel_clock(&self) -> (u64, u64) {
+        let (r, v, cntl) = (self.regs.get(0x0c00) as u64, self.regs.get(0x0f00) as u64, self.regs.get(0x0900) as u64);
+        (DAC_PLL_REF_HZ * (4 * (v + 2) + (cntl >> 6)), (r + 2) << ((cntl >> 4) & 3) << ((cntl >> 2) & 1))
+    }
 }
+
+const DAC_PLL_REF_HZ: u64 = 33_000_000;
 
 /// The XMAP: the pixel processors' display side (display modes per window ID,
 /// buffer selects, scanout pointers), reached as an index register (`INDEX`)
@@ -387,6 +404,51 @@ impl Vc3 {
         (w > 0 && h > 0).then_some((w, h))
     }
 
+    /// VC3 clocks in one frame, the time the chip takes to walk its frame
+    /// table once. Register 0 points at the table: pairs of (line sequence
+    /// address, repeat count) ending at a count of 0. A line sequence is a
+    /// run of entries of one halfword (bit 7 set) or two, each first
+    /// halfword carrying a duration in VC3 clocks in bits 14:8; the line
+    /// ends at an entry whose halfwords all have bit 15 set. None while no
+    /// table is loaded or a line never ends (a table half written). Walking
+    /// the table is inferred from the timing tables IRIX ships, not
+    /// established hardware behaviour.
+    ///
+    /// Ported from hw/misc/sgi-mgras-display.c in jamesbraid/qemu-sgi-origami.
+    pub fn frame_clocks(&self) -> Option<u64> {
+        let at = |a: usize| self.sram[a & 0x7FFF];
+        // Bounds the line walks; a stock table reads a few hundred halfwords.
+        let mut budget = 4 * self.sram.len();
+        let mut line_clocks = |mut a: usize| -> Option<u64> {
+            let mut clocks = 0;
+            while budget > 0 {
+                budget -= 1;
+                let first = at(a);
+                a += 1;
+                clocks += (first >> 8 & 0x7F) as u64;
+                let mut end = first & 0x8000 != 0;
+                if first & 0x80 == 0 {
+                    end &= at(a) & 0x8000 != 0;
+                    a += 1;
+                }
+                if end {
+                    return Some(clocks);
+                }
+            }
+            None
+        };
+        let ep = self.regs[0] as usize;
+        let mut frame = 0;
+        for i in 0..self.sram.len() / 2 {
+            let (line, count) = (at(ep + 2 * i), at(ep + 2 * i + 1));
+            if count == 0 {
+                return (frame > 0).then_some(frame);
+            }
+            frame += count as u64 * line_clocks(line as usize)?;
+        }
+        None
+    }
+
     /// Scanlines in the main window-ID frame table: one entry per visible
     /// line, then an 0xFFFF end-of-frame entry.
     pub fn did_lines(&self) -> usize {
@@ -497,6 +559,18 @@ impl Dcb {
         self.cmap[1].rev = cmap_rev[1];
         self.dac.init();
         self.bdvers = bdvers;
+    }
+
+    /// Retrace to retrace, from the VC3's frame table and the pixel clock
+    /// (the VC3 runs at half of it). None without a frame the scan-out can
+    /// retrace: no table, or one shorter than a millisecond.
+    ///
+    /// Ported from hw/misc/sgi-mgras-display.c in jamesbraid/qemu-sgi-origami.
+    pub fn retrace_period(&self) -> Option<std::time::Duration> {
+        let frame = self.vc3.frame_clocks()?;
+        let (num, den) = self.dac.pixel_clock();
+        let ns = 2 * frame as u128 * den as u128 * 1_000_000_000 / num as u128;
+        (ns >= 1_000_000).then(|| std::time::Duration::from_nanos(ns.min(u64::MAX as u128) as u64))
     }
 
     pub fn write_dcbctrl(&mut self, dev: usize, val: u32) {
