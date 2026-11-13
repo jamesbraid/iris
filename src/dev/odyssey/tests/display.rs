@@ -840,8 +840,7 @@ fn composed_board() -> Box<Board> {
     s
 }
 
-/// Frames composed until one is not: a store's frame is followed by one
-/// more, which catches data its mark was seen ahead of.
+/// Frames composed until one is not.
 fn composes(s: &mut Board) -> usize {
     let mut n = 0;
     while s.scanout_update() {
@@ -861,16 +860,24 @@ fn an_unchanged_frame_is_not_composed_again() {
     assert_eq!(in_frame(&s, 2, 3), WORD1_RGB);
 }
 
-/// Every way the scan-out's input changes brings a new frame: a store to
-/// board memory (a draw, a pixel write), the colour lookup RAM and gamma
-/// table, a display mode, the overlay modes, the cursor's entries, the
-/// scan-out geometry, the mode, a buffer swap at the retrace, and a reset.
+/// Every way the scan-out's input changes brings a new frame: a command
+/// the board processes (a draw, a copy, a pixel write, a write of the
+/// colour lookup RAM and gamma table, a display mode, the overlay modes,
+/// the cursor's entries or the scan-out geometry), the mode, a buffer swap
+/// at the retrace, and a reset.
 #[test]
 fn every_change_to_what_the_scanout_reads_composes_a_new_frame() {
     type Change = fn(&mut Board);
-    let changes: [(&str, Change); 11] = [
+    let changes: [(&str, Change); 12] = [
         ("a draw", |s| rgb_fill(s, 0xff, 0, 0, 100, 100, 110, 110)),
         ("a pixel write", |s| pixel_write(s, 5, 5, 0x1122_3344)),
+        ("a copy", |s| {
+            // Four id-plane bytes copied to another row.
+            cmd(s, crate::dev::odyssey::consts::cmd::COPY_RECT_TRIGGER);
+            for w in [0x14_2000, 40 << 16 | 30, 0x0050_0050, 1 << 16 | 4, 0x8000_1000, 0x14_2000, 41 << 16 | 60, 0x3a00_0041] {
+                cmd(s, w);
+            }
+        }),
         ("a gamma entry", |s| backend_entry(s, crate::dev::odyssey::consts::ODSY_GAMMA_BASE + 0x100, 0x3ff)),
         ("a colour-map entry", |s| backend_entry(s, 7, LUT_RED)),
         ("a display mode", |s| dispmode(s, 3, DISPMODE_GROUP17)),
@@ -887,19 +894,76 @@ fn every_change_to_what_the_scanout_reads_composes_a_new_frame() {
     for (what, change) in changes {
         let mut s = composed_board();
         change(&mut s);
-        let stores = ["a draw", "a pixel write", "a reset"].contains(&what);
-        assert_eq!(composes(&mut s), if stores { 2 } else { 1 }, "{what} composes a new frame, once more for a store");
+        assert_eq!(composes(&mut s), 1, "{what} composes a new frame, once");
     }
 }
 
-/// A store through any pointer to the memory counts, including a writer
-/// that uploads what it wrote itself (`untracked`), and a view of the
-/// memory that is cloned or copied around.
+/// The GPU scan-out keeps its last frame while nothing it reads has
+/// changed, and composes a new one after each kind of change the display
+/// can see, a draw, a copy and a pixel write among them (it needs
+/// `VPRO_GPU=1`).
+#[cfg(feature = "wgpu")]
 #[test]
-fn a_store_through_any_view_of_the_memory_composes_a_new_frame() {
+fn the_gpu_scanout_composes_only_a_changed_frame() {
+    if !gpu_unit_tests() {
+        return;
+    }
+    type Change = fn(&mut Board);
+    let changes: [(&str, Change); 4] = [
+        ("a draw", |s| rgb_fill(s, 0xff, 0, 0, 100, 100, 110, 110)),
+        ("a pixel write", |s| pixel_write(s, 5, 5, 0x1122_3344)),
+        ("a colour-map entry", |s| backend_entry(s, 7, LUT_RED)),
+        ("the video mode", |s| s.set_scanout_size(1024, 768)),
+    ];
+    for (what, change) in changes {
+        let (mut s, _) = board("v12");
+        cursor_load(&mut s, 2, 3);
+        cursor_entry(&mut s, cursor::CONTROL, 1);
+        assert_eq!(s.scanout_update_on_gpu(), Some(true), "the first frame is composed");
+        let composed_until_idle = |s: &mut Board| {
+            let mut n = 0;
+            while s.scanout_update_on_gpu() == Some(true) {
+                n += 1;
+                assert!(n < 4, "frames keep being composed");
+            }
+            n
+        };
+        composed_until_idle(&mut s);
+        for _ in 0..3 {
+            assert_eq!(s.scanout_update_on_gpu(), Some(false), "an idle frame is not composed");
+        }
+        change(&mut s);
+        assert_eq!(composed_until_idle(&mut s), 1, "{what} composes a new frame, once");
+    }
+}
+
+/// A store to the board, whatever register or command it is, tells the
+/// display once it has been processed.
+#[test]
+fn a_store_to_the_board_marks_the_display() {
     let mut s = composed_board();
-    s.vram.ptr().untracked().store(0x4000, 4, 1);
-    assert_eq!(composes(&mut s), 2);
-    s.vram.ptr_shared().store(0x4000, 4, 2);
-    assert_eq!(composes(&mut s), 2);
+    assert!(!s.vram.ptr().take_drawn(), "nothing has been stored since the last frame");
+    reg_write(&mut s, swap::ARM, 0);
+    assert!(s.vram.ptr().take_drawn());
+}
+
+/// A store to the memory does not tell the display, through any view of it:
+/// the cost of a mark belongs to a command and a finished job, not to a
+/// pixel. What marks it is the board processing a command, or the raster
+/// unit finishing a job.
+#[test]
+fn a_store_to_the_memory_alone_does_not_compose_a_new_frame() {
+    if super::gpu_unit_tests() {
+        // The GPU unit uploads the mirror's changed blocks, and the upload
+        // marks the display once, however many stores it carries.
+        return;
+    }
+    let mut s = composed_board();
+    s.vram.ptr().store(0x4000, 4, 1);
+    s.vram.ptr().untracked().store(0x4000, 4, 2);
+    s.vram.ptr_shared().store(0x4000, 4, 3);
+    assert_eq!(composes(&mut s), 0);
+    // The command that stored it marks the display.
+    s.vram.ptr_shared().mark_drawn();
+    assert_eq!(composes(&mut s), 1);
 }

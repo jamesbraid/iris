@@ -285,11 +285,13 @@ impl Odyssey {
             crate::pf_begin!(crate::perfetto::events::ODSY_FRAME_PLANES);
             let composed = reader.update_on_gpu();
             crate::pf_end!(crate::perfetto::events::ODSY_FRAME_PLANES);
-            if let Some((buffer, w, h)) = composed {
+            if let Some((buffer, w, h, changed)) = composed {
                 set_display_fifo_pending(state.fifo.level() as usize + state.raster.pending() as usize);
                 crate::pf_end!(crate::perfetto::events::ODSY_CAPTURE);
                 drop(reader);
-                if display.due(true) {
+                // An unchanged frame is the last buffer, presented only at
+                // the idle refresh.
+                if display.due(changed) {
                     crate::pf_begin!(crate::perfetto::events::ODSY_PRESENT);
                     display.present_gpu(&buffer, w, h);
                     crate::pf_end!(crate::perfetto::events::ODSY_PRESENT);

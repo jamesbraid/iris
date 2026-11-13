@@ -255,6 +255,13 @@ impl Board {
     pub fn scanout_update(&mut self) -> bool {
         self.test_reader().update()
     }
+
+    /// As `scanout_update` on the GPU scan-out: None when it composes
+    /// nothing, else whether the frame was composed again.
+    #[cfg(feature = "wgpu")]
+    pub fn scanout_update_on_gpu(&mut self) -> Option<bool> {
+        self.test_reader().update_on_gpu().map(|(_, _, _, changed)| changed)
+    }
 }
 
 /// What one main drawable id shows, decided once per update instead of per

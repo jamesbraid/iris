@@ -1070,6 +1070,9 @@ impl GpuRaster {
             self.vram.write(lo, bytemuck::cast_slice(self.mirror.words_at(lo, hi - lo)));
             self.uploaded += hi - lo;
             self.uploaded_tiles += hi - lo;
+            // The display may have taken the command's mark before this
+            // reached the memory it composes from.
+            self.mirror.mark_drawn();
         }
     }
 
@@ -1153,6 +1156,8 @@ impl GpuRaster {
     fn upload_dirty(&mut self) {
         for (off, len) in self.mirror.take_dirty_runs() {
             self.vram.write(off, bytemuck::cast_slice(self.mirror.words_at(off, len)));
+            // As upload_tiles: the command's mark may already be taken.
+            self.mirror.mark_drawn();
             self.uploaded += len;
             self.uploaded_blocks += len;
         }
@@ -1277,6 +1282,9 @@ impl GpuRaster {
             pass.dispatch_workgroups((w * h).div_ceil(64), 1, 1);
         }
         self.pending = Some(self.gpu.submit(enc));
+        // The copy ran on the GPU: the display composes again (on the same
+        // queue, so after the copy).
+        self.mirror.mark_drawn();
         let mut s = Slot::zeroed();
         s.views[0] = u.dst;
         let (x, y) = op.dst_xy;
@@ -1591,6 +1599,8 @@ impl GpuRaster {
         }
         if let Some(sub) = self.batch.flush(&self.pipelines, &[&self.sets[k].group]) {
             self.pending = Some(sub);
+            // As in copy: the batch's stores are the GPU's alone.
+            self.mirror.mark_drawn();
         }
         self.last = None;
         self.opened = None;
@@ -1630,6 +1640,7 @@ impl GpuRaster {
         self.flush();
         self.vram.write(offset, bytemuck::cast_slice(words));
         self.uploaded += 8 * words.len() as u64;
+        self.mirror.mark_drawn();
     }
 
     /// Zero all of board memory (the mirror has been zeroed by the caller).
@@ -1641,6 +1652,7 @@ impl GpuRaster {
         }
         self.gpu_dirty_any = false;
         self.mirror.clear_dirty();
+        self.mirror.mark_drawn();
     }
 
     /// Board memory as the model's words, after a wait.

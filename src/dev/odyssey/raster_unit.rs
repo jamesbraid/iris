@@ -251,6 +251,9 @@ pub(super) struct RasterQueue<const HEADS: usize = 1> {
     /// front end uses it only for a job it runs itself, with no raster thread
     /// (`RasterQueue::ctx`).
     ctx: UnsafeCell<RasterCtx>,
+    /// Board memory, for the mark that tells the display a job is done
+    /// (`VramPtr::mark_drawn`). Set when the board's memory is allocated.
+    pub display: std::sync::OnceLock<super::vram::VramPtr>,
     /// Jobs submitted and not yet finished, and one more while `held`.
     pending: AtomicU32,
     /// The shader and back end hold quads of finished draws: the raster
@@ -323,6 +326,7 @@ impl<const HEADS: usize> Default for RasterQueue<HEADS> {
             // SAFETY: as the ring.
             spare: unsafe { Box::new_zeroed().assume_init() },
             ctx: UnsafeCell::new(RasterCtx::new()),
+            display: std::sync::OnceLock::new(),
             pending: AtomicU32::new(0),
             held: AtomicBool::new(false),
             flush: AtomicBool::new(false),
@@ -397,6 +401,16 @@ impl RasterQueue {
         self.pending.load(SeqCst)
     }
 
+    /// Tell the display that a job is done, so it composes again. The
+    /// pixels of a draw may still be on their way through the pipeline; the
+    /// mark when the pipeline runs dry (`release_held`) brings the frame
+    /// after them.
+    fn mark_drawn(&self) {
+        if let Some(mem) = self.display.get() {
+            mem.mark_drawn();
+        }
+    }
+
     /// The estimated work of the jobs submitted and not yet finished.
     pub fn queued(&self) -> u64 {
         self.queued.load(SeqCst)
@@ -418,6 +432,7 @@ impl RasterQueue {
             // context (see the Sync impl).
             let ctx = unsafe { &mut *self.ctx.get() };
             job(ctx);
+            self.mark_drawn();
             return;
         }
         let entry = Box::into_raw(Box::new(Box::new(job) as RasterJob)) as u64;
@@ -553,6 +568,7 @@ impl RasterQueue {
             self.give_back(job);
         }
         self.flush.store(false, SeqCst);
+        self.mark_drawn();
         if self.held.swap(false, SeqCst) && self.pending.fetch_sub(1, SeqCst) == 1 {
             let _g = self.idle.lock();
             self.idle_kick.notify_all();
@@ -751,6 +767,7 @@ impl RasterQueue {
                         self.release_held(ctx);
                     }
                 }
+                self.mark_drawn();
                 let left = self.queued.fetch_sub(cost, SeqCst) - cost;
                 // This job's count, unless the pipeline keeps it.
                 let mut done = 1;
@@ -770,6 +787,8 @@ impl RasterQueue {
                             self.give_back(job);
                         }
                         self.flush.store(false, SeqCst);
+                        // The pipeline is dry: the last pixels are in.
+                        self.mark_drawn();
                         if self.held.swap(false, SeqCst) {
                             done += 1;
                         }

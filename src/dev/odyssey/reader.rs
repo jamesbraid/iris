@@ -3,9 +3,12 @@
 //! When anything it reads has changed, the display composes the whole
 //! screen from board memory as the scan-out registers describe it
 //! (frame.rs), reading memory the raster unit and the front end may be
-//! writing, without a lock, as the real scan-out does. A store to the
-//! memory (`VramPtr::take_written`) or a move of a register generation
-//! below marks the next frame; with neither, the frame on show stays.
+//! writing, without a lock, as the real scan-out does. A command the
+//! board has processed or drawing it has finished
+//! (`VramPtr::take_drawn`), or a move of a register generation below,
+//! marks the next frame; with neither, the frame on show stays. That holds
+//! whether the raster unit and the compose run on the CPU or the GPU, and
+//! no store to board memory pays for it.
 //! The rest of what a frame reads is shared the same way:
 //!
 //! - the lookup RAM, the display modes, the cursor and the scan-out
@@ -437,10 +440,10 @@ pub(super) struct ScanoutReader {
     /// What `frame` was composed from: the mode, the registers and the
     /// displayed-buffer bits. None before the first.
     composed: Option<(u64, u64, u32)>,
-    /// The last frame was composed for a store to board memory. The store's
-    /// mark is not ordered against its data, so the frame may have missed
-    /// the data; one more is composed to catch it.
-    settling: bool,
+    /// The last frame composed on the GPU (`update_on_gpu`), what it was
+    /// composed from, and its size.
+    #[cfg(feature = "wgpu")]
+    gpu_composed: Option<((u64, u64, u32), wgpu::Buffer, u32, u32)>,
     /// The GPU scan-out failed once (reported), and the CPU composes.
     gpu_failed: bool,
     /// Compose on the CPU in the screen's order, 0xAABBGGRR
@@ -463,7 +466,10 @@ impl ScanoutReader {
         self.restart_gen = 0;
         self.snap_gen = u64::MAX;
         self.composed = None;
-        self.settling = false;
+        #[cfg(feature = "wgpu")]
+        {
+            self.gpu_composed = None;
+        }
         self.frame = Vec::new();
         self.frame_width = 0;
         self.frame_height = 0;
@@ -513,26 +519,42 @@ impl ScanoutReader {
 
     /// As `update`, on the GPU scan-out with no readback: the frame stays
     /// in the scan-out's buffer, returned with its size, for a renderer on
-    /// the same device. None when there is no GPU scan-out, no frame, or it
-    /// fails (the caller then takes the `update` path).
+    /// the same device, and whether it was composed again (false: nothing
+    /// it reads has changed, and the buffer is the last frame's). None when
+    /// there is no GPU scan-out, no frame, or it fails (the caller then
+    /// takes the `update` path).
     #[cfg(feature = "wgpu")]
-    pub fn update_on_gpu(&mut self) -> Option<(wgpu::Buffer, u32, u32)> {
+    pub fn update_on_gpu(&mut self) -> Option<(wgpu::Buffer, u32, u32, bool)> {
         let shared = self.shared();
         let scanout = shared.gpu_scanout.get()?;
         if self.gpu_failed {
             return None;
         }
+        // Taken before anything is read, as in `update_to`.
+        let marked = shared.vram.get().is_none_or(|mem| mem.take_drawn());
         self.sync(&shared);
         if self.frame.is_empty() {
             return None;
         }
         let displayed = shared.front.lock().displayed_buffer;
         self.snap_gen = shared.regs.snapshot(&mut self.snap, self.snap_gen);
+        let now = (self.mode_gen, self.snap_gen, displayed);
+        if let Some((was, buffer, w, h)) = &self.gpu_composed {
+            if !marked && *was == now {
+                return Some((buffer.clone(), *w, *h, false));
+            }
+        }
+        // `frame` is not this one: the CPU path composes afresh if taken.
+        self.composed = None;
+        self.gpu_composed = None;
         let frame = Frame::snapshot(&self.snap, displayed)?;
         let (w, h) = (frame.width.min(self.frame_width), frame.height.min(self.frame_height));
         let composed = scanout.lock().compose(&frame, &self.snap, w, h);
         match composed {
-            Ok(buffer) => Some((buffer, w, h)),
+            Ok(buffer) => {
+                self.gpu_composed = Some((now, buffer.clone(), w, h));
+                Some((buffer, w, h, true))
+            }
             Err(e) => {
                 self.gpu_failed = true;
                 crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi-odyssey: gpu scanout: {e}; composing on the CPU");
@@ -541,19 +563,15 @@ impl ScanoutReader {
         }
     }
 
-    /// Compose the frame again if anything the scan-out reads has changed
-    /// since the last one: a store to board memory, a register (lookup RAM,
+    /// Compose the frame again if anything the scan-out reads may have
+    /// changed since the last one: the board processed a command or
+    /// finished drawing, a register (lookup RAM,
     /// display modes, cursor, scan-out geometry), the mode, or the
     /// displayed-buffer bits. It is composed from board memory as the
     /// scan-out registers describe it (frame.rs); black while they describe
     /// none. False when `frame` is as it was, or there is no scanout mode
     /// and so no frame.
     ///
-    /// A frame composed for a store is followed by one more, since a store's
-    /// mark can be seen before its data.
-    ///
-    /// The scan-out on the GPU draws into memory with no store the CPU
-    /// sees, so there every frame is composed.
     #[cfg(test)]
     pub fn update(&mut self) -> bool {
         !matches!(self.update_to(None), Composed::No)
@@ -565,9 +583,9 @@ impl ScanoutReader {
     /// readback still lands in `frame`, as 0x00RRGGBB.
     pub fn update_to(&mut self, target: Option<(&mut [u32], usize)>) -> Composed {
         let shared = self.shared();
-        // Taken before anything is read: a store that lands from here on
-        // marks the next frame.
-        let stored = shared.vram.get().is_none_or(|mem| mem.take_written());
+        // Taken before anything is read: a mark that lands from here on
+        // brings the next frame.
+        let marked = shared.vram.get().is_none_or(|mem| mem.take_drawn());
 
         self.sync(&shared);
         if self.frame.is_empty() {
@@ -576,11 +594,14 @@ impl ScanoutReader {
         let displayed = shared.front.lock().displayed_buffer;
         self.snap_gen = shared.regs.snapshot(&mut self.snap, self.snap_gen);
         let now = Some((self.mode_gen, self.snap_gen, displayed));
-        if !stored && !self.settling && self.composed == now && shared.gpu_scanout.get().is_none() {
+        if !marked && self.composed == now {
             return Composed::No;
         }
         self.composed = now;
-        self.settling = stored;
+        #[cfg(feature = "wgpu")]
+        {
+            self.gpu_composed = None;
+        }
         let gpu = shared.gpu_scanout.get().filter(|_| !self.gpu_failed);
         let (w, h) = (self.frame_width as usize, self.frame_height as usize);
         let snapshot = if self.screen_order { Frame::snapshot_for_screen(&self.snap, displayed) } else { Frame::snapshot(&self.snap, displayed) };

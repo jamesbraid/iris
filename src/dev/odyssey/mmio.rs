@@ -25,7 +25,16 @@ use super::record::{RecHandle, RecSlot, Recorder};
 use super::registers::reg;
 use super::trace::{Trace, TRACE_CPU};
 impl Board {
+    /// Process one store to the board: a command word or a register. The
+    /// display is told after it, whatever the store changed (the picture
+    /// it reads may be memory, a register or neither), once per store and
+    /// not per pixel.
     pub fn write_dispatch(&mut self, addr: u64, value: u64, size: u32) {
+        self.dispatch_store(addr, value, size);
+        self.vram.mark_drawn();
+    }
+
+    fn dispatch_store(&mut self, addr: u64, value: u64, size: u32) {
         let sequence = self.trace_sequence;
         self.trace_sequence = sequence.wrapping_add(1);
         crate::dlog_dev!(LogModule::Odyssey, "sgi-odyssey: MMIO write seq {} offset {:#x} size {} value {:#x}", sequence, addr, size, value);

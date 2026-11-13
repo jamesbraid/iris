@@ -907,3 +907,63 @@ fn scanout_composes_as_the_cpu_frame() {
         }
     }
 }
+
+/// The display composes again only when the board's flag is set
+/// (`VramPtr::take_drawn`). The GPU unit's batches and uploads reach the
+/// memory the scan-out reads with no command of the guest's behind them, so
+/// each must set it, or the screen stays stale until something else is
+/// drawn. The display may also take a command's mark before the upload
+/// lands; the upload marks again.
+#[test]
+fn every_store_to_gpu_memory_marks_the_display() {
+    let Some(gpu) = gpu() else { return };
+    let mut rng = Lcg(9);
+    let mut p = Pair::new(&gpu, &mut rng, &RGBA_MODE);
+    let mut mirror = Vram::new(VRAM_BYTES);
+    mirror.track_dirty();
+    let m = mirror.ptr();
+    p.gpu.attach_mirror(m);
+    let shown = |what: &str| assert!(m.take_drawn(), "{what}: the display was not told");
+    m.take_drawn();
+
+    // A batch: recorded, then submitted.
+    let c = ClearDraw {
+        planes: p.planes(),
+        targets: [true, false],
+        colour: Some(0x1234_5678),
+        colour_mask: u32::MAX,
+        depth: None,
+        stencil: None,
+        id_value: 0,
+        id_mask: 0,
+    };
+    clear(&mut p, &c, 0, 0, 40, 40);
+    p.gpu.flush();
+    shown("a submitted batch");
+
+    // A store into the mirror whose command's mark the display takes before
+    // the upload: the upload at the next flush.
+    m.store(0x1000, 8, 0xdead_beef);
+    m.mark_drawn();
+    assert!(m.take_drawn());
+    p.gpu.flush();
+    shown("the upload of the mirror's dirty blocks");
+
+    // A writer's own upload of a region it stored untracked.
+    let v = p.dv.colour[0];
+    m.take_drawn();
+    let u = m.untracked();
+    u.store(0x1000, 8, 0x1111);
+    p.gpu.upload_region(&v, 0, 0, 15, 15);
+    shown("a region upload");
+
+    p.gpu.write_words(0x2000, &[1, 2, 3]);
+    shown("written words");
+
+    p.gpu.clear_all();
+    shown("a memory clear");
+
+    // Nothing new: nothing to show.
+    p.gpu.flush();
+    assert!(!m.take_drawn(), "an empty flush marked the display");
+}

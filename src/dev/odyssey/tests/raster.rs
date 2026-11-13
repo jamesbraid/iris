@@ -810,6 +810,8 @@ fn stress(seed: u64, last_is_lut: bool) {
                 }
                 _ => h.front.lock().swap_arm |= rng.next_u32() & 0xf,
             }
+            // The command each of these stands for marks the display after it.
+            s.vram.mark_drawn();
         }
         std::thread::yield_now();
     }
@@ -826,6 +828,7 @@ fn stress(seed: u64, last_is_lut: bool) {
             if !last_is_lut {
                 s.draw_mask = ODSY_DRAW_MASK_BUFFER0 | ODSY_DRAW_MASK_BUFFER1;
                 s.paint_pixel((rng.next_u32() % 1280) as i64, (rng.next_u32() % 1024) as i64, rng.next_u32());
+                s.vram.mark_drawn();
             } else {
                 // The entry every black pixel is looked up in.
                 s.display_fifo.lock().data(ODSY_GAMMA_BASE, rng.next_u32() & lut::ENTRY_MASK);
@@ -1039,24 +1042,34 @@ fn the_sphere_map_reflects_the_eye_vector_about_the_normal() {
     assert!((tt - 0.5).abs() < 1e-6, "{tt}");
 }
 
+/// A raster job that has run tells the display, whether the raster thread
+/// runs it or the front end does with no thread. The display composes after
+/// the job, not after each pixel it stores.
+#[test]
+fn a_finished_raster_job_marks_the_display() {
+    let (h, _st, _display) = display_rig();
+    let mem = h.test_board().vram.ptr();
+    h.raster.wait_idle();
+    mem.take_drawn();
+    h.raster.submit(|_| {});
+    h.raster.wait_idle();
+    assert!(mem.take_drawn(), "a job on the raster thread did not tell the display");
+    h.raster.stop();
+    mem.take_drawn();
+    h.raster.submit(|_| {});
+    assert!(mem.take_drawn(), "a job run by the front end did not tell the display");
+}
+
 /// What the display thread presents: an idle board is presented only on
 /// the display's refresh frames, and a change shows on the next frame.
 #[test]
 fn an_idle_display_presents_only_its_refresh_frames() {
-    if super::gpu_unit_tests() {
-        // The GPU scan-out composes every frame.
-        return;
-    }
     let (h, _st, display) = display_rig();
     let seq = |d: &Display| d.screen.lock().frame_seq;
 
     Odyssey::frame(&h, &display);
     let first = seq(&display);
     assert_eq!(first, 1, "the first frame is presented");
-    // The reset's stores bring one more frame, which catches data their
-    // mark was seen ahead of.
-    Odyssey::frame(&h, &display);
-    assert_eq!(seq(&display), 2);
     let refresh = (1..=10).filter(|_| {
         let before = seq(&display);
         Odyssey::frame(&h, &display);
@@ -1065,9 +1078,11 @@ fn an_idle_display_presents_only_its_refresh_frames() {
     assert_eq!(refresh, 1, "ten idle frames present once, at the refresh");
 
     h.raster.wait_idle();
+    // A store alone is not seen; the command that made it marks the display.
     h.test_board().vram.ptr().store(0x1000, 4, 0x55);
+    h.test_board().vram.mark_drawn();
     let before = seq(&display);
     Odyssey::frame(&h, &display);
-    assert_eq!(seq(&display), before + 1, "a store shows on the next frame");
+    assert_eq!(seq(&display), before + 1, "a marked store shows on the next frame");
     h.raster.stop();
 }

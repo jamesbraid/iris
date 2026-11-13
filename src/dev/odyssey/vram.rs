@@ -184,16 +184,17 @@ pub(super) struct Vram {
     words: Vec<u64>,
     /// The dirty map, once the memory mirrors the GPU's.
     dirty: Option<Arc<DirtyBlocks>>,
-    /// Set by every store: the display composes again when it finds it set
-    /// (`VramPtr::take_written`).
-    written: Arc<AtomicBool>,
+    /// Set when the board has processed a command or the raster unit has
+    /// drawn: the display composes again when it finds it set
+    /// (`VramPtr::take_drawn`). A store does not set it.
+    drawn: Arc<AtomicBool>,
 }
 
 impl Vram {
     /// Memory of at least size bytes, a power of two, so an address masks
     /// into it.
     pub fn new(size: u64) -> Vram {
-        Vram { words: vec![0; (size.next_power_of_two() / 8).max(1) as usize], dirty: None, written: Arc::default() }
+        Vram { words: vec![0; (size.next_power_of_two() / 8).max(1) as usize], dirty: None, drawn: Arc::default() }
     }
 
     /// Start keeping the dirty map (the GPU instantiation's mirror).
@@ -213,29 +214,34 @@ impl Vram {
     /// sized once, at allocation, and never moves, so the pointer stays
     /// good for the board's life.
     pub fn ptr(&mut self) -> VramPtr {
-        VramPtr { ptr: self.words.as_mut_ptr(), mask: self.words.len() - 1, dirty: self.dirty_ptr(), written: Arc::as_ptr(&self.written) }
+        VramPtr { ptr: self.words.as_mut_ptr(), mask: self.words.len() - 1, dirty: self.dirty_ptr(), drawn: Arc::as_ptr(&self.drawn) }
     }
 
     /// ptr() from a shared borrow: the memory is written through the pointer
     /// by units that race as the board's do (see VramPtr).
     pub fn ptr_shared(&self) -> VramPtr {
-        VramPtr { ptr: self.words.as_ptr() as *mut u64, mask: self.words.len() - 1, dirty: self.dirty_ptr(), written: Arc::as_ptr(&self.written) }
+        VramPtr { ptr: self.words.as_ptr() as *mut u64, mask: self.words.len() - 1, dirty: self.dirty_ptr(), drawn: Arc::as_ptr(&self.drawn) }
     }
 
     fn dirty_ptr(&self) -> *const DirtyBlocks {
         self.dirty.as_ref().map_or(std::ptr::null(), |d| Arc::as_ptr(d))
     }
 
-    /// Zero the memory, then mark it written: a frame composed while the
+    /// Zero the memory, then mark the display: a frame composed while the
     /// fill ran saw it half cleared, and the mark after the last word
     /// brings the next frame.
     pub fn clear(&mut self) {
         self.words.fill(0);
-        self.written.store(true, Ordering::Relaxed);
+        self.mark_drawn();
+    }
+
+    /// Mark the display, as `VramPtr::mark_drawn` does.
+    pub fn mark_drawn(&self) {
+        self.drawn.store(true, Ordering::Release);
     }
 
     /// The memory as words, for the GPU unit's tests. It does not mark the
-    /// memory written: a caller that changes the picture marks it after.
+    /// display: a caller that changes the picture marks it after.
     #[cfg(all(test, feature = "wgpu"))]
     pub fn words_mut(&mut self) -> &mut [u64] {
         &mut self.words
@@ -254,11 +260,11 @@ pub(super) struct VramPtr {
     mask: usize,
     /// The dirty map, or null when none is kept (Vram::track_dirty).
     dirty: *const DirtyBlocks,
-    /// `Vram::written`, which outlives the pointer like the array.
-    written: *const AtomicBool,
+    /// `Vram::drawn`, which outlives the pointer like the array.
+    drawn: *const AtomicBool,
 }
 
-/// Where a null view's stores, which never happen, would mark.
+/// Where a null view's marks, which never happen, would land.
 static NOWHERE: AtomicBool = AtomicBool::new(false);
 
 // SAFETY: the array outlives every user (Board owns it and stops the raster
@@ -298,18 +304,12 @@ impl VramPtr {
         if n == 8 { w } else { (w >> shift) & ((1u64 << (8 * n)) - 1) }
     }
 
-    /// Store v as the n bytes at byte address a (load()'s bits), and mark
-    /// the memory written for the display.
+    /// Store v as the n bytes at byte address a (load()'s bits). It does not
+    /// tell the display: the board marks it once per command it processes
+    /// and per piece of raster work it finishes (`mark_drawn`), not per
+    /// pixel.
     #[inline(always)]
     pub fn store(&self, a: u64, n: u32, v: u64) {
-        self.store_quiet(a, n, v);
-        self.mark_written();
-    }
-
-    /// `store` without the mark, for a loop that calls `mark_written`
-    /// once after its last store, so the loop stays free of an atomic.
-    #[inline(always)]
-    pub fn store_quiet(&self, a: u64, n: u32, v: u64) {
         let p = self.word(a);
         // SAFETY: as load().
         unsafe {
@@ -326,28 +326,29 @@ impl VramPtr {
         }
     }
 
-    /// Mark the memory written. A relaxed store, not a read-modify-write and
-    /// with no ordering against the data: a display that takes the mark
-    /// before the data it marks is visible composes the old data, and the
-    /// frame after composes it again (`ScanoutReader::update`).
+    /// Tell the display that a command was processed or drawing finished,
+    /// so it composes again. A plain store, not a read-modify-write: it
+    /// releases the stores before it, so the display that takes the mark
+    /// sees the drawing the mark follows (`take_drawn`), and a frame needs
+    /// no second pass to catch it.
     #[inline(always)]
-    pub fn mark_written(&self) {
-        // SAFETY: the flag lives as long as the memory (Vram::written).
-        unsafe { (*self.written).store(true, Ordering::Relaxed) }
+    pub fn mark_drawn(&self) {
+        // SAFETY: the flag lives as long as the memory (Vram::drawn).
+        unsafe { (*self.drawn).store(true, Ordering::Release) }
     }
 
-    /// Whether anything was stored since the last call, which clears it:
-    /// the display takes it before it reads the memory, so a store that
-    /// lands during the frame marks the next one.
-    pub fn take_written(&self) -> bool {
-        // SAFETY: the flag lives as long as the memory (Vram::written).
-        unsafe { (*self.written).swap(false, Ordering::Relaxed) }
+    /// Whether the board marked the display since the last call, which
+    /// clears it: the display takes it before it reads the memory, so a
+    /// mark that lands during the frame brings the next one.
+    pub fn take_drawn(&self) -> bool {
+        // SAFETY: the flag lives as long as the memory (Vram::drawn).
+        unsafe { (*self.drawn).swap(false, Ordering::Acquire) }
     }
 
     /// The same memory with no dirty map: for a writer that uploads what
     /// it wrote itself (`GpuRaster::upload_region`).
     pub fn untracked(&self) -> VramPtr {
-        VramPtr { ptr: self.ptr, mask: self.mask, dirty: std::ptr::null(), written: self.written }
+        VramPtr { ptr: self.ptr, mask: self.mask, dirty: std::ptr::null(), drawn: self.drawn }
     }
 
     /// The dirty map's marked blocks as byte runs, unmarked; none without a
@@ -382,9 +383,8 @@ impl VramPtr {
     /// marking the dirty map: a readback from the GPU, which the GPU
     /// already holds.
     ///
-    /// It does not mark the memory written: the GPU unit's board always
-    /// composes every frame (`DisplayShared::gpu_scanout`), so no flag is
-    /// read there.
+    /// It does not mark the display: the bytes are the GPU's own, so the
+    /// picture they make was marked when the GPU drew them.
     #[cfg_attr(not(feature = "wgpu"), allow(dead_code, reason = "used by the GPU raster unit"))]
     pub fn write_words_untracked(&self, off: u64, words: &[u64]) {
         debug_assert!(off % 8 == 0 && off + 8 * words.len() as u64 <= self.size());
@@ -411,7 +411,7 @@ impl VramPtr {
 
     /// No memory: a view of a field the surface lacks, which nothing reads.
     pub fn null() -> VramPtr {
-        VramPtr { ptr: std::ptr::null_mut(), mask: 0, dirty: std::ptr::null(), written: &NOWHERE }
+        VramPtr { ptr: std::ptr::null_mut(), mask: 0, dirty: std::ptr::null(), drawn: &NOWHERE }
     }
 }
 

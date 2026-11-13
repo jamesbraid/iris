@@ -268,9 +268,8 @@ impl Rows {
         };
         let len = self.v.value_len();
         for x in x0..=x1 {
-            self.mem.store_quiet(self.v.addr(x, y), len, v);
+            self.mem.store(self.v.addr(x, y), len, v);
         }
-        self.mem.mark_written();
     }
 }
 

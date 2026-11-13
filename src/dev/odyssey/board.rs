@@ -1239,6 +1239,8 @@ impl Board {
         {
             let mem = self.vram.ptr();
             let _ = self.display.vram.set(mem);
+            // The raster unit marks the display as it finishes its jobs.
+            let _ = self.raster.display.set(mem);
         }
 
         // Setting the mode restarts the retrace at the mode's rate.

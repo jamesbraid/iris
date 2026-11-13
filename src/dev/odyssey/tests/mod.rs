@@ -266,4 +266,6 @@ pub(super) fn pixel(s: &Board, buffer: u32, x: i32, y: i32) -> u32 {
 pub(super) fn pixel_write(s: &mut Board, x: i32, y: i32, value: u32) {
     s.gpu_sync();
     screen_field(s, 0).store_word(x, y, value);
+    // The command a pixel write stands for marks the display after it.
+    s.vram.mark_drawn();
 }
