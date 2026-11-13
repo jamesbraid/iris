@@ -73,3 +73,84 @@ jobs:
       with:
         report_paths: target/nextest/ci-gpu/junit.xml
         annotate_only: true
+
+  # The same tests on Windows, through lavapipe's Windows build from the
+  # mesa-dist-win project. The runner has the Vulkan loader but no driver, and
+  # as an administrator the loader ignores VK_DRIVER_FILES, so the driver's
+  # manifest is registered the way an installed driver is. Without it wgpu
+  # finds no adapter ("vulkan drivers/libraries could not be loaded") and the
+  # display tests fail.
+  # The IMPACT raster tests stay out: lavapipe on this runner takes 30 to 40 s
+  # for each sweep that Linux's takes 3 to 5 s for, 413 s for the twelve one at
+  # a time, and with more than one running, their first wait times out. They
+  # run the same SPIR-V through the same driver code as the Linux job.
+  lavapipe-windows:
+    name: wgpu on lavapipe (Windows)
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      VPRO_GPU: "1"
+      WGPU_BACKEND: vulkan
+      MESA_VERSION: "26.2.6"
+      MESA_SHA256: b2e00615feaba45942343c265cc8c5f576142ca682c1ac6661922d4b72492877
+    steps:
+    - uses: actions/checkout@v5
+    - name: Install pinned toolchain
+      run: rustup show
+    - name: Install lavapipe
+      shell: pwsh
+      run: |
+        $archive = "$env:RUNNER_TEMP\mesa.7z"
+        Invoke-WebRequest "https://github.com/pal1000/mesa-dist-win/releases/download/$env:MESA_VERSION/mesa3d-$env:MESA_VERSION-release-msvc.7z" -OutFile $archive
+        $got = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+        if ($got -ne $env:MESA_SHA256) { throw "mesa archive sha256 is $got, expected $env:MESA_SHA256" }
+        $dir = "$env:RUNNER_TEMP\mesa"
+        7z x $archive "-o$dir" x64\lvp_icd.x86_64.json x64\vulkan_lvp.dll -y
+        if ($LASTEXITCODE -ne 0) { throw "7z failed: $LASTEXITCODE" }
+        reg add HKLM\SOFTWARE\Khronos\Vulkan\Drivers /v "$dir\x64\lvp_icd.x86_64.json" /t REG_DWORD /d 0 /f
+        if ($LASTEXITCODE -ne 0) { throw "reg failed: $LASTEXITCODE" }
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: wgpu
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39  # v2.90.3
+      with:
+        tool: nextest
+    # default() is the profile's own filter; naming it keeps the rest of it.
+    - name: Run the wgpu tests
+      run: cargo ci-gpu -E 'default() - test(/^dev::mgras::/)'
+    - uses: mikepenz/action-junit-report@a16be3a69023e9bd7e748ede768b3282ea7b30ce  # v6.7.1
+      if: ${{ !cancelled() }}
+      with:
+        report_paths: target/nextest/ci-gpu/junit.xml
+        annotate_only: true
+
+  # The same tests on a macOS runner's Metal device ("Apple Paravirtual
+  # device", a virtual GPU), which is a real adapter, not a software one.
+  metal:
+    name: wgpu on Metal
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      VPRO_GPU: "1"
+      WGPU_BACKEND: metal
+    steps:
+    - uses: actions/checkout@v5
+    - name: Install pinned toolchain
+      run: rustup show
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: wgpu
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39  # v2.90.3
+      with:
+        tool: nextest
+    - name: Run the wgpu tests
+      run: cargo ci-gpu
+    - uses: mikepenz/action-junit-report@a16be3a69023e9bd7e748ede768b3282ea7b30ce  # v6.7.1
+      if: ${{ !cancelled() }}
+      with:
+        report_paths: target/nextest/ci-gpu/junit.xml
+        annotate_only: true
