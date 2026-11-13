@@ -20,16 +20,27 @@ slow-timeout = { period = "60s", terminate-after = 20 }
 
 # The tests `cargo ci-gpu` runs on a GPU (.github/workflows/wgpu.yml): the
 # shared wgpu layer and presenter, and the VPro display through the GPU
-# scan-out and the offscreen wgpu renderer. The VPro golden scenes stay out:
-# two of them differ from their goldens on the GPU unit by one colour step.
+# scan-out and the offscreen wgpu renderer, and the IMPACT raster unit against
+# its interpreter. The VPro golden scenes stay out: two of them differ from
+# their goldens on the GPU unit by one colour step.
 [profile.ci-gpu]
-default-filter = 'test(/^wgpu::|^dev::odyssey::tests::display::/)'
+default-filter = 'test(/^wgpu::|^dev::odyssey::tests::display::|^dev::mgras::wgpu::/)'
 # Each test opens its own device. lavapipe refuses some ("parent device is
 # lost") when dozens open at once, as on a many-core host; four, a hosted
 # runner's count, pass.
 test-threads = 4
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 20 }
+
+# The IMPACT raster tests' first submission builds the raster kernel's
+# pipelines, which on lavapipe, Mesa's software Vulkan driver, is CPU-bound
+# work. With four of them starting at once next to the rest of the set on a
+# four-core runner, three tests' first wait outlasted its 30 s limit in one
+# of two runs, and two at a time still timed out once on a pull request run.
+# One at a time passed every run (about 145 s for the set).
+[[profile.ci-gpu.overrides]]
+filter = 'test(/^dev::mgras::wgpu::/)'
+test-group = 'mgras-raster'
 
 [profile.ci-gpu.junit]
 path = "junit.xml"
@@ -51,6 +62,8 @@ slow-timeout = { period = "60s", terminate-after = 20 }
 # into the host's one default output: run in parallel, their tones would mix.
 [test-groups]
 real-audio = { max-threads = 1 }
+# The IMPACT raster tests in the ci-gpu profile (see there).
+mgras-raster = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'test(/_on_the_real_device$/)'

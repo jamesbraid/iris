@@ -2,8 +2,9 @@ name: wgpu
 
 # The wgpu path on lavapipe, Mesa's software Vulkan driver: hosted runners
 # have no GPU. It runs the shared wgpu layer, the presenter drawing into an
-# offscreen texture, and the VPro display composing on the GPU scan-out and
-# presenting through the offscreen wgpu renderer, the window's path. The
+# offscreen texture, the IMPACT raster unit checked against its interpreter,
+# and the VPro display composing on the GPU scan-out and presenting through
+# the offscreen wgpu renderer, the window's path. The
 # display tests assert the display's frame counts (composed, left unchanged,
 # presented from the GPU), so a display that composes every frame again, or
 # stops presenting from the GPU, fails here without a window or a screenshot.
