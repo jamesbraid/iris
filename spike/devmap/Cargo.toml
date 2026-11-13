@@ -1,0 +1,17 @@
+[package]
+name = "devmap-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Its own workspace: not part of iris's.
+[workspace]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
+
+[target.'cfg(not(windows))'.dependencies]
+libc = "0.2"
+
+[profile.release]
+debug = false
