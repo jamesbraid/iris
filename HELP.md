@@ -652,6 +652,7 @@ cpu     = "r4400"           # "r5000" (--cpu); IP28: "r10000", Octane: r10000/r1
 [graphics]
 board      = "newport"      # "newport", "xz", "extreme", "solidimpact" ("impact:solid"), "highimpact" ("impact:high"), "maximpact" ("impact:max"); the Octane: IMPACT (default solidimpact), "v6", "v8", "v10", "v12" ("vpro:v12" and so on; need IRIX 6.5.10 or later installed with the VPro driver, and PROM 4.0, or 4.5 for the V10 and V12) or "none"
 heads      = 1              # 2 = dual-head Newport (second REX3 in GIO slot 1)
+# windows  = "cycle"        # with heads = 2: "cycle", "side-by-side" or "per-screen" (stored; the window does not act on it yet)
 resolution = "guest"        # or "1024x768", "1280x960", "1280x1024"
 # threads  = 2              # VPro: fragment pipeline workers (more on a host with cores to spare)
 # tile     = 32             # VPro: screen tile size, a power of two from 8 to 256

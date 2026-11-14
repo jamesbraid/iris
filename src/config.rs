@@ -1328,6 +1328,40 @@ pub struct GraphicsSection {
     /// means volatile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flash: Option<String>,
+    /// How the host shows a machine's several screens (dual-head Newport):
+    /// `cycle` (default) one window with a hotkey to step through them,
+    /// `side-by-side` all in one window, `per-screen` a window each. Only
+    /// valid with more than one screen. See [`MachineConfig::screen_count`].
+    #[serde(default, skip_serializing_if = "ScreenWindows::is_default")]
+    pub windows: ScreenWindows,
+}
+
+/// How the host window shows a machine with several screens
+/// (`[graphics] windows`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenWindows {
+    /// One window showing one screen; a hotkey steps to the next.
+    #[default]
+    Cycle,
+    /// One window with the screens next to each other.
+    SideBySide,
+    /// One window per screen.
+    PerScreen,
+}
+
+impl ScreenWindows {
+    fn is_default(&self) -> bool {
+        *self == Self::Cycle
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cycle => "cycle",
+            Self::SideBySide => "side-by-side",
+            Self::PerScreen => "per-screen",
+        }
+    }
 }
 
 /// What draws the host window (`renderer`, `--renderer`).
@@ -1373,6 +1407,7 @@ impl Default for GraphicsSection {
             raster: RasterUnit::Cpu,
             gpu_backend: default_gpu_backend(),
             flash: None,
+            windows: ScreenWindows::default(),
         }
     }
 }
@@ -3474,6 +3509,17 @@ impl MachineConfig {
         Ok(())
     }
 
+    /// How many screens the machine presents to the host: the Newport heads;
+    /// every other board has one. A machine whose board drives several
+    /// channels counts them here.
+    pub fn screen_count(&self) -> usize {
+        if self.graphics_board() == GraphicsBoard::Newport && !self.headless {
+            self.graphics.heads as usize
+        } else {
+            1
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.validate_virtio_serial()?;
         self.validate_ip27_sections()?;
@@ -3487,6 +3533,13 @@ impl MachineConfig {
             return Err(format!(
                 "graphics.heads {} is invalid (valid: 1, 2)",
                 self.graphics.heads
+            ));
+        }
+        if self.graphics.windows != ScreenWindows::Cycle && self.screen_count() < 2 {
+            return Err(format!(
+                "graphics.windows = \"{}\" needs a machine with several screens (graphics.heads = 2); \
+                 a single screen has one window",
+                self.graphics.windows.as_str()
             ));
         }
         let board = self.graphics_board();
@@ -4499,6 +4552,37 @@ mod export_tests {
         assert!(cfg.validate_newport_raster_gate().is_err());
         cfg.graphics.raster = RasterUnit::Cpu;
         assert!(cfg.validate_newport_raster_gate().is_ok());
+    }
+
+    #[test]
+    fn windows_key_picks_how_several_screens_are_shown() {
+        let cfg = |t: &str| toml::from_str::<MachineConfig>(t).unwrap();
+        assert_eq!(cfg("").graphics.windows, ScreenWindows::Cycle);
+        for (name, mode) in [("cycle", ScreenWindows::Cycle), ("side-by-side", ScreenWindows::SideBySide), ("per-screen", ScreenWindows::PerScreen)] {
+            let c = cfg(&format!("[graphics]\nheads = 2\nwindows = \"{name}\"\n"));
+            assert_eq!(c.graphics.windows, mode);
+            assert_eq!(mode.as_str(), name);
+            assert!(c.validate().is_ok(), "{name}: {:?}", c.validate());
+        }
+        assert!(toml::from_str::<MachineConfig>("[graphics]\nwindows = \"tabs\"\n").is_err());
+    }
+
+    #[test]
+    fn windows_key_other_than_cycle_needs_several_screens() {
+        let one = toml::from_str::<MachineConfig>("[graphics]\nwindows = \"side-by-side\"\n").unwrap();
+        assert_eq!(one.screen_count(), 1);
+        let err = one.validate().unwrap_err();
+        assert!(err.contains("graphics.windows") && err.contains("several screens"), "{err}");
+        assert!(toml::from_str::<MachineConfig>("[graphics]\nheads = 2\n").unwrap().validate().is_ok());
+        assert_eq!(toml::from_str::<MachineConfig>("[graphics]\nheads = 2\n").unwrap().screen_count(), 2);
+        // The default needs nothing, and leaves a single-screen config's text alone.
+        let plain = MachineConfig::default();
+        assert!(plain.validate().is_ok());
+        assert!(!toml::to_string(&plain).unwrap().contains("windows"));
+        let mut two = plain.clone();
+        two.graphics.heads = 2;
+        two.graphics.windows = ScreenWindows::PerScreen;
+        assert!(toml::to_string(&two).unwrap().contains("windows = \"per-screen\""));
     }
 
     /// IDs 1 to 15 are valid on the Octane's wide buses, and 1 to 7 on the
