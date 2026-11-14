@@ -345,7 +345,7 @@ impl ResidentDisplay {
         let cut = rex.resident_frame_cut(timeout)?;
         let requests = cut.requests;
         let capture = requests.needs_frame || requests.needs_screenshot
-            || rex.screens[0].requests.capturing();
+            || rex.screens[0].requests.pending() || rex.screens[0].requests.capturing();
         at_marker(cut.position);
 
         let mut screen = rex.screen.lock();
@@ -408,6 +408,9 @@ impl ResidentDisplay {
             let shown = Frame { width: stamp.width, height: stamp.height, gpu: Some(buffer), ..Frame::default() };
             renderer.present_resident_gpu_frame(&shown, &stats).map_err(ResidentError::Failed)?;
         }
+        // A presenter was shown this frame above; only a headless board has
+        // to hand its picture to the screen's consumers (VNC, screenshots).
+        let headless = renderer.is_none();
         if capture {
             let (width, height) = (stamp.width as usize, stamp.height as usize);
             self.capture.resize(width * height, 0);
@@ -422,6 +425,17 @@ impl ResidentDisplay {
             }
             screen.frame_seq = screen.frame_seq.wrapping_add(1);
             rex.resident_frame.complete(requests);
+            if headless {
+                // `Screen::publish` takes the presenter slot this frame holds.
+                drop(renderer);
+                let out = &rex.screens[0];
+                let mut frame = out.frame(0, 0);
+                frame.width = stamp.width;
+                frame.height = stamp.height;
+                frame.words.clear();
+                frame.words.extend_from_slice(&self.capture);
+                out.publish(frame, &stats);
+            }
         }
         Ok(stamp)
     }
@@ -432,7 +446,7 @@ impl ResidentDisplay {
             let start = Instant::now();
             let requests = rex.resident_frame.requests();
             let needs_frame = requests.needs_frame || requests.needs_screenshot
-                || rex.screens[0].requests.capturing();
+                || rex.screens[0].requests.pending() || rex.screens[0].requests.capturing();
             if needs_frame || rex.renderer().lock().is_some() {
                 let result = self.render(rex, FRAME_WAIT, |_| {});
                 *rex.resident_frame.error.lock() = result.as_ref().err().cloned();
