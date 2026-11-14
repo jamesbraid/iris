@@ -128,7 +128,7 @@ fn composed(rex: &Rex3) -> (usize, usize, Vec<u32>) {
     (W, H, out)
 }
 
-fn run_px(jit: bool) -> (usize, usize, Vec<u32>) {
+fn with_board<T>(jit: bool, read: impl FnOnce(&Rex3) -> T) -> T {
     // No refresh thread: it latches TOPSCAN and the VC2 state on a host timer,
     // which moved the whole frame by a row from run to run.
     // A stopping REX3 saves the draw shapes it saw, to $HOME/.iris unless told
@@ -142,10 +142,37 @@ fn run_px(jit: bool) -> (usize, usize, Vec<u32>) {
     let _ = jit;
     configure_display(rex);
     scene(rex);
-    let (w, h, px) = composed(rex);
+    read(rex)
+}
+
+fn run_px(jit: bool) -> (usize, usize, Vec<u32>) {
+    let (w, h, px) = with_board(jit, composed);
     let colours = colour_count(w, h, w, &px);
     assert!(colours > 12, "the frame is not a blank: {colours} colours");
     (w, h, px)
+}
+
+/// The same frame from the planes on a GPU through the direct scan-out, read
+/// back as `0xAABBGGRR` words.
+#[cfg(feature = "wgpu")]
+fn composed_on_gpu(rex: &Rex3, gpu: &std::sync::Arc<crate::wgpu::Gpu>) -> (usize, usize, Vec<u32>) {
+    use crate::dev::ng1::wgpu::{Ng1Planes, Ng1Scanout};
+    rex.wait_idle();
+    let mut screen = rex.screen.lock();
+    let diag = AtomicU64::new(0);
+    screen.refresh_gpu_display_state(&rex.vc2, &rex.xmap0, &rex.cmap0, &rex.bt445, &diag);
+    assert_eq!((screen.width, screen.height), (W, H));
+    screen.topscan = unsafe { (*rex.context.get()).topscan as usize };
+    let rgb = unsafe { &*rex.fb_rgb.get() };
+    let aux = unsafe { &*rex.fb_aux.get() };
+    let planes = Ng1Planes::new(gpu);
+    planes.sync(gpu, &rgb[..], &aux[..], None);
+    let mut scan = Ng1Scanout::new(gpu).unwrap_or_else(|e| panic!("{e}"));
+    let state = screen.display_state();
+    scan.seed_did(&state).unwrap_or_else(|e| panic!("{e}"));
+    let frame = scan.compose(&state, &planes).unwrap_or_else(|e| panic!("{e}"));
+    let bytes = gpu.read_vec(&frame, &[(0, (W * H * 4) as u64)]).expect("frame readback");
+    (W, H, bytemuck::cast_slice::<u8, u32>(&bytes).to_vec())
 }
 
 fn run_once(jit: bool) -> String {
@@ -164,4 +191,19 @@ fn newport_composed_frame_is_pinned() {
     assert_eq!(a, run_once(true), "the shader JIT draws the same frame");
     eprintln!("newport frame hash {a}");
     assert_eq!(a, PIN);
+}
+
+/// The pin again, composed on the GPU from the same planes. Skips with no adapter.
+#[cfg(feature = "wgpu")]
+#[test]
+fn newport_composed_frame_is_pinned_on_the_gpu() {
+    let gpu = match crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default(), Box::new(|_| {})) {
+        Ok(gpu) => gpu,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let (w, h, px) = with_board(false, |rex| composed_on_gpu(rex, &gpu));
+    assert_eq!(frame_hash(w, h, w, &px), PIN);
 }

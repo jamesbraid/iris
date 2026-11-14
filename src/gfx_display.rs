@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use crate::cpu::mips_core::CyclesPtr;
-use crate::disp::{BarStats, Ng1Planes};
+use crate::dev::ng1::screen::Ng1Screen;
+use crate::disp::BarStats;
 
 /// What the front-end draws a screen's frames with: the GL window, the wgpu
 /// window, iris-gui's capture. It owns the status bar and draws it under the
@@ -390,7 +391,7 @@ pub struct Frame {
     pub gpu: Option<::wgpu::Buffer>,
     /// Newport's planes and display state, for the one presenter that composes
     /// them itself; `words` is then empty. Only [`Need::planes`] asks for it.
-    pub planes: Option<Ng1Planes>,
+    pub planes: Option<Ng1Screen>,
     /// Newport's debug overlay, `width` to a row in the same order as `words`
     /// (transparent where nothing is shown), only while it is on.
     pub overlay: Option<Vec<u32>>,

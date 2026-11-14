@@ -525,11 +525,9 @@ impl GlCompositor {
             }
             self.fb_textures_initialized = true;
         }
-        if !src.status_bar_only {
-            // tex_did is indexed by display row `y` directly (not fb_y), so the
-            // visible w×h window is all that's ever sampled.
-            Self::upload_fb_u8(gl, tex_did, src.did, w, h);
-        }
+        // tex_did is indexed by display row `y` directly (not fb_y), so the
+        // visible w×h window is all that's ever sampled.
+        Self::upload_fb_u8(gl, tex_did, src.did, w, h);
 
         // ── Upload lookup tables (skip if unchanged) ───────────────────────────
         let cmap_hash = hash_u32_slice(src.cmap);

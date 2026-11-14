@@ -18,7 +18,7 @@ use crate::dev::ng1::rex3_dirty::DamageTracker;
 #[cfg(feature = "rex-gpu")]
 use crate::dev::ng1::rex3_gpu::FlushReason;
 use bitfield::bitfield;
-use crate::disp::Rex3Screen;
+use crate::dev::ng1::screen::Rex3Screen;
 use std::io::Write;
 
 #[cfg(all(test, feature = "wgpu"))]
@@ -1589,7 +1589,7 @@ impl Rex3 {
         let fb_rgb: CpuPlane = (0..(2048 * 1024)).map(|_| next_rand()).collect::<Vec<u32>>().into_boxed_slice().into();
         let fb_aux: CpuPlane = (0..(2048 * 1024)).map(|_| next_rand()).collect::<Vec<u32>>().into_boxed_slice().into();
         
-        let screen = Arc::new(Mutex::new(crate::disp::Rex3Screen::new()));
+        let screen = Arc::new(Mutex::new(Rex3Screen::new()));
 
         Self {
             config,
@@ -3666,6 +3666,14 @@ impl Rex3 {
         let mut compositor: Option<crate::compositor::SwCompositor> = None;
         #[cfg(feature = "wgpu")]
         let mut scanout: Option<Result<crate::dev::ng1::wgpu::Ng1Scanout, String>> = None;
+        // The scan-out's copy of the CPU planes, and whether it is current:
+        // a frame composed some other way took the damage without uploading it.
+        #[cfg(feature = "wgpu")]
+        let mut gpu_planes: Option<crate::dev::ng1::wgpu::Ng1Planes> = None;
+        #[cfg(feature = "wgpu")]
+        let mut gpu_planes_current = false;
+        #[cfg(all(feature = "wgpu", feature = "rex-dirty-upload"))]
+        let mut damage_rects: (Vec<DamageRect>, Vec<DamageRect>) = (Vec::new(), Vec::new());
         let screen_out = &self.screens[0];
 
         crate::gfx_display::run_display(
@@ -3800,28 +3808,77 @@ impl Rex3 {
                 overlay.draw_snapshot.extend(ring.iter_newest_first().copied());
             }
 
-            #[cfg(feature = "rex-dirty-upload")]
-            screen.refresh(
-                &**fb_rgb,
-                &**fb_aux,
-                &fb_damage,
-                &self.vc2,
-                &self.xmap0,
-                &self.cmap0,
-                &self.bt445,
-                &self.diag,
-            );
-            #[cfg(not(feature = "rex-dirty-upload"))]
-            screen.refresh(
-                &**fb_rgb,
-                &**fb_aux,
-                fb_was_dirty,
-                &self.vc2,
-                &self.xmap0,
-                &self.cmap0,
-                &self.bt445,
-                &self.diag,
-            );
+            // On the window's device the planes go up to the GPU as they are
+            // and the scan-out does the rest: no CPU copy of the planes, no CPU
+            // decode of the window ids. A GPU that fails has stopped the
+            // machine; no frame is made on the CPU in its place.
+            #[cfg(feature = "wgpu")]
+            let direct_gpu = if kind.1 { screen_out.adopt_window_gpu().cloned() } else { None };
+            #[cfg(not(feature = "wgpu"))]
+            let direct_gpu: Option<()> = None;
+            #[cfg(feature = "wgpu")]
+            if let Some(gpu) = direct_gpu.as_ref() {
+                if gpu_planes.is_none() {
+                    gpu_planes = Some(crate::dev::ng1::wgpu::Ng1Planes::new(gpu));
+                    gpu_planes_current = false;
+                }
+                let Some(planes) = gpu_planes.as_ref() else { unreachable!("made above") };
+                #[cfg(feature = "rex-dirty-upload")]
+                let (rgb_damage, aux_damage) = {
+                    fb_damage.rectangles_into(DamagePlane::Rgb, &mut damage_rects.0);
+                    fb_damage.rectangles_into(DamagePlane::Aux, &mut damage_rects.1);
+                    (&damage_rects.0[..], &damage_rects.1[..])
+                };
+                if fb_was_dirty || !gpu_planes_current {
+                    // Whole planes unless the tracker says which rows moved.
+                    #[cfg(feature = "rex-dirty-upload")]
+                    let damage = gpu_planes_current.then_some((rgb_damage, aux_damage));
+                    #[cfg(not(feature = "rex-dirty-upload"))]
+                    let damage = None;
+                    crate::pf_scope!(crate::perfetto::events::REX3_FB_COPY);
+                    planes.sync(gpu, &**fb_rgb, &**fb_aux, damage);
+                    gpu_planes_current = true;
+                }
+            } else {
+                gpu_planes_current = false;
+            }
+
+            if direct_gpu.is_some() && !overlay.active() {
+                #[cfg(feature = "wgpu")]
+                screen.refresh_gpu_display_state(&self.vc2, &self.xmap0, &self.cmap0, &self.bt445, &self.diag);
+            } else {
+                // The overlay reads the CPU's copies of both planes and its
+                // window-id map, which a GPU-composed frame never made.
+                #[cfg(feature = "rex-dirty-upload")]
+                {
+                    let mut all = crate::dev::ng1::rex3_dirty::DamageSnapshot::default();
+                    if direct_gpu.is_some() {
+                        all.mark_full(DamagePlane::Rgb);
+                        all.mark_full(DamagePlane::Aux);
+                    }
+                    screen.refresh(
+                        &**fb_rgb,
+                        &**fb_aux,
+                        if direct_gpu.is_some() { &all } else { &fb_damage },
+                        &self.vc2,
+                        &self.xmap0,
+                        &self.cmap0,
+                        &self.bt445,
+                        &self.diag,
+                    );
+                }
+                #[cfg(not(feature = "rex-dirty-upload"))]
+                screen.refresh(
+                    &**fb_rgb,
+                    &**fb_aux,
+                    fb_was_dirty || direct_gpu.is_some(),
+                    &self.vc2,
+                    &self.xmap0,
+                    &self.cmap0,
+                    &self.bt445,
+                    &self.diag,
+                );
+            }
 
             let (w, h) = (screen.width, screen.height);
             if w == 0 || h == 0 || kind == (false, false, false) {
@@ -3844,38 +3901,36 @@ impl Rex3 {
             }
 
             let mut composed = false;
-            // On the window's device: the compose a wgpu window used to run
-            // itself. A GPU that fails has stopped the machine; no frame is
-            // made on the CPU in its place.
             #[cfg(feature = "wgpu")]
-            if kind.1 {
-                if let Some(gpu) = screen_out.adopt_window_gpu() {
-                    if scanout.is_none() {
-                        scanout = Some(crate::dev::ng1::wgpu::Ng1Scanout::new(gpu));
-                    }
-                    let frame = match scanout.as_mut() {
-                        Some(Ok(sc)) => {
-                            crate::pf_scope!(crate::perfetto::events::REX3_COMPOSE);
-                            sc.compose(&screen.compositor_source())
-                        }
-                        Some(Err(e)) => Err(e.clone()),
-                        None => unreachable!("made above"),
-                    };
-                    match gpu_frame_or_fail(gpu, frame) {
-                        Some(buffer) => out.gpu = Some(buffer),
-                        None => {
-                            // Reported once; later frames stop here quietly.
-                            scanout = Some(Err(String::new()));
-                            self.diag.fetch_and(!Self::DIAG_LOCK_SCREEN, Ordering::Relaxed);
-                            return false;
-                        }
-                    }
-                    composed = true;
+            if let (Some(gpu), Some(planes)) = (direct_gpu.as_ref(), gpu_planes.as_ref()) {
+                if scanout.is_none() {
+                    scanout = Some(crate::dev::ng1::wgpu::Ng1Scanout::new(gpu));
                 }
+                let frame = match scanout.as_mut() {
+                    Some(Ok(sc)) => {
+                        crate::pf_scope!(crate::perfetto::events::REX3_COMPOSE);
+                        let display = screen.display_state();
+                        sc.seed_did(&display)
+                            .and_then(|()| sc.compose(&display, planes))
+                            .map_err(|e| e.to_string())
+                    }
+                    Some(Err(e)) => Err(e.clone()),
+                    None => unreachable!("made above"),
+                };
+                match gpu_frame_or_fail(gpu, frame) {
+                    Some(buffer) => out.gpu = Some(buffer),
+                    None => {
+                        // Reported once; later frames stop here quietly.
+                        scanout = Some(Err(String::new()));
+                        self.diag.fetch_and(!Self::DIAG_LOCK_SCREEN, Ordering::Relaxed);
+                        return false;
+                    }
+                }
+                composed = true;
             }
             // For the one presenter that composes the planes itself.
             if kind.2 && !composed {
-                out.planes = Some(crate::disp::Ng1Planes(self.screen.clone()));
+                out.planes = Some(crate::dev::ng1::screen::Ng1Screen(self.screen.clone()));
                 composed = true;
             }
             if !composed {

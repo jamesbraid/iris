@@ -8,9 +8,8 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 
 use super::{RasterMode, Rex3, GFIFO_RESIDENT_FRAME, STATUS_VRINT};
 use crate::gfx_display::{Frame, Renderer};
-use crate::dev::ng1::wgpu::direct::{CaptureFault, Ng1ResidentScanout, ResidentFrameStamp, ResidentScanoutTraffic};
+use crate::dev::ng1::wgpu::resident_scanout::{CaptureFault, Ng1ResidentScanout, ResidentFrameStamp, ResidentScanoutTraffic};
 use crate::dev::ng1::wgpu::resident::{Position, ResidentError};
-use crate::dev::ng1::wgpu::Ng1Scanout;
 use crate::disp::{BarStats, FB_STRIDE};
 use crate::debug_overlay::DebugOverlay;
 use crate::wgpu::Gpu;
@@ -317,7 +316,7 @@ impl ResidentDisplay {
         if let Some(renderer) = rex.renderer().lock().as_deref() {
             validate_presenter(renderer, gpu)?;
         }
-        let scanout = Ng1Scanout::new_resident(gpu, &rex)?;
+        let scanout = Ng1ResidentScanout::new(gpu, &rex)?;
         Ok(Self {
             scanout,
             overlay: DebugOverlay::new(),
@@ -352,7 +351,7 @@ impl ResidentDisplay {
         let mut screen = rex.screen.lock();
         rex.resident_frame.invalidate();
         screen.topscan = cut.topscan;
-        let resized = screen.refresh_resident_display_state(
+        let resized = screen.refresh_gpu_display_state(
             &rex.vc2,
             &rex.xmap0,
             &rex.cmap0,

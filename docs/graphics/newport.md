@@ -143,12 +143,16 @@ There are two host-GPU paths. `rex-gpu` (`rex3_gpu.rs`) is a prototype behind it
 own feature. It draws on the GPU for replays (`REX3_REPLAY_ENGINE=gpu`), and
 `IRIS_REX3_GPU=<backend>` turns on an experimental live renderer; the CPU renderer
 stays the default. The `wgpu` feature composes the display on the GPU for the
-window (`Ng1Scanout`, in `wgpu/`, used from `src/ui.rs`) when `renderer = "wgpu"`
-is set. That path does not change what the processor does.
+window (`Ng1Scanout`, in `wgpu/`) when `renderer = "wgpu"` is set: the CPU raster
+keeps drawing into its planes, the refresh thread uploads them (whole planes, or
+only the rows that changed under `rex-dirty-upload`), and one kernel does the
+window-id expansion from the VC2 table, the cursor, overlays, the colour maps
+and the gamma. A mouse move writes 16 bytes. That path does not change what the
+processor does.
 
-An independent resident GPU raster and direct scanout exist only in tests;
-neither a feature flag nor an environment variable selects them in a running
-emulator. Newport rejects `[graphics] raster = "wgpu"` until M3. The tests
+An independent resident GPU raster exists only in tests, and the same scan-out
+composes its planes; neither a feature flag nor an environment variable selects
+it in a running emulator. Newport rejects `[graphics] raster = "wgpu"` until M3. The tests
 seed full linear RGB and auxiliary planes, execute the supported flat fills
 through the real GFIFO and use a marker to order same-device composition.
 Ordinary test frames do not transfer or access raw CPU planes or fall back to

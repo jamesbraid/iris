@@ -17,6 +17,8 @@ use crate::dev::ng1::rex3_flat_fill::{prepare_resident_flat_fill, FillPlane};
 use crate::wgpu::tiles::{COARSE, LIST_CAP, MASK_WORDS, TILE_H, TILE_W};
 use crate::wgpu::{ArchShaders, Batch, BatchPipelines, Fragment, Full, Gpu, TileGrid};
 
+use super::Ng1Planes;
+
 const STRIDE: u32 = 2048;
 const HEIGHT: u32 = 1024;
 const PLANE_WORDS: usize = (STRIDE * HEIGHT) as usize;
@@ -424,6 +426,9 @@ pub(crate) struct ResidentScanoutBindings {
     pub(in crate::dev::ng1) epoch: Epoch,
     pub(in crate::dev::ng1) layout: wgpu::BindGroupLayout,
     pub(in crate::dev::ng1) group: wgpu::BindGroup,
+    /// The same buffers for the scan-out, which binds them itself; its
+    /// generation is the epoch.
+    pub(in crate::dev::ng1) planes: Ng1Planes,
 }
 
 impl Planes {
@@ -471,7 +476,8 @@ impl Planes {
         if let Some(error) = pollster::block_on(scope.pop()) {
             return Err(ResidentError::Failed(format!("scanout bindings: {error}")));
         }
-        Ok(ResidentScanoutBindings { epoch, layout, group })
+        let planes = Ng1Planes { rgb: self.rgb.clone(), aux: self.aux.clone(), generation: epoch.0 };
+        Ok(ResidentScanoutBindings { epoch, layout, group, planes })
     }
 }
 

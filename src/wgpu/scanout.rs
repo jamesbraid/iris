@@ -185,7 +185,9 @@ impl Scanout {
 
     /// Reuse an already submitted slot, and only update the frame header when
     /// its dimensions change. The first nonempty frame must supply a slot.
-    #[cfg(test)]
+    /// A `slot` shorter than the buffer rewrites only its first bytes: a
+    /// board whose slot starts with a small, often-changing header sends
+    /// just that.
     pub(crate) fn compose_cached(
         &mut self,
         pipeline: &ScanoutPipeline,
