@@ -28,7 +28,7 @@ use crate::wgpu::{library, Fragment, Source};
 pub const LOD_MATH: Fragment = Fragment::new("kona_lodmath.wgsl", include_str!("lodmath.wgsl"));
 pub const TEXTURE_MEM: Fragment = Fragment::new("kona_texture_mem.wgsl", include_str!("texture_mem.wgsl"));
 pub const TEXTURE: Fragment = Fragment::new("kona_texture.wgsl", include_str!("texture.wgsl"));
-pub const FRAGMENT: Fragment = Fragment::new("fragment.wgsl", include_str!("fragment.wgsl"));
+pub const FRAGMENT: Fragment = Fragment::new("kona_fragment.wgsl", include_str!("fragment.wgsl"));
 
 /// Words of a packed descriptor (`TD_WORDS` in texture.wgsl).
 pub const TD_WORDS: usize = 166;

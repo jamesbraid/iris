@@ -259,7 +259,7 @@ fn ms_alpha_samples(alpha: u32, count: u32) -> u32 {
 }
 
 // A 13-bit colour component as 8 bits, rounded (ops.rs `to8`).
-fn to8(c13: u32) -> u32 {
+fn ms_to8(c13: u32) -> u32 {
     return (c13 * 255u + 4095u) / 8191u;
 }
 
@@ -271,7 +271,7 @@ fn to8(c13: u32) -> u32 {
 // covered samples). `run` is the colour run, `stride` its bits a sample
 // (24 or more). Returns the pixel's word; the run is updated.
 fn ms_write_resolve(run: ptr<function, array<u32, 6>>, count: u32, stride: u32, live: u32, src: vec4<u32>) -> u32 {
-    let fresh = (to8(src.x) << 16u) | (to8(src.y) << 8u) | to8(src.z);
+    let fresh = (ms_to8(src.x) << 16u) | (ms_to8(src.y) << 8u) | ms_to8(src.z);
     var sum = vec3<u32>(0u);
     for (var k = 0u; k < count; k++) {
         var rgb = ms_sample_get(run, k, stride, 24u);
@@ -283,7 +283,7 @@ fn ms_write_resolve(run: ptr<function, array<u32, 6>>, count: u32, stride: u32, 
     }
     let rnd = count / 2u;
     let m = (sum + vec3<u32>(rnd)) / vec3<u32>(count);
-    return (to8(src.w) << 24u) | (m.x << 16u) | (m.y << 8u) | m.z;
+    return (ms_to8(src.w) << 24u) | (m.x << 16u) | (m.y << 8u) | m.z;
 }
 
 // ---- accumulation buffer (gl/pixels.rs accumulate_cpu)

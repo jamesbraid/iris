@@ -633,24 +633,28 @@ fn planes_in_several_chunks_match_the_cpu_arm() {
     }
 }
 
-/// A line-stippled line has no kernel: it runs on the CPU against the mirror, among triangles that
-/// do.
+/// A store that holds more texture pages than the GPU's pool can has its textured triangles drawn
+/// on the CPU against the mirror, among the triangles that have no texture, which the GPU still draws.
 #[test]
-fn a_triangle_with_no_kernel_runs_on_the_cpu() {
+fn textures_the_pool_cannot_hold_run_on_the_cpu() {
+    use super::super::gpu_lib::tests::{random_desc, random_store, Flavour, Rng};
     let _serial = serial();
     let Some(dev) = gpu() else { return };
     let (w, h) = (96u32, 64u32);
     let mut r = Lcg(61);
-    let p = Pair::new(dev, w, h, &mut r, 100, None);
+    let mut rng = Rng(0x7E27_0789);
+    let p = Pair::with_textures(dev, w, h, &mut r, 100, None, &|| random_store(&mut Rng(0x6161)));
+    // The test store holds 20 pages.
+    p.g().state.lock().tex.limit_pages(10);
     let mut states: Vec<DrawState> = (0..4).map(|_| state_full(w, h, &mut r)).collect();
-    states[0].line_stipple = Some((0xa5c3, 2));
+    states[0].texture = Some(random_desc(&mut rng, Flavour::Plain));
+    states[1].texture = Some(random_desc(&mut rng, Flavour::Enhanced));
     let mut on_cpu = 0;
-    for _ in 0..300 {
+    for _ in 0..200 {
         let ds = &states[r.next() as usize % states.len()];
-        let tri = rand_tri(&mut r, w, h, 24);
-        let Ok(mut job) = setup::shaped(&tri, ds, 0, Shape::Plain) else { continue };
-        job.line = r.coin(2);
-        on_cpu += (job.line && ds.line_stipple.is_some()) as u32;
+        let tri = rand_tex_tri(&mut r, w, h, 24);
+        let Ok(job) = setup::shaped(&tri, ds, 0, Shape::Plain) else { continue };
+        on_cpu += ds.texture.is_some() as u32;
         p.both(StoreOpOwned::Tri(*ds, job));
     }
     assert!(on_cpu > 0);
@@ -781,4 +785,73 @@ fn textured_triangles_match_the_cpu_arm() {
     let second = st.tex_pages - pages_after_first;
     assert_eq!(second, 4, "the second sync wrote the four pages that changed, not the store");
     p.finish("textured triangles");
+}
+
+/// A triangle's vertices with fog (coordinate / w and 1 / w) and a distance along the line.
+fn rand_fog_tri(r: &mut Lcg, w: u32, h: u32, size: i32) -> [WVertex; 3] {
+    let mut v = rand_tri(r, w, h, size);
+    for item in v.iter_mut() {
+        let q = r.f(0.3, 2.0);
+        item.fog = [r.f(0.0, 12.0) * q, q];
+        item.d = r.f(-4.0, 120.0);
+    }
+    v
+}
+
+/// What a draw state carries for the features past the plain chain, at random.
+fn state_features(w: u32, h: u32, r: &mut Lcg) -> DrawState {
+    use crate::dev::kona::back::raster::fog::Fog;
+    use crate::dev::kona::defs::gl;
+    let mut d = state_full(w, h, r);
+    if r.coin(2) {
+        let mode = [gl::LINEAR, gl::EXP, gl::EXP2][r.next() as usize % 3];
+        d.fog = Fog::new(true, mode, r.f(0.02, 0.5), r.f(0.0, 4.0), r.f(2.0, 14.0), [r.f(0.0, 1.0), r.f(0.0, 1.0), r.f(0.0, 1.0)]);
+    }
+    if r.coin(2) {
+        d.line_stipple = Some((r.next() as u16 | 0x0101, 1 + r.next() % 5));
+    }
+    d
+}
+
+/// Triangles of every shape (plain, the fan of a smoothed polygon or line, the square of a smoothed
+/// point), with fog, a line stipple and the polygon stipple, as the CPU arm draws them.
+#[test]
+fn fog_smoothing_and_line_stipple_match_the_cpu_arm() {
+    use crate::dev::kona::back::raster::setup::Outline;
+    let _serial = serial();
+    let Some(dev) = gpu() else { return };
+    let (w, h) = (128u32, 80u32);
+    let mut r = Lcg(91);
+    let p = Pair::new(dev, w, h, &mut r, 100, None);
+    let states: Vec<DrawState> = (0..10).map(|_| state_features(w, h, &mut r)).collect();
+    let (mut drawn, mut smooth, mut disc, mut fogged, mut stippled) = (0, 0, 0, 0, 0);
+    for _ in 0..500 {
+        let ds = &states[r.next() as usize % states.len()];
+        let tri = rand_fog_tri(&mut r, w, h, 30);
+        let line = r.coin(3);
+        let shaped = match r.next() % 4 {
+            0 => {
+                let Some(o) = Outline::new(&tri, ds) else { continue };
+                let inner = [r.coin(3), r.coin(3), r.coin(3)];
+                smooth += 1;
+                setup::shaped(&tri, ds, 0, Shape::Smooth { inner, outline: &o })
+            }
+            1 => {
+                disc += 1;
+                let c = (r.f(0.0, w as f32), r.f(0.0, h as f32));
+                setup::shaped(&tri, ds, 0, Shape::Disc { x: c.0, y: c.1, r: r.f(0.6, 5.0) })
+            }
+            _ => setup::shaped(&tri, ds, 0, Shape::Plain),
+        };
+        let Ok(mut job) = shaped else { continue };
+        job.line = line;
+        fogged += ds.fog.is_some() as u32;
+        stippled += (line && ds.line_stipple.is_some()) as u32;
+        p.both(StoreOpOwned::Tri(*ds, job));
+        drawn += 1;
+    }
+    eprintln!("{drawn} triangles ({smooth} smoothed polygons, {disc} points; {fogged} fogged, {stippled} line-stippled); {:?}", p.g().stats());
+    assert_eq!(p.g().stats().cpu_ops, 0, "every triangle ran on the GPU");
+    assert!(smooth > 20 && disc > 20 && fogged > 50 && stippled > 20);
+    p.finish("fog, smoothing and line stipple");
 }

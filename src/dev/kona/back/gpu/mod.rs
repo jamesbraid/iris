@@ -8,8 +8,8 @@
 //! CPU mirror (`observe`), runs the CPU code on the mirror, and puts what the op wrote back
 //! (`Bracket`). Which ops stay on the CPU, by what the GPU kernels do not do yet:
 //!
-//! - triangles with fog, smoothing, multisampling or a line stipple, and clears of a multisampled
-//!   window; an edge step that does not fit 32 bits; textures when the store holds more pages than
+//! - multisampled triangles and clears of a multisampled window; an edge step that does not fit 32
+//!   bits; textures when the store holds more pages than
 //!   the GPU's pool can (one storage binding);
 //! - X pixel writes with a host payload, GL pixel writes, accumulation and the stencil write
 //!   of glDrawPixels;
@@ -76,7 +76,7 @@ const KONA: Fragment = Fragment::new("kona.wgsl", include_str!("kona.wgsl"));
 const COPY: Fragment = Fragment::new("copy.wgsl", include_str!("copy.wgsl"));
 
 /// Words in a record, past its slot index and the constant `one`.
-const REC_W: usize = 50;
+const REC_W: usize = 84;
 /// Record kinds, word 37 (`kona.wgsl`).
 const K_TRI: u32 = 0;
 const K_XFILL: u32 = 1;
@@ -88,6 +88,10 @@ const R_RECT: usize = 33;
 const R_KIND: usize = 37;
 /// A triangle's texture coordinate planes: s/w, t/w, r/w, q/w, each at, dx, dy.
 const R_TEX: usize = 38;
+/// The fog coordinate / w and 1 / w planes, the distance along a line, and the smoothing cover.
+const R_FOG: usize = 50;
+const R_LD: usize = 56;
+const R_COV: usize = 59;
 
 /// Bits a bitmap slot holds: 56 words after its five header words.
 const BITMAP_BITS: u64 = 56 * 32;
@@ -142,6 +146,10 @@ const SLOT_W: usize = 128;
 /// The texture descriptor's offset in the descriptor table, and the flag that says there is one.
 const S_TEXD: usize = 64;
 const F_TEX: u32 = 1024;
+const F_LSTIP: u32 = 2048;
+/// The fog and line stipple parameters in a slot.
+const S_FOG: usize = 66;
+const S_LSTIP: usize = 72;
 
 /// What the store did, for tests and the monitor.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -519,13 +527,10 @@ pub fn takes_copy(word: usize, clips: usize) -> bool {
 }
 
 /// Whether the kernels draw this triangle, texture memory aside (the pool must hold the store's
-/// pages: `TexMem::fits`): one with no fog, smoothing or multisampling, and no line stipple.
+/// pages: `TexMem::fits`): one that is not multisampled.
 fn tri_on_gpu(ds: &DrawState, job: &TriJob) -> bool {
     let t = &job.tri;
     ds.samples.is_none()
-        && curve_of(ds) == 0
-        && t.cover == Cover::None
-        && !(job.line && ds.line_stipple.is_some())
         && (0..3).all(|k| i32::try_from(t.a[k]).is_ok() && i32::try_from(t.b[k]).is_ok())
         && ds_planes(ds).iter().all(|&w| resident(w))
 }
@@ -895,6 +900,19 @@ impl State {
         if let Some(d) = &ds.texture {
             s.w[0] |= F_TEX;
             s.w[S_TEXD] = self.desc_offset(d)?;
+        }
+        if let (Some(f), true) = (&ds.fog, mode != MODE_CLEAR) {
+            s.w[S_FOG] = curve_of(ds) as u32;
+            s.w[S_FOG + 1] = f.a.to_bits();
+            s.w[S_FOG + 2] = f.b.to_bits();
+            for k in 0..3 {
+                s.w[S_FOG + 3 + k] = f.colour[k].to_bits();
+            }
+        }
+        if let (Some((pattern, repeat)), MODE_LINE) = (ds.line_stipple, mode) {
+            s.w[0] |= F_LSTIP;
+            s.w[S_LSTIP] = pattern as u32;
+            s.w[S_LSTIP + 1] = repeat;
         }
         if mode == MODE_POLY {
             if let Some(rows) = &ds.polygon_stipple {
@@ -1335,6 +1353,31 @@ fn tri_rec(job: &TriJob) -> GRec {
     for (k, plane) in t.tex.iter().enumerate() {
         for (n, v) in plane.iter().enumerate() {
             w[R_TEX + 3 * k + n] = v.to_bits();
+        }
+    }
+    for (k, plane) in t.fog.iter().enumerate() {
+        for (n, v) in plane.iter().enumerate() {
+            w[R_FOG + 3 * k + n] = v.to_bits();
+        }
+    }
+    for (n, v) in t.line_d.iter().enumerate() {
+        w[R_LD + n] = v.to_bits();
+    }
+    match &t.cover {
+        Cover::None => {}
+        Cover::Edges { inner, n, plane } => {
+            w[R_COV] = 1 | (inner[0] as u32) << 2 | (inner[1] as u32) << 3 | (inner[2] as u32) << 4 | (*n as u32) << 8 | (job.line as u32) << 16;
+            for (k, e) in plane.iter().enumerate().take(*n as usize) {
+                for (c, v) in e.iter().enumerate() {
+                    w[R_COV + 1 + 3 * k + c] = v.to_bits();
+                }
+            }
+        }
+        Cover::Disc { x, y, r } => {
+            w[R_COV] = 2;
+            w[R_COV + 1] = x.to_bits();
+            w[R_COV + 2] = y.to_bits();
+            w[R_COV + 3] = r.to_bits();
         }
     }
     w[R_RECT] = job.rect.x0 as u32;

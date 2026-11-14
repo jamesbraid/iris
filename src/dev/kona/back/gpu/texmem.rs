@@ -111,6 +111,12 @@ impl TexMem {
         store.resident_pages() <= self.max as usize
     }
 
+    /// Let the pool hold at most `pages`, as a small device would.
+    #[cfg(test)]
+    pub fn limit_pages(&mut self, pages: u32) {
+        self.max = pages;
+    }
+
     /// Whether the store has changed since the last sync.
     pub fn stale(&self, store: &TextureStore) -> bool {
         store.version() != self.synced

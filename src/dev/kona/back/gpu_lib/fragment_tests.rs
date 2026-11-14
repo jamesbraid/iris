@@ -22,7 +22,7 @@ use crate::wgpu::library;
 const KERNEL: Frag = Frag::new(
     "fragment_test.wgsl",
     r#"
-#include "fragment.wgsl"
+#include "kona_fragment.wgsl"
 
 struct Case { w: array<u32, 32> }
 struct Out { w: array<u32, 8> }
