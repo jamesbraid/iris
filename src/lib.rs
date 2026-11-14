@@ -227,6 +227,7 @@ pub mod gfifo;
 pub mod wgpu;
 pub mod trace_writer;
 pub mod gfx_display;
+pub mod tile_pool;
 pub mod hostinput;
 pub mod keysym;
 pub mod vnc;
