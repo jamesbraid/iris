@@ -554,6 +554,27 @@ fn the_direct_scanout_matches_the_software_compositor_on_random_state() {
     }
 }
 
+/// A mouse move writes the cursor's 16-byte header and nothing else: no VC2
+/// RAM, no window-id expansion, no tables.
+#[test]
+fn a_cursor_move_writes_only_the_cursor_header() {
+    let Some(gpu) = gpu() else { return };
+    let mut rig = Rig::new(&gpu, NewportResolution::Res1280x1024);
+    scene_windows(&mut rig);
+    let s = rig.parity("windows", Upload::Bands);
+    check("windows", Upload::Bands, &s);
+    let before = rig.scan.traffic();
+    for i in 0..10u16 {
+        rig.move_cursor(300 + 17 * i, 200 + 9 * i);
+        let s = rig.parity("cursor move", Upload::Bands);
+        check("cursor move", Upload::Bands, &s);
+    }
+    let after = rig.scan.traffic();
+    assert_eq!(after.did_expansions.submitted, before.did_expansions.submitted, "a mouse move re-expanded the window ids");
+    assert_eq!(after.display.attempted_bytes - before.display.attempted_bytes, 10 * 16);
+    assert_eq!(after.frames_submitted - before.frames_submitted, 10);
+}
+
 /// Frames with nothing new upload nothing and compose the same pixels.
 #[test]
 fn an_unchanged_frame_uploads_no_display_state() {

@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use super::{Ng1Slot, SCANOUT, VC2_WORDS};
+use super::{cursor_header, Ng1Slot, SCANOUT, VC2_WORDS};
 use crate::dev::ng1::rex3_dirty::{DamagePlane, DamageRect};
 use crate::dev::ng1::screen::{Ng1DisplayGenerations, Ng1DisplaySource};
 use crate::dev::ng1::vc2::{
@@ -391,7 +391,7 @@ impl Ng1Scanout {
     ///
     /// Only what changed since the last frame goes up: the VC2 RAM, the
     /// window-id expansion and the display tables each follow their own
-    /// revision.
+    /// revision, and a cursor move alone writes its 16-byte header.
     pub(crate) fn compose(&mut self, src: &Ng1DisplaySource<'_>, planes: &Ng1Planes) -> Result<wgpu::Buffer, ScanoutError> {
         if src.width == 0 || src.width > FB_STRIDE || src.height == 0 || src.height > HEIGHT {
             return Err(ScanoutError::Invalid("scanout dimensions exceed the Newport planes"));
@@ -469,7 +469,10 @@ impl Ng1Scanout {
             || changed(|g| g.cmap)
             || changed(|g| g.ramdac)
             || geometry_changed;
+        // Nothing else moved: the cursor's header is the slot's first 16 bytes.
+        let cursor_only = !slot_changed && changed(|g| g.cursor);
         let slot = slot_changed.then(|| Ng1Slot::of_display(src));
+        let cursor = cursor_only.then(|| cursor_header(src.vc2_regs, src.cursor_x_adjust));
 
         let control = src.vc2_regs[VC2_REG_DISPLAY_CONTROL as usize];
         let did_params = DidParams {
@@ -487,9 +490,9 @@ impl Ng1Scanout {
         let expansion_uploads = vc2_changed as u64 + did_changed as u64;
         let expansion_bytes = if vc2_changed { (2 * VC2_WORDS) as u64 } else { 0 }
             + if did_changed { size_of::<DidParams>() as u64 } else { 0 };
-        let scanout_uploads = slot_changed as u64 + header_changed as u64;
-        let scanout_bytes = if slot_changed { size_of::<Ng1Slot>() as u64 } else { 0 }
-            + if header_changed { 16 } else { 0 };
+        let slot_len = if slot_changed { size_of::<Ng1Slot>() as u64 } else if cursor_only { 16 } else { 0 };
+        let scanout_uploads = (slot_changed || cursor_only) as u64 + header_changed as u64;
+        let scanout_bytes = slot_len + if header_changed { 16 } else { 0 };
         self.traffic.display.attempt(
             expansion_uploads + scanout_uploads,
             expansion_bytes + scanout_bytes,
@@ -511,7 +514,11 @@ impl Ng1Scanout {
             .ok_or(ScanoutError::Invalid("display bindings are missing"))?;
         let planes_group = &self.planes_group.as_ref()
             .ok_or(ScanoutError::Invalid("plane bindings are missing"))?.1;
-        let update: Option<&[u8]> = slot.as_ref().map(|slot| bytemuck::bytes_of(slot));
+        let update: Option<&[u8]> = match (&slot, &cursor) {
+            (Some(slot), _) => Some(bytemuck::bytes_of(slot)),
+            (None, Some(cursor)) => Some(bytemuck::bytes_of(cursor)),
+            (None, None) => None,
+        };
         let result = self.scanout.compose_cached(
             &self.pipeline,
             dimensions.0,

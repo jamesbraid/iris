@@ -147,7 +147,7 @@ window (`Ng1Scanout`, in `wgpu/`) when `renderer = "wgpu"` is set: the CPU raste
 keeps drawing into its planes, the refresh thread uploads them (whole planes, or
 only the rows that changed under `rex-dirty-upload`), and one kernel does the
 window-id expansion from the VC2 table, the cursor, overlays, the colour maps
-and the gamma. That path does not change what the
+and the gamma. A mouse move writes 16 bytes. That path does not change what the
 processor does.
 
 An independent resident GPU raster exists only in tests, and the same scan-out

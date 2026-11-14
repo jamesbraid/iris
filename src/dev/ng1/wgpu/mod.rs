@@ -48,7 +48,7 @@ struct Ng1Slot {
 }
 
 /// The slot's first four words: where the cursor's hot spot is and what
-/// shape it has.
+/// shape it has. A mouse move changes only these, so only these go up.
 fn cursor_header(r: &[u16; 32], cursor_x_adjust: i32) -> [u32; 4] {
     let ctrl = r[VC2_REG_DISPLAY_CONTROL as usize];
     [

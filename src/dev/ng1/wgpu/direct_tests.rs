@@ -296,9 +296,38 @@ fn direct_ng1_scanout_display_generations_track_real_changes() {
     }
     display.refresh();
     let cursor = display.screen.display_state().generations;
-    assert!(cursor.vc2_regs > first.vc2_regs);
+    assert!(cursor.cursor > first.cursor);
+    assert_eq!(cursor.vc2_regs, first.vc2_regs, "a mouse move must not look like a new window-id table");
     assert_eq!(cursor.vc2_ram, first.vc2_ram);
     assert_eq!(cursor.did, first.did, "cursor movement must not upload unchanged DID");
+
+    // The enable and size bits are the cursor's; the others are the table's.
+    {
+        let mut vc2 = display.vc2.lock();
+        vc2.regs[VC2_REG_DISPLAY_CONTROL as usize] ^= VC2_CTRL_CURSOR_SIZE;
+        vc2.dirty = true;
+    }
+    display.refresh();
+    let size = display.screen.display_state().generations;
+    assert!(size.cursor > cursor.cursor);
+    assert_eq!(size.vc2_regs, cursor.vc2_regs);
+    {
+        let mut vc2 = display.vc2.lock();
+        vc2.regs[VC2_REG_SCANLINE_LEN as usize] += 1 << 5;
+        vc2.dirty = true;
+    }
+    display.refresh();
+    let scan_len = display.screen.display_state().generations;
+    assert!(scan_len.vc2_regs > size.vc2_regs);
+    assert_eq!(scan_len.cursor, size.cursor);
+    {
+        let mut vc2 = display.vc2.lock();
+        vc2.regs[VC2_REG_SCANLINE_LEN as usize] -= 1 << 5;
+        vc2.regs[VC2_REG_DISPLAY_CONTROL as usize] ^= VC2_CTRL_CURSOR_SIZE;
+        vc2.dirty = true;
+    }
+    display.refresh();
+    let cursor = display.screen.display_state().generations;
 
     {
         let mut vc2 = display.vc2.lock();

@@ -4,7 +4,9 @@
 // Bt445 RAMDAC's gamma tables finish it. The same rules as
 // `SwCompositor::compose_pixels` (src/compositor.rs), word for word.
 //
-// The slot (group 1) holds the frame's registers and tables. The included bindings are the two planes (group 2) and the window-id map and
+// The slot (group 1) holds the frame's registers and tables; its first four
+// words are the cursor's, rewritten alone when only the mouse moved. The
+// included bindings are the two planes (group 2) and the window-id map and
 // VC2 RAM (group 3). The RGB/aux planes are 2048 x 1024, the DID map has one byte per display
 // pixel, and VC2 RAM has two 16-bit words per word (lower address first).
 
