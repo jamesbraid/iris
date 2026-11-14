@@ -100,7 +100,7 @@ pub(crate) struct MgrasScanout {
     group: wgpu::BindGroup,
     slot: Vec<u32>,
     runs: Vec<(u16, u8)>,
-    /// The last frame's size, and a readback's 0x00RRGGBB words.
+    /// The last frame's size, and a readback's 0xAABBGGRR words.
     pub width: u32,
     pub height: u32,
     words: Vec<u32>,
@@ -221,7 +221,7 @@ impl MgrasScanout {
     }
 
     /// Compose the frame and submit it, no readback; the buffer it is in
-    /// (0x00RRGGBB, rows of `width`) and its size.
+    /// (0xAABBGGRR, rows of `width`) and its size.
     pub fn compose(&mut self, r: &Rss, dcb: &Dcb) -> Result<(wgpu::Buffer, u32, u32), String> {
         let n = self.build(r, dcb);
         let (w, h) = (self.width, self.height);
@@ -237,9 +237,7 @@ impl MgrasScanout {
         self.words.resize(w * h, 0);
         self.scanout.run(&self.pipeline, w as u32, h as u32, bytemuck::cast_slice(&self.slot[..n]), &[&self.group], &mut self.words)?;
         for y in 0..h {
-            for (o, v) in out[y * stride..y * stride + w].iter_mut().zip(&self.words[y * w..(y + 1) * w]) {
-                *o = 0xFF00_0000 | (v & 0xFF) << 16 | (v & 0xFF00) | (v >> 16) & 0xFF;
-            }
+            out[y * stride..y * stride + w].copy_from_slice(&self.words[y * w..(y + 1) * w]);
         }
         Ok((w, h))
     }

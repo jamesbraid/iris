@@ -110,14 +110,8 @@ impl DisplayRegs {
     /// 2 it is a crosshair: APPROXIMATION, a one-pixel horizontal and vertical
     /// line across the whole raster through the position, in colour word 1. The
     /// crosshair's extent, width and colour are unknown.
-    #[cfg(test)]
     pub fn cursor_row(&self, y: u32, dst: &mut [u32], width: u32) {
-        self.cursor_row_in(y, dst, width, false);
-    }
-
-    /// As `cursor_row`, in the screen's order when `abgr` (`frame::to_screen`).
-    pub fn cursor_row_in(&self, y: u32, dst: &mut [u32], width: u32, abgr: bool) {
-        let cursor_rgb = |w: u32| if abgr { super::frame::to_screen(cursor_rgb(w)) } else { cursor_rgb(w) };
+        let cursor_rgb = |w: u32| super::frame::abgr(cursor_rgb(w));
         let cx = self.cursor_x();
         let cy = self.cursor_y();
         let row = (y as i32).wrapping_sub(cy);
@@ -413,7 +407,7 @@ pub(super) enum Composed {
     No,
     /// In `frame` (the GPU scan-out's readback, or no target given).
     InFrame,
-    /// In the target, in the order `screen_order` names.
+    /// In the target.
     InTarget,
 }
 
@@ -422,7 +416,7 @@ pub(super) enum Composed {
 #[derive(Default)]
 pub(super) struct ScanoutReader {
     shared: Option<Arc<DisplayShared>>,
-    /// The presented frame: `frame_width` by `frame_height` of 0x00RRGGBB;
+    /// The presented frame: `frame_width` by `frame_height` of 0xAABBGGRR;
     /// empty with no mode.
     pub frame: Vec<u32>,
     pub frame_width: u32,
@@ -441,13 +435,6 @@ pub(super) struct ScanoutReader {
     /// mark is not ordered against its data, so the frame may have missed
     /// the data; one more is composed to catch it.
     settling: bool,
-    /// Compose on the CPU in the screen's order, 0xAABBGGRR
-    /// (`Frame::snapshot_for_screen`): the display thread's choice, so its
-    /// frames go to the screen with no conversion. Tests read 0x00RRGGBB.
-    pub screen_order: bool,
-    /// Whether `frame` holds the screen's order (else 0x00RRGGBB, as the
-    /// GPU scan-out's readback gives it).
-    pub frame_abgr: bool,
 }
 
 impl ScanoutReader {
@@ -555,10 +542,10 @@ impl ScanoutReader {
         !matches!(self.update_to(None), Composed::No)
     }
 
-    /// As `update`, composing on the CPU into `target` (rows of `stride`,
-    /// in the order `screen_order` names) instead of `frame`: the display
+    /// As `update`, composing on the CPU into `target` (rows of `stride`)
+    /// instead of `frame`: the display
     /// thread's frames go straight into the screen. The GPU scan-out's
-    /// readback still lands in `frame`, as 0x00RRGGBB.
+    /// readback still lands in `frame`.
     pub fn update_to(&mut self, target: Option<(&mut [u32], usize)>) -> Composed {
         let shared = self.shared();
         // Taken before anything is read: a store that lands from here on
@@ -579,11 +566,11 @@ impl ScanoutReader {
         self.settling = stored;
         let gpu = shared.gpu_scanout.get();
         let (w, h) = (self.frame_width as usize, self.frame_height as usize);
-        let snapshot = if self.screen_order { Frame::snapshot_for_screen(&self.snap, displayed) } else { Frame::snapshot(&self.snap, displayed) };
+        let snapshot = Frame::snapshot(&self.snap, displayed);
         let (Some(frame), Some(mem)) = (snapshot, shared.vram.get()) else {
             // No scan-out programmed (out of reset, before the PROM sets
             // it up): nothing is shown.
-            let black = if self.screen_order { super::frame::to_screen(0) } else { 0 };
+            let black = super::frame::abgr(0);
             return match target {
                 Some((out, stride)) => {
                     for row in out.chunks_mut(stride).take(h) {
@@ -593,7 +580,6 @@ impl ScanoutReader {
                 }
                 None => {
                     self.frame.fill(black);
-                    self.frame_abgr = self.screen_order;
                     Composed::InFrame
                 }
             };
@@ -610,7 +596,6 @@ impl ScanoutReader {
                             self.frame.copy_within(y * fw as usize..(y + 1) * fw as usize, y * w);
                         }
                     }
-                    self.frame_abgr = false;
                     return Composed::InFrame;
                 }
                 Err(e) => {
@@ -630,7 +615,6 @@ impl ScanoutReader {
             }
             None => {
                 frame.compose(*mem, &self.snap, &mut self.frame, w, h);
-                self.frame_abgr = frame.is_screen_order();
                 Composed::InFrame
             }
         }

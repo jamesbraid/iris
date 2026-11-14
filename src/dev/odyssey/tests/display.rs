@@ -60,11 +60,12 @@ fn shown(s: &mut Board, x: i32, y: i32) -> u32 {
     in_frame(s, x, y)
 }
 
-/// The pixel at (x, y) of the frame last composed, as 0x00RRGGBB. Composing
+/// The pixel at (x, y) of the frame last composed, as 0x00RRGGBB (the
+/// frame holds 0xAABBGGRR). Composing
 /// is the whole frame each time, so a run of reads with nothing changed in
 /// between composes once (`s.scanout_update()`) and reads with this.
 fn in_frame(s: &Board, x: i32, y: i32) -> u32 {
-    s.reader.frame[(y * s.reader.frame_width as i32 + x) as usize] & 0xff_ffff
+    s.reader.frame[(y * s.reader.frame_width as i32 + x) as usize].swap_bytes() >> 8
 }
 
 /// Put main drawable `id` (bits 7:3 of a pixel's id byte) on every pixel of the box [x0, x1) x [y0, y1).

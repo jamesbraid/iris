@@ -113,14 +113,12 @@ pub(super) struct Frame {
     gamma: Box<[[[u32; 256]; 3]; 3]>,
     /// The lookup RAM's colours, in the output's order.
     lut: Box<[u32; lut::SIZE as usize]>,
-    /// Whether `compose` writes the screen's order, 0xAABBGGRR with alpha
-    /// set (`Frame::snapshot_for_screen`), not 0x00RRGGBB.
-    abgr: bool,
 }
 
-/// 0x00RRGGBB as the screen's 0xAABBGGRR, opaque.
+/// 0x00RRGGBB as 0xAABBGGRR, opaque: the one order every frame is in, the
+/// GPU scan-out's and the screen's.
 #[inline(always)]
-pub(super) fn to_screen(rgb: u32) -> u32 {
+pub(super) fn abgr(rgb: u32) -> u32 {
     0xff00_0000 | rgb.swap_bytes() >> 8
 }
 
@@ -189,7 +187,7 @@ fn colour<const K: u32, const RGB: bool, const LOG2: u32>(f: &Frame, p: &Plan, w
         K_LANES => word_of(lanes_from(value(words, b, 6))),
         K_INDEX2 => value(words, b, 2) as u32,
         K_INDEX4 => value(words, b, 4) as u32,
-        K_OUTSIDE => return if f.abgr { to_screen(0) } else { 0 },
+        K_OUTSIDE => return abgr(0),
         _ => p.field.load(value(words, b, p.field.value_len())),
     };
     if RGB {
@@ -264,17 +262,6 @@ impl Frame {
     /// The frame the registers describe, with buffer (displayed >> id) & 1
     /// showing for each window; None before the scan-out is set up.
     pub fn snapshot(regs: &DisplayRegs, displayed: u32) -> Option<Frame> {
-        Self::snapshot_in(regs, displayed, false)
-    }
-
-    /// As `snapshot`, composing in the screen's order (`Rex3Screen::rgba`,
-    /// 0xAABBGGRR): the display thread's frames, which then go to the
-    /// screen as they are.
-    pub fn snapshot_for_screen(regs: &DisplayRegs, displayed: u32) -> Option<Frame> {
-        Self::snapshot_in(regs, displayed, true)
-    }
-
-    fn snapshot_in(regs: &DisplayRegs, displayed: u32, abgr: bool) -> Option<Frame> {
         let r = &regs.pbj;
         let (width, height, stride) = (r[pbj::WIDTH], r[pbj::HEIGHT], r[pbj::STRIDE]);
         if width == 0 || height == 0 || stride == 0 || width > stride * TILE {
@@ -297,7 +284,7 @@ impl Frame {
                     // Each channel's entry alone in its byte; alpha is set in
                     // all three, so their OR is opaque.
                     let v = ctx.gamma[ch][folded];
-                    t[ch][c as usize] = if abgr { to_screen(v) } else { v };
+                    t[ch][c as usize] = abgr(v);
                 }
             }
         }
@@ -308,17 +295,11 @@ impl Frame {
             fields,
             wid: Surface::new(r[pbj::OVERLAY_BASE], stride, 1),
             wid_layout: Layout::of(wid_format),
-            lut: Box::new(std::array::from_fn(|i| if abgr { to_screen(ctx.rgb[i]) } else { ctx.rgb[i] })),
+            lut: Box::new(std::array::from_fn(|i| abgr(ctx.rgb[i]))),
             ctx,
             plans,
             gamma,
-            abgr,
         })
-    }
-
-    /// Whether `compose` writes the screen's order (`snapshot_for_screen`).
-    pub fn is_screen_order(&self) -> bool {
-        self.abgr
     }
 
     /// The frame buffer and the window-id buffer the scan-out reads.
@@ -377,7 +358,7 @@ impl Frame {
         }
     }
 
-    /// The whole frame into `out` (rows of `stride` pixels, at most
+    /// The whole frame into `out` (0xAABBGGRR, rows of `stride` pixels, at most
     /// `rows` of them), the cursor over it.
     pub fn compose(&self, mem: VramPtr, regs: &DisplayRegs, out: &mut [u32], stride: usize, rows: usize) {
         let w = (self.width as usize).min(stride);
@@ -397,7 +378,7 @@ impl Frame {
                 }
             }
             for y in band..band + lines {
-                regs.cursor_row_in(y as u32, &mut out[y * stride..y * stride + w], w as u32, self.abgr);
+                regs.cursor_row(y as u32, &mut out[y * stride..y * stride + w], w as u32);
             }
         }
     }
@@ -420,7 +401,7 @@ impl Frame {
             // A tile row that wraps the end of memory.
             for (i, o) in seg.iter_mut().enumerate() {
                 let rgb = self.pixel(mem, x + i as u32, y);
-                *o = if self.abgr { to_screen(rgb) } else { rgb };
+                *o = abgr(rgb);
             }
             return;
         };
@@ -598,7 +579,7 @@ mod tests {
         mem.store(wid.offset(20, 9), 1, 2 << ODSY_DID_MAIN_SHIFT);
         let mut out = vec![0u32; 32 * 16];
         frame.compose(mem, &regs, &mut out, 32, 16);
-        assert_eq!(out[2 * 32 + 3], 0x40_80_c0);
-        assert_eq!(out[9 * 32 + 20], 0x10_20_30);
+        assert_eq!(out[2 * 32 + 3], abgr(0x40_80_c0));
+        assert_eq!(out[9 * 32 + 20], abgr(0x10_20_30));
     }
 }

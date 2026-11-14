@@ -441,9 +441,98 @@ fn boards_on_one_shared_device_keep_their_own_order() {
     b.write(&bb, 0, &[2u8; 16]);
     b.submit(b.encoder("b"));
     a.submit(a.encoder("a"));
-    let mut staging = super::memory::Staging::default();
-    assert_eq!(staging.read(&a, &ba, &[(0, 16)]).unwrap(), vec![7u8; 16]);
-    assert_eq!(staging.read(&b, &bb, &[(0, 16)]).unwrap(), vec![2u8; 16]);
+    assert_eq!(a.read_vec(&ba, &[(0, 16)]).unwrap(), vec![7u8; 16]);
+    assert_eq!(b.read_vec(&bb, &[(0, 16)]).unwrap(), vec![2u8; 16]);
+}
+
+/// Readbacks borrow one staging buffer between them: ranges come back in the
+/// order asked, a mis-sized `out` is refused, a read larger than a staging
+/// buffer goes through in pieces, and two boards on one device reuse the
+/// buffer the other made.
+#[test]
+fn reads_are_ranged_counted_and_share_one_staging_buffer() {
+    let Some((a, _)) = counted() else { return };
+    let b = a.share();
+    let src = a.buffer("src", 64, wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
+    let bytes: Vec<u8> = (0..64).collect();
+    a.write(&src, 0, &bytes);
+    let got = a.read_vec(&src, &[(48, 8), (4, 4)]).unwrap();
+    assert_eq!(got, [&bytes[48..56], &bytes[4..8]].concat());
+    assert!(a.read(&src, &[(0, 8)], &mut [0u8; 4]).is_err(), "out is the ranges' length");
+    // The other board's read lends the same buffer.
+    assert_eq!(b.read_vec(&src, &[(0, 4)]).unwrap(), &bytes[..4]);
+    let stats = a.read_stats();
+    assert_eq!((stats.reads, stats.bytes, stats.buffers), (2, 16, 1));
+
+    // Bigger than one staging buffer: 20 MiB in two pieces.
+    let big_len = 20u64 << 20;
+    let big = a.buffer("big", big_len, wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
+    let pattern: Vec<u8> = (0..big_len as usize).map(|i| (i % 251) as u8).collect();
+    a.write(&big, 0, &pattern);
+    let mut out = vec![0u8; big_len as usize];
+    a.read(&big, &[(0, big_len)], &mut out).unwrap();
+    assert!(out == pattern, "a read in pieces is the whole buffer");
+    assert_eq!(a.read_stats().buffers, 1, "the pieces reuse the staging buffer");
+}
+
+/// The presenter's unpack kernel reads a scan-out frame's 0xAABBGGRR words
+/// as the texture's R, G, B and A.
+#[test]
+fn the_unpack_kernel_reads_abgr_words() {
+    let Some(gpu) = gpu() else { return };
+    let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None };
+    let layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("unpack test"),
+        entries: &[
+            entry(0, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }),
+            entry(1, wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::Rgba8Unorm, view_dimension: wgpu::TextureViewDimension::D2 }),
+            entry(2, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }),
+        ],
+    });
+    let pipeline = super::shader::Source::new("unpack test").body(super::present::UNPACK).compute_pipeline(&gpu.device, "unpack", &[&layout]).unwrap();
+    // 64 pixels a row make the texture copy's 256-byte row pitch.
+    let words: Vec<u32> = (0..64u32 * 2).map(|i| 0xff00_0000 | (i * 3) << 16 | (i * 5 & 0xff) << 8 | (i * 7 & 0xff)).collect();
+    let src = gpu.buffer("unpack src", words.len() as u64 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+    gpu.write(&src, 0, bytemuck::cast_slice(&words));
+    let size = gpu.buffer("unpack size", 16, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+    gpu.write(&size, 0, bytemuck::cast_slice(&[64u32, 2, 0, 0]));
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("unpack out"),
+        size: wgpu::Extent3d { width: 64, height: 2, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("unpack test"),
+        layout: &layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: src.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+            wgpu::BindGroupEntry { binding: 2, resource: size.as_entire_binding() },
+        ],
+    });
+    let out = gpu.buffer("unpack readback", 64 * 2 * 4, wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
+    let mut enc = gpu.encoder("unpack test");
+    {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("unpack test"), timestamp_writes: None });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(8, 1, 1);
+    }
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        wgpu::TexelCopyBufferInfo { buffer: &out, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256), rows_per_image: Some(2) } },
+        wgpu::Extent3d { width: 64, height: 2, depth_or_array_layers: 1 },
+    );
+    gpu.submit(enc);
+    let got = gpu.read_vec(&out, &[(0, 64 * 2 * 4)]).unwrap();
+    // 0xAABBGGRR in memory is the bytes R, G, B, A.
+    assert!(got == bytemuck::cast_slice::<u32, u8>(&words), "texture bytes are the words' bytes");
 }
 
 /// A loss is every board's, once: the callback runs one time for two boards,

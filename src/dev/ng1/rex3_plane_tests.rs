@@ -6,7 +6,7 @@ use crate::dev::ng1::rex3_shape;
 use crate::dev::ng1::wgpu::resident::{ObservationCounters, ObservationReason, PlaneMask};
 use crate::dev::ng1::wgpu::Ng1Scanout;
 use crate::traits::{BusDevice, Device};
-use crate::wgpu::{Gpu, GpuOptions, Staging};
+use crate::wgpu::{Gpu, GpuOptions};
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -457,11 +457,10 @@ fn resident_gpu_no_touch_gfifo_fence_and_direct_scanout() {
             };
             let mut software = SwCompositor::new();
             software.compose_pixels(&cpu_source);
-            let bytes = Staging::default().read(&gpu, &consumer, &[(0, frame_bytes)]).unwrap();
+            let bytes = gpu.read_vec(&consumer, &[(0, frame_bytes)]).unwrap();
             for y in 0..state.height {
                 for x in 0..state.width {
-                    let pixel = software.pixels()[y * crate::disp::FB_STRIDE + x];
-                    let expected = ((pixel & 0xff) << 16) | (pixel & 0xff00) | ((pixel >> 16) & 0xff);
+                    let expected = software.pixels()[y * crate::disp::FB_STRIDE + x];
                     let at = (y * state.width + x) * 4;
                     let actual = u32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap());
                     assert_eq!(actual, expected, "direct scanout pixel ({x}, {y})");

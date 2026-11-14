@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use super::super::device::Gpu;
 use super::super::library;
-use super::super::memory::Staging;
 use super::super::shader::{Fragment, Source};
 
 const KERNEL: Fragment = Fragment::new(
@@ -94,7 +93,7 @@ fn run(gpu: &Arc<Gpu>, ins: &[[u32; 4]]) -> Vec<[u32; 4]> {
         pass.dispatch_workgroups((ins.len() as u32).div_ceil(64), 1, 1);
     }
     gpu.submit(enc);
-    let bytes = Staging::default().read(gpu, &outb, &[(0, outb.size())]).unwrap_or_else(|e| panic!("{e}"));
+    let bytes = gpu.read_vec(&outb, &[(0, outb.size())]).unwrap_or_else(|e| panic!("{e}"));
     gpu.check().unwrap_or_else(|e| panic!("{e}"));
     bytemuck::cast_slice(&bytes).to_vec()
 }

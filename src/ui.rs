@@ -774,7 +774,7 @@ struct WgpuRenderer {
     /// Newport's planes composed on the presenter's device; None until the
     /// first such frame, or when it cannot be made (then `compositor`).
     ng1: Option<Result<crate::dev::ng1::wgpu::Ng1Scanout, ()>>,
-    /// The frame read back for screenshots and VNC, 0x00RRGGBB.
+    /// The frame read back for screenshots and VNC, 0xAABBGGRR.
     readback: Vec<u32>,
     /// The first presentation error, reported once.
     failed: bool,
@@ -839,7 +839,7 @@ impl Renderer for WgpuRenderer {
                             for y in 0..height {
                                 let row = y * crate::disp::FB_STRIDE;
                                 for (d, &v) in screen.rgba[row..row + width].iter_mut().zip(&self.readback[y * width..(y + 1) * width]) {
-                                    *d = 0xff00_0000 | v.swap_bytes() >> 8;
+                                    *d = v;
                                 }
                             }
                         }

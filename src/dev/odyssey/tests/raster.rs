@@ -758,9 +758,9 @@ fn assert_frame_is_whole_resolve(h: &BoardLocks, display: &Display, what: &str) 
     let reader = display.reader.lock();
     let (w, ht) = (reader.frame_width as usize, reader.frame_height as usize);
     let regs = s.regs().read();
-    // What the display thread put on the screen, in the screen's order.
+    // What the display thread put on the screen.
     let displayed = s.front.lock().displayed_buffer;
-    let frame = crate::dev::odyssey::frame::Frame::snapshot_for_screen(&regs, displayed).expect("the scan-out is set up");
+    let frame = crate::dev::odyssey::frame::Frame::snapshot(&regs, displayed).expect("the scan-out is set up");
     let mut want = vec![0u32; w * ht];
     frame.compose(s.vram.ptr_shared(), &regs, &mut want, w, ht);
     let screen = display.screen.lock();

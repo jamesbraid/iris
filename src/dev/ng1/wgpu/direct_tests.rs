@@ -35,7 +35,7 @@ use crate::dev::ng1::xmap9::Xmap9;
 use crate::disp::{Ng1DisplaySource, Rex3Screen, FB_STRIDE};
 use crate::gfx_display::GfxDisplay;
 use crate::traits::{BusDevice, Device, BUS_BUSY, BUS_OK};
-use crate::wgpu::{Gpu, GpuOptions, Staging};
+use crate::wgpu::{Gpu, GpuOptions};
 
 const WIDTH: usize = 64;
 const HEIGHT: usize = 48;
@@ -223,7 +223,6 @@ fn compare_frame(
     display: &mut Display,
     legacy: &mut Ng1Scanout,
     sw: &mut SwCompositor,
-    staging: &mut Staging,
     rgb: &[u32],
     aux: &[u32],
 ) -> Vec<u32> {
@@ -239,11 +238,11 @@ fn compare_frame(
     assert_eq!(frame.position, status.submitted);
     assert_eq!((frame.width as usize, frame.height as usize), (state.width, state.height));
     // This is an explicit readback of the composed output, never a plane.
-    let bytes = staging.read(frame.gpu, frame.buffer, &[(0, old_gpu.len() as u64 * 4)])
+    let bytes = frame.gpu.read_vec(frame.buffer, &[(0, old_gpu.len() as u64 * 4)])
         .expect("composed frame readback");
     let direct = bytemuck::cast_slice::<u8, u32>(&bytes).to_vec();
     assert_pixels_eq("direct and CPU-source GPU compositors", &direct, &old_gpu);
-    let did = staging.read(scan.gpu(), scan.did_for_test(), &[(0, PLANE_WORDS as u64)])
+    let did = scan.gpu().read_vec(scan.did_for_test(), &[(0, PLANE_WORDS as u64)])
         .expect("decoded DID readback");
     assert!(state.did.len() >= PLANE_WORDS, "CPU DID map is too small");
     let expected_did = &state.did[..PLANE_WORDS];
@@ -259,8 +258,7 @@ fn compare_frame(
     }
     for y in 0..state.height {
         for x in 0..state.width {
-            let pixel = sw.pixels()[y * FB_STRIDE + x];
-            let expected = ((pixel & 0xff) << 16) | (pixel & 0xff00) | ((pixel >> 16) & 0xff);
+            let expected = sw.pixels()[y * FB_STRIDE + x];
             assert_eq!(direct[y * state.width + x], expected, "software parity at ({x}, {y})");
         }
     }
@@ -416,9 +414,8 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
             let mut legacy = Ng1Scanout::new(&gpu).expect("CPU-source GPU compositor");
             let mut display = Display::new();
             let mut sw = SwCompositor::new();
-            let mut staging = Staging::default();
 
-            let first = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            let first = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             let traffic = scan.traffic();
             assert_eq!(traffic.frames_submitted, 1);
             assert_eq!(traffic.did_expansions.attempts, 1);
@@ -431,7 +428,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
             assert!(traffic.display.submitted_bytes < 128 * 1024, "initial display state is not small");
             assert_no_plane_traffic(traffic);
 
-            let again = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            let again = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             assert_eq!(again, first);
             assert_eq!(scan.traffic().display, traffic.display, "unchanged display state was uploaded");
             assert_eq!(scan.traffic().did, traffic.did);
@@ -451,7 +448,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
             let fb = Framebuffers { rgb: rgb.as_mut_ptr(), aux: aux.as_mut_ptr() };
             let mode = rex3_shape::unpack(cpu_context.drawmode0.0, cpu_context.drawmode1.0, cpu_context.clipmode);
             draw_with_fb(&mut cpu_context, &fb, &mode);
-            let drawn = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            let drawn = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             assert_ne!(drawn, first, "resident draw must become visible through the existing binding");
             assert_eq!(scan.traffic().display, traffic.display, "drawing must not re-upload display state");
             assert_ne!(resident.status().unwrap().submitted, initial_status.submitted);
@@ -462,7 +459,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 cmap.dirty = true;
             }
             display.refresh();
-            let palette = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            let palette = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             assert_ne!(palette, drawn, "palette change must affect the composed frame");
             assert_eq!(scan.traffic().did_expansions.submitted, 1);
 
@@ -472,7 +469,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 dac.dirty = true;
             }
             display.refresh();
-            let gamma = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            let gamma = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             assert_ne!(gamma, palette, "gamma change must affect the composed frame");
             assert_eq!(scan.traffic().did_expansions.submitted, 1);
 
@@ -484,12 +481,12 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 vc2.dirty = true;
             }
             display.refresh();
-            let cursor = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            let cursor = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             assert_ne!(cursor, gamma, "cursor changes must affect the composed frame");
             assert_eq!(scan.traffic().did_expansions.submitted, 2);
 
             display.screen.topscan = 1023;
-            let scroll = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            let scroll = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             assert_ne!(scroll, cursor, "topscan must wrap through the resident plane");
             assert_eq!(scan.traffic().did_expansions.submitted, 2);
 
@@ -499,7 +496,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 xmap.dirty = true;
             }
             display.refresh();
-            let xmap = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            let xmap = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             assert_ne!(xmap, scroll, "XMAP change must affect the composed frame");
             assert_eq!(scan.traffic().did_expansions.submitted, 2);
 
@@ -509,11 +506,11 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 vc2.dirty = true;
             }
             display.refresh();
-            let did = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            let did = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             assert_ne!(did, xmap, "decoded DID change must affect the composed frame");
             assert_eq!(scan.traffic().did_expansions.submitted, 3);
             let after_did = scan.traffic();
-            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             assert_eq!(scan.traffic().display, after_did.display);
             assert_eq!(scan.traffic().did, after_did.did);
 
@@ -527,7 +524,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 }
                 display.refresh();
                 assert_eq!(display.screen.height, height);
-                compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+                compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             }
             assert_eq!(scan.traffic().did_expansions.submitted, 5);
             assert_no_plane_traffic(scan.traffic());
@@ -541,7 +538,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
 
             let mut other_display = Display::new();
             let before_other_source = scan.traffic();
-            compare_frame(&mut scan, &mut resident, &mut other_display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut other_display, &mut legacy, &mut sw, &rgb, &aux);
             assert_eq!(
                 scan.traffic().did_expansions.submitted,
                 before_other_source.did_expansions.submitted + 1,
@@ -553,7 +550,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 vc2.dirty = true;
             }
             other_display.refresh();
-            compare_frame(&mut scan, &mut resident, &mut other_display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut other_display, &mut legacy, &mut sw, &rgb, &aux);
             {
                 let mut vc2 = other_display.vc2.lock();
                 vc2.ram[DID_LINE] = 2;
@@ -561,11 +558,11 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 vc2.dirty = true;
             }
             other_display.refresh();
-            compare_frame(&mut scan, &mut resident, &mut other_display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut other_display, &mut legacy, &mut sw, &rgb, &aux);
             assert_eq!(other_display.screen.did[3 * FB_STRIDE], 6);
-            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
-            compare_frame(&mut scan, &mut resident, &mut other_display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
-            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut other_display, &mut legacy, &mut sw, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             assert_eq!(
                 scan.traffic().did_expansions.submitted,
                 before_other_source.did_expansions.submitted + 6,
@@ -634,7 +631,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
             ));
             assert_eq!(scan.traffic(), before);
             let mut rebound = Ng1Scanout::new_resident(&gpu, &resident).expect("bind new epoch");
-            let reset_frame = compare_frame(&mut rebound, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            let reset_frame = compare_frame(&mut rebound, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             assert_no_plane_traffic(rebound.traffic());
 
             let restored_prefix = vec![0x00a5_5ac3; WIDTH];
@@ -648,7 +645,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
             ));
             assert_eq!(rebound.traffic(), before_restore);
             let mut restored = Ng1Scanout::new_resident(&gpu, &resident).expect("bind restored epoch");
-            let restored_frame = compare_frame(&mut restored, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            let restored_frame = compare_frame(&mut restored, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             assert_ne!(restored_frame, reset_frame, "restore must be visible through freshly bound planes");
             let status = resident.status().unwrap();
             assert_eq!((status.restore_uploads, status.restore_bytes), (1, (WIDTH * 4) as u64));
@@ -683,7 +680,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
             let mut legacy = Ng1Scanout::new(&gpu).expect("CPU-source GPU compositor");
             let mut display = Display::new();
             let mut sw = SwCompositor::new();
-            let mut staging = Staging::default();
 
             let mut stale_display = Display::new();
             stale_display.screen.did[3 * FB_STRIDE] = 6;
@@ -712,7 +708,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut stale_display,
                 &mut legacy,
                 &mut sw,
-                &mut staging,
                 &rgb,
                 &aux,
             );
@@ -724,7 +719,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut display,
                 &mut legacy,
                 &mut sw,
-                &mut staging,
                 &rgb,
                 &aux,
             );
@@ -741,7 +735,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut display,
                 &mut legacy,
                 &mut sw,
-                &mut staging,
                 &rgb,
                 &aux,
             );
@@ -762,7 +755,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut display,
                 &mut legacy,
                 &mut sw,
-                &mut staging,
                 &rgb,
                 &aux,
             );
@@ -781,7 +773,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut display,
                 &mut legacy,
                 &mut sw,
-                &mut staging,
                 &rgb,
                 &aux,
             );
@@ -798,7 +789,7 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
             let mut state = display.screen.display_state();
             state.did = &[];
             let frame = rebound.compose(&state, &mut resident).expect("rebind without CPU DID");
-            let bytes = staging.read(frame.gpu, frame.buffer, &[(0, preserved.len() as u64 * 4)])
+            let bytes = frame.gpu.read_vec(frame.buffer, &[(0, preserved.len() as u64 * 4)])
                 .expect("rebound frame readback");
             assert_pixels_eq("rebound frame", bytemuck::cast_slice(&bytes), &preserved);
             compare_frame(
@@ -807,7 +798,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut display,
                 &mut legacy,
                 &mut sw,
-                &mut staging,
                 &rgb,
                 &aux,
             );
@@ -826,7 +816,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut display,
                 &mut legacy,
                 &mut sw,
-                &mut staging,
                 &rgb,
                 &aux,
             );
@@ -851,7 +840,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut display,
                 &mut legacy,
                 &mut sw,
-                &mut staging,
                 &rgb,
                 &aux,
             );
@@ -871,7 +859,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut display,
                 &mut legacy,
                 &mut sw,
-                &mut staging,
                 &rgb,
                 &aux,
             );
@@ -891,7 +878,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut display,
                 &mut legacy,
                 &mut sw,
-                &mut staging,
                 &rgb,
                 &aux,
             );
@@ -910,7 +896,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut display,
                 &mut legacy,
                 &mut sw,
-                &mut staging,
                 &rgb,
                 &aux,
             );
@@ -927,7 +912,7 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 vc2.dirty = true;
             }
             display.refresh();
-            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             {
                 let mut vc2 = display.vc2.lock();
                 vc2.ram[DID_LINE] = 2;
@@ -935,7 +920,7 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 vc2.dirty = true;
             }
             display.refresh();
-            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
 
             for inactive_bit in [VC2_CTRL_BLACKOUT, VC2_CTRL_VIDEO_TIMING_EN] {
                 for did_enabled in [false, true] {
@@ -951,7 +936,7 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                         vc2.dirty = true;
                     }
                     display.refresh();
-                    compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+                    compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
                     assert_eq!(display.screen.did[0], previous_did);
                     assert_eq!(display.screen.did[3 * FB_STRIDE], 6);
                     {
@@ -960,7 +945,7 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                         vc2.dirty = true;
                     }
                     display.refresh();
-                    compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+                    compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
                     assert_eq!(display.screen.did[0], next_did as u8);
                     assert_eq!(display.screen.did[3 * FB_STRIDE], 6);
                 }
@@ -975,7 +960,7 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
             assert_eq!(scan.traffic(), before_reset);
             let mut reset = Ng1Scanout::new_resident(&gpu, &resident).expect("bind reset epoch");
             let reset_frame = compare_frame(
-                &mut reset, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux,
+                &mut reset, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux,
             );
             assert_eq!(display.screen.did[3 * FB_STRIDE], 6);
             assert!(reset.traffic().display.submitted_bytes < 128 * 1024);
@@ -988,7 +973,7 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
             ));
             let mut restored = Ng1Scanout::new_resident(&gpu, &resident).expect("bind restored epoch");
             let restored_frame = compare_frame(
-                &mut restored, &mut resident, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux,
+                &mut restored, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux,
             );
             assert_pixels_eq("restored frame", &restored_frame, &reset_frame);
             assert_no_plane_traffic(restored.traffic());
@@ -1039,8 +1024,7 @@ fn direct_ng1_scanout_gpu_uses_the_board_binding_seam() {
             let mut legacy = Ng1Scanout::new(&gpu).expect("CPU-source GPU compositor");
             let mut display = Display::new();
             let mut sw = SwCompositor::new();
-            let mut staging = Staging::default();
-            let first = compare_frame(&mut scan, &mut source, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            let first = compare_frame(&mut scan, &mut source, &mut display, &mut legacy, &mut sw, &rgb, &aux);
 
             board.0.start();
             let mut expected = fill_context();
@@ -1059,7 +1043,7 @@ fn direct_ng1_scanout_gpu_uses_the_board_binding_seam() {
             let fb = Framebuffers { rgb: rgb.as_mut_ptr(), aux: aux.as_mut_ptr() };
             let mode = rex3_shape::unpack(expected.drawmode0.0, expected.drawmode1.0, expected.clipmode);
             draw_with_fb(&mut expected, &fb, &mode);
-            let drawn = compare_frame(&mut scan, &mut source, &mut display, &mut legacy, &mut sw, &mut staging, &rgb, &aux);
+            let drawn = compare_frame(&mut scan, &mut source, &mut display, &mut legacy, &mut sw, &rgb, &aux);
             assert_ne!(drawn, first, "board draw must appear through the original bindings");
             let status = source.scanout_status().unwrap();
             assert_ne!(status.submitted, initial_status.submitted);
@@ -1286,16 +1270,14 @@ fn resident_frame_gpu_marker_order_capture_and_display_changes() {
             assert!(expected_first != expected_second);
             let buffers = outputs.lock().clone();
             assert_eq!(buffers.len(), 2);
-            let mut staging = Staging::default();
-            let read_presented = |staging: &mut Staging, buffer: &wgpu::Buffer| {
-                let bytes = staging.read(&gpu, buffer, &[(0, (WIDTH * HEIGHT * 4) as u64)]).unwrap();
+            let read_presented = |buffer: &wgpu::Buffer| {
+                let bytes = gpu.read_vec(buffer, &[(0, (WIDTH * HEIGHT * 4) as u64)]).unwrap();
                 bytemuck::cast_slice::<u8, u32>(&bytes).to_vec()
             };
-            let first_pixels = read_presented(&mut staging, &buffers[0]);
-            let second_pixels = read_presented(&mut staging, &buffers[1]);
-            let to_gpu = |pixels: &[u32]| pixels.iter().map(|pixel| pixel.swap_bytes() >> 8).collect::<Vec<_>>();
-            assert_pixels_eq("first marked prefix", &first_pixels, &to_gpu(&expected_first));
-            assert_pixels_eq("later draw", &second_pixels, &to_gpu(&expected_second));
+            let first_pixels = read_presented(&buffers[0]);
+            let second_pixels = read_presented(&buffers[1]);
+            assert_pixels_eq("first marked prefix", &first_pixels, &expected_first);
+            assert_pixels_eq("later draw", &second_pixels, &expected_second);
 
             board.0.request_frame();
             let before_fence_race = board.0.screen.lock().frame_seq;
