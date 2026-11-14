@@ -310,6 +310,12 @@ impl<J: Send, F: Fn(&J, Tile) + Sync> TilePool<J, F> {
 
     // The pool.
 
+    /// Workers asleep on the wake condition, for the test of that path.
+    #[cfg(test)]
+    fn sleeping(&self) -> u32 {
+        self.pool.sleepers.load(SeqCst)
+    }
+
     fn run_worker(&self) {
         let mut spins = 0u32;
 
@@ -413,6 +419,25 @@ mod tests {
         assert!(pool.idle());
         assert_eq!(pool.staged(), 1000);
         assert_eq!(runs.load(SeqCst), want);
+        pool.stop();
+    }
+
+    /// A pool that has gone to sleep is woken by a job.
+    #[test]
+    fn a_sleeping_pool_is_woken_by_a_job() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let n = runs.clone();
+        let pool = TilePool::new("tile-test", 4, 16, 2, move |_: &Job, _: Tile| {
+            n.fetch_add(1, Relaxed);
+        });
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pool.sleeping() < 2 && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(pool.sleeping(), 2, "both workers went to sleep");
+        pool.push(Job::default(), Rect { x0: 0, y0: 0, x1: 19, y1: 19 });
+        pool.drain();
+        assert_eq!(runs.load(SeqCst), 4);
         pool.stop();
     }
 
