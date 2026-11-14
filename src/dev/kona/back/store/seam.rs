@@ -189,6 +189,17 @@ impl Store {
         }
     }
 
+    /// Copy the plane at `word` into `dst` at `at` bytes, on the device, and say so. False on the
+    /// CPU arm and for a plane that lives in the mirror alone (overlay and popup): the caller
+    /// reads `cpu`. A plane nothing has drawn into copies as zeros.
+    #[cfg(feature = "wgpu")]
+    pub fn copy_plane(&self, word: usize, dst: &wgpu::Buffer, at: u64) -> bool {
+        match self {
+            Store::Cpu(_) => false,
+            Store::Gpu(g) => g.copy_plane(word, dst, at),
+        }
+    }
+
     /// What the GPU arm has done, as a line for the monitor; None on the CPU arm.
     pub fn gpu_report(&self) -> Option<String> {
         match self {

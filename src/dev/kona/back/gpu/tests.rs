@@ -25,7 +25,7 @@ pub(in crate::dev::kona::back) fn shared_gpu() -> Option<Arc<Gpu>> {
 
 /// The GL backend's context lock times out when several threads drive it at once, so a test that
 /// uses the device holds this for its whole run.
-fn serial() -> parking_lot::MutexGuard<'static, ()> {
+pub(in crate::dev::kona::back) fn serial() -> parking_lot::MutexGuard<'static, ()> {
     static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
     LOCK.lock()
 }

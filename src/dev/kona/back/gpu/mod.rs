@@ -283,6 +283,17 @@ impl GpuStore {
         }
     }
 
+    /// Copy the plane of `word` into `dst` at `at` bytes on the device, after the records so far,
+    /// for a reader that works on the GPU (the scan-out). False for a word that lives in the
+    /// mirror alone; a plane nothing has named is zeros.
+    pub fn copy_plane(&self, word: usize, dst: &wgpu::Buffer, at: u64) -> bool {
+        if !resident(word) {
+            return false;
+        }
+        self.state.lock().copy_plane(word, dst, at);
+        true
+    }
+
     /// Zero the planes on the GPU and forget what is known of them.
     pub fn reset(&self) {
         self.state.lock().reset();
@@ -1182,6 +1193,17 @@ impl State {
             self.gpu.write(&self.chunks[p.chunk], p.base + (y as u64 * w as u64 + x0 as u64) * 4, bytemuck::cast_slice(&row));
         }
         self.stats.uploaded_words += (x1 - x0) as u64 * (y1 - y0) as u64;
+    }
+
+    fn copy_plane(&mut self, word: usize, dst: &wgpu::Buffer, at: u64) {
+        self.flush();
+        let bytes = self.plane_words as u64 * 4;
+        let mut enc = self.gpu.encoder("kona plane copy");
+        match &self.planes[word] {
+            Some(p) => enc.copy_buffer_to_buffer(&self.chunks[p.chunk], p.base, dst, at, bytes),
+            None => enc.clear_buffer(dst, at, Some(bytes)),
+        }
+        self.gpu.submit(enc);
     }
 
     /// Zero every plane on the GPU.

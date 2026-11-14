@@ -307,13 +307,29 @@ impl KonaBackend {
         let tex = TextureStore::with_capacity_bytes(cfg.texture_bytes_per_rm());
         #[cfg(feature = "wgpu")]
         if let Some(gpu) = gpu {
-            return Ok(Self::on(cfg, Store::with_gpu(gpu, cfg.managed.0, cfg.managed.1, tex)?));
+            let mut back = Self::on(cfg, Store::with_gpu(gpu.clone(), cfg.managed.0, cfg.managed.1, tex)?);
+            back.scan_out_on(gpu)?;
+            return Ok(back);
         }
         #[cfg(not(feature = "wgpu"))]
         if let Some(never) = gpu {
             match never {}
         }
         Ok(Self::on(cfg, Store::with_texture(cfg.managed.0, cfg.managed.1, tex)))
+    }
+
+    /// Compose the display on `gpu` too: the frame is made there from the store's planes, and a
+    /// window on the same device shows it without a readback. The managed area may be too big for
+    /// the device's buffer limits, and then the CPU composes. A GPU that fails later stops the
+    /// machine (it was given the device's fatal callback).
+    #[cfg(feature = "wgpu")]
+    fn scan_out_on(&mut self, gpu: crate::SharedGpu) -> Result<(), String> {
+        let (w, h) = (self.store.cpu().width(), self.store.cpu().height());
+        let Some(sc) = display::scanout::GpuScanout::new(&gpu, w, h)? else { return Ok(()) };
+        eprintln!("kona: scan-out on the GPU: {}", gpu.caps);
+        self.display.set_gpu(gpu);
+        *self.scanout.lock() = Some(sc);
+        Ok(())
     }
 
     fn on(cfg: KonaConfig, store: Store) -> Self {
@@ -381,21 +397,6 @@ impl KonaBackend {
             }
             Err(why) => self.refused[why as usize] += 1,
         }
-    }
-
-    /// Compose the display on `gpu` (`[graphics] raster = "wgpu"`): the frame
-    /// is made there, and a window on the same device shows it without a
-    /// readback. The raster still draws on the CPU. The managed area may be too
-    /// big for the device's buffer limits, and then the CPU composes. A GPU that
-    /// fails later stops the machine (it was given the device's fatal callback).
-    #[cfg(feature = "wgpu")]
-    pub fn set_gpu(&mut self, gpu: crate::SharedGpu) -> Result<(), String> {
-        let (w, h) = (self.store.cpu().width(), self.store.cpu().height());
-        let Some(sc) = display::scanout::GpuScanout::new(&gpu, w, h)? else { return Ok(()) };
-        eprintln!("kona: scan-out on the GPU: {}", gpu.caps);
-        self.display.set_gpu(gpu);
-        *self.scanout.lock() = Some(sc);
-        Ok(())
     }
 
     /// The window this board shows the guest, to hand to the machine so

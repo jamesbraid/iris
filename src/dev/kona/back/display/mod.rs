@@ -301,7 +301,7 @@ impl Compositor {
         let mut guard = self.scanout.lock();
         let sc = guard.as_mut()?;
         let (w, h) = (self.store.cpu().width(), self.store.cpu().height());
-        if let Err(e) = sc.compose(self.store.cpu(), self.word, map, tables) {
+        if let Err(e) = sc.compose(&self.store, self.word, map, tables) {
             sc.fail(&e);
             screen.counts.count(false);
             return Some(false);

@@ -5,12 +5,14 @@
 //!
 //! The pixel planes the compose reads (the colour words, the window-ID plane
 //! and the overlay and popup planes) are copies of the store's, kept in one
-//! GPU buffer. The raster still draws into the store on the CPU, so each
-//! frame the copies are brought up to date by comparing the store with a
-//! shadow of what the GPU holds, a 32 x 32 tile at a time, and uploading the
-//! tiles that differ (`Planes::upload`, the one place that names where the
-//! planes come from). A store that lives on the GPU would bind its planes
-//! here instead, and the shadow and the comparison go.
+//! GPU buffer. A store on the CPU is brought up to date each frame by
+//! comparing it with a shadow of what the GPU holds, a 32 x 32 tile at a
+//! time, and uploading the tiles that differ (`Planes::upload`, the one place
+//! that names where the planes come from). A store whose planes live on the
+//! GPU (`Store::Gpu`) copies the colour, second-buffer and window-ID planes
+//! into the buffer on the device, with nothing compared or sent from the
+//! host; the overlay and popup planes stay in the store's host copy and take
+//! the comparison.
 //!
 //! The tables are resolved on the CPU into the display slot as the compose
 //! reads them: the window kinds, the colour map through the gamma RAM, the
@@ -22,7 +24,7 @@ use parking_lot::Mutex;
 
 use super::tables::{Baked, Window, ENTRIES, IDS};
 use super::ColourMap;
-use crate::dev::kona::back::store::{PixelStore, DID_PLANE, OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE};
+use crate::dev::kona::back::store::{Store, DID_PLANE, OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE};
 use crate::dev::kona::defs::{OVERLAY_ID_FIRST, POPUP_ID};
 use crate::wgpu::{Fragment, Gpu, Scanout, ScanoutPipeline, ScanoutShaders};
 
@@ -147,12 +149,15 @@ impl Planes {
     ///
     /// The store is read as it is, without waiting for drawing, as the CPU
     /// compose does.
-    fn upload(&mut self, gpu: &Gpu, store: &PixelStore, positions: [usize; PLANES], need: [bool; PLANES]) {
+    fn upload(&mut self, gpu: &Gpu, store: &Store, positions: [usize; PLANES], need: [bool; PLANES]) {
         let (w, h) = (self.w, self.h);
         let n = w * h;
         let tiles = w.div_ceil(TILE);
         for p in (0..PLANES).filter(|&p| need[p]) {
-            let Some(array) = store.array(positions[p]) else { continue };
+            if store.copy_plane(positions[p], &self.buffer, (p * n * 4) as u64) {
+                continue;
+            }
+            let Some(array) = store.cpu().array(positions[p]) else { continue };
             let pitch = array.pitch();
             for band in 0..h.div_ceil(TILE) {
                 let (y0, y1) = (band * TILE, ((band + 1) * TILE).min(h));
@@ -320,8 +325,8 @@ impl GpuScanout {
 
     /// Bring the planes up to date, resolve the tables and compose; no
     /// readback. `word` is the colour word position of the main window.
-    pub fn compose(&mut self, store: &PixelStore, word: usize, map: &ColourMap, tables: &Baked) -> Result<(), String> {
-        if (store.width() as usize, store.height() as usize) != (self.planes.w, self.planes.h) {
+    pub fn compose(&mut self, store: &Store, word: usize, map: &ColourMap, tables: &Baked) -> Result<(), String> {
+        if (store.cpu().width() as usize, store.cpu().height() as usize) != (self.planes.w, self.planes.h) {
             return Err("the managed area changed size".into());
         }
         let positions = [word, word + 1, DID_PLANE, OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE];
@@ -580,6 +585,41 @@ mod tests {
         assert!(gpu.check().is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1, "the machine hears it once");
         assert_eq!(screen.latest().map(|f| f.seq), Some(1), "no frame is published after");
+    }
+
+    /// A store whose planes live on the GPU scans out the same frame as the CPU compose of a CPU
+    /// store given the same draws, with the colour, back and window-ID planes copied on the device
+    /// and the overlay and popup planes (host copy) compared and uploaded.
+    #[test]
+    fn a_gpu_store_scans_out_like_a_cpu_store() {
+        use crate::dev::kona::back::raster::{ClearReq, DrawState, Rect};
+        use crate::dev::kona::back::store::{StoreOp, texture::TextureStore};
+        let Some(gpu) = crate::dev::kona::back::gpu::tests::shared_gpu() else { return };
+        let _serial = crate::dev::kona::back::gpu::tests::serial();
+        let mut sc = GpuScanout::new(&gpu, W, H).expect("pipeline").expect("fits");
+        for seed in [31u64, 32] {
+            let (cpu, map, t) = scene(&Scene { layers: true, gamma: true, ..Scene::new(seed) });
+            let gs = Store::with_gpu(gpu.clone(), W, H, TextureStore::default()).expect("store");
+            // The same random planes on the GPU: the host planes through `write`, and some clears
+            // and boxes on top of them as records, applied to both.
+            for w in [1usize, 2, DID_PLANE, OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE] {
+                for y in 0..H {
+                    for x in 0..W {
+                        gs.write(x, y, w, cpu.read(x, y, w));
+                    }
+                }
+            }
+            let full = Rect { x0: 0, y0: 0, x1: W as i32, y1: H as i32 };
+            let ds = DrawState { clip: full, viewport: full, colour: [1, 2], colours: 2, ..DrawState::default() };
+            let req = ClearReq { rect: Rect { x0: 10, y0: 5, x1: 90, y1: 60 }, colour: Some(0xff12_3456), ..Default::default() };
+            for s in [&cpu, &gs] {
+                s.apply(StoreOp::Clear { ds: &ds, req: &req });
+                s.apply(StoreOp::FillBox { word: 1, x1: 40, y1: 20, x2: 120, y2: 80, value: 0x0300_0077 });
+                s.apply(StoreOp::FillBox { word: DID_PLANE, x1: 0, y1: 0, x2: 60, y2: 40, value: 4 << 2 });
+            }
+            assert_same(&mut sc, &format!("gpu store, seed {seed}"), &gs, &map, &t);
+            assert_eq!(cpu.checksum(), gs.checksum(), "the GPU store holds what the CPU store does");
+        }
     }
 
     /// The slot holds every table the compose reads, and the planes stay under the binding.

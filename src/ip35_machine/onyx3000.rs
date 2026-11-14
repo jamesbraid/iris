@@ -180,8 +180,8 @@ impl Ip35Board for Onyx3000 {
         });
         let (mut io, xbridge) = wire_ibrick(nodes, cfg, Some(port_reset))?;
         let status = new_status();
-        let pipe = fit_pipe(&nodes[0].bedrock, &xbridge, cfg, KonaConfig::new(product, rm_count)?, &status)?;
-        crate::workstation::fit_kona_gpu(&pipe, &crate::workstation::open_gpu(cfg, faults)?)?;
+        let gpu = crate::workstation::share_gpu(&crate::workstation::open_gpu(cfg, faults)?);
+        let pipe = fit_pipe(&nodes[0].bedrock, &xbridge, cfg, KonaConfig::new(product, rm_count)?, &status, gpu)?;
         let _ = cell.set(Arc::downgrade(&pipe));
         eprintln!("iris: {} on the G-brick at I-brick widget {PIPE_WIDGET}", product.spec().label);
         let (start, stop, reset) = (pipe.clone(), pipe.clone(), pipe.clone());
@@ -267,12 +267,13 @@ fn fit_pipe(
     cfg: &MachineConfig,
     kona: KonaConfig,
     status: &Arc<crate::disp::StatusSource>,
+    gpu: Option<crate::SharedGpu>,
 ) -> Result<Arc<Kona>, String> {
     let kona = kona.with_host_widget(IBRICK.host_port)?.with_widget(PIPE_WIDGET)?.with_pool(cfg.graphics.threads, cfg.graphics.tile);
     let flash = cfg.graphics.flash.as_deref().map(|p| crate::dev::kona::flash_file(Path::new(p))).transpose()?;
     // Its interrupt packets are the chip's inbound writes from that widget, to
     // the address the driver programmed.
-    let pipe = Kona::new(kona, Inbound::port(bedrock, PIPE_WIDGET), bedrock.widget_dma(PIPE_WIDGET), status.clone(), flash)?;
+    let pipe = Kona::with_gpu(kona, Inbound::port(bedrock, PIPE_WIDGET), bedrock.widget_dma(PIPE_WIDGET), status.clone(), flash, gpu)?;
     bedrock.connect_widget(PIPE_WIDGET, xbridge.attach_widget(PIPE_WIDGET, pipe.clone()));
     Ok(pipe)
 }

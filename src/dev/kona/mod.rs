@@ -566,12 +566,6 @@ impl Kona {
         }
     }
 
-    /// Compose the pipe's display on the machine's GPU (see `KonaBackend::set_gpu`).
-    #[cfg(feature = "wgpu")]
-    pub fn set_gpu(&self, gpu: crate::SharedGpu) -> Result<(), String> {
-        self.shared.pipe.lock().backend.set_gpu(gpu)
-    }
-
     /// The window the pipe shows the guest, for the machine's `get_display`.
     pub fn display(&self) -> Arc<dyn crate::gfx_display::GfxDisplay> {
         self.shared.display.clone()
