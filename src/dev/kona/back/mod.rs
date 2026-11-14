@@ -53,7 +53,7 @@ use raster::setup::Shape;
 use raster::Rect;
 use tiles::{ClearJob, RasterJob, Tiles};
 use store::texture::{Exclusive, TextureStore, PAGE_WORDS};
-use store::PixelStore;
+use store::{Drained, Store, StoreOp};
 use super::stream;
 use crate::devlog::LogModule;
 use std::io::{self, Write};
@@ -219,7 +219,7 @@ pub struct KonaBackend {
     /// The X server's colour map and display-ID table, which the display
     /// reads a frame at a time.
     tables: Arc<parking_lot::Mutex<Tables>>,
-    store: Arc<PixelStore>,
+    store: Arc<Store>,
     textport: Textport,
     /// The X path's state, one copy per rendering context.
     contexts: Contexts,
@@ -279,7 +279,7 @@ fn write_lines(port: &mut BackPort<'_>, done: &x::pixel::FeedDone) -> bool {
 impl KonaBackend {
     pub fn new(cfg: KonaConfig) -> Self {
         let map = Arc::new(parking_lot::Mutex::new(ColourMap::default()));
-        let store = Arc::new(PixelStore::with_texture(cfg.managed.0, cfg.managed.1, TextureStore::with_capacity_bytes(cfg.texture_bytes_per_rm())));
+        let store = Arc::new(Store::with_texture(cfg.managed.0, cfg.managed.1, TextureStore::with_capacity_bytes(cfg.texture_bytes_per_rm())));
         let tables = Arc::<parking_lot::Mutex<Tables>>::default();
         let display = Arc::new(Display::detached());
         display.set_tables(tables.clone());
@@ -401,8 +401,10 @@ impl KonaBackend {
     /// Put what `prepare_chunks` read into the store.
     pub fn apply_chunks(&mut self, p: snapshot::Prepared) -> Result<(), String> {
         self.drain();
-        let applied = snapshot::apply(&self.store, &mut self.tables.lock(), p);
-        self.store.touch();
+        // SAFETY: the tiles are drained, and nothing draws until the restore returns.
+        let drained = unsafe { Drained::assume() };
+        let applied = snapshot::apply(&self.store, drained, &mut self.tables.lock(), p);
+        self.store.cpu().touch();
         applied
     }
 
@@ -438,7 +440,7 @@ impl KonaBackend {
         writeln!(w, "record bound      {} words per pixel", c.record_words())?;
         writeln!(w, "display handle    {}", if self.handle.is_some() { "attached" } else { "detached" })?;
         writeln!(w, "display           {} frames, {} retraces completed, thread {}", self.clock.frames(), self.clock.completed(), if self.thread.is_some() { "running" } else { "stopped" })?;
-        writeln!(w, "pixel store       {} word arrays of {} x {}", self.store.allocated().len(), self.store.width(), self.store.height())?;
+        writeln!(w, "pixel store       {} word arrays of {} x {}", self.store.cpu().allocated().len(), self.store.cpu().width(), self.store.cpu().height())?;
         writeln!(w, "textport          colour {} raster {:?}, {} drawn, {} unmodelled", self.textport.colour(), self.textport.raster(), self.textport.drawn, self.textport.unmodelled)?;
         let x = &self.contexts.current().x;
         let gc = match x.gc() {
@@ -491,7 +493,7 @@ impl KonaBackend {
         }
         drop(tables);
         let c = &self.tex_counts;
-        let t = self.store.texture();
+        let t = self.store.cpu().texture();
         writeln!(
             w,
             "textures          {} level loads ({} by DMA, {} refused, {} past memory), {} finishes, {} binds ({} refused), {} tokens not modelled; {} volume slice loads, {} volume binds; texture memory {} KiB held (peak {} KiB, ceiling {} KiB)",
@@ -553,7 +555,7 @@ impl KonaBackend {
         writeln!(w, "multisample       {} draws ({} with alpha to mask, {} with a sample mask), by the model's own rules", r.multisampled, r.alpha_to_mask, r.sample_mask)?;
         let c = &self.tex_counts;
         writeln!(w, "textures          {} level loads ({} by DMA, {} detail image loads, {} volume slice loads, {} refused, {} past memory), {} finishes, {} binds ({} of volumes, {} refused), {} tokens not modelled", c.loads, c.dma_loads, c.detail_loads, c.volume_loads, c.unsupported_load, c.full, c.finishes, c.binds, c.volume_binds, c.bind_refused, c.unmodelled)?;
-        let t = self.store.texture();
+        let t = self.store.cpu().texture();
         writeln!(w, "texture memory   {} KiB held in {} pages, peak {} KiB, ceiling {} KiB", t.resident_pages() * (PAGE_WORDS / 256), t.resident_pages(), t.peak_pages() * (PAGE_WORDS / 256), t.cap_pages() * (PAGE_WORDS / 256))?;
         writeln!(w, "texel read-backs  {} ({} in a bracket); answered with zeros: {} for a format or type the packer does not know, {} for a level not loaded; {} too big; {} with nowhere to answer", c.reads, c.reads_bracketed, c.read_unsupported, c.read_missing, c.read_oversize, c.read_unposted)?;
         if let Some(l) = &self.last_layout {
@@ -598,7 +600,7 @@ impl KonaBackend {
         let retrace = matches!(job, Job::Retrace { .. });
         let reply = self.handle_job(port, job);
         if !retrace {
-            self.store.touch();
+            self.store.cpu().touch();
         }
         reply
     }
@@ -630,7 +632,7 @@ impl KonaBackend {
         // Jobs queued before the reset finish first: they write the store it clears.
         self.drain();
         // SAFETY: the tiles are drained, and nothing draws until the reset returns.
-        unsafe { self.store.reset() };
+        self.store.apply(StoreOp::Reset(unsafe { Drained::assume() }));
         self.textport.reset();
         self.tables.lock().reset();
         self.contexts.reset();
@@ -735,12 +737,12 @@ fn drains_first(job: &Job<'_>) -> bool {
 /// the planes without a lock, so a write may happen only while none runs; every writer in the
 /// back end gets its `Exclusive` here, which waits for them first, so a write that skips the wait
 /// cannot be written down. Nothing draws until the caller returns: the producer is this thread.
-fn texture_exclusive<'a>(tiles: &mut Option<Tiles>, store: &'a PixelStore) -> Exclusive<'a> {
+fn texture_exclusive<'a>(tiles: &mut Option<Tiles>, store: &'a Store) -> Exclusive<'a> {
     if let Some(t) = tiles {
         let _ = t.drain();
     }
     // SAFETY: the tiles are drained, and the producer submits nothing until the caller is done.
-    unsafe { store.texture().exclusive() }
+    unsafe { store.cpu().texture().exclusive() }
 }
 
 /// What set-up counted, over the draws handed to it.
@@ -795,18 +797,18 @@ impl KonaBackend {
 
     /// Allocate the arrays a job writes, before a worker can see it.
     fn arrays(&self, ds: &raster::DrawState) {
-        ds.colour[..ds.colours as usize].iter().for_each(|&w| self.store.ensure(w as usize));
+        ds.colour[..ds.colours as usize].iter().for_each(|&w| self.store.cpu().ensure(w as usize));
         if ds.depth_bits != 0 {
-            self.store.ensure(ds.depth_word as usize);
+            self.store.cpu().ensure(ds.depth_word as usize);
         }
         if ds.stencil_bits != 0 {
-            self.store.ensure(ds.stencil_word as usize);
+            self.store.cpu().ensure(ds.stencil_word as usize);
         }
         if ds.ownership.is_some() {
-            self.store.ensure(store::DID_PLANE);
+            self.store.cpu().ensure(store::DID_PLANE);
         }
         if let Some(ms) = &ds.samples {
-            [ms.colour, ms.depth, ms.stencil].iter().for_each(|&(first, n)| (first..first + n).for_each(|w| self.store.ensure(w as usize)));
+            [ms.colour, ms.depth, ms.stencil].iter().for_each(|&(first, n)| (first..first + n).for_each(|w| self.store.cpu().ensure(w as usize)));
         }
     }
 
@@ -963,7 +965,7 @@ impl KonaBackend {
                     self.tex_counts.read_oversize += 1;
                     Answer::TooBig
                 } else {
-                    let texels = match c.tex.read_level(self.store.texture(), &h) {
+                    let texels = match c.tex.read_level(self.store.cpu().texture(), &h) {
                         Some(t) => t,
                         None => {
                             self.tex_counts.read_missing += 1;
@@ -1058,7 +1060,7 @@ impl KonaBackend {
         let c = self.contexts.select(port.context());
         let ds = c.gl.draw_state(screen);
         if let Some(l) = c.gl.layout.clone() {
-            l.colour.chain(l.accumulation).for_each(|w| self.store.ensure(w as usize));
+            l.colour.chain(l.accumulation).for_each(|w| self.store.cpu().ensure(w as usize));
         }
         self.arrays(&ds);
         ds
@@ -1322,7 +1324,7 @@ impl KonaBackend {
             }
             Job::Command { grammar: Grammar::Textport, selector, args, .. } => {
                 let (tiles, store) = (&mut self.tiles, &self.store);
-                self.textport.command(|| raster::surface(tiles, store, textport::COLOUR_WORD), selector, args);
+                self.textport.command(|| raster::surface(tiles, store, textport::COLOUR_WORD).store(), selector, args);
             }
             Job::Command { grammar: Grammar::Kernel, selector, args, .. } => {
                 self.regions.note(selector, args);
@@ -1478,7 +1480,7 @@ impl KonaBackend {
             }
             Job::Bitmap { header, payload } => {
                 let surface = raster::surface(&mut self.tiles, &self.store, textport::COLOUR_WORD);
-                self.textport.bitmap(&surface, header, payload)
+                self.textport.bitmap(surface.store(), header, payload)
             }
             _ => {}
         }

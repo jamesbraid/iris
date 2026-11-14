@@ -4,7 +4,7 @@
 use super::raster::ops::{BlendEq, BlendFactor, Compare, LogicOp, Ownership, StencilOp};
 use super::store::DID_PLANE;
 use super::raster::{ClearReq, DrawState, Prims, Rect, WVertex};
-use super::store::PixelStore;
+use super::store::Store;
 use super::KonaBackend;
 use crate::dev::kona::KonaConfig;
 
@@ -48,7 +48,7 @@ fn clear(st: &mut KonaBackend, ds: &DrawState, colour: Option<u32>, depth: Optio
     st.flush();
 }
 
-fn pixels(s: &PixelStore, word: usize) -> Vec<(u32, u32, u32)> {
+fn pixels(s: &Store, word: usize) -> Vec<(u32, u32, u32)> {
     let mut out = Vec::new();
     for y in 0..N {
         for x in 0..N {
@@ -61,7 +61,7 @@ fn pixels(s: &PixelStore, word: usize) -> Vec<(u32, u32, u32)> {
     out
 }
 
-fn hash(s: &PixelStore) -> u64 {
+fn hash(s: &Store) -> u64 {
     s.checksum()
 }
 
@@ -410,7 +410,7 @@ fn fogged(c: [f32; 3]) -> [WVertex; 3] {
 fn fog_darkens_a_fragment_by_its_distance() {
     use super::raster::fog::Fog;
     use crate::dev::kona::defs::gl;
-    let red_of = |s: &PixelStore, x, y| s.read(x, y, 1) >> 16 & 0xff;
+    let red_of = |s: &Store, x, y| s.read(x, y, 1) >> 16 & 0xff;
     // Constant coordinate 5, linear from 0 to 10: half way.
     let on = state(|d| d.fog = Fog::new(true, gl::LINEAR, 1.0, 0.0, 10.0, [0.0; 3]));
     let mut st = board((0, 32));
@@ -743,7 +743,7 @@ fn triangle_fill_rate() {
 }
 
 /// Whether any colour word of the store was written.
-fn pixels_written(s: &PixelStore) -> bool {
+fn pixels_written(s: &Store) -> bool {
     (0..1024).any(|y| (0..1024).any(|x| s.read(x, y, 1) != 0))
 }
 

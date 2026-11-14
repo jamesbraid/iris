@@ -45,7 +45,7 @@ pub mod pixel;
 pub mod texel;
 pub mod setup;
 pub mod smooth;
-use super::store::{PixelStore, WordArray};
+use super::store::{Store, WordArray};
 use super::tiles::Tiles;
 use ops::{BlendEq, BlendFactor, Compare, LogicOp, Ownership, StencilOp};
 
@@ -321,31 +321,38 @@ pub fn lit(lo: i64, hi: i64) -> std::ops::Range<i64> {
     lo + 1..hi + 1
 }
 
-/// A surface onto word `word` of the store, after every queued raster job has
-/// run: whatever reads or writes the store's pixels comes through here, so the
-/// tile workers never race it. The drain lives in the way to the pixels, not in a
-/// list of the jobs that need it.
-pub fn surface<'a>(tiles: &mut Option<Tiles>, store: &'a PixelStore, word: usize) -> Surface<'a> {
+/// Wait for every queued raster job to finish: whatever reads or writes the store's pixels outside
+/// the tile workers comes through here first, so the workers never race it. The drain lives in the
+/// way to the pixels, not in a list of the jobs that need it.
+pub fn fence(tiles: &mut Option<Tiles>) {
     if let Some(t) = tiles {
         // A poisoned scheduler is reported by `Tiles::is_poisoned`, which the
         // board reads; the drain itself still ends.
         let _ = t.drain();
     }
+}
+
+/// A surface onto word `word` of the store, after `fence`.
+pub fn surface<'a>(tiles: &mut Option<Tiles>, store: &'a Store, word: usize) -> Surface<'a> {
+    fence(tiles);
     Surface::new(store, word)
 }
 
-/// A word position of the store to draw into, and where drawing stops.
+/// A word position of the store to draw into, and where drawing stops. Drawing itself is a
+/// `StoreOp` handed to `store()`.
 pub struct Surface<'a> {
-    store: &'a PixelStore,
+    store: &'a Store,
+    word: usize,
     array: WordArray<'a>,
 }
 
 impl<'a> Surface<'a> {
     /// Draw into word `word` of the store's pixels. Allocates the array: this
     /// is the draw's set-up, and resolves it once for every call after.
-    pub fn new(store: &'a PixelStore, word: usize) -> Surface<'a> {
-        store.ensure(word);
-        Surface { store, array: store.array(word).expect("allocated by the set-up") }
+    pub fn new(store: &'a Store, word: usize) -> Surface<'a> {
+        let cpu = store.cpu();
+        cpu.ensure(word);
+        Surface { store, word, array: cpu.array(word).expect("allocated by the set-up") }
     }
 
     /// A surface onto another word position of the same store, allocated
@@ -358,84 +365,44 @@ impl<'a> Surface<'a> {
     /// if that word has no array, as for the second buffer of a window that has
     /// none, which a copy has nothing to move from.
     pub fn sibling_array(&self, word: usize) -> Option<WordArray<'a>> {
-        self.store.array(word)
+        self.store.cpu().array(word)
+    }
+
+    /// The store, to apply ops to and to observe.
+    pub fn store(&self) -> &'a Store {
+        self.store
+    }
+
+    /// The word position this surface is onto.
+    pub fn word(&self) -> usize {
+        self.word
     }
 
     /// The managed area's size.
     pub fn size(&self) -> (u32, u32) {
-        (self.store.width(), self.store.height())
+        (self.store.cpu().width(), self.store.cpu().height())
     }
 
     /// The word array drawn into.
     pub fn array(&self) -> WordArray<'a> {
         self.array
     }
-
-    /// Set the pixel (`x`, `y`) to `value`; false if it is off the managed area.
-    pub fn plot(&self, x: i64, y: i64, value: u32) -> bool {
-        let (w, h) = self.size();
-        if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 {
-            return false;
-        }
-        // SAFETY: the pixel is inside the managed area, which the array covers.
-        unsafe { self.array.store(y as usize * self.array.pitch() + x as usize, value) };
-        true
-    }
-
-    /// Fill the box with corners (`x1`, `y1`) and (`x2`, `y2`) by the fill rule (`lit`),
-    /// clipped to the managed area. A box whose far corner is below or left of
-    /// its near one draws nothing (what a reversed box does is unknown).
-    pub fn fill_box(&self, x1: i64, y1: i64, x2: i64, y2: i64, value: u32) {
-        let (xs, ys) = (lit(x1, x2), lit(y1, y2));
-        let xs = xs.start.max(0)..xs.end.min(self.store.width() as i64);
-        let ys = ys.start.max(0)..ys.end.min(self.store.height() as i64);
-        let pitch = self.array.pitch();
-        for y in ys {
-            let row = y as usize * pitch;
-            for x in xs.clone() {
-                // SAFETY: both ranges are clipped to the managed area.
-                unsafe { self.array.store(row + x as usize, value) };
-            }
-        }
-    }
-
-    /// Set the pixels of a bitmap whose bits are set, most significant bit
-    /// first, row-major, `width` bits a row, with its row 0 at `y0` and its
-    /// column 0 at `x0`. Rows and columns off the managed area are skipped
-    /// without being looked at, and a clear word is skipped whole.
-    pub fn bitmap(&self, x0: i64, y0: i64, width: u32, height: u32, bits: &[u32], value: u32) {
-        let (w, h) = (self.store.width() as i64, self.store.height() as i64);
-        let pitch = self.array.pitch();
-        // The columns of the bitmap that land on the store.
-        let (lo, hi) = ((-x0).max(0), (w - x0).min(width as i64));
-        for r in 0..height as u64 {
-            let y = y0 + r as i64;
-            if y < 0 || y >= h || lo >= hi {
-                continue;
-            }
-            let (row_bit, row_store) = (r * width as u64, y as usize * pitch);
-            let (mut bit, end) = (row_bit + lo as u64, row_bit + hi as u64);
-            while bit < end {
-                let word = bits.get((bit / 32) as usize).copied().unwrap_or(0);
-                if word == 0 {
-                    bit = (bit / 32 + 1) * 32;
-                    continue;
-                }
-                if word >> (31 - bit % 32) & 1 != 0 {
-                    // SAFETY: the column is inside `lo..hi`, clipped to the store.
-                    unsafe { self.array.store(row_store + (x0 + (bit - row_bit) as i64) as usize, value) };
-                }
-                bit += 1;
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dev::kona::back::store::StoreOp;
 
-    fn lit(s: &PixelStore, w: usize) -> Vec<(u32, u32)> {
+    fn fb(s: &Store, word: usize, x1: i64, y1: i64, x2: i64, y2: i64, value: u32) {
+        s.apply(StoreOp::FillBox { word, x1, y1, x2, y2, value });
+    }
+
+    fn pt(s: &Store, x: i64, y: i64, value: u32) {
+        s.apply(StoreOp::Plot { word: 0, x, y, value });
+    }
+
+    fn lit(s: &Store, w: usize) -> Vec<(u32, u32)> {
         let mut v = Vec::new();
         for y in 0..s.height() {
             for x in 0..s.width() {
@@ -451,8 +418,8 @@ mod tests {
     /// fraction, lights columns x1+1..=x2 and rows y1+1..=y2.
     #[test]
     fn a_box_lights_columns_and_rows_after_the_near_corner() {
-        let s = PixelStore::new(16, 16);
-        Surface::new(&s, 1).fill_box(2, 3, 5, 6, 7);
+        let s = Store::new(16, 16);
+        fb(&s, 1, 2, 3, 5, 6, 7);
         let got = lit(&s, 1);
         assert_eq!(got.len(), 3 * 3);
         assert!(got.iter().all(|&(x, y)| (3..=5).contains(&x) && (4..=6).contains(&y)));
@@ -465,10 +432,9 @@ mod tests {
     /// overlap, which is why the rule leaves the near edge out.
     #[test]
     fn boxes_sharing_an_edge_neither_gap_nor_overlap() {
-        let s = PixelStore::new(8, 12);
-        let d = Surface::new(&s, 0);
-        d.fill_box(0, 0, 7, 5, 1);
-        d.fill_box(0, 5, 7, 10, 2);
+        let s = Store::new(8, 12);
+        fb(&s, 0, 0, 0, 7, 5, 1);
+        fb(&s, 0, 0, 5, 7, 10, 2);
         for y in 1..=10u32 {
             for x in 1..=7u32 {
                 assert_eq!(s.read(x, y, 0), if y <= 5 { 1 } else { 2 }, "({x},{y})");
@@ -487,24 +453,24 @@ mod tests {
     /// unlit; a box past the far edges is clipped; a reversed box draws nothing.
     #[test]
     fn boxes_are_clipped_and_reversed_ones_draw_nothing() {
-        let s = PixelStore::new(8, 8);
-        let d = Surface::new(&s, 0);
-        d.fill_box(0, 0, 100, 100, 1);
+        let s = Store::new(8, 8);
+        fb(&s, 0, 0, 0, 100, 100, 1);
         assert_eq!(s.read(0, 4, 0), 0);
         assert_eq!(s.read(4, 0, 0), 0);
         assert_eq!(lit(&s, 0).len(), 7 * 7);
-        let t = PixelStore::new(8, 8);
-        Surface::new(&t, 0).fill_box(5, 5, 2, 2, 1);
-        Surface::new(&t, 0).fill_box(-50, -50, -10, -10, 1);
+        let t = Store::new(8, 8);
+        fb(&t, 0, 5, 5, 2, 2, 1);
+        fb(&t, 0, -50, -50, -10, -10, 1);
         assert!(lit(&t, 0).is_empty());
     }
 
     #[test]
     fn plot_refuses_off_screen_points() {
-        let s = PixelStore::new(4, 4);
-        let d = Surface::new(&s, 0);
-        assert!(d.plot(3, 3, 9));
-        assert!(!d.plot(4, 0, 9) && !d.plot(0, 4, 9) && !d.plot(-1, 0, 9) && !d.plot(i64::MAX, 0, 9));
+        let s = Store::new(4, 4);
+        pt(&s, 3, 3, 9);
+        for (x, y) in [(4, 0), (0, 4), (-1, 0), (i64::MAX, 0)] {
+            pt(&s, x, y, 9);
+        }
         assert_eq!(lit(&s, 0), [(3, 3)]);
     }
 
@@ -512,18 +478,18 @@ mod tests {
     /// clear.
     #[test]
     fn a_bitmap_sets_its_set_bits() {
-        let s = PixelStore::new(16, 16);
+        let s = Store::new(16, 16);
         // 5 x 3: row 0 = 10101, row 1 = 01010, row 2 = 11111.
         let bits = [0b10101_01010_11111u32 << 17];
-        Surface::new(&s, 2).bitmap(4, 8, 5, 3, &bits, 3);
+        s.apply(StoreOp::Bitmap { word: 2, x0: 4, y0: 8, width: 5, height: 3, bits: &bits, value: 3 });
         assert_eq!(lit(&s, 2).len(), 3 + 2 + 5);
         assert_eq!(s.read(4, 8, 2), 3);
         assert_eq!(s.read(5, 8, 2), 0);
         assert_eq!(s.read(5, 9, 2), 3);
         assert_eq!(s.read(8, 10, 2), 3);
         // A short payload: the missing words read as clear.
-        let wide = PixelStore::new(32, 4);
-        Surface::new(&wide, 4).bitmap(0, 0, 32, 2, &[u32::MAX], 1);
+        let wide = Store::new(32, 4);
+        wide.apply(StoreOp::Bitmap { word: 4, x0: 0, y0: 0, width: 32, height: 2, bits: &[u32::MAX], value: 1 });
         assert_eq!(lit(&wide, 4).len(), 32);
     }
 }

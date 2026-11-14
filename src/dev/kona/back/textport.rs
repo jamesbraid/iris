@@ -19,7 +19,7 @@
 
 use crate::dev::kona::back::display::ColourMap;
 use crate::dev::kona::defs::*;
-use crate::dev::kona::back::raster::Surface;
+use crate::dev::kona::back::store::{Store, StoreOp};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -78,18 +78,18 @@ impl Textport {
     }
 
     /// A textport command. False if `selector` is not one.
-    /// `surface` makes the surface a paint draws on, only when one does.
-    pub fn command<'a>(&mut self, surface: impl FnOnce() -> Surface<'a>, selector: u32, args: &[u32]) -> bool {
+    /// `store` makes the store a paint draws on (after any queued raster job), only when one does.
+    pub fn command<'a>(&mut self, store: impl FnOnce() -> &'a Store, selector: u32, args: &[u32]) -> bool {
         let a = |i: usize| args.get(i).copied().unwrap_or(0);
         match selector {
             TEXTPORT_SET_COLOUR => self.colour = a(0) & 0xff,
             TEXTPORT_SET_RASTER_POSITION => self.raster = (a(0) as i32, a(1) as i32),
             TEXTPORT_FILL_BOX => {
-                surface().fill_box(a(0) as i32 as i64, a(1) as i32 as i64, a(2) as i32 as i64, a(3) as i32 as i64, self.colour);
+                store().apply(StoreOp::FillBox { word: COLOUR_WORD, x1: a(0) as i32 as i64, y1: a(1) as i32 as i64, x2: a(2) as i32 as i64, y2: a(3) as i32 as i64, value: self.colour });
                 self.drawn += 1;
             }
             TEXTPORT_PLOT_POINT => {
-                surface().plot(a(0) as i32 as i64, a(1) as i32 as i64, self.colour);
+                store().apply(StoreOp::Plot { word: COLOUR_WORD, x: a(0) as i32 as i64, y: a(1) as i32 as i64, value: self.colour });
                 self.drawn += 1;
             }
             TEXTPORT_LOAD_COLOUR_MAP => self.colour_map.lock().load(args),
@@ -100,11 +100,11 @@ impl Textport {
     }
 
     /// A bitmap blit: six header words, then the bits.
-    pub fn bitmap(&mut self, surface: &Surface<'_>, header: &[u32], payload: &[u32]) {
+    pub fn bitmap(&mut self, store: &Store, header: &[u32], payload: &[u32]) {
         let [w, h, xo, yo, xa, ya] = header else { return };
         let (xo, yo, xa, ya) = (*xo as i16 as i64, *yo as i16 as i64, *xa as i16 as i64, *ya as i16 as i64);
         let (rx, ry) = (self.raster.0 as i64, self.raster.1 as i64);
-        surface.bitmap(rx - xo, ry - yo, *w, *h, payload, self.colour);
+        store.apply(StoreOp::Bitmap { word: COLOUR_WORD, x0: rx - xo, y0: ry - yo, width: *w, height: *h, bits: payload, value: self.colour });
         // The position advances with wrapping 32-bit arithmetic: its range is
         // unknown.
         self.raster = ((rx + xa) as i32, (ry + ya) as i32);
@@ -115,16 +115,14 @@ impl Textport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dev::kona::back::store::PixelStore;
 
-
-    /// What the tests draw on: the store's colour word, with nothing queued.
-    fn sf<'a>(s: &'a PixelStore) -> impl FnOnce() -> Surface<'a> {
-        move || Surface::new(s, COLOUR_WORD)
+    /// What the tests draw on: the store, with nothing queued.
+    fn sf<'a>(s: &'a Store) -> impl FnOnce() -> &'a Store {
+        move || s
     }
 
-    fn tp() -> (Textport, PixelStore) {
-        (Textport::default(), PixelStore::new(32, 32))
+    fn tp() -> (Textport, Store) {
+        (Textport::default(), Store::new(32, 32))
     }
 
     #[test]
@@ -178,7 +176,7 @@ mod tests {
         t.command(sf(&s), 2, &[5]);
         t.command(sf(&s), 4, &[10, 10]);
         // 2 x 2, origin (-1, 0): column 0 at x = 11; advance (3, 0).
-        t.bitmap(&Surface::new(&s, COLOUR_WORD), &[2, 2, -1i32 as u32, 0, 3, 0], &[0b10_01u32 << 28]);
+        t.bitmap(&s, &[2, 2, -1i32 as u32, 0, 3, 0], &[0b10_01u32 << 28]);
         assert_eq!(s.read(11, 10, COLOUR_WORD), 5);
         assert_eq!(s.read(12, 10, COLOUR_WORD), 0);
         assert_eq!(s.read(12, 11, COLOUR_WORD), 5);
@@ -186,7 +184,7 @@ mod tests {
         assert_eq!(t.raster(), (13, 10));
         // A header of the wrong length is ignored.
         let before = (t.colour(), t.raster(), t.drawn, t.unmodelled);
-        t.bitmap(&Surface::new(&s, COLOUR_WORD), &[1, 1], &[0]);
+        t.bitmap(&s, &[1, 1], &[0]);
         assert_eq!((t.colour(), t.raster(), t.drawn, t.unmodelled), before);
     }
 
