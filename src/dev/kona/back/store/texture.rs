@@ -216,12 +216,14 @@ impl TextureStore {
     }
 
     /// How many changes the words have had. A copy made at version `v` is current while this is `v`.
+    #[cfg(any(feature = "wgpu", test))]
     pub fn version(&self) -> u64 {
         // SAFETY: as for `plane`.
         unsafe { &*self.inner.get() }.version
     }
 
     /// The version at which page `page` of plane `plane` last changed, 0 if it never has.
+    #[cfg(any(feature = "wgpu", test))]
     pub fn page_version(&self, plane: u16, page: usize) -> u64 {
         self.plane(plane).stamps.get(page).copied().unwrap_or(0)
     }

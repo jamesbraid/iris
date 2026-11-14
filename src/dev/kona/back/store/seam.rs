@@ -109,11 +109,12 @@ impl Store {
     /// on the GPU. For tests that set up planes the seam has no op for.
     #[cfg(test)]
     pub fn write(&self, x: u32, y: u32, w: usize, value: u32) -> bool {
-        let r = Rect { x0: x as i32, y0: y as i32, x1: x as i32 + 1, y1: y as i32 + 1 };
-        let held = self.bracket(&[w], r);
+        #[cfg(feature = "wgpu")]
+        let held = if let Store::Gpu(g) = self { Some(g.bracket(&[w], Rect { x0: x as i32, y0: y as i32, x1: x as i32 + 1, y1: y as i32 + 1 })) } else { None };
         let ok = self.cpu().write(x, y, w, value);
-        if ok {
-            held.wrote();
+        #[cfg(feature = "wgpu")]
+        if let (Some(h), true) = (&held, ok) {
+            h.wrote();
         }
         ok
     }
@@ -229,20 +230,6 @@ impl Store {
         }
     }
 
-    /// Hold the words of `planes` inside `r` for CPU code that draws into `cpu` directly. They are
-    /// current now; call `wrote` on the guard when the code has changed any, and they go back to
-    /// the store when it drops. Nothing to do on the CPU arm.
-    pub fn bracket(&self, planes: &[usize], r: Rect) -> Bracket<'_> {
-        match self {
-            Store::Cpu(_) => {
-                let _ = (planes, r);
-                Bracket { #[cfg(feature = "wgpu")] gpu: None, _store: std::marker::PhantomData }
-            }
-            #[cfg(feature = "wgpu")]
-            Store::Gpu(g) => Bracket { gpu: Some(g.bracket(planes, r)), _store: std::marker::PhantomData },
-        }
-    }
-
     /// Do `op`. Whoever hands in an op has made every queued raster job finish first (`raster::fence`).
     pub fn apply(&self, op: StoreOp<'_>) -> Applied {
         match self {
@@ -302,24 +289,6 @@ impl Store {
             }
         }
         done
-    }
-}
-
-/// Words held for CPU code (`Store::bracket`).
-pub struct Bracket<'a> {
-    #[cfg(feature = "wgpu")]
-    gpu: Option<super::super::gpu::Bracket<'a>>,
-    _store: std::marker::PhantomData<&'a Store>,
-}
-
-impl Bracket<'_> {
-    /// The code changed words in the region.
-    #[inline]
-    pub fn wrote(&self) {
-        #[cfg(feature = "wgpu")]
-        if let Some(b) = &self.gpu {
-            b.wrote();
-        }
     }
 }
 

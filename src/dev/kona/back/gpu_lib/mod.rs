@@ -22,8 +22,11 @@
 //!   arithmetic of `sample_mask`, and the stencil and depth tests.
 
 use crate::dev::kona::back::raster::texel::{Combine, EnvMode, Filter, TexDesc, TexLevel, Wrap, CURVE_NODES, MAX_LEVELS};
+#[cfg(test)]
 use crate::dev::kona::back::store::texture::{TextureStore, PAGE_WORDS};
-use crate::wgpu::{library, Fragment, Source};
+#[cfg(test)]
+use crate::wgpu::{library, Source};
+use crate::wgpu::Fragment;
 
 pub const LOD_MATH: Fragment = Fragment::new("kona_lodmath.wgsl", include_str!("lodmath.wgsl"));
 pub const TEXTURE_MEM: Fragment = Fragment::new("kona_texture_mem.wgsl", include_str!("texture_mem.wgsl"));
@@ -37,6 +40,7 @@ const LEVEL_WORDS: usize = 6;
 
 /// A kernel source with every library the texture stage needs, for `body` to
 /// `#include "kona_texture.wgsl"`. `planes` and `pages_per_plane` size the page table.
+#[cfg(test)]
 pub fn texture_source(label: &str, planes: u32, pages_per_plane: u32) -> Source {
     Source::new(label)
         .define("TEX_PLANES", planes)
@@ -113,11 +117,13 @@ pub const ABSENT: u32 = u32::MAX;
 
 /// A texture store's pages in the form texture_mem.wgsl reads: a page table
 /// of `planes * pages_per_plane` slots and the pool of the pages that exist.
+#[cfg(test)]
 pub struct TexMemory {
     pub pages: Vec<u32>,
     pub pool: Vec<u32>,
 }
 
+#[cfg(test)]
 impl TexMemory {
     /// Every page the store holds in planes `0..planes`. Panics on a page past
     /// `pages_per_plane`, which the shader could not reach.
