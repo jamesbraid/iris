@@ -746,3 +746,52 @@ fn triangle_fill_rate() {
 fn pixels_written(s: &PixelStore) -> bool {
     (0..1024).any(|y| (0..1024).any(|x| s.read(x, y, 1) != 0))
 }
+
+/// The composed frame of the 150-triangle scene is pinned too, on the
+/// inline scheduler and on tile workers. The store checksum above stops at the
+/// pixel words; this goes through the colour map and tables the display runs
+/// (`Pixels::frame` is what the monitor's `shot` and the display thread use).
+#[test]
+fn kona_composed_frame_is_pinned() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move |m: u32| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as u32 % m
+    };
+    let draws: Vec<[WVertex; 3]> = (0..150)
+        .map(|_| {
+            let p = |next: &mut dyn FnMut(u32) -> u32| (next(90) as f32 - 12.5, next(90) as f32 - 12.5);
+            let c = |next: &mut dyn FnMut(u32) -> u32| [next(8192) as u16, next(8192) as u16, next(8192) as u16, 8191];
+            let z = next(0xffff_ff00);
+            tri([p(&mut next), p(&mut next), p(&mut next)], [c(&mut next), c(&mut next), c(&mut next)], [z, z.saturating_add(next(1 << 20)), z])
+        })
+        .collect();
+    let run = |pool: (usize, u32)| {
+        let mut st = board(pool);
+        let ds = state(|d| {
+            d.depth_test = true;
+            d.depth_func = Compare::Lequal;
+        });
+        clear(&mut st, &ds, Some(0xff10_2030), Some(0xffff_ff00));
+        for d in &draws {
+            draw(&mut st, &ds, &[*d]);
+        }
+        st.drain();
+        assert!(!st.is_poisoned());
+        // Window 0 holds direct colour, as the X server's mode word says (tables.rs).
+        st.tables.lock().load_mode(0, 4);
+        let frame = st.pixels().frame();
+        let colours = crate::test_frame_pin::colour_count(N as usize, N as usize, N as usize, &frame);
+        assert!(colours > 100, "the frame is not a blank: {colours} colours");
+        crate::test_frame_pin::frame_hash(N as usize, N as usize, N as usize, &frame)
+    };
+    let inline = run((0, 32));
+    eprintln!("kona frame hash {inline}");
+    assert_eq!(inline, run((0, 32)), "the inline run is deterministic");
+    for pool in [(1, 32), (4, 16)] {
+        assert_eq!(run(pool), inline, "pool {pool:?}");
+    }
+    assert_eq!(inline, "7dddf8eb4069afcdb7379671c6e5f640c1d2982de4b82e324fed99bb383326b3");
+}

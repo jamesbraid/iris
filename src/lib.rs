@@ -272,3 +272,5 @@ mod block_node_sync_bench;
 pub(crate) mod test_board;
 #[cfg(test)]
 pub(crate) mod test_temp;
+#[cfg(test)]
+pub(crate) mod test_frame_pin;
