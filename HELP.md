@@ -817,6 +817,8 @@ Configuration
   --nvram <FILE>              NVRAM file (default: nvram.bin)
   --nveeprom <FILE>           Indigo2 NVRAM EEPROM file (default: nveeprom.bin)
   --machine <NAME>            Machine to emulate (a [machine] profile name); `help` lists them
+  --list-machines             Print the machines this build emulates and exit
+  --list-machines-json        The same as JSON, with each one's processors, memory, SCSI and graphics options
   --ip22                      Same as --machine indigo2_ip22
   --graphics <BOARD>          newport, xz, extreme, solidimpact, highimpact, maximpact, v6, v8, v10, v12
   --cpu <MODEL>               r4400 (default), r5000, r10000, r12000 or r14000, as the machine allows

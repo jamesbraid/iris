@@ -601,6 +601,7 @@ iris-gui does not parse this standalone option set; use its named-machine UI.
 | `--net-mode` | Networking backend: "nat" (default, software gateway), "pcap" (bridge onto a real host interface; requires --features pcap), "stream" (a private segment; needs `network.stream`) or "off". |
 | `--pcap-interface` | Host interface to bridge onto in PCAP mode (e.g. eth0, en0). Implies --net-mode pcap. List candidates with --list-net-interfaces. |
 | `--validate` | Check the configuration (parse, settings, files, directories, ports) without starting the machine; exit 0 or 1. See [HELP.md](HELP.md#checking-a-configuration). |
+| `--list-machines`, `--list-machines-json` | List the machines this build emulates and exit: a line each, or with `--list-machines-json` a document (`schema`, and per machine its name, label, processors, memory banks and sizes, SCSI limits and graphics boards) for scripts and front ends. |
 | `--list-net-interfaces` | Print the host network interfaces libpcap can bridge onto, then exit. Requires a build with --features pcap. |
 | `--no-scsi-deferred-int` | Disable deferred SCSI status interrupts (default: enabled for OpenBSD/NetBSD compatibility). |
 | `--no-write-cache` | Turn every hard disk's write cache off (`write_cache = false` in each `[scsi.N]` and in `[nvme]`): slower, but a host crash loses no completed write. |

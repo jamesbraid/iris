@@ -3923,6 +3923,16 @@ pub struct Cli {
     #[arg(long, value_name = "NAME")]
     pub machine: Option<String>,
 
+    /// Print the machines this build emulates and exit, one line each.
+    #[arg(long = "list-machines", default_value_t = false)]
+    pub list_machines: bool,
+
+    /// Print the machines this build emulates and exit, as JSON: each one's
+    /// processors, memory, SCSI and graphics boards, for scripts and front
+    /// ends.
+    #[arg(long = "list-machines-json", default_value_t = false, conflicts_with = "list_machines")]
+    pub list_machines_json: bool,
+
     /// Same as `--machine indigo2_ip22`.
     #[arg(long, default_value_t = false, hide = true, conflicts_with = "machine")]
     pub ip22: bool,
@@ -4387,6 +4397,15 @@ pub fn load_config() -> (MachineConfig, u32) {
     if cli.config != DEFAULT_CONFIG && !std::path::Path::new(&cli.config).exists() {
         eprintln!("Configuration error: --config {} does not exist", cli.config);
         std::process::exit(1);
+    }
+
+    if cli.list_machines || cli.list_machines_json {
+        if cli.list_machines_json {
+            println!("{}", serde_json::to_string_pretty(&crate::machine_catalogue::catalogue()).expect("a document of plain values"));
+        } else {
+            print!("{}", MachineProfile::list());
+        }
+        std::process::exit(0);
     }
 
     if cli.machine.as_deref() == Some("help") {

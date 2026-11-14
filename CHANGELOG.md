@@ -13,6 +13,13 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Configuration
+
+- `iris --list-machines` prints the machines a build emulates; with
+  `--list-machines-json` it prints each one's processors, memory banks and sizes, SCSI limits and
+  graphics boards, from the tables the config check uses, for scripts and
+  front ends.
+
 ### Bench rig
 
 - The bare-metal bench rig (`[testdev]`) takes `cpu = "r14000_500"`, the
