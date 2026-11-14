@@ -27,6 +27,7 @@ pub mod context;
 pub mod gl;
 pub mod textport;
 pub mod x;
+pub mod lodmath;
 #[cfg(test)]
 mod golden;
 #[cfg(test)]
