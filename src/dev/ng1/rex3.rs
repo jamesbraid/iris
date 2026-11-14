@@ -1526,7 +1526,7 @@ pub struct Rex3 {
     /// Read at any time to see what the refresh/painter/processor threads are doing.
     pub diag: AtomicU64,
     debug_state: Mutex<DebugState>,
-    pub renderer: Mutex<Option<Box<dyn Renderer>>>,
+    screens: [Arc<crate::gfx_display::Screen>; 1],
     display_stop: crate::gfx_display::DisplayStop,
     /// Compiled shaders, keyed by `(dm0, dm1_normalized, clipmode_key)`.
     ///
@@ -1590,16 +1590,6 @@ pub struct Rex3 {
     pub show_cmap: AtomicBool,
     /// When true, overlay decoded DID/XMAP mode info near the bottom of the screen.
     pub show_disp_debug: AtomicBool,
-    /// Set by UI when RightCtrl+PrintScreen is pressed; cleared by refresh thread after saving.
-    pub screenshot_pending: AtomicBool,
-    /// Monotonically incrementing screenshot counter for unique filenames.
-    pub screenshot_counter: AtomicU32,
-    /// One-shot "compose the next frame into `screen.rgba`" (no file), for
-    /// the CI socket and the monitor's `screen` commands.
-    frame_request: AtomicBool,
-    /// Frame consumers (VNC) that want `screen.rgba` kept current; while
-    /// non-zero every full frame is read back and the compositor is software.
-    capture_users: AtomicUsize,
 }
 
 unsafe impl Sync for Rex3 {}
@@ -1718,7 +1708,12 @@ impl Rex3 {
             interp_go_count: AtomicU64::new(0),
             debug_state: Mutex::new(DebugState::default()),
             diag: AtomicU64::new(0),
-            renderer: Mutex::new(None),
+            screens: [Arc::new({
+                let mut screen = crate::gfx_display::Screen::new(0, Arc::default());
+                // Its compose also learns the mode and the cursor offset.
+                screen.always = true;
+                screen
+            })],
             display_stop: Default::default(),
             // IRIS_NO_JIT (set by the sandboxed Mac App Store GUI build) forces
             // the interpreter: Cranelift's mmap+mprotect executable pages aren't
@@ -1765,10 +1760,6 @@ impl Rex3 {
             trace: Mutex::new(trace::Rex3Trace::new()),
             show_cmap: AtomicBool::new(false),
             show_disp_debug: AtomicBool::new(false),
-            screenshot_pending: AtomicBool::new(false),
-            screenshot_counter: AtomicU32::new(0),
-            frame_request: AtomicBool::new(false),
-            capture_users: AtomicUsize::new(0),
         }
     }
 
@@ -1842,7 +1833,7 @@ impl Rex3 {
         {
             return Err(ResidentError::InvalidState("REX3 cannot attach while recording or tracing"));
         }
-        if self.renderer.lock().is_some() {
+        if self.renderer().lock().is_some() {
             return Err(ResidentError::InvalidState("REX3 live resident scanout is not implemented"));
         }
         Ok(())
@@ -2015,7 +2006,7 @@ impl Rex3 {
             RasterMode::Resident(raster) => raster.gpu(),
             _ => None,
         };
-        if let Some(renderer) = self.renderer.lock().as_deref() {
+        if let Some(renderer) = self.renderer().lock().as_deref() {
             let gpu = resident_gpu.as_ref()
                 .ok_or(ResidentError::Unsupported("resident renderer requires a GPU"))?;
             frame::validate_presenter(renderer, gpu)?;
@@ -3722,7 +3713,6 @@ impl Rex3 {
     }
 
     fn refresh_loop(&self) {
-        let frame_duration = std::time::Duration::from_micros(16667); // ~60Hz
         let mut status_bar  = crate::disp::StatusBar::new();
         let mut overlay     = crate::debug_overlay::DebugOverlay::new();
         let mut sbtex       = crate::disp::StatusBarTexture::new();
@@ -3736,12 +3726,40 @@ impl Rex3 {
         // While capture forces the renderer onto the software compositor:
         // whether it used GL before, to switch back when capture ends.
         let mut restore_gl: Option<bool> = None;
+        let screen_out = &self.screens[0];
 
-        while self.running.load(Ordering::Relaxed) {
+        crate::gfx_display::run_display(
+            screen_out,
+            &self.running,
+            &self.display_stop,
+            // The hardware VBLANK ticks every frame and latches cursor-Y,
+            // whether or not the host rendered: the guest's vsync timing must
+            // not depend on it. VBLANK stays asserted until the CPU reads
+            // STATUS, which clears STATUS_VRINT and deasserts the interrupt
+            // line (matching MAME newport behaviour).
+            || {
+                #[cfg(feature = "gputrace")]
+                self.trace_flush(false);
+                self.config.status.fetch_or(STATUS_VRINT, Ordering::Relaxed);
+                {
+                    self.diag.fetch_or(Self::DIAG_LOCK_VC2, Ordering::Relaxed);
+                    let mut vc2 = self.vc2.lock();
+                    vc2.regs[crate::dev::ng1::vc2::VC2_REG_WORKING_CURSOR_Y as usize] = vc2.regs[crate::dev::ng1::vc2::VC2_REG_CURSOR_Y_LOC as usize];
+                    drop(vc2);
+                    self.diag.fetch_and(!Self::DIAG_LOCK_VC2, Ordering::Relaxed);
+                }
+                {
+                    self.diag.fetch_or(Self::DIAG_LOCK_VBLANK_CB, Ordering::Relaxed);
+                    let irq = self.vblank_cb.lock().clone();
+                    self.diag.fetch_and(!Self::DIAG_LOCK_VBLANK_CB, Ordering::Relaxed);
+                    if let Some(irq) = irq {
+                        crate::pf_instant!(crate::perfetto::events::REX3_VBLANK);
+                        irq.set(true);
+                    }
+                }
+            },
+            |out, need| {
             let start = std::time::Instant::now();
-            #[cfg(feature = "gputrace")]
-            self.trace_flush(false);
-
             // Poll and clear activity bits; preserve persistent LED bits.
             let bar_stats = self.status.snapshot(start, self.gfifo.len());
 
@@ -3782,7 +3800,7 @@ impl Rex3 {
             // their own dirty flags (peeked here, not cleared — refresh() clears
             // them when it runs). A periodic heartbeat keeps the live status bar
             // moving and bounds any missed-dirty staleness. VBLANK is still ticked
-            // every frame (see the else branch), independent of host rendering.
+            // every frame (the retrace duty), independent of host rendering.
             //
             // The dirty mutexes are locked one at a time (separate `let`s) so we
             // never hold two of them at once — avoids any lock-ordering hazard
@@ -3802,211 +3820,145 @@ impl Rex3 {
             let fb_was_dirty = self.fb_damage.has_damage();
             #[cfg(not(feature = "rex-dirty-upload"))]
             let fb_was_dirty = self.fb_dirty.swap(false, Ordering::AcqRel);
+            // A one-shot request for a frame, apart from a capturing client.
+            let requested = screen_out.requests.pending();
             let should_render = fb_was_dirty
                 || palette_dirty
                 || dbg_overlay
                 || topscan != last_topscan
-                || self.screenshot_pending.load(Ordering::Relaxed)
-                || self.frame_request.load(Ordering::Relaxed)
+                || requested
                 || frames_since_render >= IDLE_HEARTBEAT_FRAMES;
 
-            if should_render {
-                frames_since_render = 0;
-                last_topscan = topscan;
-                self.diag.fetch_or(Self::DIAG_LOCK_SCREEN, Ordering::Relaxed);
-                let mut screen = self.screen.lock();
-                #[cfg(feature = "rex-dirty-upload")]
-                let fb_damage = self.fb_damage.take();
-                #[cfg(feature = "rex-dirty-upload")]
-                let fb_was_dirty = !fb_damage.is_empty();
-                screen.topscan = topscan;
-                screen.status_bar_only = full_presents > 0
-                    && !fb_was_dirty
-                    && !palette_dirty
-                    && !dbg_overlay
-                    && !self.screenshot_pending.load(Ordering::Relaxed)
-                    && !self.frame_request.load(Ordering::Relaxed);
-
-                // Push debug state into overlay
-                overlay.show_cmap       = self.show_cmap.load(Ordering::Relaxed);
-                overlay.show_disp_debug = self.show_disp_debug.load(Ordering::Relaxed);
-                let dd = self.draw_debug_active();
-                overlay.show_draw_debug = dd;
-                #[cfg(feature = "developer")]
-                if dd {
-                    let ring = self.draw_ring.lock();
-                    overlay.draw_snapshot.clear();
-                    overlay.draw_snapshot.extend(ring.iter_newest_first().copied());
-                }
-                self.diag.fetch_or(Self::DIAG_LOCK_RENDERER, Ordering::Relaxed);
-                let mut renderer = self.renderer.lock();
-
-                #[cfg(feature = "rex-dirty-upload")]
-                let resized = screen.refresh(
-                    &**fb_rgb,
-                    &**fb_aux,
-                    &fb_damage,
-                    &self.vc2,
-                    &self.xmap0,
-                    &self.cmap0,
-                    &self.bt445,
-                    &self.diag,
-                );
-                #[cfg(not(feature = "rex-dirty-upload"))]
-                let resized = screen.refresh(
-                    &**fb_rgb,
-                    &**fb_aux,
-                    fb_was_dirty,
-                    &self.vc2,
-                    &self.xmap0,
-                    &self.cmap0,
-                    &self.bt445,
-                    &self.diag,
-                );
-                if resized {
-                    if let Some(ref mut r) = *renderer {
-                        r.resize(screen.width, screen.height);
-                    }
-                }
-
-                // Screenshot: grab pixels from the compositor before presenting.
-                let take_screenshot = self.screenshot_pending.swap(false, Ordering::Relaxed);
-                // Frame consumers: a one-shot request, or capture (VNC) on
-                // every full frame. Heartbeats change nothing in the picture.
-                let capture = self.capture_users.load(Ordering::Relaxed) > 0;
-                let want_frame = self.frame_request.load(Ordering::Relaxed)
-                    || (capture && !screen.status_bar_only);
-                let need_readback = take_screenshot || want_frame;
-
-                // Assert VBLANK: device state is now copied into screen caches, so
-                // the CPU gets the maximum window to react before the next refresh.
-                self.config.status.fetch_or(STATUS_VRINT, Ordering::Relaxed);
-                {
-                    self.diag.fetch_or(Self::DIAG_LOCK_VC2, Ordering::Relaxed);
-                    let mut vc2 = self.vc2.lock();
-                    vc2.regs[crate::dev::ng1::vc2::VC2_REG_WORKING_CURSOR_Y as usize] = vc2.regs[crate::dev::ng1::vc2::VC2_REG_CURSOR_Y_LOC as usize];
-                    drop(vc2);
-                    self.diag.fetch_and(!Self::DIAG_LOCK_VC2, Ordering::Relaxed);
-                }
-                {
-                    self.diag.fetch_or(Self::DIAG_LOCK_VBLANK_CB, Ordering::Relaxed);
-                    let irq = self.vblank_cb.lock().clone();
-                    self.diag.fetch_and(!Self::DIAG_LOCK_VBLANK_CB, Ordering::Relaxed);
-                    if let Some(irq) = irq {
-                        crate::pf_instant!(crate::perfetto::events::REX3_VBLANK);
-                        irq.set(true);
-                    }
-                }
-
-                // Present: compositor → overlay → status bar → swap
-                if screen.width > 0 && screen.height > 0 {
-                    if let Some(ref mut r) = *renderer {
-                        crate::pf_scope!(crate::perfetto::events::REX3_PRESENT);
-                        self.diag.fetch_or(Self::DIAG_LOOP_GL_RENDER, Ordering::Relaxed);
-                        // Capture reads every frame back: keep it a slice copy
-                        // out of the software compositor, never a GL readback.
-                        if capture {
-                            restore_gl.get_or_insert_with(|| r.gl_compositor());
-                            r.switch_compositor(false);
-                        } else if let Some(gl) = restore_gl.take() {
-                            if gl {
-                                r.switch_compositor(true);
-                            }
-                        }
-                        r.present(
-                            &mut *screen,
-                            &mut overlay,
-                            &mut status_bar,
-                            &mut sbtex,
-                            &bar_stats,
-                            need_readback,
-                            None,
-                            None,
-                        );
-                        self.diag.fetch_and(!Self::DIAG_LOOP_GL_RENDER, Ordering::Relaxed);
-                    } else if need_readback {
-                        // No front-end (`--ci`): compose the guest screen here.
-                        // No status bar or overlay: this is the guest's screen.
-                        let comp = capture_compositor.get_or_insert_with(crate::compositor::SwCompositor::new);
-                        {
-                            crate::pf_scope!(crate::perfetto::events::REX3_COMPOSE);
-                            comp.compose_pixels(&screen.compositor_source());
-                        }
-                        let (w, h) = (screen.width, screen.height);
-                        let px = comp.pixels();
-                        for y in 0..h {
-                            let row = y * crate::disp::FB_STRIDE;
-                            screen.rgba[row..row + w].copy_from_slice(&px[row..row + w]);
-                        }
-                    }
-                    if need_readback {
-                        screen.frame_seq = screen.frame_seq.wrapping_add(1);
-                    }
-
-                    if !screen.status_bar_only {
-                        full_presents = full_presents.saturating_add(1);
-                    }
-
-                    if take_screenshot {
-                        let width  = screen.width;
-                        let height = screen.height;
-                        let pixels = screen.rgba.clone();
-                        let n      = self.screenshot_counter.fetch_add(1, Ordering::Relaxed);
-                        let path   = format!("screenshot_{:04}.png", n);
-                        thread::spawn(move || {
-                            match crate::disp::write_png_words(&path, &pixels, crate::disp::FB_STRIDE, width, height) {
-                                Ok(()) => println!("iris: screenshot saved to {}", path),
-                                Err(e) => println!("iris: screenshot failed: {}", e),
-                            }
-                        });
-                    }
-                }
-
-                // Cleared after the copy above, under the screen lock, so a
-                // waiter that sees it clear then reads the finished frame.
-                self.frame_request.store(false, Ordering::Relaxed);
-                self.diag.fetch_and(!(Self::DIAG_LOCK_SCREEN | Self::DIAG_LOCK_RENDERER), Ordering::Relaxed);
-            } else {
+            if !should_render {
                 // Nothing visible changed — skip the full refresh + GL upload and
-                // leave the already-presented front buffer on screen. Still tick
-                // the hardware VBLANK and latch cursor-Y every frame: the guest's
-                // vsync timing must not depend on whether the host re-rendered.
+                // leave the already-presented front buffer on screen.
                 frames_since_render = frames_since_render.saturating_add(1);
-                self.config.status.fetch_or(STATUS_VRINT, Ordering::Relaxed);
-                {
-                    self.diag.fetch_or(Self::DIAG_LOCK_VC2, Ordering::Relaxed);
-                    let mut vc2 = self.vc2.lock();
-                    vc2.regs[crate::dev::ng1::vc2::VC2_REG_WORKING_CURSOR_Y as usize] = vc2.regs[crate::dev::ng1::vc2::VC2_REG_CURSOR_Y_LOC as usize];
-                    drop(vc2);
-                    self.diag.fetch_and(!Self::DIAG_LOCK_VC2, Ordering::Relaxed);
+                return false;
+            }
+            frames_since_render = 0;
+            last_topscan = topscan;
+            self.diag.fetch_or(Self::DIAG_LOCK_SCREEN, Ordering::Relaxed);
+            let mut screen = self.screen.lock();
+            #[cfg(feature = "rex-dirty-upload")]
+            let fb_damage = self.fb_damage.take();
+            #[cfg(feature = "rex-dirty-upload")]
+            let fb_was_dirty = !fb_damage.is_empty();
+            screen.topscan = topscan;
+            screen.status_bar_only = full_presents > 0
+                && !fb_was_dirty
+                && !palette_dirty
+                && !dbg_overlay
+                && !requested;
+
+            // Push debug state into overlay
+            overlay.show_cmap       = self.show_cmap.load(Ordering::Relaxed);
+            overlay.show_disp_debug = self.show_disp_debug.load(Ordering::Relaxed);
+            let dd = self.draw_debug_active();
+            overlay.show_draw_debug = dd;
+            #[cfg(feature = "developer")]
+            if dd {
+                let ring = self.draw_ring.lock();
+                overlay.draw_snapshot.clear();
+                overlay.draw_snapshot.extend(ring.iter_newest_first().copied());
+            }
+            self.diag.fetch_or(Self::DIAG_LOCK_RENDERER, Ordering::Relaxed);
+            let mut renderer = self.renderer().lock();
+
+            #[cfg(feature = "rex-dirty-upload")]
+            let resized = screen.refresh(
+                &**fb_rgb,
+                &**fb_aux,
+                &fb_damage,
+                &self.vc2,
+                &self.xmap0,
+                &self.cmap0,
+                &self.bt445,
+                &self.diag,
+            );
+            #[cfg(not(feature = "rex-dirty-upload"))]
+            let resized = screen.refresh(
+                &**fb_rgb,
+                &**fb_aux,
+                fb_was_dirty,
+                &self.vc2,
+                &self.xmap0,
+                &self.cmap0,
+                &self.bt445,
+                &self.diag,
+            );
+            if resized {
+                if let Some(ref mut r) = *renderer {
+                    r.resize(screen.width, screen.height);
                 }
-                {
-                    self.diag.fetch_or(Self::DIAG_LOCK_VBLANK_CB, Ordering::Relaxed);
-                    let irq = self.vblank_cb.lock().clone();
-                    self.diag.fetch_and(!Self::DIAG_LOCK_VBLANK_CB, Ordering::Relaxed);
-                    if let Some(irq) = irq {
-                        crate::pf_instant!(crate::perfetto::events::REX3_VBLANK);
-                        irq.set(true);
+            }
+
+            // Frame consumers: a one-shot request, or capture (VNC) on
+            // every full frame. Heartbeats change nothing in the picture.
+            let capture = screen_out.requests.capturing();
+            let need_readback = requested || (capture && !screen.status_bar_only);
+            let _ = need;
+
+            // Present: compositor → overlay → status bar → swap
+            if screen.width > 0 && screen.height > 0 {
+                if let Some(ref mut r) = *renderer {
+                    crate::pf_scope!(crate::perfetto::events::REX3_PRESENT);
+                    self.diag.fetch_or(Self::DIAG_LOOP_GL_RENDER, Ordering::Relaxed);
+                    // Capture reads every frame back: keep it a slice copy
+                    // out of the software compositor, never a GL readback.
+                    if capture {
+                        restore_gl.get_or_insert_with(|| r.gl_compositor());
+                        r.switch_compositor(false);
+                    } else if let Some(gl) = restore_gl.take() {
+                        if gl {
+                            r.switch_compositor(true);
+                        }
+                    }
+                    r.present(
+                        &mut *screen,
+                        &mut overlay,
+                        &mut status_bar,
+                        &mut sbtex,
+                        &bar_stats,
+                        need_readback,
+                        None,
+                        None,
+                    );
+                    self.diag.fetch_and(!Self::DIAG_LOOP_GL_RENDER, Ordering::Relaxed);
+                } else if need_readback {
+                    // No front-end (`--ci`): compose the guest screen here.
+                    // No status bar or overlay: this is the guest's screen.
+                    let comp = capture_compositor.get_or_insert_with(crate::compositor::SwCompositor::new);
+                    {
+                        crate::pf_scope!(crate::perfetto::events::REX3_COMPOSE);
+                        comp.compose_pixels(&screen.compositor_source());
+                    }
+                    let (w, h) = (screen.width, screen.height);
+                    let px = comp.pixels();
+                    for y in 0..h {
+                        let row = y * crate::disp::FB_STRIDE;
+                        screen.rgba[row..row + w].copy_from_slice(&px[row..row + w]);
                     }
                 }
-            }
+                if need_readback {
+                    let (w, h) = (screen.width, screen.height);
+                    out.width = w as u32;
+                    out.height = h as u32;
+                    out.words.clear();
+                    for y in 0..h {
+                        let row = y * crate::disp::FB_STRIDE;
+                        out.words.extend_from_slice(&screen.rgba[row..row + w]);
+                    }
+                }
 
-            // Timing & VBLANK
-            let elapsed = start.elapsed();
-            if elapsed < frame_duration {
-                thread::sleep(frame_duration - elapsed);
+                if !screen.status_bar_only {
+                    full_presents = full_presents.saturating_add(1);
+                }
             }
-
-            // Sleep out the remainder of the frame. VBLANK stays asserted until
-            // the CPU reads STATUS, which clears STATUS_VRINT and deasserts the
-            // interrupt line (matching MAME newport behaviour).
-            let elapsed = start.elapsed();
-            if elapsed < frame_duration {
-                thread::sleep(frame_duration - elapsed);
-            }
-        }
-
-        self.display_stop.finish(&self.renderer);
+            screen_out.counts.count(!screen.status_bar_only);
+            self.diag.fetch_and(!(Self::DIAG_LOCK_SCREEN | Self::DIAG_LOCK_RENDERER), Ordering::Relaxed);
+            need_readback && screen.width > 0 && screen.height > 0
+            },
+        );
     }
 
     #[cfg(all(test, feature = "gputrace"))]
@@ -4423,7 +4375,7 @@ impl Rex3 {
         register_mutex_fn("rex3::processor_thread", self, |r| r.processor_thread.is_locked());
         register_mutex_fn("rex3::refresh_thread", self, |r| r.refresh_thread.is_locked());
         register_mutex_fn("rex3::vblank_cb", self, |r| r.vblank_cb.is_locked());
-        register_mutex_fn("rex3::renderer", self, |r| r.renderer.is_locked());
+        register_mutex_fn("rex3::renderer", self, |r| r.renderer().is_locked());
         register_mutex_fn("rex3::debug_state", self, |r| r.debug_state.is_locked());
         crate::locks::register_mutex("rex3::screen", &self.screen);
     }
@@ -4932,7 +4884,7 @@ impl Device for Rex3 {
             writeln!(writer, "  resolution: {}x{}", screen.width, screen.height).unwrap();
             writeln!(writer, "  topscan: {:03x}  (fb row {} maps to display row 0)", screen.topscan, (screen.topscan + 1) & 0x3FF).unwrap();
             writeln!(writer, "  show_disp_debug: {}", self.show_disp_debug.load(Ordering::Relaxed)).unwrap();
-            let status = if let Some(r) = self.renderer.lock().as_ref() {
+            let status = if let Some(r) = self.renderer().lock().as_ref() {
                 r.compositor_status()
             } else {
                 "no renderer".to_string()
@@ -4947,10 +4899,10 @@ impl Device for Rex3 {
                 Some("sw") => false,
                 _ => return Err("Usage: disp compositor <gl|sw>".to_string()),
             };
-            if use_gl && self.capture_users.load(Ordering::Relaxed) > 0 {
+            if use_gl && self.screens[0].requests.capturing() {
                 return Err("the VNC server needs the software compositor while it runs".to_string());
             }
-            let active = if let Some(renderer) = self.renderer.lock().as_mut() {
+            let active = if let Some(renderer) = self.renderer().lock().as_mut() {
                 renderer.switch_compositor(use_gl)
             } else {
                 "no renderer"
@@ -5843,64 +5795,15 @@ impl BusDevice for Rex3 {
 // Resettable + Saveable for Rex3 (including Vc2, Xmap9, Cmap)
 // ============================================================================
 
-impl crate::gfx_display::GfxDisplay for Rex3 {
-    fn renderer_slot(&self) -> &Mutex<Option<Box<dyn Renderer>>> { &self.renderer }
-    fn display_stop(&self) -> &crate::gfx_display::DisplayStop { &self.display_stop }
-    fn screen(&self) -> &Mutex<Rex3Screen> { &self.screen }
-    fn request_screenshot(&self) {
-        #[cfg(all(test, feature = "wgpu"))]
-        if self.resident_frame.is_active() {
-            self.resident_frame.request_screenshot();
-            return;
-        }
-        self.screenshot_pending.store(true, Ordering::Relaxed);
+impl Rex3 {
+    /// The renderer slot the front-end installs into.
+    pub(crate) fn renderer(&self) -> &Mutex<Option<Box<dyn Renderer>>> {
+        &self.screens[0].window.renderer
     }
-    fn screenshot_pending(&self) -> bool {
-        #[cfg(all(test, feature = "wgpu"))]
-        if self.resident_frame.is_active() {
-            return self.resident_frame.screenshot_pending();
-        }
-        self.screenshot_pending.load(Ordering::Relaxed)
-    }
-    fn cycles(&self) -> crate::cpu::mips_core::CyclesPtr { self.status.cycles() }
-    fn request_frame(&self) {
-        #[cfg(all(test, feature = "wgpu"))]
-        if self.resident_frame.is_active() {
-            self.resident_frame.request_frame();
-            return;
-        }
-        self.frame_request.store(true, Ordering::Relaxed);
-    }
-    fn frame_pending(&self) -> bool {
-        #[cfg(all(test, feature = "wgpu"))]
-        if self.resident_frame.is_active() {
-            return self.resident_frame.frame_pending();
-        }
-        self.frame_request.load(Ordering::Relaxed)
-    }
-    fn frame_available(&self) -> bool {
-        #[cfg(all(test, feature = "wgpu"))]
-        if self.resident_frame.is_active() {
-            return self.resident_frame.frame_available();
-        }
-        true
-    }
-    fn set_capture(&self, on: bool) {
-        if on {
-            self.capture_users.fetch_add(1, Ordering::Relaxed);
-            // Repaint at once so the new consumer gets a frame.
-            #[cfg(all(test, feature = "wgpu"))]
-            if self.resident_frame.is_active() {
-                self.resident_frame.request_frame();
-                return;
-            }
-            self.frame_request.store(true, Ordering::Release);
-        } else {
-            let _ = self.capture_users.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
-        }
-    }
+
+    /// The host GPU the board draws on, when it does.
     #[cfg(feature = "wgpu")]
-    fn gpu(&self) -> Option<std::sync::Arc<crate::wgpu::Gpu>> {
+    fn display_gpu(&self) -> Option<std::sync::Arc<crate::wgpu::Gpu>> {
         #[cfg(test)]
         if let RasterMode::Resident(raster) = &*self.raster.lock() {
             return raster.gpu();
@@ -5914,6 +5817,22 @@ impl crate::gfx_display::GfxDisplay for Rex3 {
             None
         }
     }
+}
+
+impl crate::gfx_display::GfxDisplay for Rex3 {
+    fn screens(&self) -> &[Arc<crate::gfx_display::Screen>] {
+        // The device is known once the raster unit is chosen, which is after
+        // the board is built and before the front-end asks.
+        #[cfg(feature = "wgpu")]
+        if self.screens[0].gpu.get().is_none() {
+            if let Some(gpu) = self.display_gpu() {
+                let _ = self.screens[0].gpu.set(gpu);
+            }
+        }
+        &self.screens
+    }
+    fn display_stop(&self) -> &crate::gfx_display::DisplayStop { &self.display_stop }
+    fn cycles(&self) -> crate::cpu::mips_core::CyclesPtr { self.status.cycles() }
     fn hw_cursor(&self) -> Option<crate::gfx_display::HwCursor> {
         use crate::dev::ng1::vc2::{VC2_REG_CURRENT_CURSOR_X, VC2_REG_CURSOR_Y_LOC,
             VC2_REG_CURSOR_ENTRY_PTR, VC2_REG_DISPLAY_CONTROL, VC2_CTRL_CURSOR_EN, VC2_CTRL_CURSOR_SIZE};

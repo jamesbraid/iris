@@ -108,6 +108,7 @@ use std::thread::JoinHandle;
 
 use parking_lot::Mutex;
 
+use crate::gfx_display::{Frame, Need};
 use crate::ip30::{widget_large_base, widget_small_base};
 use crate::irq::InterruptController;
 use crate::traits::{
@@ -263,45 +264,60 @@ impl Odyssey {
         }
     }
 
-    /// One display frame: the retrace if it is due, then, if anything the
-    /// scan-out reads has changed, the whole frame composed from board
-    /// memory as the scan-out registers describe it (frame.rs), and
-    /// presented; an unchanged frame is presented only at the idle
-    /// refresh. The display takes no board lock and waits for no drawing:
-    /// it reads memory while the raster unit and the front end write it,
-    /// as the board's own scan-out does.
-    fn frame(state: &BoardLocks, display: &Display) {
+    /// The board's per-frame duty, which the guest waits on whether or not
+    /// anything watches: flush the trace, run the scan-out's clock (the
+    /// retrace, which latches the swaps armed and raises the video interrupt;
+    /// a composed frame has run it already), and keep the screen's size known
+    /// without composing a frame.
+    fn retrace(state: &BoardLocks, display: &Display) {
         crate::pf_begin!(crate::perfetto::events::ODSY_CAPTURE);
         state.trace.flush(false);
         let mut reader = display.reader.lock();
         reader.attach(&state.shared);
-        reader.poll(monotonic_ns());
-        if !display.consumed() {
-            // Nothing shows or reads a frame. The retrace above still runs,
-            // as the guest waits on it; the picture is not composed.
-            display.publish_size(reader.frame_width as usize, reader.frame_height as usize);
-            display.counts.count(false);
-            crate::pf_end!(crate::perfetto::events::ODSY_CAPTURE);
-            return;
+        if !display.polled.swap(false, Ordering::Relaxed) {
+            reader.poll(monotonic_ns());
         }
+        let (w, h) = (reader.frame_width, reader.frame_height);
+        if w != 0 && h != 0 {
+            display.out().set_size(w as u32, h as u32);
+        }
+        crate::pf_end!(crate::perfetto::events::ODSY_CAPTURE);
+    }
+
+    /// If anything the scan-out reads has changed, the whole frame composed
+    /// from board memory as the scan-out registers describe it (frame.rs), and
+    /// presented; an unchanged frame is presented only at the idle refresh.
+    /// The display takes no board lock and waits for no drawing: it reads
+    /// memory while the raster unit and the front end write it, as the
+    /// board's own scan-out does. Words are filled only for a consumer that
+    /// reads them. True when `out` holds a frame.
+    fn compose(state: &BoardLocks, display: &Display, out: &mut Frame, need: Need) -> bool {
+        crate::pf_begin!(crate::perfetto::events::ODSY_CAPTURE);
+        let mut reader = display.reader.lock();
+        reader.attach(&state.shared);
+        // The retrace comes due before the frame is composed, so a swap it
+        // latches shows in this frame. The tick's retrace duty then leaves
+        // the clock alone.
+        reader.poll(monotonic_ns());
+        display.polled.store(true, Ordering::Relaxed);
         // On the GPU raster unit with the wgpu renderer on the same device,
         // the frame is composed and presented there with no readback.
         #[cfg(feature = "wgpu")]
-        if display.gpu_frames_wanted() {
+        if need.gpu {
             crate::pf_begin!(crate::perfetto::events::ODSY_FRAME_PLANES);
             let composed = reader.update_on_gpu();
             crate::pf_end!(crate::perfetto::events::ODSY_FRAME_PLANES);
             if let Some((buffer, w, h)) = composed {
-                display.counts.count(true);
+                display.out().counts.count(true);
                 set_display_fifo_pending(state.fifo.level() as usize + state.raster.pending() as usize);
                 crate::pf_end!(crate::perfetto::events::ODSY_CAPTURE);
                 drop(reader);
-                if display.due(true) {
+                if display.due(true, false) {
                     crate::pf_begin!(crate::perfetto::events::ODSY_PRESENT);
                     display.present_gpu(&buffer, w, h);
                     crate::pf_end!(crate::perfetto::events::ODSY_PRESENT);
                 }
-                return;
+                return false;
             }
         }
         crate::pf_begin!(crate::perfetto::events::ODSY_FRAME_PLANES);
@@ -315,20 +331,29 @@ impl Odyssey {
         set_display_fifo_pending(state.fifo.level() as usize + state.raster.pending() as usize);
         crate::pf_end!(crate::perfetto::events::ODSY_CAPTURE);
         let changed = !matches!(composed, reader::Composed::No);
-        display.counts.count(changed);
-        if w == 0 || h == 0 || !display.due(changed) {
-            return;
+        display.out().counts.count(changed);
+        if w == 0 || h == 0 || !display.due(changed, display.out().requests.pending()) {
+            return false;
         }
         crate::pf_begin!(crate::perfetto::events::ODSY_PRESENT);
         match composed {
             reader::Composed::InFrame => {
                 drop(screen);
-                display.present(&reader.frame[..w * h], w, h, 0);
+                display.present(&reader.frame[..w * h], w, h, 0, out, need.words);
             }
             // In the screen already, or unchanged: present it as it is.
-            reader::Composed::InTarget | reader::Composed::No => display.present_in_place(screen, w, h),
+            reader::Composed::InTarget | reader::Composed::No => display.present_in_place(screen, w, h, out, need.words),
         }
         crate::pf_end!(crate::perfetto::events::ODSY_PRESENT);
+        need.words
+    }
+
+    /// One display frame by hand, as the display thread runs it: compose if
+    /// anything looks, then the retrace.
+    #[cfg(test)]
+    fn frame(state: &BoardLocks, display: &Display) {
+        display.out().tick(|out, need| Odyssey::compose(state, display, out, need));
+        Odyssey::retrace(state, display);
     }
 }
 
@@ -363,9 +388,6 @@ impl BusDevice for Odyssey {
     }
 }
 
-/// The display thread's frame period: the modelled mode's 60 Hz.
-const FRAME_PERIOD: std::time::Duration = std::time::Duration::from_micros(16_667);
-
 impl Device for Odyssey {
     fn step(&self, _cycles: u64) {}
 
@@ -395,21 +417,17 @@ impl Device for Odyssey {
             std::thread::Builder::new()
                 .name("odyssey-display".into())
                 .spawn(move || {
-                    let mut next = std::time::Instant::now();
-                    while running.load(Ordering::Acquire) {
-                        Odyssey::frame(&state, &display);
-                        next += FRAME_PERIOD;
-                        let now = std::time::Instant::now();
-                        if next > now {
-                            std::thread::sleep(next - now);
-                        } else {
-                            next = now;
-                        }
-                    }
                     // The renderer is released on this thread, which owns its
                     // context; a stop from the main thread leaves it alone
                     // (`DisplayStop`).
-                    display.stop();
+                    crate::gfx_display::run_display(
+                        display.out(),
+                        &running,
+                        &display.display_stop,
+                        || Odyssey::retrace(&state, &display),
+                        |out, need| Odyssey::compose(&state, &display, out, need),
+                    );
+                    display.local_done();
                 })
                 .expect("odyssey display thread"),
         );

@@ -1026,7 +1026,7 @@ impl Ui {
         // preference is ignored (CGL on macOS) or there is no shared dispatch
         // layer (WGL on Windows).
         #[cfg(all(feature = "wgpu", target_os = "linux"))]
-        if display.gpu().is_some() {
+        if display.screens()[0].gpu.get().is_some() {
             display_builder = display_builder.with_preference(ApiPreference::PreferEgl);
         }
 
@@ -1148,7 +1148,7 @@ impl Ui {
             current_win_h: 0,
         };
 
-        *display.renderer_slot().lock() = Some(Box::new(renderer));
+        *display.screens()[0].window.renderer.lock() = Some(Box::new(renderer));
 
         Self { ps2, display, discs, window, window_size, resize_request, display_res, timer_manager, initial_scale: scale, scroll_pixels_per_line, lock_aspect_ratio }
     }
@@ -1165,7 +1165,7 @@ impl Ui {
         attrs: WindowAttributes,
         scale: u32,
     ) -> Result<(Arc<Window>, Arc<Mutex<Option<(u32, u32)>>>, Arc<Mutex<Option<ResizeRequest>>>, Arc<Mutex<(u32, u32)>>), String> {
-        let gpu = match display.gpu() {
+        let gpu = match display.screens()[0].gpu.get().cloned() {
             Some(g) => g,
             None => crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default(), Box::new(|e| eprintln!("iris: the window's GPU failed: {e}")))?,
         };
@@ -1194,9 +1194,9 @@ impl Ui {
             ng1: None,
             readback: Vec::new(),
             failed: false,
-            board_device: display.gpu().is_some_and(|g| Arc::ptr_eq(&g, &gpu)),
+            board_device: display.screens()[0].gpu.get().is_some_and(|g| Arc::ptr_eq(g, &gpu)),
         };
-        *display.renderer_slot().lock() = Some(Box::new(renderer));
+        *display.screens()[0].window.renderer.lock() = Some(Box::new(renderer));
         Ok((window, window_size, resize_request, display_res))
     }
 
@@ -1308,7 +1308,7 @@ impl Ui {
             }
 
             if keycode == KeyCode::PrintScreen && pressed && !input.repeat && *rctrl_held {
-                display.request_screenshot();
+                crate::gfx_display::save_screenshot(&display.screens()[0]);
                 return;
             }
 

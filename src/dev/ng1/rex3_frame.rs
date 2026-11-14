@@ -313,13 +313,12 @@ pub(crate) struct ResidentDisplay {
     status: StatusBar,
     sbtex: StatusBarTexture,
     capture: Vec<u32>,
-    save_screenshots: bool,
     resize_pending: bool,
 }
 
 impl ResidentDisplay {
     pub(crate) fn new(rex: &Rex3, gpu: &Arc<Gpu>) -> Result<Self, ResidentError> {
-        if let Some(renderer) = rex.renderer.lock().as_deref() {
+        if let Some(renderer) = rex.renderer().lock().as_deref() {
             validate_presenter(renderer, gpu)?;
         }
         let scanout = Ng1Scanout::new_resident(gpu, &rex)?;
@@ -329,7 +328,6 @@ impl ResidentDisplay {
             status: StatusBar::new(),
             sbtex: StatusBarTexture::new(),
             capture: Vec::new(),
-            save_screenshots: true,
             resize_pending: true,
         })
     }
@@ -340,10 +338,6 @@ impl ResidentDisplay {
 
     pub(crate) fn fail_next_capture(&mut self, fault: CaptureFault) {
         self.scanout.fail_next_capture(fault);
-    }
-
-    pub(crate) fn suppress_screenshot_files(&mut self) {
-        self.save_screenshots = false;
     }
 
     /// The hook runs at the FIFO cut, before the raster lock is taken. It is
@@ -358,7 +352,7 @@ impl ResidentDisplay {
         let cut = rex.resident_frame_cut(timeout)?;
         let requests = cut.requests;
         let capture = requests.needs_frame || requests.needs_screenshot
-            || rex.capture_users.load(Ordering::Acquire) != 0;
+            || rex.screens[0].requests.capturing();
         at_marker(cut.position);
 
         let mut screen = rex.screen.lock();
@@ -385,7 +379,7 @@ impl ResidentDisplay {
         if self.overlay.active() {
             return Err(ResidentError::Unsupported("resident debug overlays require CPU planes"));
         }
-        let mut renderer = rex.renderer.lock();
+        let mut renderer = rex.renderer().lock();
         if let Some(renderer) = renderer.as_deref_mut() {
             validate_presenter(renderer, self.scanout.gpu())?;
             if self.resize_pending {
@@ -438,17 +432,6 @@ impl ResidentDisplay {
             }
             screen.frame_seq = screen.frame_seq.wrapping_add(1);
             rex.resident_frame.complete(requests);
-            if requests.needs_screenshot && self.save_screenshots {
-                let pixels = screen.rgba.clone();
-                let n = rex.screenshot_counter.fetch_add(1, Ordering::Relaxed);
-                let path = format!("screenshot_{n:04}.png");
-                std::thread::spawn(move || {
-                    match crate::disp::write_png_words(&path, &pixels, crate::disp::FB_STRIDE, width, height) {
-                        Ok(()) => println!("iris: screenshot saved to {path}"),
-                        Err(error) => println!("iris: screenshot failed: {error}"),
-                    }
-                });
-            }
         }
         Ok(stamp)
     }
@@ -459,8 +442,8 @@ impl ResidentDisplay {
             let start = Instant::now();
             let requests = rex.resident_frame.requests();
             let needs_frame = requests.needs_frame || requests.needs_screenshot
-                || rex.capture_users.load(Ordering::Acquire) != 0;
-            if needs_frame || rex.renderer.lock().is_some() {
+                || rex.screens[0].requests.capturing();
+            if needs_frame || rex.renderer().lock().is_some() {
                 let result = self.render(rex, FRAME_WAIT, |_| {});
                 *rex.resident_frame.error.lock() = result.as_ref().err().cloned();
                 if let Err(error) = result {
@@ -485,8 +468,96 @@ impl ResidentDisplay {
                 std::thread::sleep(period - elapsed);
             }
         }
-        rex.display_stop.finish(&rex.renderer);
+        rex.display_stop.finish(rex.renderer());
     }
+}
+
+impl Rex3 {
+    /// The request calls the front-end makes on the board's screen, for the
+    /// resident path's tests: the resident display counts its own requests.
+    pub(crate) fn request_screenshot(&self) {
+        if self.resident_frame.is_active() {
+            self.resident_frame.request_screenshot();
+        } else {
+            self.screens[0].requests.request();
+        }
+    }
+
+    pub(crate) fn screenshot_pending(&self) -> bool {
+        if self.resident_frame.is_active() {
+            return self.resident_frame.screenshot_pending();
+        }
+        self.screens[0].requests.pending()
+    }
+
+    pub(crate) fn request_frame(&self) {
+        if self.resident_frame.is_active() {
+            self.resident_frame.request_frame();
+        } else {
+            self.screens[0].requests.request();
+        }
+    }
+
+    pub(crate) fn frame_pending(&self) -> bool {
+        if self.resident_frame.is_active() {
+            return self.resident_frame.frame_pending();
+        }
+        self.screens[0].requests.pending()
+    }
+
+    pub(crate) fn frame_available(&self) -> bool {
+        if self.resident_frame.is_active() {
+            return self.resident_frame.frame_available();
+        }
+        true
+    }
+
+    pub(crate) fn set_capture(&self, on: bool) {
+        self.screens[0].requests.capture(on);
+        if on {
+            // Repaint at once so the new consumer gets a frame.
+            self.request_frame();
+        }
+    }
+
+    pub(crate) fn gpu(&self) -> Option<Arc<Gpu>> {
+        self.display_gpu()
+    }
+}
+
+/// The visible part of the last composed frame, tight, with its sequence
+/// number; `None` until the display has a video mode or while the resident
+/// display has no captured frame. The resident path writes `screen.rgba`.
+pub(crate) fn copy_frame(rex: &Rex3, out: &mut Vec<u32>) -> Option<(usize, usize, u64)> {
+    if !rex.frame_available() {
+        return None;
+    }
+    let screen = rex.screen.lock();
+    if !rex.frame_available() {
+        return None;
+    }
+    let (w, h) = (screen.width, screen.height);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    out.clear();
+    out.reserve(w * h);
+    for y in 0..h {
+        let row = y * FB_STRIDE;
+        out.extend_from_slice(&screen.rgba[row..row + w]);
+    }
+    Some((w, h, screen.frame_seq))
+}
+
+/// Request a frame and wait (at most `timeout`) for the resident display to
+/// capture it, then copy it as [`copy_frame`] does.
+pub(crate) fn fresh_frame(rex: &Rex3, out: &mut Vec<u32>, timeout: Duration) -> Option<(usize, usize, u64)> {
+    rex.request_frame();
+    let deadline = Instant::now() + timeout;
+    while rex.frame_pending() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    copy_frame(rex, out)
 }
 
 #[cfg(test)]
@@ -494,7 +565,6 @@ mod tests {
     use super::*;
     use crate::dev::ng1::rex3::{Rex3Context, GFIFO_DEPTH, REX3_WRMASK};
     use crate::dev::ng1::wgpu::resident::{ResidentBackend, ResidentStatus};
-    use crate::gfx_display::{fresh_frame, GfxDisplay};
     use crate::traits::Device;
 
     struct Probe;

@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 use parking_lot::Mutex;
 
 use crate::cpu::mips_core::CyclesPtr;
-use crate::dev::ng1::rex3::Renderer;
+use crate::gfx_display::{Frame, Screen};
 use crate::disp::{Rex3Screen, FB_STRIDE};
 
 /// Idle frames between forced presents.
@@ -23,12 +23,9 @@ const IDLE_REFRESH: u32 = 6;
 
 /// The window the board shows the guest: what `GfxDisplay` hands out.
 pub(super) struct Display {
-    pub renderer: Mutex<Option<Box<dyn Renderer>>>,
+    pub screens: [Arc<Screen>; 1],
+    /// What the installed renderer presents from.
     pub screen: Mutex<Rex3Screen>,
-    pub screenshot: AtomicBool,
-    /// Screenshots saved, for the next file's number.
-    screenshot_counter: std::sync::atomic::AtomicU32,
-    pub frame: AtomicBool,
     /// Whether the display thread releases the renderer when it ends.
     pub(super) display_stop: crate::gfx_display::DisplayStop,
     local: Mutex<Option<Local>>,
@@ -37,18 +34,13 @@ pub(super) struct Display {
     pub reader: Mutex<ScanoutReader>,
     /// Frames since the last present.
     idle: AtomicU32,
-    /// The frame size last copied to the screen; (0, 0) before the first.
-    shown: Mutex<(usize, usize)>,
+    /// The clock ran at the start of this tick's frame.
+    pub(super) polled: AtomicBool,
     /// The machine's status-bar inputs.
     status: Arc<crate::disp::StatusSource>,
     /// The registers the display reads, for the host's cursor query; set
     /// when the board hands the display out.
     shared: OnceLock<Arc<DisplayShared>>,
-    /// Consumers (VNC) that read `screen.rgba` every frame
-    /// (`GfxDisplay::set_capture`): while any does, frames are read back.
-    capture: AtomicU32,
-    /// Frames the display thread composed and skipped, for `screen frames`.
-    pub(super) counts: crate::gfx_display::FrameCounts,
 }
 
 struct Local {
@@ -61,62 +53,25 @@ struct Local {
 impl Display {
     pub(super) fn new(status: Arc<crate::disp::StatusSource>) -> Self {
         Self {
-            renderer: Mutex::new(None),
+            screens: [Arc::new(Screen::new(0, Arc::default()))],
             screen: Mutex::new(Rex3Screen::new()),
-            screenshot: AtomicBool::new(false),
-            screenshot_counter: std::sync::atomic::AtomicU32::new(0),
-            frame: AtomicBool::new(false),
             display_stop: Default::default(),
             local: Mutex::new(None),
             reader: Mutex::new(ScanoutReader::default()),
             idle: AtomicU32::new(0),
-            shown: Mutex::new((0, 0)),
+            polled: AtomicBool::new(false),
             status,
             shared: OnceLock::new(),
-            capture: AtomicU32::new(0),
-            counts: Default::default(),
         }
     }
 
-    /// Whether anything shows or reads the frames: a renderer (the window), a
-    /// screenshot or frame request, or a client capturing every frame. With
-    /// none (`--ci` with no window, no screenshot asked for) a frame composed
-    /// is a frame nobody sees, and with the GPU raster unit it costs a
-    /// scan-out, a readback and a pass over every pixel. A request composes
-    /// the next frame whole, since the board's memory marks and register
-    /// generations are not consumed while frames are skipped.
-    pub(super) fn consumed(&self) -> bool {
-        self.screenshot.load(Ordering::Acquire)
-            || self.frame.load(Ordering::Acquire)
-            || self.capture.load(Ordering::Acquire) != 0
-            || self.renderer.lock().is_some()
-    }
-
-    /// The screen's size, set without composing a frame: what `screen info`
-    /// and pointer steering read before anything asks for a picture.
-    pub(super) fn publish_size(&self, width: usize, height: usize) {
-        let mut shown = self.shown.lock();
-        if *shown != (width, height) && width != 0 && height != 0 {
-            let mut screen = self.screen.lock();
-            screen.width = width.min(FB_STRIDE);
-            screen.height = height;
-            *shown = (width, height);
-        }
-    }
-
-    /// Whether this frame can stay on the GPU: the installed renderer takes
-    /// frames on the board's device, and nothing wants `screen.rgba` filled
-    /// (a screenshot, a frame request, a capturing VNC client).
-    #[cfg(feature = "wgpu")]
-    pub(super) fn gpu_frames_wanted(&self) -> bool {
-        !self.screenshot.load(Ordering::Acquire)
-            && !self.frame.load(Ordering::Acquire)
-            && self.capture.load(Ordering::Acquire) == 0
-            && self.renderer.lock().as_ref().is_some_and(|r| r.takes_gpu_frames())
+    /// The window and the consumers' side of the board's screen.
+    pub(super) fn out(&self) -> &Arc<Screen> {
+        &self.screens[0]
     }
 
     /// Present a frame composed on the GPU (0x00RRGGBB, rows of `width`)
-    /// through the installed renderer; `screen.rgba` keeps its last frame.
+    /// through the installed renderer; no words are filled.
     #[cfg(feature = "wgpu")]
     pub(super) fn present_gpu(&self, frame: &wgpu::Buffer, width: u32, height: u32) {
         let (w, h) = (width as usize, height as usize);
@@ -125,8 +80,8 @@ impl Display {
         screen.height = h;
         screen.prebuilt = true;
         screen.status_bar_only = false;
-        *self.shown.lock() = (w, h);
-        let mut renderer = self.renderer.lock();
+        self.out().set_size(width, height);
+        let mut renderer = self.out().window.renderer.lock();
         if let Some(renderer) = renderer.as_mut() {
             let mut local = self.local.lock();
             let local = local.get_or_insert_with(|| Local {
@@ -146,14 +101,18 @@ impl Display {
 
     /// Read the cursor from `shared` from now on.
     pub(super) fn attach_registers(&self, shared: Arc<DisplayShared>) {
+        // A window presents on the device the scan-out composes on.
+        #[cfg(feature = "wgpu")]
+        if let Some(scanout) = shared.gpu_scanout.get() {
+            let _ = self.out().gpu.set(scanout.lock().gpu());
+        }
         let _ = self.shared.set(shared);
     }
 
-    /// Whether this frame is presented: when a line changed, when a
-    /// screenshot or frame is wanted, or on every sixth idle frame, as IMPACT
-    /// does, so a window or VNC client that missed a frame catches up.
-    pub(super) fn due(&self, changed: bool) -> bool {
-        let wanted = self.screenshot.load(Ordering::Acquire) || self.frame.load(Ordering::Acquire);
+    /// Whether this frame is presented: when a line changed, when its words
+    /// are wanted, or on every sixth idle frame, as IMPACT does, so a window or
+    /// VNC client that missed a frame catches up.
+    pub(super) fn due(&self, changed: bool, wanted: bool) -> bool {
         let idle = self.idle.fetch_add(1, Ordering::Relaxed) + 1;
         if changed || wanted || idle >= IDLE_REFRESH {
             self.idle.store(0, Ordering::Relaxed);
@@ -165,12 +124,12 @@ impl Display {
     /// Convert `rows` (0x00RRGGBB lines of `width` pixels, the first being
     /// line `first` of a frame `height` lines tall) into the screen and
     /// present it. No rows: present the screen as it is.
-    pub(super) fn present(&self, rows: &[u32], width: usize, height: usize, first: usize) {
-        self.present_lines(rows.chunks_exact(width.max(1)).enumerate().map(|(i, row)| (first + i, row)), width, height);
+    pub(super) fn present(&self, rows: &[u32], width: usize, height: usize, first: usize, out: &mut Frame, words: bool) {
+        self.present_lines(rows.chunks_exact(width.max(1)).enumerate().map(|(i, row)| (first + i, row)), width, height, out, words);
     }
 
     /// As present(), for lines given with their numbers.
-    pub(super) fn present_lines<'a>(&self, lines: impl Iterator<Item = (usize, &'a [u32])>, width: usize, height: usize) {
+    pub(super) fn present_lines<'a>(&self, lines: impl Iterator<Item = (usize, &'a [u32])>, width: usize, height: usize, out: &mut Frame, words: bool) {
         let mut screen = self.screen.lock();
         let (w, h) = (width.min(FB_STRIDE), height.min(screen.fb_rgb.len() / FB_STRIDE));
         for (y, src) in lines {
@@ -183,42 +142,32 @@ impl Display {
                 *d = super::frame::to_screen(rgb);
             }
         }
-        self.present_in_place(screen, width, height);
+        self.present_in_place(screen, width, height, out, words);
     }
 
     /// Present the screen whose `fb_rgb` holds the frame, `width` by
-    /// `height` (the display thread composes into it under this lock).
-    /// `rgba` is brought level with it only when something reads it: a
+    /// `height` (the display thread composes into it under this lock). `out`
+    /// gets the frame's words only when a consumer reads them (`words`): a
     /// screenshot, a frame request, a capturing VNC client. The renderers
     /// take `fb_rgb`.
-    pub(super) fn present_in_place(&self, mut screen: parking_lot::MutexGuard<'_, Rex3Screen>, width: usize, height: usize) {
+    pub(super) fn present_in_place(&self, mut screen: parking_lot::MutexGuard<'_, Rex3Screen>, width: usize, height: usize, out: &mut Frame, words: bool) {
         let w = width.min(FB_STRIDE);
         let h = height.min(screen.fb_rgb.len() / FB_STRIDE);
         screen.width = w;
         screen.height = h;
         screen.prebuilt = true;
         screen.status_bar_only = false;
-        let wanted = self.screenshot.load(Ordering::Acquire) || self.frame.load(Ordering::Acquire) || self.capture.load(Ordering::Acquire) != 0;
-        if wanted {
-            let planes = &mut *screen;
+        if words {
+            out.width = w as u32;
+            out.height = h as u32;
+            out.words.clear();
             for y in 0..h {
                 let at = y * FB_STRIDE;
-                planes.rgba[at..at + w].copy_from_slice(&planes.fb_rgb[at..at + w]);
+                out.words.extend_from_slice(&screen.fb_rgb[at..at + w]);
             }
         }
-        *self.shown.lock() = (width, height);
-        screen.frame_seq = screen.frame_seq.wrapping_add(1);
-        // RCtrl+PrintScreen (ui.rs): save the screen as it is presented.
-        if self.screenshot.swap(false, Ordering::AcqRel) {
-            let pixels = screen.rgba.clone();
-            let n = self.screenshot_counter.fetch_add(1, Ordering::Relaxed);
-            let path = format!("screenshot_{:04}.png", n);
-            std::thread::spawn(move || match crate::disp::write_png_words(&path, &pixels, crate::disp::FB_STRIDE, w, h) {
-                Ok(()) => println!("iris: screenshot saved to {}", path),
-                Err(e) => println!("iris: screenshot failed: {}", e),
-            });
-        }
-        let mut renderer = self.renderer.lock();
+        self.out().set_size(width as u32, height as u32);
+        let mut renderer = self.out().window.renderer.lock();
         if let Some(renderer) = renderer.as_mut() {
             let mut local = self.local.lock();
             let local = local.get_or_insert_with(|| Local {
@@ -234,15 +183,11 @@ impl Display {
             let stats = self.status.snapshot(std::time::Instant::now(), display_fifo_pending());
             renderer.present(&mut screen, &mut local.overlay, &mut local.status, &mut local.texture, &stats, false, None, None);
         }
-        self.screenshot.store(false, Ordering::Release);
-        self.frame.store(false, Ordering::Release);
     }
 
-    /// Drop the frame state but leave the renderer as it is.
-    /// The display thread's last act: release the renderer, unless the stop
-    /// came from the main thread, and drop the per-frame overlay state.
-    pub(super) fn stop(&self) {
-        self.display_stop.finish(&self.renderer);
+    /// The display thread's last act, after the renderer is released: drop
+    /// the per-frame overlay state.
+    pub(super) fn local_done(&self) {
         self.local.lock().take();
     }
 }
@@ -370,46 +315,17 @@ impl ResolveCtx {
 }
 
 impl crate::gfx_display::GfxDisplay for Display {
+    fn screens(&self) -> &[Arc<Screen>] {
+        &self.screens
+    }
     fn display_stop(&self) -> &crate::gfx_display::DisplayStop {
         &self.display_stop
-    }
-    fn renderer_slot(&self) -> &Mutex<Option<Box<dyn Renderer>>> {
-        &self.renderer
-    }
-    fn screen(&self) -> &Mutex<Rex3Screen> {
-        &self.screen
-    }
-    fn request_screenshot(&self) {
-        self.screenshot.store(true, Ordering::Release);
-    }
-    fn screenshot_pending(&self) -> bool {
-        self.screenshot.load(Ordering::Acquire)
-    }
-    fn frame_counts(&self) -> Option<&crate::gfx_display::FrameCounts> {
-        Some(&self.counts)
     }
     fn cycles(&self) -> CyclesPtr {
         self.status.cycles()
     }
-    fn request_frame(&self) {
-        self.frame.store(true, Ordering::Release);
-    }
-    fn frame_pending(&self) -> bool {
-        self.frame.load(Ordering::Acquire)
-    }
-    fn set_capture(&self, on: bool) {
-        if on {
-            self.capture.fetch_add(1, Ordering::AcqRel);
-        } else {
-            let _ = self.capture.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
-        }
-    }
     fn hw_cursor(&self) -> Option<crate::gfx_display::HwCursor> {
         // A racy read of the registers, as the display thread's frame does.
         self.shared.get()?.regs.hw_cursor()
-    }
-    #[cfg(feature = "wgpu")]
-    fn gpu(&self) -> Option<std::sync::Arc<crate::wgpu::Gpu>> {
-        Some(self.shared.get()?.gpu_scanout.get()?.lock().gpu())
     }
 }

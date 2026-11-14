@@ -728,7 +728,7 @@ fn display_rig() -> (BoardLocks, LibState, Arc<Display>) {
     let display = Arc::new(Display::new(crate::disp::StatusSource::detached()));
     // A client that reads every frame, as VNC does: with nobody reading, the
     // display composes nothing.
-    crate::gfx_display::GfxDisplay::set_capture(&*display, true);
+    display.out().requests.capture(true);
     (h, st, display)
 }
 
@@ -987,7 +987,7 @@ fn a_frame_waits_for_no_slice_and_takes_no_lock() {
     }
     let (h, st) = slow_raster(0);
     let display = Arc::new(Display::new(crate::disp::StatusSource::detached()));
-    crate::gfx_display::GfxDisplay::set_capture(&*display, true);
+    display.out().requests.capture(true);
     let hold = Arc::new(AtomicBool::new(true));
     let held = hold.clone();
     h.raster.submit(move |_| {
@@ -1052,7 +1052,7 @@ fn an_idle_display_presents_only_its_refresh_frames() {
         return;
     }
     let (h, _st, display) = display_rig();
-    let seq = |d: &Display| d.screen.lock().frame_seq;
+    let seq = |d: &Display| d.out().latest().map_or(0, |f| f.seq);
 
     Odyssey::frame(&h, &display);
     let first = seq(&display);
@@ -1082,17 +1082,16 @@ fn an_idle_display_presents_only_its_refresh_frames() {
 /// each bring frames back.
 mod unwatched {
     use super::*;
-    use crate::gfx_display::GfxDisplay;
 
     /// A rig whose display nobody reads.
     fn rig() -> (BoardLocks, Arc<Display>) {
         let (h, _st, display) = display_rig();
-        display.set_capture(false);
+        display.out().requests.capture(false);
         (h, display)
     }
 
     fn counts(d: &Display) -> (u64, u64, u64) {
-        d.frame_counts().unwrap().get()
+        d.out().counts.get()
     }
 
     #[test]
@@ -1102,9 +1101,8 @@ mod unwatched {
             Odyssey::frame(&h, &display);
         }
         assert_eq!(counts(&display), (12, 0, 12), "twelve frames, none composed");
-        let screen = display.screen.lock();
-        assert_eq!((screen.width, screen.height), (ODSY_WIDTH as usize, ODSY_HEIGHT as usize), "the size is published");
-        assert_eq!(screen.frame_seq, 0, "no frame was presented");
+        assert_eq!(display.out().size(), (ODSY_WIDTH, ODSY_HEIGHT), "the size is published");
+        assert!(display.out().latest().is_none(), "no frame was presented");
         h.raster.stop();
     }
 
@@ -1131,16 +1129,17 @@ mod unwatched {
         h.test_board().vram.ptr().store(0x1000, 4, 0x55);
         Odyssey::frame(&h, &display);
         assert_eq!(counts(&display).1, 0);
-        display.request_frame();
-        assert!(display.frame_pending());
+        display.out().requests.request();
+        assert!(display.out().requests.pending());
         Odyssey::frame(&h, &display);
-        assert!(!display.frame_pending(), "answered by the next frame");
+        assert!(!display.out().requests.pending(), "answered by the next frame");
         assert_eq!(counts(&display).1, 1);
         assert_frame_is_whole_resolve(&h, &display, "the requested frame");
         {
             let screen = display.screen.lock();
-            assert_eq!(screen.frame_seq, 1);
-            assert_eq!(&screen.rgba[..64], &screen.fb_rgb[..64], "rgba holds the frame the request got");
+            let frame = display.out().latest().expect("the requested frame");
+            assert_eq!(frame.seq, 1);
+            assert_eq!(&frame.words[..64], &screen.fb_rgb[..64], "the frame holds what the request got");
         }
         // And frames are skipped again.
         Odyssey::frame(&h, &display);
@@ -1151,15 +1150,15 @@ mod unwatched {
     #[test]
     fn a_capturing_client_or_a_renderer_brings_frames_back_and_leaving_takes_them_away() {
         let (h, display) = rig();
-        display.set_capture(true);
+        display.out().requests.capture(true);
         Odyssey::frame(&h, &display);
         assert_eq!(counts(&display).1, 1, "a capturing client gets a frame");
-        display.set_capture(false);
+        display.out().requests.capture(false);
         Odyssey::frame(&h, &display);
         assert_eq!(counts(&display).1, 1, "and none once it leaves");
         let probe = crate::display_stop_tests::Probe::new(|| {});
         let presents = probe.presents.clone();
-        *display.renderer_slot().lock() = Some(Box::new(probe));
+        *display.out().window.renderer.lock() = Some(Box::new(probe));
         Odyssey::frame(&h, &display);
         assert!(presents.load(SeqCst) >= 1, "a renderer is given the frame");
         h.raster.stop();

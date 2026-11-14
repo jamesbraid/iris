@@ -100,10 +100,14 @@ impl HostInput {
 
     /// The display's visible size, (0, 0) before it has a mode.
     pub fn screen_size(&self) -> (usize, usize) {
-        self.display.as_ref().map(|d| {
-            let s = d.screen().lock();
-            (s.width, s.height)
-        }).unwrap_or((0, 0))
+        let Some(screen) = self.display.as_ref().map(|d| &d.screens()[0]) else { return (0, 0) };
+        let mut size = screen.size();
+        if size == (0, 0) {
+            // A board that composes only for a reader has not been asked yet.
+            screen.capture(Duration::from_millis(250));
+            size = screen.size();
+        }
+        (size.0 as usize, size.1 as usize)
     }
 
     fn cursor(&self) -> Option<HwCursor> {
@@ -449,10 +453,11 @@ impl HostInput {
     /// it did.
     pub fn frame(&self) -> Result<(usize, usize, Vec<u32>, bool), String> {
         let d = self.display.as_ref().ok_or("no display (headless)")?;
-        let fresh = crate::gfx_display::wait_fresh_frame(&**d, Duration::from_millis(250));
-        let mut px = Vec::new();
-        let (w, h, _) = crate::gfx_display::copy_frame(&**d, &mut px).ok_or("the display has no video mode yet")?;
-        Ok((w, h, px, fresh))
+        let screen = &d.screens()[0];
+        let frame = screen.capture(Duration::from_millis(250));
+        let fresh = !screen.requests.pending();
+        let frame = frame.filter(|f| f.width > 0 && f.height > 0).ok_or("the display has no video mode yet")?;
+        Ok((frame.width as usize, frame.height as usize, frame.words.clone(), fresh))
     }
 
     /// Wait until the screen has not changed for `quiet`, at most `timeout`.
@@ -540,7 +545,7 @@ impl crate::traits::Device for HostInput {
         match (cmd, sub) {
             ("screen", "info") | ("screen", "") => {
                 let (sw, sh) = self.screen_size();
-                let seq = self.display.as_ref().map(|d| d.screen().lock().frame_seq).unwrap_or(0);
+                let seq = self.display.as_ref().and_then(|d| d.screens()[0].latest()).map_or(0, |f| f.seq);
                 out(&mut w, format!("screen {sw}x{sh} frame {seq}"));
                 match self.cursor() {
                     Some(c) => {
@@ -556,7 +561,7 @@ impl crate::traits::Device for HostInput {
             }
             ("screen", "frames") => {
                 let d = self.display.as_ref().ok_or("no display")?;
-                let counts = d.frame_counts().ok_or("this board does not count its display frames")?;
+                let counts = &d.screens()[0].counts;
                 match args.get(1).copied() {
                     None => {
                         let (frames, composed, skipped) = counts.get();
@@ -736,7 +741,7 @@ mod tests {
 
     #[test]
     fn screen_frames_reports_and_resets_a_boards_counts() {
-        let fake = Arc::new(crate::gfx_display::testing::FakeDisplay::new(4, 2, false));
+        let fake = Arc::new(crate::gfx_display::testing::FakeDisplay::new(4, 2, true));
         let display: Arc<dyn GfxDisplay> = fake.clone();
         let hi = HostInput::new(Some(display), Arc::new(Ps2Controller::new(None)));
         let run = |args: &[&str]| {
@@ -750,7 +755,7 @@ mod tests {
             hi.execute_command("screen", args, Box::new(Sink(out.clone()))).map(|_| String::from_utf8(out.lock().clone()).unwrap())
         };
         for composed in [true, false, false] {
-            fake.counts.count(composed);
+            fake.screens()[0].counts.count(composed);
         }
         assert_eq!(run(&["frames"]).unwrap(), "3 frames: 1 composed, 2 skipped\n");
         run(&["frames", "reset"]).unwrap();

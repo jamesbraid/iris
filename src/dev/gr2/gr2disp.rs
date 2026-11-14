@@ -22,64 +22,17 @@ const IDLE_HEARTBEAT_FRAMES: u32 = 6;
 
 impl Gr2 {
     pub(super) fn display_loop(&self) {
-        let frame = Duration::from_micros(16667);
+        let screen = &self.screens[0];
         let mut status_bar = crate::disp::StatusBar::new();
         let mut overlay = crate::debug_overlay::DebugOverlay::new();
         let mut sbtex = crate::disp::StatusBarTexture::new();
         let mut frames_since_render = u32::MAX;
         let mut sized = false;
 
-        while self.running.load(Ordering::Relaxed) {
-            let start = Instant::now();
-
-            let dirty = self.dirty.swap(false, Ordering::Acquire);
-            let shot = self.screenshot_pending.load(Ordering::Relaxed);
-            if dirty || shot || frames_since_render >= IDLE_HEARTBEAT_FRAMES {
-                frames_since_render = 0;
-                let stats = self.status.snapshot(start, self.hq_fifo.len());
-
-                let mut screen = self.screen.lock();
-                if dirty || !sized {
-                    let r = self.regs();
-                    gr2comp::compose(self.vram(), &r.vc1, &r.xmap, &r.dac, &mut screen.fb_rgb);
-                    // The frame is already final RGB, so keep `rgba` (what CI
-                    // screenshots read) current without needing a renderer
-                    // readback. This also makes screenshots work headless.
-                    let screen = &mut *screen;
-                    for y in 0..FB_H {
-                        let row = y * gr2comp::OUT_STRIDE;
-                        screen.rgba[row..row + FB_W].copy_from_slice(&screen.fb_rgb[row..row + FB_W]);
-                    }
-                    screen.frame_seq = screen.frame_seq.wrapping_add(1);
-                }
-                screen.prebuilt = true;
-                screen.width = FB_W;
-                screen.height = FB_H;
-                screen.status_bar_only = !dirty && sized && !shot;
-
-                let take_shot = self.screenshot_pending.swap(false, Ordering::Relaxed);
-                let mut renderer = self.renderer.lock();
-                if let Some(r) = renderer.as_mut() {
-                    if !sized {
-                        r.resize(FB_W, FB_H);
-                    }
-                    r.present(&mut screen, &mut overlay, &mut status_bar, &mut sbtex, &stats, take_shot, None, None);
-                }
-                sized = true;
-
-                if take_shot {
-                    let pixels = screen.rgba.clone();
-                    let n = self.screenshot_counter.fetch_add(1, Ordering::Relaxed);
-                    let path = format!("screenshot_{:04}.png", n);
-                    thread::spawn(move || match crate::disp::write_png_words(&path, &pixels, crate::disp::FB_STRIDE, FB_W, FB_H) {
-                        Ok(()) => println!("iris: screenshot saved to {}", path),
-                        Err(e) => println!("iris: screenshot failed: {}", e),
-                    });
-                }
-            } else {
-                frames_since_render = frames_since_render.saturating_add(1);
-            }
-
+        crate::gfx_display::run_display(
+            screen,
+            &self.running,
+            &self.display_stop,
             // Vertical retrace, after the frame is composed: scanout reads
             // VRAM during the frame, and the guest flips buffers in the
             // blank. Composed after the pulse, the copy raced the flip and
@@ -88,20 +41,56 @@ impl Gr2 {
             // The vertical status level (EXTIO SG_STAT_0) is held for the
             // blanking interval (~40 of 1066 lines at 60 Hz), long enough
             // for a polling CPU to see both edges.
-            if let Some(cb) = self.retrace_cb.lock().clone() {
-                cb(true);
-                thread::sleep(VBLANK);
-                cb(false);
-            }
+            || {
+                if let Some(cb) = self.retrace_cb.lock().clone() {
+                    cb(true);
+                    thread::sleep(VBLANK);
+                    cb(false);
+                }
+                self.trace_flush(false);
+            },
+            |out, need| {
+                let start = Instant::now();
+                let dirty = self.dirty.swap(false, Ordering::Acquire);
+                if !(dirty || need.words || frames_since_render >= IDLE_HEARTBEAT_FRAMES) {
+                    frames_since_render = frames_since_render.saturating_add(1);
+                    return false;
+                }
+                frames_since_render = 0;
+                let stats = self.status.snapshot(start, self.hq_fifo.len());
 
-            self.trace_flush(false);
+                let mut canvas = self.screen.lock();
+                if dirty || !sized {
+                    let r = self.regs();
+                    gr2comp::compose(self.vram(), &r.vc1, &r.xmap, &r.dac, &mut canvas.fb_rgb);
+                }
+                canvas.prebuilt = true;
+                canvas.width = FB_W;
+                canvas.height = FB_H;
+                canvas.status_bar_only = !dirty && sized && !need.words;
+                // The frame is already final RGB, so a consumer's copy needs no
+                // renderer readback. This also makes screenshots work headless.
+                let fresh = dirty || !sized || need.words;
+                if fresh {
+                    out.width = FB_W as u32;
+                    out.height = FB_H as u32;
+                    out.words.clear();
+                    for y in 0..FB_H {
+                        let row = y * gr2comp::OUT_STRIDE;
+                        out.words.extend_from_slice(&canvas.fb_rgb[row..row + FB_W]);
+                    }
+                }
 
-            let elapsed = start.elapsed();
-            if elapsed < frame {
-                thread::sleep(frame - elapsed);
-            }
-        }
-
-        self.display_stop.finish(&self.renderer);
+                if let Some(r) = screen.window.renderer.lock().as_mut() {
+                    if !sized {
+                        r.resize(FB_W, FB_H);
+                    }
+                    r.present(&mut canvas, &mut overlay, &mut status_bar, &mut sbtex, &stats, false, None, None);
+                }
+                sized = true;
+                screen.counts.count(fresh);
+                fresh
+            },
+        );
     }
 }

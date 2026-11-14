@@ -1979,7 +1979,7 @@ fn a_stop_from_the_main_thread_leaves_the_renderer_alone() {
                 let cfg = test_cfg();
                 let host = TestHost::new();
                 let kona = Kona::new(cfg, host.clone(), host.clone(), crate::dev::kona::tests::test_status(), None).unwrap();
-                *kona.with_backend(|b| b.display()).renderer_slot().lock() = Some(Box::new(Spy(spy)));
+                *kona.with_backend(|b| b.display()).out().window.renderer.lock() = Some(Box::new(Spy(spy)));
                 kona.start();
                 kona.stop();
             })

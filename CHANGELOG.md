@@ -39,6 +39,11 @@ hashes are given where a change is easiest to understand by reading the commit.
 - `screen frames [reset]` on the monitor says how many frames a board's display
   thread ran, composed and skipped. The O2 and the VPro count them; the other
   boards say they do not yet.
+- Every board's screen now takes screenshots, VNC and monitor frame reads the
+  same way: a request is answered by a frame composed after it, so one made
+  while a frame is being composed is no longer lost, and no board spawns its own
+  screenshot thread. A board whose screen nobody looks at composes nothing, as
+  the O2 and the VPro already did. `screen frames` works on every board.
 
 ### Bench rig
 

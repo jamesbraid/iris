@@ -259,39 +259,45 @@ pub struct Compositor {
     map: Arc<Mutex<ColourMap>>,
     tables: Arc<Mutex<Tables>>,
     display: Arc<Display>,
-    frame: Vec<u32>,
     /// Frames passed over since one was composed.
     idle: u32,
 }
 
 impl Compositor {
     pub fn new(store: Arc<PixelStore>, word: usize, map: Arc<Mutex<ColourMap>>, tables: Arc<Mutex<Tables>>, display: Arc<Display>) -> Compositor {
-        let n = store.width() as usize * store.height() as usize;
-        Compositor { store, word, map, tables, display, frame: vec![0; n], idle: 0 }
+        Compositor { store, word, map, tables, display, idle: 0 }
     }
 }
 
 impl Compositor {
-    /// Compose the frame and present it, unless nothing has changed.
+    /// Compose the frame and publish it, unless nothing looks at it or nothing
+    /// has changed.
     pub fn frame(&mut self) {
-        // The requests this frame answers are noted before it is composed, and
-        // the flag is cleared before the pixels are read.
-        let noted = self.display.note();
-        let drawn = self.store.take_touched();
-        if !drawn && !self.display.wanted() {
-            self.idle += 1;
-            if self.idle < IDLE_REFRESH {
-                return;
+        let screen = self.display.out().clone();
+        screen.tick(|out, _| {
+            // The flag is cleared before the pixels are read.
+            let drawn = self.store.take_touched();
+            if !drawn && !screen.requests.pending() {
+                self.idle += 1;
+                if self.idle < IDLE_REFRESH {
+                    screen.counts.count(false);
+                    return false;
+                }
             }
-        }
-        self.idle = 0;
-        // The tables are copied once per frame, under their lock; the store
-        // is read as it is, without waiting for drawing.
-        let map = self.map.lock().clone();
-        let (w, h) = (self.store.width() as usize, self.store.height() as usize);
-        let tables = self.tables.lock().snapshot();
-        compose(&self.store, self.word, &map, &tables, &mut self.frame, w);
-        self.display.present(&self.frame, w, h, noted);
+            self.idle = 0;
+            // The tables are copied once per frame, under their lock; the
+            // store is read as it is, without waiting for drawing.
+            let map = self.map.lock().clone();
+            let (w, h) = (self.store.width(), self.store.height());
+            let tables = self.tables.lock().snapshot();
+            out.width = w;
+            out.height = h;
+            out.words.resize(w as usize * h as usize, 0);
+            compose(&self.store, self.word, &map, &tables, &mut out.words, w as usize);
+            self.display.present(&out.words, w as usize, h as usize);
+            screen.counts.count(true);
+            true
+        });
     }
 
     /// The display thread's last act.
@@ -369,17 +375,27 @@ impl Pixels {
 mod tests {
     use super::*;
 
-    /// A frame is composed and presented when the store was touched, when a frame or
-    /// screenshot is wanted, and on every sixth frame otherwise.
+    /// A frame is composed and published when the store was touched, when a
+    /// frame is wanted, and on every sixth frame otherwise, and not at all
+    /// while nothing looks.
     #[test]
     fn an_idle_display_composes_a_frame_in_six() {
-        use crate::gfx_display::GfxDisplay;
         let store = Arc::new(PixelStore::new(4, 3));
         let display = Arc::new(Display::detached());
         let mut c = Compositor::new(store.clone(), 1, Arc::default(), Arc::default(), display.clone());
-        let shown = || display.screen().lock().frame_seq;
+        let screen = display.out().clone();
+        let shown = || screen.latest().map_or(0, |f| f.seq);
+        c.frame();
+        assert_eq!(shown(), 0, "nobody looks: nothing is composed");
+        // A pending request is the consumer.
+        screen.requests.request();
         c.frame();
         assert_eq!(shown(), 1, "a new store is shown once");
+        assert!(!screen.requests.pending());
+        let Some(f) = screen.latest() else { panic!("a frame") };
+        assert_eq!((f.width, f.height, f.words.len()), (4, 3, 12));
+        // Looked at by a capturing client: passed over until the sixth.
+        screen.requests.capture(true);
         for _ in 0..IDLE_REFRESH - 1 {
             c.frame();
         }
@@ -391,10 +407,10 @@ mod tests {
         assert_eq!(shown(), 3, "a touched store is shown at once");
         c.frame();
         assert_eq!(shown(), 3, "and only once");
-        display.request_frame();
+        screen.requests.request();
         c.frame();
         assert_eq!(shown(), 4, "a wanted frame is composed");
-        assert!(!display.frame_pending());
+        assert!(!screen.requests.pending());
     }
 
     #[test]
