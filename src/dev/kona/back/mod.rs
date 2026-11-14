@@ -25,6 +25,8 @@ pub mod raster;
 pub mod tiles;
 pub mod snapshot;
 pub mod store;
+#[cfg(feature = "wgpu")]
+pub mod gpu;
 pub mod context;
 pub mod gl;
 pub mod textport;
@@ -285,9 +287,38 @@ fn write_lines(port: &mut BackPort<'_>, done: &x::pixel::FeedDone) -> bool {
 }
 
 impl KonaBackend {
+    /// A CPU back end, for tests. With the `wgpu` feature and `KONA_TEST_GPU_ARM` set it draws on
+    /// the GPU instead (`KONA_TEST_GPU` picks the device), to run the suites that were written for
+    /// the CPU arm against the other one.
+    #[cfg(test)]
     pub fn new(cfg: KonaConfig) -> Self {
+        #[cfg(feature = "wgpu")]
+        if std::env::var_os("KONA_TEST_GPU_ARM").is_some() {
+            if let Some(gpu) = gpu::tests::shared_gpu() {
+                return Self::with_gpu(cfg, Some(gpu)).expect("a store on the test GPU");
+            }
+        }
+        Self::on(cfg, Store::with_texture(cfg.managed.0, cfg.managed.1, TextureStore::with_capacity_bytes(cfg.texture_bytes_per_rm())))
+    }
+
+    /// A back end that draws on `gpu` when there is one (`[graphics] raster = "wgpu"`), else on
+    /// the CPU. A GPU that cannot hold the screen is an error here, not a quiet CPU back end.
+    pub fn with_gpu(cfg: KonaConfig, gpu: Option<crate::SharedGpu>) -> Result<Self, String> {
+        let tex = TextureStore::with_capacity_bytes(cfg.texture_bytes_per_rm());
+        #[cfg(feature = "wgpu")]
+        if let Some(gpu) = gpu {
+            return Ok(Self::on(cfg, Store::with_gpu(gpu, cfg.managed.0, cfg.managed.1, tex)?));
+        }
+        #[cfg(not(feature = "wgpu"))]
+        if let Some(never) = gpu {
+            match never {}
+        }
+        Ok(Self::on(cfg, Store::with_texture(cfg.managed.0, cfg.managed.1, tex)))
+    }
+
+    fn on(cfg: KonaConfig, store: Store) -> Self {
         let map = Arc::new(parking_lot::Mutex::new(ColourMap::default()));
-        let store = Arc::new(Store::with_texture(cfg.managed.0, cfg.managed.1, TextureStore::with_capacity_bytes(cfg.texture_bytes_per_rm())));
+        let store = Arc::new(store);
         let tables = Arc::<parking_lot::Mutex<Tables>>::default();
         let display = Arc::new(Display::detached());
         display.set_tables(tables.clone());
@@ -466,6 +497,9 @@ impl KonaBackend {
         writeln!(w, "display handle    {}", if self.handle.is_some() { "attached" } else { "detached" })?;
         writeln!(w, "display           {} frames, {} retraces completed, thread {}", self.clock.frames(), self.clock.completed(), if self.thread.is_some() { "running" } else { "stopped" })?;
         writeln!(w, "pixel store       {} word arrays of {} x {}", self.store.cpu().allocated().len(), self.store.cpu().width(), self.store.cpu().height())?;
+        if let Some(line) = self.store.gpu_report() {
+            writeln!(w, "pixel planes      on the GPU: {line}")?;
+        }
         writeln!(w, "textport          colour {} raster {:?}, {} drawn, {} unmodelled", self.textport.colour(), self.textport.raster(), self.textport.drawn, self.textport.unmodelled)?;
         let x = &self.contexts.current().x;
         let gc = match x.gc() {
@@ -858,7 +892,9 @@ impl KonaBackend {
                 self.raster.sample_mask += (ms.cover != !0) as u64;
             }
             let drawable = !ds.clip.is_empty() && (ds.colours != 0 || (ds.depth_test && ds.depth_bits != 0) || (ds.stencil.enabled && ds.stencil_bits != 0));
-            let state = self.tiles().state(ds);
+            // The GPU arm takes the jobs itself, one op at a time; there are no tile workers.
+            let gpu = self.store.is_gpu();
+            let state = if gpu { 0 } else { self.tiles().state(ds) };
             if drawable {
                 self.arrays(&ds);
             }
@@ -872,7 +908,11 @@ impl KonaBackend {
                 match raster::setup::shaped(t, &ds, state, shape) {
                     Ok(mut job) => {
                         job.line = line;
-                        let _ = b.tiles().submit(RasterJob::Tri(job));
+                        if gpu {
+                            b.store.apply(StoreOp::Tri { ds: &ds, job: &job });
+                        } else {
+                            let _ = b.tiles().submit(RasterJob::Tri(job));
+                        }
                     }
                     Err(raster::setup::Skip::NoArea) => b.raster.no_area += 1,
                     Err(raster::setup::Skip::NoSample) => b.raster.no_sample += 1,
@@ -914,7 +954,11 @@ impl KonaBackend {
                     continue;
                 }
                 self.arrays(&ds);
-                let _ = self.tiles().submit(RasterJob::Clear(ClearJob { req, state }));
+                if gpu {
+                    self.store.apply(StoreOp::Clear { ds: &ds, req: &req });
+                } else {
+                    let _ = self.tiles().submit(RasterJob::Clear(ClearJob { req, state }));
+                }
             }
         }
         prims.clear();

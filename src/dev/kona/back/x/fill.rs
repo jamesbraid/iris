@@ -85,7 +85,7 @@ use crate::dev::kona::defs::*;
 use super::gc::{Gc, Target};
 use crate::dev::kona::back::raster::ops::LogicOp;
 use super::state::XState;
-use crate::dev::kona::back::raster::Surface;
+use crate::dev::kona::back::raster::{Rect, Surface};
 use crate::dev::kona::back::store::{StoreOp, WordArray, DID_PLANE, OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE};
 
 /// The two-word data token (tests).
@@ -171,6 +171,25 @@ pub struct StipplePattern {
     pub origin: (i64, i64),
 }
 
+/// One clipped box of a request with everything `rows` reads from its plan, as the GPU store
+/// takes it in place of running the loop.
+#[cfg(feature = "wgpu")]
+#[derive(Clone, Copy, Debug)]
+pub struct LoweredFill<'a> {
+    pub word: usize,
+    pub b: Box4,
+    pub height: i64,
+    pub fg: u32,
+    pub bg: u32,
+    pub mask: u32,
+    pub width_mask: u32,
+    pub gx: u32,
+    pub opaque: bool,
+    pub needs: bool,
+    pub stipple: Option<StipplePattern>,
+    pub clips: &'a [[i32; 4]],
+}
+
 /// Everything about a request, looked up once.
 pub(in crate::dev::kona) struct Plan<'a> {
     pub(super) gc: Gc,
@@ -248,6 +267,42 @@ impl<'a> Plan<'a> {
     fn second(&self) -> Option<Plan<'a>> {
         let array = self.back?;
         Some(Plan { gc: self.gc.clone(), word: crate::dev::kona::back::textport::COLOUR_WORD + 1, array, pitch: array.pitch(), height: self.height, bounds: self.bounds, clips: self.clips, stipple: self.stipple, needs: self.needs, back: None })
+    }
+
+    /// The word position the plan draws into.
+    pub(in crate::dev::kona::back) fn word(&self) -> usize {
+        self.word
+    }
+
+    /// The box `b` (X coordinates, far corner exclusive) as store pixels: the store's rows run the
+    /// other way.
+    pub(in crate::dev::kona::back) fn store_rect(&self, b: Box4) -> Rect {
+        Rect { x0: b.0 as i32, y0: (self.height - b.3) as i32, x1: b.2 as i32, y1: (self.height - b.1) as i32 }
+    }
+
+    /// The widest word the target holds.
+    #[cfg(feature = "wgpu")]
+    pub(in crate::dev::kona::back) fn width_mask(&self) -> u32 {
+        self.gc.width_mask
+    }
+
+    /// The area the plan can draw in, as store pixels.
+    pub(in crate::dev::kona::back) fn bounds_rect(&self) -> Rect {
+        self.store_rect((self.bounds.x1, self.bounds.y1, self.bounds.x2, self.bounds.y2))
+    }
+
+    /// The clip rectangles when there are several (one is the bounds).
+    pub(in crate::dev::kona::back) fn clip_list(&self) -> &'a [[i32; 4]] {
+        self.clips
+    }
+
+    /// The box `b` as a GPU store record takes it: everything `rows` reads from the plan.
+    #[cfg(feature = "wgpu")]
+    pub(in crate::dev::kona::back) fn lower(&self, b: Box4) -> LoweredFill<'a> {
+        let gc = &self.gc;
+        // With no destination read the colour alone makes each word, as in `rows`.
+        let (fg, bg) = if self.needs { (gc.foreground, gc.background) } else { (gc.apply(gc.foreground, 0), gc.apply(gc.background, 0)) };
+        LoweredFill { word: self.word, b, height: self.height, fg, bg, mask: gc.mask, width_mask: gc.width_mask, gx: gc.gx as u32, opaque: gc.opaque_or_tiled, needs: self.needs, stipple: self.stipple, clips: self.clips }
     }
 
     /// The plan for `gc` over the whole managed area: the clip list and the scissor do not limit it.
@@ -438,10 +493,13 @@ impl XState {
             Err(why) => return Outcome { drawn: 0, refused: Some(why) },
         };
         let back = plan.second();
-        if plan.needs && !boxes.clone().all(|b| plan.destination_fits(b, spans) && back.as_ref().is_none_or(|p| p.destination_fits(b, spans))) {
+        let store = surface.store();
+        // The check reads the destination words. A store that keeps them elsewhere answers it from
+        // what its writers could have stored where the boxes lie, or brings those words up to date first.
+        let proven = plan.needs && store.settle(&plan, back.as_ref(), boxes.clone().filter_map(|b| plan.clip(b)));
+        if plan.needs && !proven && !boxes.clone().all(|b| plan.destination_fits(b, spans) && back.as_ref().is_none_or(|p| p.destination_fits(b, spans))) {
             return Outcome { drawn: 0, refused: Some(Refused::Destination) };
         }
-        let store = surface.store();
         let mut drawn = 0;
         for b in boxes {
             if let Some(b) = plan.clip(b) {
