@@ -328,7 +328,7 @@ impl Board {
                 self.raster.run_now(|ctx| {
                     if let Some(g) = &mut ctx.gpu {
                         if let Err(e) = g.read_back_view(&rows.v, x, y, x.wrapping_add(w as i32 - 1), y.wrapping_add(h as i32 - 1)) {
-                            crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi-odyssey: gpu readback: {e}");
+                            g.fail(&format!("VPro readback: {e}"));
                         }
                     }
                 });

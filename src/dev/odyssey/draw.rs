@@ -76,7 +76,7 @@ impl Board {
             if let Some(g) = &mut ctx.gpu {
                 for rows in [&planes.colour[0], &planes.colour[1], &planes.depth, &planes.stencil, &planes.did, &planes.overlay] {
                     if let Err(e) = g.read_back_view(&rows.v, x0, y0, x1, y1) {
-                        crate::dlog!(LogModule::Odyssey, "sgi-odyssey: gpu readback: {e}");
+                        g.fail(&format!("VPro readback: {e}"));
                     }
                 }
             }

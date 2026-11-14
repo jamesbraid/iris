@@ -441,8 +441,6 @@ pub(super) struct ScanoutReader {
     /// mark is not ordered against its data, so the frame may have missed
     /// the data; one more is composed to catch it.
     settling: bool,
-    /// The GPU scan-out failed once (reported), and the CPU composes.
-    gpu_failed: bool,
     /// Compose on the CPU in the screen's order, 0xAABBGGRR
     /// (`Frame::snapshot_for_screen`): the display thread's choice, so its
     /// frames go to the screen with no conversion. Tests read 0x00RRGGBB.
@@ -514,14 +512,11 @@ impl ScanoutReader {
     /// As `update`, on the GPU scan-out with no readback: the frame stays
     /// in the scan-out's buffer, returned with its size, for a renderer on
     /// the same device. None when there is no GPU scan-out, no frame, or it
-    /// fails (the caller then takes the `update` path).
+    /// fails (the device then reports the failure, and nothing is composed).
     #[cfg(feature = "wgpu")]
     pub fn update_on_gpu(&mut self) -> Option<(wgpu::Buffer, u32, u32)> {
         let shared = self.shared();
         let scanout = shared.gpu_scanout.get()?;
-        if self.gpu_failed {
-            return None;
-        }
         self.sync(&shared);
         if self.frame.is_empty() {
             return None;
@@ -534,8 +529,9 @@ impl ScanoutReader {
         match composed {
             Ok(buffer) => Some((buffer, w, h)),
             Err(e) => {
-                self.gpu_failed = true;
-                crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi-odyssey: gpu scanout: {e}; composing on the CPU");
+                // No frame: the failure stops the machine, and a CPU
+                // composition would show a stale board memory meanwhile.
+                scanout.lock().fail(&format!("VPro scan-out: {e}"));
                 None
             }
         }
@@ -581,7 +577,7 @@ impl ScanoutReader {
         }
         self.composed = now;
         self.settling = stored;
-        let gpu = shared.gpu_scanout.get().filter(|_| !self.gpu_failed);
+        let gpu = shared.gpu_scanout.get();
         let (w, h) = (self.frame_width as usize, self.frame_height as usize);
         let snapshot = if self.screen_order { Frame::snapshot_for_screen(&self.snap, displayed) } else { Frame::snapshot(&self.snap, displayed) };
         let (Some(frame), Some(mem)) = (snapshot, shared.vram.get()) else {
@@ -606,7 +602,8 @@ impl ScanoutReader {
             let (fw, fh) = (frame.width.min(self.frame_width), frame.height.min(self.frame_height));
             // The kernel writes rows of fw; a narrower frame is spread over
             // the presented rows after.
-            match scanout.lock().run(&frame, &self.snap, fw, fh, &mut self.frame) {
+            let ran = scanout.lock().run(&frame, &self.snap, fw, fh, &mut self.frame);
+            match ran {
                 Ok(()) => {
                     if fw as usize != w {
                         for y in (1..fh as usize).rev() {
@@ -617,10 +614,9 @@ impl ScanoutReader {
                     return Composed::InFrame;
                 }
                 Err(e) => {
-                    if !self.gpu_failed {
-                        self.gpu_failed = true;
-                        crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi-odyssey: gpu scanout: {e}; composing on the CPU");
-                    }
+                    // No frame; see `update_on_gpu`.
+                    scanout.lock().fail(&format!("VPro scan-out: {e}"));
+                    return Composed::No;
                 }
             }
         }

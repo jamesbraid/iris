@@ -629,7 +629,7 @@ impl Board {
                         Err(e) => {
                             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: gpu unit: {} cleared on the CPU", e.0);
                             if let Err(e) = g.read_back() {
-                                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: gpu readback: {e}");
+                                g.fail(&format!("VPro readback: {e}"));
                             }
                         }
                     }

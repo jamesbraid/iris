@@ -101,6 +101,12 @@ impl VproScanout {
         Arc::clone(self.scanout.gpu())
     }
 
+    /// A composition came back refused (`Gpu::fail`): there is no CPU
+    /// substitute for a frame the GPU owes.
+    pub fn fail(&self, why: &str) {
+        self.scanout.gpu().fail(why);
+    }
+
     /// Over the raster unit's memory buffer.
     pub fn new(gpu: &Arc<Gpu>, vram: &wgpu::Buffer, words: u64) -> Result<VproScanout, String> {
         let layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
