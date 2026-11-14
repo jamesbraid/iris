@@ -5,14 +5,19 @@
 //! only owner of the pixel words, so a store that keeps them somewhere else (device memory, with a
 //! host copy made current by `observe`) can take the same calls.
 //!
-//! Today there is one store, `PixelStore`: `apply` runs the op at once on the calling thread and
+//! There are two arms. `Cpu` is `PixelStore`: `apply` runs the op at once on the calling thread and
 //! `observe` returns at once. Three kinds of user stay on the CPU store through `Store::cpu`: the
 //! tile workers that rasterise triangles, the display that composes the planes, and the checks that
-//! read the words before a write to decide whether to draw it at all.
+//! read the words before a write to decide whether to draw it at all. `Gpu` (`back::gpu`) keeps
+//! the planes in device memory behind a `PixelStore` mirror: `cpu` returns the mirror, and
+//! `observe` is what makes a region of it current. Ops the GPU kernels do not run yet run on the
+//! mirror and are put back (see `back::gpu`).
 
 use super::PixelStore;
 use crate::dev::kona::back::gl::pixels as gl_pixels;
-use crate::dev::kona::back::raster::{DrawState, Rect};
+use crate::dev::kona::back::raster::setup::TriJob;
+use crate::dev::kona::back::raster::{pixel, ClearReq, DrawState, Rect};
+use crate::dev::kona::back::tiles::{ClearJob, RasterJob};
 use crate::dev::kona::back::x::fill::{self as x_fill, Box4, Plan};
 use crate::dev::kona::back::x::pixel::{self as x_pixel, Conv, Geo, Setup};
 use std::ops::Range;
@@ -41,6 +46,11 @@ pub enum StoreOp<'a> {
     /// Set the pixels of a bitmap whose bits are set, most significant bit first, row-major,
     /// `width` bits a row, its row 0 at `y0` and its column 0 at `x0`.
     Bitmap { word: usize, x0: i64, y0: i64, width: u32, height: u32, bits: &'a [u32], value: u32 },
+    /// A triangle under the draw state `ds`, drawn at once. The tile workers do this on the CPU
+    /// arm; the GPU arm queues it.
+    Tri { ds: &'a DrawState, job: &'a TriJob },
+    /// A clear under the draw state `ds`, drawn at once.
+    Clear { ds: &'a DrawState, req: &'a ClearReq },
     /// An X server fill of the clipped box `b` under the request's plan.
     XFill { plan: &'a Plan<'a>, b: Box4, spans: &'a mut Vec<(i64, i64)> },
     /// An X server image (pixel write) under the plan; `words` are the rows as sent.
@@ -73,6 +83,8 @@ pub struct Applied {
 /// The pixel store, whatever holds the words.
 pub enum Store {
     Cpu(PixelStore),
+    #[cfg(feature = "wgpu")]
+    Gpu(super::super::gpu::GpuStore),
 }
 
 impl Store {
@@ -81,19 +93,50 @@ impl Store {
         Store::Cpu(PixelStore::with_texture(width, height, tex))
     }
 
+    /// A store with `tex` as its texture memory whose planes live on `gpu`.
+    #[cfg(feature = "wgpu")]
+    pub fn with_gpu(gpu: std::sync::Arc<crate::wgpu::Gpu>, width: u32, height: u32, tex: super::texture::TextureStore) -> Result<Store, String> {
+        super::super::gpu::GpuStore::new(gpu, width, height, tex).map(Store::Gpu)
+    }
+
     /// A store for tests.
     #[cfg(test)]
     pub fn new(width: u32, height: u32) -> Store {
         Store::Cpu(PixelStore::new(width, height))
     }
 
-    /// The CPU store. For the tile workers, the display and the checks that read before they write,
-    /// and for the allocation, flags and texture memory the seam does not carry. A store with no
-    /// CPU words would not have it.
+    /// Write word `w` of pixel (`x`, `y`) as `PixelStore::write` does, and on the GPU arm put it
+    /// on the GPU. For tests that set up planes the seam has no op for.
+    #[cfg(test)]
+    pub fn write(&self, x: u32, y: u32, w: usize, value: u32) -> bool {
+        let r = Rect { x0: x as i32, y0: y as i32, x1: x as i32 + 1, y1: y as i32 + 1 };
+        let held = self.bracket(&[w], r);
+        let ok = self.cpu().write(x, y, w, value);
+        if ok {
+            held.wrote();
+        }
+        ok
+    }
+
+    /// The CPU store: the words themselves, or on the GPU arm the mirror, current only where
+    /// `observe` made it so. For the tile workers, the display and the checks that read before they
+    /// write, and for the allocation, flags and texture memory the seam does not carry.
     #[inline]
     pub fn cpu(&self) -> &PixelStore {
         match self {
             Store::Cpu(s) => s,
+            #[cfg(feature = "wgpu")]
+            Store::Gpu(g) => g.mirror(),
+        }
+    }
+
+    /// Whether the planes live on the GPU.
+    #[inline]
+    pub fn is_gpu(&self) -> bool {
+        match self {
+            Store::Cpu(_) => false,
+            #[cfg(feature = "wgpu")]
+            Store::Gpu(_) => true,
         }
     }
 
@@ -101,24 +144,154 @@ impl Store {
     /// words live in host memory.
     #[inline]
     pub fn observe(&self, word: usize, r: Rect) {
-        let _ = (word, r);
+        match self {
+            Store::Cpu(_) => {
+                let _ = (word, r);
+            }
+            #[cfg(feature = "wgpu")]
+            Store::Gpu(g) => g.observe(word, r),
+        }
     }
 
     /// `observe` of the whole managed area of every allocated word position.
     pub fn observe_all(&self) {
+        if !self.is_gpu() {
+            return;
+        }
         let s = self.cpu();
         let r = Rect { x0: 0, y0: 0, x1: s.width() as i32, y1: s.height() as i32 };
         s.allocated().into_iter().for_each(|w| self.observe(w, r));
     }
 
+    /// Get ready for the destination check of an X request over `boxes` (X coordinates, clipped),
+    /// which reads the words through `cpu` and refuses when one is wider than the target. True: the
+    /// store has shown that none can be, and the check may be skipped. Otherwise the words are
+    /// current and the check should run. The CPU arm never skips.
+    #[inline]
+    pub fn settle(&self, plan: &x_fill::Plan<'_>, back: Option<&x_fill::Plan<'_>>, boxes: impl Iterator<Item = x_fill::Box4> + Clone) -> bool {
+        match self {
+            Store::Cpu(_) => {
+                let _ = (plan, back, boxes);
+                false
+            }
+            #[cfg(feature = "wgpu")]
+            Store::Gpu(g) => {
+                let mask = plan.width_mask();
+                let words = || std::iter::once(plan).chain(back);
+                if boxes.clone().all(|b| words().all(|p| g.proven(p.word(), p.store_rect(b), mask))) {
+                    return true;
+                }
+                for b in boxes {
+                    words().for_each(|p| g.observe(p.word(), p.store_rect(b)));
+                }
+                false
+            }
+        }
+    }
+
+    /// Copy the plane at `word` into `dst` at `at` bytes, on the device, and say so. False on the
+    /// CPU arm and for a plane that lives in the mirror alone (overlay and popup): the caller
+    /// reads `cpu`. A plane nothing has drawn into copies as zeros.
+    #[cfg(feature = "wgpu")]
+    pub fn copy_plane(&self, word: usize, dst: &wgpu::Buffer, at: u64) -> bool {
+        match self {
+            Store::Cpu(_) => false,
+            Store::Gpu(g) => g.copy_plane(word, dst, at),
+        }
+    }
+
+    /// What the GPU arm has done, as a line for the monitor; None on the CPU arm.
+    pub fn gpu_report(&self) -> Option<String> {
+        match self {
+            Store::Cpu(_) => None,
+            #[cfg(feature = "wgpu")]
+            Store::Gpu(g) => {
+                let (s, refused) = (g.stats(), g.copies_refused());
+                Some(format!(
+                    "{} records, {} batches; {} observes ({} from the mirror), {} read-backs of {} words; width checks {} proven, {} not; {} copies ({} refused); {} ops on the CPU, {} words put back",
+                    s.records, s.flushes, s.observes, s.hits, s.readbacks, s.readback_words, s.proven, s.unproven, s.copies, refused, s.cpu_ops, s.uploaded_words
+                ))
+            }
+        }
+    }
+
+    /// Whether `apply(XCopy)` checks the widths of the words itself, so the caller need not read
+    /// them first. The copy of `clips` clip rectangles within `word`.
+    #[inline]
+    pub fn takes_copy(&self, word: usize, clips: usize) -> bool {
+        match self {
+            Store::Cpu(_) => {
+                let _ = (word, clips);
+                false
+            }
+            #[cfg(feature = "wgpu")]
+            Store::Gpu(_) => super::super::gpu::takes_copy(word, clips),
+        }
+    }
+
+    /// Hold the words of `planes` inside `r` for CPU code that draws into `cpu` directly. They are
+    /// current now; call `wrote` on the guard when the code has changed any, and they go back to
+    /// the store when it drops. Nothing to do on the CPU arm.
+    pub fn bracket(&self, planes: &[usize], r: Rect) -> Bracket<'_> {
+        match self {
+            Store::Cpu(_) => {
+                let _ = (planes, r);
+                Bracket { #[cfg(feature = "wgpu")] gpu: None, _store: std::marker::PhantomData }
+            }
+            #[cfg(feature = "wgpu")]
+            Store::Gpu(g) => Bracket { gpu: Some(g.bracket(planes, r)), _store: std::marker::PhantomData },
+        }
+    }
+
+    /// `bracket` over the planes the draw state `ds` reads and writes, inside its clip rectangle.
+    pub fn bracket_draw(&self, ds: &DrawState) -> Bracket<'_> {
+        #[cfg(feature = "wgpu")]
+        if self.is_gpu() {
+            return self.bracket(&super::super::gpu::ds_planes(ds), ds.clip);
+        }
+        let _ = ds;
+        self.bracket(&[], Rect::default())
+    }
+
     /// Do `op`. Whoever hands in an op has made every queued raster job finish first (`raster::fence`).
     pub fn apply(&self, op: StoreOp<'_>) -> Applied {
+        match self {
+            Store::Cpu(_) => self.apply_cpu(op),
+            #[cfg(feature = "wgpu")]
+            Store::Gpu(g) => {
+                use super::super::gpu::Route;
+                match g.route(&op) {
+                    Route::Done => Applied::default(),
+                    Route::Cpu(planes, r) => {
+                        let b = g.bracket(&planes, r);
+                        b.wrote();
+                        self.apply_cpu(op)
+                    }
+                    Route::Reset => {
+                        g.reset();
+                        self.apply_cpu(op)
+                    }
+                    Route::Restore(word) => {
+                        let done = self.apply_cpu(op);
+                        let m = g.mirror();
+                        g.upload(word, Rect { x0: 0, y0: 0, x1: m.width() as i32, y1: m.height() as i32 });
+                        done
+                    }
+                }
+            }
+        }
+    }
+
+    /// Do `op` on the words `cpu` returns.
+    fn apply_cpu(&self, op: StoreOp<'_>) -> Applied {
         let s = self.cpu();
         let mut done = Applied::default();
         match op {
             StoreOp::Plot { word, x, y, value } => plot(s, word, x, y, value),
             StoreOp::FillBox { word, x1, y1, x2, y2, value } => fill_box(s, word, x1, y1, x2, y2, value),
             StoreOp::Bitmap { word, x0, y0, width, height, bits, value } => bitmap(s, word, x0, y0, width, height, bits, value),
+            StoreOp::Tri { ds, job } => pixel::run(s, &RasterJob::Tri(*job), ds, Rect { x0: 0, y0: 0, x1: s.width() as i32, y1: s.height() as i32 }),
+            StoreOp::Clear { ds, req } => pixel::run(s, &RasterJob::Clear(ClearJob { req: *req, state: 0 }), ds, Rect { x0: 0, y0: 0, x1: s.width() as i32, y1: s.height() as i32 }),
             StoreOp::XFill { plan, b, spans } => x_fill::draw(plan, b, spans),
             StoreOp::XImage { plan, kind, conv, geo, words, spans, pad } => x_pixel::draw_by_op(plan, kind, conv, geo, words, spans, pad),
             StoreOp::XCopy { plan, setup, rect, spans, row } => x_pixel::copy_write(plan, setup, rect, spans, row),
@@ -146,12 +319,33 @@ impl Store {
     }
 }
 
+/// Words held for CPU code (`Store::bracket`).
+pub struct Bracket<'a> {
+    #[cfg(feature = "wgpu")]
+    gpu: Option<super::super::gpu::Bracket<'a>>,
+    _store: std::marker::PhantomData<&'a Store>,
+}
+
+impl Bracket<'_> {
+    /// The code changed words in the region.
+    #[inline]
+    pub fn wrote(&self) {
+        #[cfg(feature = "wgpu")]
+        if let Some(b) = &self.gpu {
+            b.wrote();
+        }
+    }
+}
+
 #[cfg(test)]
 impl std::ops::Deref for Store {
     type Target = PixelStore;
 
     /// Tests read the words they drew without an `observe`; production code goes through `cpu`.
+    /// On the GPU arm the words are made current here, so a test written for the CPU arm reads the
+    /// same.
     fn deref(&self) -> &PixelStore {
+        self.observe_all();
         self.cpu()
     }
 }

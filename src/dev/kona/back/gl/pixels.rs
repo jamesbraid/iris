@@ -58,6 +58,7 @@ use crate::dev::gl::math;
 use crate::dev::kona::back::raster::ops::ownership_plane;
 use crate::dev::kona::back::raster::pixel::Planes;
 use crate::dev::kona::back::raster::DrawState;
+use crate::dev::kona::back::store::seam::Bracket;
 use crate::dev::kona::back::store::{Store, StoreOp, WordArray, DID_PLANE};
 use crate::dev::kona::defs::pixel::*;
 use crate::dev::kona::defs::*;
@@ -892,6 +893,9 @@ struct Canvas<'a> {
     planes: Planes<'a>,
     did: Option<WordArray<'a>>,
     pitch: usize,
+    /// The planes held current while fragments go straight to the CPU store; those the fragments
+    /// wrote go back to a store that keeps them elsewhere when the canvas drops.
+    bracket: Bracket<'a>,
 }
 
 impl<'a> Canvas<'a> {
@@ -899,9 +903,10 @@ impl<'a> Canvas<'a> {
         // A pixel rectangle is not textured, and the model does not stipple it (see the module doc).
         ds.texture = None;
         ds.polygon_stipple = None;
+        let bracket = store.bracket_draw(&ds);
         let cpu = store.cpu();
         let did = ds.ownership.is_some().then(|| cpu.array(DID_PLANE)).flatten();
-        Canvas { store, planes: Planes::new(cpu, &ds), ds, did, pitch: cpu.width() as usize }
+        Canvas { store, planes: Planes::new(cpu, &ds), ds, did, pitch: cpu.width() as usize, bracket }
     }
 
     /// The plane index of window pixel (`x`, `y`), when it is inside the clip rectangle and owned.
@@ -922,6 +927,7 @@ impl<'a> Canvas<'a> {
     fn frag(&self, c: &mut Counts, x: i64, y: i64, colour: [f32; 4], z: u32) {
         if let Some(index) = self.at(x, y) {
             c.fragments += 1;
+            self.bracket.wrote();
             let src = colour.map(|v| colour13(v) as u32);
             match &self.ds.samples {
                 None => self.planes.shade(&self.ds, index, src, z),
@@ -1027,6 +1033,7 @@ fn emit(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, img: &Image) {
                         Plane::Stencil(v) => {
                             let value = p.integer(v[k], MAP_STENCIL_TO_STENCIL, p.map_stencil) as u32 as u8;
                             if let (Some(index), true, true) = (canvas.at(x, y), canvas.ds.stencil_bits != 0, canvas.ds.samples.is_some()) {
+                                canvas.bracket.wrote();
                                 canvas.planes.set_stencil(&canvas.ds, index, value, canvas.ds.stencil.write_mask);
                             } else if let (Some(index), true) = (canvas.at(x, y), canvas.ds.stencil_bits != 0) {
                                 canvas.store.apply(StoreOp::StencilWrite { word: canvas.ds.stencil_word as usize, index, value, mask: canvas.ds.stencil.write_mask });

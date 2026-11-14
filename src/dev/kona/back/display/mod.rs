@@ -301,7 +301,7 @@ impl Compositor {
         let mut guard = self.scanout.lock();
         let sc = guard.as_mut()?;
         let (w, h) = (self.store.cpu().width(), self.store.cpu().height());
-        if let Err(e) = sc.compose(self.store.cpu(), self.word, map, tables) {
+        if let Err(e) = sc.compose(&self.store, self.word, map, tables) {
             sc.fail(&e);
             screen.counts.count(false);
             return Some(false);
@@ -356,6 +356,8 @@ impl Compositor {
             out.width = w;
             out.height = h;
             out.words.resize(w as usize * h as usize, 0);
+            // A store that keeps the planes on the GPU brings back what changed since the last frame.
+            self.store.observe_all();
             compose(self.store.cpu(), self.word, &map, &tables, &mut out.words, w as usize);
             screen.counts.count(true);
             true
@@ -404,6 +406,7 @@ impl Pixels {
     pub fn frame(&self) -> Vec<u32> {
         let w = self.store.cpu().width() as usize;
         let mut frame = vec![0u32; w * self.store.cpu().height() as usize];
+        self.store.observe_all();
         let map = self.map.lock().clone();
         let tables = self.tables.lock().snapshot();
         compose(self.store.cpu(), super::textport::COLOUR_WORD, &map, &tables, &mut frame, w);

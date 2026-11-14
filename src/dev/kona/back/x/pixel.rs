@@ -599,11 +599,48 @@ fn copy_fits(plan: &Plan<'_>, [sx, sy, dx, dy]: [i64; 4], (i0, i1, j0, j1): (i64
 /// written by the store (`copy_write`).
 fn copy_rows(store: &Store, plan: &Plan<'_>, s: &Setup, rect: [i64; 4], spans: &mut Vec<(i64, i64)>, row: &mut Vec<u32>) -> Verdict {
     let Some(extent) = copy_extent(plan, s, rect) else { return Verdict::Done };
-    if !copy_fits(plan, rect, extent) {
-        return Verdict::Destination;
+    // A store that holds the words elsewhere checks them where they are, as part of the copy;
+    // otherwise they are read here, current first.
+    if !store.takes_copy(plan.word(), plan.clip_list().len()) {
+        store.observe(plan.word(), plan.bounds_rect());
+        if !copy_fits(plan, rect, extent) {
+            return Verdict::Destination;
+        }
     }
     store.apply(StoreOp::XCopy { plan, setup: s, rect, spans, row });
     Verdict::Copied
+}
+
+/// A copy as a GPU store takes it: the clipped extent and everything `copy_write` reads from the
+/// plan.
+#[cfg(feature = "wgpu")]
+#[derive(Clone, Copy, Debug)]
+pub struct LoweredCopy<'a> {
+    pub word: usize,
+    /// Source and destination origins, in X coordinates.
+    pub sx: i64,
+    pub sy: i64,
+    pub dx: i64,
+    pub dy: i64,
+    /// The extent that lies inside the managed area and the plan's bounds: source columns
+    /// `i0..i1` and rows `j0..j1` of the rectangle.
+    pub i0: i64,
+    pub i1: i64,
+    pub j0: i64,
+    pub j1: i64,
+    pub gx: u32,
+    pub mask: u32,
+    pub width_mask: u32,
+    pub needs: bool,
+    pub clips: &'a [[i32; 4]],
+}
+
+/// `copy_write` as a record: None when nothing of the rectangle lies on the store.
+#[cfg(feature = "wgpu")]
+pub(in crate::dev::kona::back) fn lower_copy<'a>(plan: &Plan<'a>, s: &Setup, rect @ [sx, sy, dx, dy]: [i64; 4]) -> Option<LoweredCopy<'a>> {
+    let (i0, i1, j0, j1) = copy_extent(plan, s, rect)?;
+    let gc = &plan.gc;
+    Some(LoweredCopy { word: plan.word(), sx, sy, dx, dy, i0, i1, j0, j1, gx: gc.gx as u32, mask: gc.mask, width_mask: gc.width_mask, needs: plan.needs, clips: plan.clip_list() })
 }
 
 /// The writing half of `copy_rows`, which `row` holds one source row at a time for.
@@ -737,7 +774,8 @@ impl XState {
         let mut pad = std::mem::take(&mut self.pixel.row);
         let verdict = match Plan::with_gc(self, surface, gc, stipple) {
             Ok(Some(plan)) => {
-                let fits = !plan.needs || {
+                let b = plan.bounds;
+                let fits = !plan.needs || surface.store().settle(&plan, None, std::iter::once((b.x1, b.y1, b.x2, b.y2))) || {
                     let mut ok = true;
                     let mask = plan.gc.width_mask;
                     walk_kind(&plan, kind, &conv, &geo, words, &mut spans, &mut pad, |i, _| {

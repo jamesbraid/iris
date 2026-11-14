@@ -303,11 +303,17 @@ impl Kona {
     /// every byte the pipe programs is written through, so the contents outlast
     /// the process as they outlast power-off on a pipe.
     pub fn new(cfg: KonaConfig, irq: Arc<dyn InterruptController>, mem: Arc<dyn BusDevice>, status: Arc<crate::disp::StatusSource>, flash: Option<File>) -> Result<Arc<Kona>, String> {
+        Self::with_gpu(cfg, irq, mem, status, flash, None)
+    }
+
+    /// `new`, with the pixel store on `gpu` when there is one (`[graphics] raster = "wgpu"`). A
+    /// device failure after this reaches the machine through the device, not through the pipe.
+    pub fn with_gpu(cfg: KonaConfig, irq: Arc<dyn InterruptController>, mem: Arc<dyn BusDevice>, status: Arc<crate::disp::StatusSource>, flash: Option<File>, gpu: Option<crate::SharedGpu>) -> Result<Arc<Kona>, String> {
         let flash = match flash {
             Some(f) => flash::Flash::backed(f)?,
             None => flash::Flash::fresh(),
         };
-        let backend = KonaBackend::new(cfg);
+        let backend = KonaBackend::with_gpu(cfg, gpu)?;
         backend.set_status(status);
         let pixels = backend.pixels();
         let display: Arc<dyn crate::gfx_display::GfxDisplay> = backend.display();
@@ -558,12 +564,6 @@ impl Kona {
             s.reason_poke.store(true, SeqCst);
             s.wake();
         }
-    }
-
-    /// Compose the pipe's display on the machine's GPU (see `KonaBackend::set_gpu`).
-    #[cfg(feature = "wgpu")]
-    pub fn set_gpu(&self, gpu: crate::SharedGpu) -> Result<(), String> {
-        self.shared.pipe.lock().backend.set_gpu(gpu)
     }
 
     /// The window the pipe shows the guest, for the machine's `get_display`.

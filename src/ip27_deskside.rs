@@ -378,6 +378,7 @@ impl Deskside {
         cfg: &MachineConfig,
         layout: &DesksideLayout,
         status: &Arc<crate::disp::StatusSource>,
+        faults: &std::sync::mpsc::Sender<crate::traits::MachineFatal>,
     ) -> Result<(Arc<Bridge>, &'a Node, Option<Arc<Kona>>), String> {
         let mut widgets = 1u16 << layout.baseio_widget;
         widgets |= layout.graphics_widget.map_or(0, |w| 1 << w);
@@ -408,7 +409,9 @@ impl Deskside {
                     .with_widget(graphics_widget)?
                     .with_pool(cfg.graphics.threads, cfg.graphics.tile);
                 let flash = cfg.graphics.flash.as_deref().map(|p| crate::dev::kona::flash_file(Path::new(p))).transpose()?;
-                let pipe = Kona::new(kona_cfg, pipe_hosts.clone(), pipe_hosts.clone(), status.clone(), flash)?;
+                // `[graphics] raster = "wgpu"`: the pipe's pixel store lives on the machine's GPU.
+                let gpu = crate::workstation::share_gpu(&crate::workstation::open_gpu(cfg, faults)?);
+                let pipe = Kona::with_gpu(kona_cfg, pipe_hosts.clone(), pipe_hosts.clone(), status.clone(), flash, gpu)?;
                 let _ = pipe_hosts.widget.set(pipe.dma_widget_handle());
                 // The driver's adaptor reset link-resets the pipe's widget before it pulses the board's
                 // reset; the widget loses its Crosstalk interface registers.
@@ -497,7 +500,7 @@ impl Ip27Board for Deskside {
                 let (bridge, host) = Self::wire_per_node(nodes, cfg, layout)?;
                 (bridge, host, None)
             }
-            Crossbows::Shared => Self::wire_shared(nodes, cfg, layout, &status)?,
+            Crossbows::Shared => Self::wire_shared(nodes, cfg, layout, &status, faults)?,
         };
         if let [a, b] = nodes {
             Hub::cable(&a.hub, &b.hub);
@@ -512,7 +515,6 @@ impl Ip27Board for Deskside {
             Self::fit_mediaio(host, cfg, &pci_bridge, media, &mut io);
         }
         if let Some(p) = pipe {
-            crate::workstation::fit_kona_gpu(&p, &crate::workstation::open_gpu(cfg, faults)?)?;
             io.display = Some(p.display());
             io.status = Some(status);
             io.devices.push(p.clone());

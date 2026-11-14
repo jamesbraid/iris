@@ -1313,10 +1313,14 @@ pub struct GraphicsSection {
     /// two from 8 to 256.
     #[serde(default = "default_graphics_tile")]
     pub tile: u32,
-    /// VPro and IMPACT: where the raster unit runs: `cpu` (the threads
-    /// above; IMPACT's raster engine threads) or `wgpu` (the host GPU
-    /// through wgpu compute; needs the `wgpu` feature). GR2, the O2 and
-    /// InfiniteReality: where the display scans out (their raster stays on
+    /// VPro, IMPACT and InfiniteReality (KONA): where the raster unit runs:
+    /// `cpu` (the threads above; IMPACT's raster engine threads) or `wgpu`
+    /// (the host GPU through wgpu compute; needs the `wgpu` feature). On
+    /// InfiniteReality the pixel planes live on the GPU and the display
+    /// scans out from them, and the draws its kernels do not run yet
+    /// (texture, fog, smoothing, multisampling, pixel transfers) run on the
+    /// CPU against a copy. GR2 and the O2: where the display scans out (GR2's
+    /// raster and CRIME's rendering engine stay on
     /// the CPU).
     #[serde(default)]
     pub raster: RasterUnit,
@@ -4137,7 +4141,7 @@ pub struct Cli {
     #[arg(long = "graphics", visible_alias = "board", visible_alias = "graphics-board", value_name = "BOARD")]
     pub graphics: Option<GraphicsBoard>,
 
-    /// VPro and IMPACT: where the raster unit runs: `cpu` (default) or `wgpu` (the host GPU through wgpu compute; needs a build with the `wgpu` feature). GR2, the O2 and InfiniteReality: where the display scans out.
+    /// VPro, IMPACT and InfiniteReality: where the raster unit runs: `cpu` (default) or `wgpu` (the host GPU through wgpu compute; needs a build with the `wgpu` feature). GR2 and the O2: where the display scans out.
     #[arg(long = "raster", value_name = "UNIT")]
     pub raster: Option<RasterUnit>,
 
