@@ -86,7 +86,8 @@ const FIXED_MAX: i32 = (1 << 24) - 1;
 const DEPTH_2S: f32 = 8589901824.0;
 const DEPTH_MIN_VALUE: f32 = 1.0 / 2147483648.0;
 
-var<private> nc: f32;
+// Zero, known only at run time: see p().
+var<private> nz: u32;
 
 // Record words, read in place: a record or slot copied by value sits in
 // each lane's private memory, and enough of that gave wrong results on
@@ -107,10 +108,13 @@ fn r64(pi: u32, i: u32) -> I64 {
     return I64(recs[pi].w[i], recs[pi].w[i + 1u]);
 }
 
-// x * 1.0 through a value the compiler cannot fold: the product is
-// rounded on its own before it joins a sum.
+// x through an xor with a value the compiler cannot fold: a product or
+// difference is rounded on its own before it joins a sum. Metal compiles
+// with fast math, which may fuse a multiply into an add and reassociate;
+// a multiply by a run-time 1.0 did not stop it there (9 raster tests were
+// a step off the CPU path), an xor on the bits does.
 fn p(x: f32) -> f32 {
-    return x * nc;
+    return bitcast<f32>(bitcast<u32>(x) ^ nz);
 }
 
 // Rust's `as i32`: truncation, saturating, NaN to 0.
@@ -277,7 +281,7 @@ fn shade_pixel(pi: u32, si: u32, px: i32, py: i32, s: ShadeIn) -> Frag {
         let iw0 = rf(pi, T_IW);
         let w1 = p(l1 * rf(pi, T_IW + 1u));
         let w2 = p(l2 * rf(pi, T_IW + 2u));
-        let sum = (p(((1.0 - l1) - l2) * iw0) + w1) + w2;
+        let sum = (p(p(p(1.0 - l1) - l2) * iw0) + w1) + w2;
         if sum == 0.0 || !(abs(sum) < bitcast<f32>(0x7f800000u)) {
             return none;
         }
@@ -480,7 +484,7 @@ fn arch_tile_begin(tile: u32, px: i32, py: i32, lane: u32) {
 fn arch_prim(pi: u32, px: i32, py: i32, lane: u32) {
     tc_prepare(pi, px, py);
     let si = recs[pi].slot;
-    nc = bitcast<f32>(recs[pi].one);
+    nz = recs[pi].one ^ 0x3f800000u;
     let kind = recs[pi].kind;
     if kind == REC_RECT {
         rect(pi, si, px, py);
