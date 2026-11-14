@@ -1430,6 +1430,13 @@ fn resident_frame_gpu_headless_screenshot_png_matches_cpu() {
                 assert!(!board.0.screenshot_pending());
                 assert_eq!(board.0.screen.lock().frame_seq, initial_seq + 1);
                 let expected = software_frame(&board.0, &rgb, &aux);
+                // The display no longer writes files; it publishes the frame on
+                // the board's Screen and the hotkey encodes that frame.
+                let frame = board.0.screens()[0].latest().expect("the screen publishes the composed frame");
+                assert_eq!((frame.width as usize, frame.height as usize), (WIDTH, HEIGHT));
+                crate::disp::write_png_words(
+                    "screenshot_0000.png", &frame.words, frame.width as usize, frame.width as usize, frame.height as usize,
+                ).unwrap();
                 let deadline = Instant::now() + Duration::from_secs(10);
                 let (info, pixels) = loop {
                     let decoded = (|| {
@@ -1637,6 +1644,12 @@ fn resident_frame_gpu_headless_requests_and_vnc_capture() {
                 .map(|pixel| u32::from_le_bytes(pixel.try_into().unwrap())).collect();
             let expected: Vec<u32> = captured.iter().map(|pixel| pixel & 0x00ff_ffff).collect();
             assert_pixels_eq("VNC composed frame", &vnc, &expected);
+            // The server sends the screen's newest frame at once and asks for
+            // a fresh one; the capture follows on the display's next tick.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while board.0.screen.lock().frame_seq <= seq && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
             assert!(board.0.screen.lock().frame_seq > seq, "VNC enabled composed capture");
             drop(stream);
             let deadline = Instant::now() + Duration::from_secs(5);
