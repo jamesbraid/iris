@@ -127,7 +127,7 @@ pub struct Sharpen {
 /// The weights of the client's default curve, points (-4, 1) and (0, 0): linear in the level of detail from 1 at
 /// -4 and below to 0 at 0 (established as the default points; the straight line between them is approximated).
 pub fn default_weights() -> [f32; CURVE_NODES] {
-    std::array::from_fn(|i| if i == 0 { 1.0f32 } else { (-(i as f32 / 64.0f32).log2() / 4.0f32).clamp(0.0f32, 1.0f32) })
+    std::array::from_fn(|i| if i == 0 { 1.0f32 } else { (-crate::dev::kona::back::lodmath::log2(i as f32 / 64.0f32) / 4.0f32).clamp(0.0f32, 1.0f32) })
 }
 
 /// The 64 samples of a spline-form filter table: four ten-bit codes to two words, each a signed mantissa shifted
@@ -373,7 +373,7 @@ pub fn sample3(store: &TextureStore, d: &TexDesc, s: f32, t: f32, r: f32, lod: f
 /// whether the hardware interpolates or takes the nearest node).
 #[inline(always)]
 fn curve_weight(w: &[f32; CURVE_NODES], lod: f32) -> f32 {
-    let at = (lod.exp2() * 64.0f32).min(63.0f32);
+    let at = (crate::dev::kona::back::lodmath::exp2(lod) * 64.0f32).min(63.0f32);
     let n = at as usize;
     let f = at - n as f32;
     w[n] * (1.0f32 - f) + w[(n + 1).min(CURVE_NODES - 1)] * f

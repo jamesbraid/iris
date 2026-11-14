@@ -9,9 +9,6 @@
 //! `lod_log2` and `lod_exp2` in `gpu_lib/lodmath.wgsl`, which do the same
 //! operations in the same order on integer halves, so the two agree bit for bit.
 
-// Not called yet: the raster kernel's texture stage will use it (the GPU twin is already tested against it).
-#![allow(dead_code)]
-
 const LN2: f64 = f64::from_bits(0x3fe6_2e42_fefa_39ef);
 const TWO_OVER_LN2: f64 = f64::from_bits(0x4007_1547_652b_82fe);
 

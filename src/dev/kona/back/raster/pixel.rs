@@ -550,7 +550,7 @@ fn run_tri<const FOG: u8, const AA: bool, const PLAIN: bool, const ADD: bool, S:
                         (rho, scale) = (rr, rs);
                     }
                 }
-                (rho * scale / 16.0f32).max(1e-6f32).log2()
+                crate::dev::kona::back::lodmath::log2((rho * scale / 16.0f32).max(1e-6f32))
             });
             for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
                 let (x, y) = (qx + dx, qy + dy);

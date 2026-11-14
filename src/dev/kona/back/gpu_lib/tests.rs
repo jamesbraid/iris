@@ -220,13 +220,11 @@ fn log2_and_exp2_match_the_host() {
         check("log2", x, outs[2 * i], lodmath::log2(x), (x as f64).log2() as f32, x.log2());
         check("exp2", x, outs[2 * i + 1], lodmath::exp2(x), (x as f64).exp2() as f32, x.exp2());
     }
-    eprintln!("{} log2 and {} exp2 inputs: gpu differs from the CPU twin or the rounded double on {}; the host f32 libm differs from the gpu on {host_misses} results (each by an ulp)", xs.len(), xs.len(), bad.len());
+    eprintln!("{} log2 and {} exp2 inputs: gpu differs from the CPU twin or the rounded double on {}; the host f32 libm, which the CPU no longer uses, differs on {host_misses} results (each by an ulp)", xs.len(), xs.len(), bad.len());
     for l in &host_examples {
         eprintln!("  host libm: {l}");
     }
     assert!(bad.is_empty(), "{} results differ:\n{}", bad.len(), bad.iter().take(20).cloned().collect::<Vec<_>>().join("\n"));
-    // The host libm is not rounded, but it is within an ulp nearly always.
-    assert!(host_misses * 500 < 2 * xs.len(), "the host libm differs on {host_misses} results");
 }
 
 /// A kernel over 16-word cases: [desc, kind, s, t, r, lod, 6..9 fragment colour, 10..13 texel, 14
