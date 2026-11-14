@@ -819,20 +819,30 @@ constructor, answers `GfxDisplay::cycles` from it, and does not build a
 
 ### The composed frame and the hardware cursor
 
-`GfxDisplay` (`src/gfx_display.rs`) is what the window, the CI socket, the
-monitor's `screen`/`ptr` commands and the VNC server see of a board, whichever
-board it is. The display thread leaves the composed guest frame in
-`screen().rgba` (stride 2048, `0xAABBGGRR`, no status bar) and bumps
-`screen().frame_seq` each time it rewrites it. GR2, the O2 and InfiniteReality
-compose on the CPU and do this every frame, as do IMPACT and VPro unless the
-window's renderer takes GPU frames (above). Newport composes inside the window's
-renderer, so it fills `rgba` only when asked: `request_frame` for one frame,
-`set_capture(true)` for every frame while a consumer (VNC) watches. In normal
-Newport operation, continuous capture switches the GL window to its software
-compositor, while a wgpu window reads its composed GPU output. With no window
-(`--ci`) the refresh thread composes in software itself. The test-only resident
-display also reads its composed GPU output, as described above.
-`copy_frame`/`fresh_frame` are the helpers that read it.
+`GfxDisplay` (`src/gfx_display.rs`) hands out a board's `Screen`s (one per
+head), the hardware cursor and the CPU cycle counter. A `Screen` is what the
+window, the CI socket, the monitor's `screen`/`ptr` commands and the VNC server
+see of a board, whichever board it is: the window's renderer slot, the newest
+composed guest frame (`latest()`; tight rows, `0xAABBGGRR`, no status bar, with
+a sequence number), the frame requests, and the counts `screen frames` reports.
+A consumer that wants a frame calls `capture(timeout)`: it asks, the board
+composes the next frame, and the call returns the newest. VNC turns
+`requests.capture(true)` on and follows `latest()` by sequence number. A request
+made while a frame is being composed is not answered by that frame but by the
+next one.
+
+Each board's display thread is `run_display` with two closures: the board's
+per-frame duty (the retrace pulse, trace flushes), which runs every tick, and
+its compose, which runs only when `Screen::need()` says something looks at the
+screen (a renderer, a pending request, a capturing client). With nobody looking
+a board composes nothing. GR2, the O2 and InfiniteReality compose on the CPU;
+IMPACT and VPro skip the readback when the window's renderer takes GPU frames
+(above). Newport composes inside the window's renderer, so it fills the frame's
+words only when asked. In normal Newport operation, continuous capture switches
+the GL window to its software compositor, while a wgpu window reads its composed
+GPU output. With no window (`--ci`) the refresh thread composes in software
+itself. The test-only resident display also reads its composed GPU output, as
+described above.
 
 Nothing downstream looks inside the drawing code. The VNC server
 (`src/vnc/`) finds damage by comparing frames in 64x64 tiles, so every board

@@ -402,7 +402,7 @@ fn pack_frame(
 
 /// Copy the band `dirty_y..dirty_y + dirty_h` of a composed frame (stride
 /// 2048, `0xAABBGGRR`) into `screen.rgba`, where everything outside this process
-/// reads it: the VNC server's `grab_loop`, `fresh_frame`, and the screenshot
+/// reads it: the VNC server's `grab_loop`, `Screen::capture`, and the screenshot
 /// path. Same layout, same word format, so it is a row-wise copy — no
 /// conversion, exactly like the `--ci` path in REX3's refresh loop.
 ///

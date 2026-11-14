@@ -1,77 +1,35 @@
 //! What the UI, CI socket and GUI front-end need from whichever graphics board
-//! drives the screen (Newport/REX3 or GR2).
+//! drives the screen.
 //!
-//! Each board owns its display thread and composition (the status bar's
-//! inputs come from the machine's shared `StatusSource`); this trait only
-//! exposes the hand-off points: the renderer slot the front-end installs into, the
-//! last-presented screen (screenshots, VNC), the hardware cursor, and the CPU
-//! cycle counter.
+//! A board owns its display thread and its composition; the thread is
+//! [`run_display`] with the board's closures. What the front-end sees is one
+//! [`Screen`] per head: the renderer slot it installs into, the newest
+//! composed frame (screenshots, VNC, the monitor), the requests it makes for
+//! a fresh one, and the counts of what the thread did. [`GfxDisplay`] only
+//! hands the screens out, with the hardware cursor and the CPU cycle counter.
 
-use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use crate::disp::Rex3Screen;
 use crate::cpu::mips_core::CyclesPtr;
 use crate::dev::ng1::rex3::Renderer;
 
 pub trait GfxDisplay: Send + Sync {
+    /// The board's screens in head order. Most boards have one.
+    fn screens(&self) -> &[Arc<Screen>];
+
     /// The board's [`DisplayStop`], which its stop and its display thread use.
     fn display_stop(&self) -> &DisplayStop;
-
-    /// Slot the front-end installs its renderer into. The board's display
-    /// thread presents every frame through whatever is installed here.
-    fn renderer_slot(&self) -> &Mutex<Option<Box<dyn Renderer>>>;
-
-    /// Last presented frame state. Screenshots read `rgba` (stride 2048).
-    fn screen(&self) -> &Mutex<Rex3Screen>;
-
-    /// Ask the display thread to read the next frame back into `screen().rgba`.
-    fn request_screenshot(&self);
-
-    /// True while a [`request_screenshot`](Self::request_screenshot) readback is
-    /// still pending. Callers wait for this to clear (bounded) so they copy the
-    /// requested frame rather than the one that happened to be current. The
-    /// default is `false`: a board that does not consume the request has
-    /// nothing to wait for.
-    fn screenshot_pending(&self) -> bool { false }
-
-    /// Frames the display thread composed and skipped, for `screen frames`,
-    /// on a board that counts them.
-    fn frame_counts(&self) -> Option<&FrameCounts> { None }
-
-    /// CPU cycle counter the board was wired to (GUI's live MIPS estimate).
-    fn cycles(&self) -> CyclesPtr;
-
-    /// Ask for the next composed frame in `screen().rgba`, without the
-    /// screenshot file [`request_screenshot`](Self::request_screenshot) also
-    /// writes. Boards that compose into `rgba` every frame ignore it.
-    fn request_frame(&self) {}
-
-    /// True while a [`request_frame`](Self::request_frame) is still pending.
-    fn frame_pending(&self) -> bool { false }
-
-    /// Whether a completed composed frame is available to consumers. This
-    /// may be called with `screen()` locked and must not lock it again.
-    fn frame_available(&self) -> bool { true }
-
-    /// Keep `screen().rgba` current with every composed frame while at least
-    /// one consumer (VNC) has turned capture on. Calls nest: each `true` is
-    /// matched by a `false`. Newport's GL capture composes in software; its
-    /// wgpu window and gated resident tests read back composed GPU output.
-    /// Boards that always compose into `rgba` ignore it.
-    fn set_capture(&self, _on: bool) {}
 
     /// The hardware cursor as the guest has set it, read live from the
     /// board's registers (not the last composed frame).
     fn hw_cursor(&self) -> Option<HwCursor> { None }
 
-    /// The host GPU the board draws or composes on, when it uses one: a wgpu
-    /// window renderer presents on the same device, so a frame composed there
-    /// need not come back to the CPU.
-    #[cfg(feature = "wgpu")]
-    fn gpu(&self) -> Option<std::sync::Arc<crate::wgpu::Gpu>> { None }
+    /// CPU cycle counter the board was wired to (GUI's live MIPS estimate).
+    fn cycles(&self) -> CyclesPtr;
 }
 
 /// Set when anything the scan-out reads may have changed; taken by the
@@ -381,6 +339,241 @@ impl DisplayStop {
     }
 }
 
+/// One composed picture of a screen, immutable once published in an `Arc`.
+#[derive(Default)]
+pub struct Frame {
+    /// Counts up by one for each frame the screen publishes.
+    pub seq: u64,
+    pub width: u32,
+    pub height: u32,
+    /// `0xAABBGGRR`, `width` to a row, no padding. Empty when only `gpu` was
+    /// needed.
+    pub words: Vec<u32>,
+    /// The same pixels in the same order on the screen's device.
+    #[cfg(feature = "wgpu")]
+    pub gpu: Option<::wgpu::Buffer>,
+    /// Newport's debug overlay, only while it is on.
+    pub overlay: Option<Vec<u32>>,
+}
+
+/// What the screen needs composed this tick. All false: nobody looks, so the
+/// board composes nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Need {
+    /// A pull consumer (a screenshot, VNC, the monitor) wants the frame's words.
+    pub words: bool,
+    /// The shown renderer takes frames on the board's device, and no pull
+    /// consumer wants words.
+    pub gpu: bool,
+    /// A renderer is shown: the board redraws what changed, and at its idle
+    /// rate so the status bar moves.
+    pub redraw: bool,
+}
+
+impl Need {
+    pub fn any(&self) -> bool {
+        self.words || self.gpu || self.redraw
+    }
+}
+
+/// The front-end's half of a screen: the renderer it installs, and which of
+/// the machine's screens that renderer is showing.
+#[derive(Default)]
+pub struct Window {
+    pub renderer: Mutex<Option<Box<dyn Renderer>>>,
+    pub shown: AtomicUsize,
+}
+
+/// One head's output, shared by the board's display thread and every consumer.
+/// The board side takes no lock but its own: it marks changes, reads requests
+/// and publishes frames, and the consumers read.
+pub struct Screen {
+    /// Set by whatever the scan-out reads (see [`ScreenChanged`]).
+    pub changed: Arc<ScreenChanged>,
+    pub requests: FrameRequests,
+    /// What the display thread did, for the monitor's `screen frames`.
+    pub counts: FrameCounts,
+    pub window: Arc<Window>,
+    pub index: usize,
+    /// Park the display thread while nobody looks, instead of ticking at the
+    /// frame period. Only a board with no retrace duty may: its marks wake it.
+    pub parks: bool,
+    /// Compose at the idle rate with nobody looking, for a board whose
+    /// compose also learns state others read (Newport's mode and cursor offset).
+    pub always: bool,
+    /// The host GPU the board draws or composes on, when it uses one: a wgpu
+    /// window presents on the same device. Set once, when the board knows it.
+    #[cfg(feature = "wgpu")]
+    pub gpu: std::sync::OnceLock<Arc<crate::wgpu::Gpu>>,
+    /// The frame size last published or set, packed height << 32 | width.
+    size: AtomicU64,
+    /// The requests the frame being composed will answer.
+    noted: AtomicU64,
+    /// Held only to clone or swap an `Arc`.
+    latest: Mutex<Option<Arc<Frame>>>,
+    /// A published frame's buffer, once nobody holds the frame.
+    spare: Mutex<Vec<u32>>,
+}
+
+impl Screen {
+    pub fn new(index: usize, window: Arc<Window>) -> Screen {
+        Screen {
+            changed: Arc::new(ScreenChanged::marked()),
+            requests: FrameRequests::default(),
+            counts: FrameCounts::default(),
+            window,
+            index,
+            parks: false,
+            always: false,
+            #[cfg(feature = "wgpu")]
+            gpu: std::sync::OnceLock::new(),
+            size: AtomicU64::new(0),
+            noted: AtomicU64::new(0),
+            latest: Mutex::new(None),
+            spare: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// What this tick has to compose: a request or a capturing client wants
+    /// words, a renderer is shown (and takes device frames, when it does).
+    pub fn need(&self) -> Need {
+        let words = self.requests.pending() || self.requests.capturing();
+        let renderer = self.window.renderer.lock();
+        #[cfg(feature = "wgpu")]
+        let gpu = !words && renderer.as_ref().is_some_and(|r| r.takes_gpu_frames());
+        #[cfg(not(feature = "wgpu"))]
+        let gpu = false;
+        Need { words, gpu, redraw: self.always || renderer.is_some() }
+    }
+
+    /// A frame to compose into, `w` by `h` words, in a buffer no consumer
+    /// holds. It notes the requests the frame will answer: take it before
+    /// composing, and a request made meanwhile stays pending after
+    /// [`publish`](Self::publish).
+    pub fn frame(&self, w: u32, h: u32) -> Frame {
+        self.noted.store(self.requests.note(), Ordering::Release);
+        let mut words = std::mem::take(&mut *self.spare.lock());
+        words.resize(w as usize * h as usize, 0);
+        Frame { width: w, height: h, words, ..Frame::default() }
+    }
+
+    /// One tick of the display: compose if anything looks, and publish what
+    /// `compose` filled (see [`run_display`]). Returns what was needed.
+    pub fn tick(&self, compose: impl FnOnce(&mut Frame, Need) -> bool) -> Need {
+        let need = self.need();
+        if need.any() {
+            let mut frame = self.frame(0, 0);
+            if compose(&mut frame, need) {
+                self.publish(frame);
+            } else {
+                // The picture stands; what was asked for is answered by it.
+                self.requests.answer(self.noted.load(Ordering::Acquire));
+            }
+        } else {
+            // Nothing looked, so a mark has no frame to make. Taken, so that
+            // a parked thread sleeps on the next one.
+            self.changed.take();
+            self.counts.count(false);
+        }
+        need
+    }
+
+    /// The size of the picture the board shows, known before any frame is
+    /// composed: what pointer steering needs. (0, 0) before the board has a mode.
+    pub fn size(&self) -> (u32, u32) {
+        let s = self.size.load(Ordering::Relaxed);
+        (s as u32, (s >> 32) as u32)
+    }
+
+    /// Say what size the board's picture is, for a board that knows it
+    /// without composing.
+    pub fn set_size(&self, w: u32, h: u32) {
+        self.size.store(u64::from(h) << 32 | u64::from(w), Ordering::Relaxed);
+    }
+
+    /// Store `f` as the newest frame and answer the requests it was noted for.
+    pub fn publish(&self, mut f: Frame) {
+        self.set_size(f.width, f.height);
+        let old = {
+            let mut latest = self.latest.lock();
+            f.seq = latest.as_ref().map_or(0, |o| o.seq).wrapping_add(1);
+            latest.replace(Arc::new(f))
+        };
+        if let Some(Ok(old)) = old.map(Arc::try_unwrap) {
+            *self.spare.lock() = old.words;
+        }
+        self.requests.answer(self.noted.load(Ordering::Acquire));
+    }
+
+    /// The newest frame, if any has been published.
+    pub fn latest(&self) -> Option<Arc<Frame>> {
+        self.latest.lock().clone()
+    }
+
+    /// Ask for a frame composed from now on, wait at most `timeout` for it and
+    /// return the newest. When the wait ran out, that is an older frame and
+    /// [`FrameRequests::pending`] still says so.
+    pub fn capture(&self, timeout: Duration) -> Option<Arc<Frame>> {
+        self.requests.request();
+        self.changed.wake();
+        let deadline = Instant::now() + timeout;
+        while self.requests.pending() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.latest()
+    }
+}
+
+/// The hotkey's screenshot: the screen's next frame, written as
+/// `screenshot_NNNN.png` in the working directory off the caller's thread.
+pub fn save_screenshot(screen: &Arc<Screen>) {
+    static SHOTS: AtomicU64 = AtomicU64::new(0);
+    let screen = screen.clone();
+    std::thread::spawn(move || {
+        let Some(frame) = screen.capture(Duration::from_secs(2)).filter(|f| f.width > 0 && f.height > 0) else {
+            println!("iris: screenshot failed: the display has no frame");
+            return;
+        };
+        let path = format!("screenshot_{:04}.png", SHOTS.fetch_add(1, Ordering::Relaxed));
+        let (w, h) = (frame.width as usize, frame.height as usize);
+        match crate::disp::write_png_words(&path, &frame.words, w, w, h) {
+            Ok(()) => println!("iris: screenshot saved to {path}"),
+            Err(e) => println!("iris: screenshot failed: {e}"),
+        }
+    });
+}
+
+/// The display thread of a board: until `running` clears, each frame period
+/// it composes if anyone looks, runs the board's per-frame duty and waits out
+/// the period. `compose` fills the frame it is given from the board's state
+/// and returns whether it did; false means the picture is unchanged, and the
+/// newest frame stands. A request is answered either way. The board counts
+/// the frames it runs in [`Screen::counts`]; a tick nobody looks at is counted
+/// here as skipped. `retrace` is the
+/// board's hardware duty (the retrace pulse and its interrupt, trace flushes,
+/// the status counters). It runs every tick, watched or not, after the frame
+/// is taken, so a flip the guest makes at the retrace shows from the next one.
+/// The thread ends by releasing the renderer ([`DisplayStop`]).
+pub fn run_display(
+    screen: &Screen,
+    running: &AtomicBool,
+    stop: &DisplayStop,
+    mut retrace: impl FnMut(),
+    mut compose: impl FnMut(&mut Frame, Need) -> bool,
+) {
+    let mut wait = FrameWait::new(&screen.changed, FRAME_PERIOD);
+    while running.load(Ordering::Relaxed) {
+        let need = screen.tick(&mut compose);
+        retrace();
+        if need.any() || !screen.parks {
+            wait.wait();
+        } else {
+            wait.park_until_marked(Some(Instant::now() + Duration::from_millis(250)));
+        }
+    }
+    stop.finish(&screen.window.renderer);
+}
+
 /// The hardware cursor: where the board draws its glyph and which of the
 /// glyph's pixels are opaque. The glyph's top-left is the pointer position
 /// minus the hotspot, which the hardware does not know.
@@ -413,53 +606,6 @@ impl HwCursor {
     }
 }
 
-/// The visible part of the last composed frame, tight (`width` pixels a row,
-/// `0xAABBGGRR`, R in the low byte), with its sequence number. `None` until
-/// the display has a video mode. Holds the screen lock only for the copy.
-pub fn copy_frame(display: &dyn GfxDisplay, out: &mut Vec<u32>) -> Option<(usize, usize, u64)> {
-    if !display.frame_available() {
-        return None;
-    }
-    let screen = display.screen().lock();
-    if !display.frame_available() {
-        return None;
-    }
-    let (w, h) = (screen.width, screen.height);
-    if w == 0 || h == 0 {
-        return None;
-    }
-    out.clear();
-    out.reserve(w * h);
-    for y in 0..h {
-        let row = y * crate::disp::FB_STRIDE;
-        out.extend_from_slice(&screen.rgba[row..row + w]);
-    }
-    Some((w, h, screen.frame_seq))
-}
-
-/// Request a fresh frame and wait (at most `timeout`) for the board to
-/// compose it. Returns false when the wait ran out with the request still
-/// pending, so the screen still holds an older frame.
-pub fn wait_fresh_frame(display: &dyn GfxDisplay, timeout: std::time::Duration) -> bool {
-    display.request_frame();
-    let deadline = std::time::Instant::now() + timeout;
-    while display.frame_pending() {
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    true
-}
-
-/// [`wait_fresh_frame`], then copy the frame as [`copy_frame`] does, whether
-/// or not the wait succeeded. For callers that can use a slightly old frame;
-/// a caller that cannot calls the two itself.
-pub fn fresh_frame(display: &dyn GfxDisplay, out: &mut Vec<u32>, timeout: std::time::Duration) -> Option<(usize, usize, u64)> {
-    wait_fresh_frame(display, timeout);
-    copy_frame(display, out)
-}
-
 /// A display for tests: a screen of a given size whose requested frames are
 /// composed at once, or never.
 #[cfg(test)]
@@ -467,90 +613,157 @@ pub(crate) mod testing {
     use super::*;
 
     pub(crate) struct FakeDisplay {
-        stop: DisplayStop,
-        renderer: Mutex<Option<Box<dyn Renderer>>>,
-        screen: Mutex<Rex3Screen>,
-        pub(crate) counts: FrameCounts,
-        stuck: bool,
+        stop: Arc<DisplayStop>,
+        screens: [Arc<Screen>; 1],
+        running: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
     }
 
     impl FakeDisplay {
         /// A `w` by `h` screen; `stuck` never composes a requested frame.
-        pub(crate) fn new(w: usize, h: usize, stuck: bool) -> Self {
-            let mut screen = Rex3Screen::new();
-            (screen.width, screen.height) = (w, h);
-            Self { stop: DisplayStop::default(), renderer: Mutex::new(None), screen: Mutex::new(screen), counts: FrameCounts::default(), stuck }
+        pub(crate) fn new(w: u32, h: u32, stuck: bool) -> Self {
+            let screens = [Arc::new(Screen::new(0, Arc::default()))];
+            // The picture a stuck board still has from before.
+            let mut first = screens[0].frame(w, h);
+            first.words.fill(0xff00_0000);
+            screens[0].publish(first);
+            let stop = Arc::new(DisplayStop::default());
+            let running = Arc::new(AtomicBool::new(!stuck));
+            let thread = (!stuck).then(|| {
+                let (screen, stop, running) = (screens[0].clone(), stop.clone(), running.clone());
+                std::thread::spawn(move || {
+                    run_display(&screen, &running, &stop, || {}, |out, _| {
+                        out.width = w;
+                        out.height = h;
+                        out.words.resize(w as usize * h as usize, 0);
+                        true
+                    })
+                })
+            });
+            Self { stop, screens, running, thread }
+        }
+    }
+
+    impl Drop for FakeDisplay {
+        fn drop(&mut self) {
+            self.running.store(false, Ordering::SeqCst);
+            self.screens[0].changed.wake();
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
         }
     }
 
     impl GfxDisplay for FakeDisplay {
+        fn screens(&self) -> &[Arc<Screen>] { &self.screens }
         fn display_stop(&self) -> &DisplayStop { &self.stop }
-        fn renderer_slot(&self) -> &Mutex<Option<Box<dyn Renderer>>> { &self.renderer }
-        fn screen(&self) -> &Mutex<Rex3Screen> { &self.screen }
-        fn request_screenshot(&self) {}
         fn cycles(&self) -> CyclesPtr { CyclesPtr::dangling() }
-        fn frame_pending(&self) -> bool { self.stuck }
-        fn frame_counts(&self) -> Option<&FrameCounts> { Some(&self.counts) }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::testing::FakeDisplay;
     use super::*;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::Arc;
-    use std::time::Duration;
 
-    struct ChangingDisplay {
-        stop: DisplayStop,
-        renderer: Mutex<Option<Box<dyn Renderer>>>,
-        screen: Mutex<Rex3Screen>,
-        checks: AtomicUsize,
-        available_checks: AtomicUsize,
+    fn screen() -> Screen {
+        Screen::new(0, Arc::default())
     }
 
-    impl GfxDisplay for ChangingDisplay {
-        fn display_stop(&self) -> &DisplayStop { &self.stop }
-        fn renderer_slot(&self) -> &Mutex<Option<Box<dyn Renderer>>> { &self.renderer }
-        fn screen(&self) -> &Mutex<Rex3Screen> { &self.screen }
-        fn request_screenshot(&self) {}
-        fn cycles(&self) -> CyclesPtr { CyclesPtr::dangling() }
-        fn frame_available(&self) -> bool {
-            self.checks.fetch_add(1, Ordering::Relaxed) < self.available_checks.load(Ordering::Relaxed)
+    /// With nothing looking the board composes nothing, and a request, a
+    /// capturing client or a renderer each bring the compose back.
+    #[test]
+    fn a_screen_nobody_looks_at_is_not_composed() {
+        let s = screen();
+        let composes = std::cell::Cell::new(0);
+        let tick = |s: &Screen| s.tick(|f, _| { composes.set(composes.get() + 1); f.width = 1; f.height = 1; f.words.push(7); true });
+        assert_eq!(tick(&s), Need::default());
+        assert_eq!(composes.get(), 0);
+        assert_eq!(s.counts.get(), (1, 0, 1), "a tick nobody looked at is counted as skipped");
+        s.requests.request();
+        assert!(tick(&s).words);
+        assert_eq!(composes.get(), 1);
+        assert!(!s.requests.pending());
+        assert_eq!(s.latest().unwrap().words, [7]);
+        s.requests.capture(true);
+        assert!(tick(&s).words);
+        s.requests.capture(false);
+        assert!(!tick(&s).any());
+        assert_eq!(composes.get(), 2);
+        struct Quiet;
+        impl Renderer for Quiet {
+            fn present(&mut self, _: &mut crate::disp::Rex3Screen, _: &mut crate::debug_overlay::DebugOverlay, _: &mut crate::disp::StatusBar,
+                _: &mut crate::disp::StatusBarTexture, _: &crate::disp::BarStats, _: bool, _: Option<&[u32]>, _: Option<&[u32]>) {}
         }
+        *s.window.renderer.lock() = Some(Box::new(Quiet));
+        assert_eq!(tick(&s), Need { words: false, gpu: false, redraw: true });
+        assert_eq!(composes.get(), 3);
     }
 
-    /// A board that never composes the requested frame is reported, so a
-    /// caller does not take the old screen for a new one.
+    /// A request made while a frame is composed is not in it: it stays pending
+    /// after that frame is published, and the next frame answers it.
     #[test]
-    fn waiting_for_a_frame_that_never_comes_says_so() {
-        assert!(!wait_fresh_frame(&FakeDisplay::new(0, 0, true), Duration::from_millis(20)));
-        assert!(wait_fresh_frame(&FakeDisplay::new(0, 0, false), Duration::from_millis(20)));
+    fn a_request_made_during_a_compose_is_answered_by_the_next_frame() {
+        let s = screen();
+        s.requests.request();
+        s.tick(|f, _| {
+            f.words.push(1);
+            f.width = 1;
+            f.height = 1;
+            s.requests.request();
+            true
+        });
+        assert!(s.requests.pending(), "the second request needs a frame composed after it");
+        assert_eq!(s.latest().unwrap().seq, 1);
+        s.tick(|f, _| { f.words.push(2); f.width = 1; f.height = 1; true });
+        assert!(!s.requests.pending());
+        assert_eq!(s.latest().unwrap().words, [2]);
+        assert_eq!(s.latest().unwrap().seq, 2);
+        // An unchanged picture still answers the request.
+        s.requests.request();
+        s.tick(|_, _| false);
+        assert!(!s.requests.pending());
+        assert_eq!(s.latest().unwrap().seq, 2, "and the newest frame stands");
     }
 
+    /// A frame a consumer holds is never overwritten; its buffer comes back
+    /// once nobody holds it.
     #[test]
-    fn copy_frame_rechecks_availability_under_the_screen_lock() {
-        std::thread::Builder::new().stack_size(64 * 1024 * 1024).spawn(|| {
-            let mut screen = Rex3Screen::new();
-            screen.width = 1;
-            screen.height = 1;
-            screen.rgba[0] = 0xff12_3456;
-            screen.frame_seq = 7;
-            let display = ChangingDisplay {
-                stop: DisplayStop::default(), renderer: Mutex::new(None), screen: Mutex::new(screen),
-                checks: AtomicUsize::new(0), available_checks: AtomicUsize::new(usize::MAX),
-            };
-            let mut pixels = Vec::new();
-            assert_eq!(copy_frame(&display, &mut pixels), Some((1, 1, 7)));
-            assert_eq!(pixels, [0xff12_3456]);
-            display.checks.store(0, Ordering::Relaxed);
-            display.available_checks.store(1, Ordering::Relaxed);
-            pixels[0] = 0xfeed_beef;
-            assert_eq!(copy_frame(&display, &mut pixels), None);
-            assert_eq!(pixels, [0xfeed_beef]);
-            assert_eq!(display.checks.load(Ordering::Relaxed), 2);
-        }).unwrap().join().unwrap();
+    fn a_held_frame_is_not_reused() {
+        let s = screen();
+        let mut f = s.frame(2, 1);
+        f.words.copy_from_slice(&[1, 2]);
+        s.publish(f);
+        let held = s.latest().unwrap();
+        let mut f = s.frame(2, 1);
+        f.words.copy_from_slice(&[3, 4]);
+        s.publish(f);
+        assert_eq!(held.words, [1, 2]);
+        assert_eq!(s.latest().unwrap().words, [3, 4]);
+        assert_eq!(s.size(), (2, 1));
+    }
+
+    /// The thread composes while a consumer waits, answers a capture, and ends
+    /// by releasing the renderer unless the stop came from the main thread.
+    #[test]
+    fn run_display_serves_a_capture_and_stops() {
+        let s = Arc::new(screen());
+        let running = Arc::new(AtomicBool::new(true));
+        let stop = Arc::new(DisplayStop::default());
+        let t = {
+            let (s, running, stop) = (s.clone(), running.clone(), stop.clone());
+            std::thread::spawn(move || run_display(&s, &running, &stop, || {}, |f, _| {
+                f.width = 2;
+                f.height = 1;
+                f.words.extend([5, 6]);
+                true
+            }))
+        };
+        let f = s.capture(Duration::from_secs(5)).expect("a frame");
+        assert!(!s.requests.pending());
+        assert_eq!(f.words, [5, 6]);
+        running.store(false, Ordering::SeqCst);
+        s.changed.wake();
+        t.join().unwrap();
     }
 
     #[test]

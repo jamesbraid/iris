@@ -651,19 +651,20 @@ fn cmd_screenshot(server: &CiServer, args: &Value) -> Response {
         return Response::err("screenshot: missing 'path' arg");
     };
 
-    // The board composes the next frame into `rgba` (Newport with no
-    // front-end composes in software on its refresh thread). The host
-    // status bar and debug overlay are never in it: this is the guest's
-    // screen.
-    let mut rgba_copy = Vec::new();
-    let fresh = crate::gfx_display::wait_fresh_frame(&**display, std::time::Duration::from_millis(250));
-    let Some((width, height, _)) = crate::gfx_display::copy_frame(&**display, &mut rgba_copy) else {
+    // The board composes the next frame (Newport with no front-end composes
+    // in software on its refresh thread). The host status bar and debug
+    // overlay are never in it: this is the guest's screen.
+    let screen = &display.screens()[0];
+    let frame = screen.capture(std::time::Duration::from_millis(250));
+    let fresh = !screen.requests.pending();
+    let Some(frame) = frame.filter(|f| f.width > 0 && f.height > 0) else {
         return Response::err("screenshot: the display has no video mode yet");
     };
+    let (width, height) = (frame.width as usize, frame.height as usize);
 
-    // `rgba` is 0xAABBGGRR (R in the low byte), the compositors' format, and
-    // copy_frame hands it over tight: rows `width` words apart.
-    if let Err(e) = crate::disp::write_png_words(path, &rgba_copy, width, width, height) {
+    // The words are 0xAABBGGRR (R in the low byte), the compositors' format,
+    // tight: rows `width` words apart.
+    if let Err(e) = crate::disp::write_png_words(path, &frame.words, width, width, height) {
         return Response::err(format!("screenshot: {}: {}", path, e));
     }
 

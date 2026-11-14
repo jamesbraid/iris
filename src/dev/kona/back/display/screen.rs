@@ -9,11 +9,9 @@
 //! keeps a clone of the `Arc` and returns it from `get_display`.
 
 use crate::cpu::mips_core::CyclesPtr;
-use crate::dev::ng1::rex3::Renderer;
 use crate::disp::{Rex3Screen, StatusSource, FB_STRIDE};
-use crate::gfx_display::{DisplayStop, FrameRequests, GfxDisplay};
+use crate::gfx_display::{DisplayStop, GfxDisplay, Screen};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 
@@ -25,14 +23,9 @@ struct Local {
 }
 
 pub struct Display {
-    renderer: Mutex<Option<Box<dyn Renderer>>>,
+    screens: [Arc<Screen>; 1],
+    /// What the installed renderer presents from.
     screen: Mutex<Rex3Screen>,
-    /// Requests: one is pending until a frame composed after it has been
-    /// presented, and one made while a frame is composed is still pending after
-    /// that frame.
-    screenshot: FrameRequests,
-    frame: FrameRequests,
-    screenshots: AtomicU32,
     display_stop: DisplayStop,
     local: Mutex<Option<Local>>,
     /// The machine's status-bar inputs.
@@ -41,21 +34,11 @@ pub struct Display {
     tables: std::sync::OnceLock<Arc<Mutex<super::tables::Tables>>>,
 }
 
-/// The requests noted before a frame was composed: the ones presenting it answers.
-#[derive(Clone, Copy, Debug)]
-pub struct Due {
-    screenshot: u64,
-    frame: u64,
-}
-
 impl Display {
     pub fn new(status: Arc<StatusSource>) -> Display {
         Display {
-            renderer: Mutex::new(None),
+            screens: [Arc::new(Screen::new(0, Arc::default()))],
             screen: Mutex::new(Rex3Screen::new()),
-            screenshot: FrameRequests::default(),
-            frame: FrameRequests::default(),
-            screenshots: AtomicU32::new(0),
             display_stop: DisplayStop::default(),
             local: Mutex::new(None),
             status: Mutex::new(status),
@@ -79,94 +62,58 @@ impl Display {
         Display::new(StatusSource::new(Arc::default(), Arc::default()))
     }
 
-    /// The requests a frame composed from now on will answer. Take it before
-    /// composing and hand it to `present`: a request made while the frame is
-    /// composed is not in it, and stays pending after that frame is presented.
-    pub fn note(&self) -> Due {
-        Due { screenshot: self.screenshot.note(), frame: self.frame.note() }
+    /// The window and the screen's consumers: this board's only screen.
+    pub fn out(&self) -> &Arc<Screen> {
+        &self.screens[0]
     }
 
-    /// Whether a screenshot or a frame has been asked for and not yet presented.
-    pub fn wanted(&self) -> bool {
-        self.screenshot_pending() || self.frame_pending()
-    }
-
-    /// Present a composed frame: `rows` are opaque `0xAABBGGRR` pixels, `width`
-    /// to a row, the first being the frame's top line.
-    pub fn present(&self, rows: &[u32], width: usize, height: usize, due: Due) {
+    /// Hand a composed frame to the installed renderer: `rows` are opaque
+    /// `0xAABBGGRR` pixels, `width` to a row, the first being the frame's top
+    /// line.
+    pub fn present(&self, rows: &[u32], width: usize, height: usize) {
+        let mut renderer = self.out().window.renderer.lock();
+        let Some(renderer) = renderer.as_mut() else { return };
         let mut screen = self.screen.lock();
         let w = width.min(FB_STRIDE);
-        let h = height.min(screen.rgba.len() / FB_STRIDE).min(rows.len() / width.max(1));
+        let h = height.min(screen.fb_rgb.len() / FB_STRIDE).min(rows.len() / width.max(1));
         screen.width = w;
         screen.height = h;
         screen.prebuilt = true;
         screen.status_bar_only = false;
-        let planes = &mut *screen;
         for (y, src) in rows.chunks_exact(width.max(1)).take(h).enumerate() {
             let at = y * FB_STRIDE;
-            planes.fb_rgb[at..at + w].copy_from_slice(&src[..w]);
-            planes.rgba[at..at + w].copy_from_slice(&src[..w]);
+            screen.fb_rgb[at..at + w].copy_from_slice(&src[..w]);
         }
-        screen.frame_seq = screen.frame_seq.wrapping_add(1);
-        // A requested screenshot is saved as presented.
-        if self.screenshot.answers(due.screenshot) {
-            let pixels = screen.rgba.clone();
-            let n = self.screenshots.fetch_add(1, Ordering::Relaxed);
-            let path = format!("screenshot_{:04}.png", n);
-            std::thread::spawn(move || match crate::disp::write_png_words(&path, &pixels, crate::disp::FB_STRIDE, w, h) {
-                Ok(()) => println!("iris: screenshot saved to {}", path),
-                Err(e) => println!("iris: screenshot failed: {}", e),
-            });
+        let mut local = self.local.lock();
+        let local = local.get_or_insert_with(|| Local {
+            overlay: crate::debug_overlay::DebugOverlay::new(),
+            status: crate::disp::StatusBar::new(),
+            texture: crate::disp::StatusBarTexture::new(),
+            size: (0, 0),
+        });
+        if local.size != (w, h) {
+            renderer.resize(w, h);
+            local.size = (w, h);
         }
-        let mut renderer = self.renderer.lock();
-        if let Some(renderer) = renderer.as_mut() {
-            let mut local = self.local.lock();
-            let local = local.get_or_insert_with(|| Local {
-                overlay: crate::debug_overlay::DebugOverlay::new(),
-                status: crate::disp::StatusBar::new(),
-                texture: crate::disp::StatusBarTexture::new(),
-                size: (0, 0),
-            });
-            if local.size != (w, h) {
-                renderer.resize(w, h);
-                local.size = (w, h);
-            }
-            let stats = self.status.lock().snapshot(std::time::Instant::now(), 0);
-            renderer.present(&mut screen, &mut local.overlay, &mut local.status, &mut local.texture, &stats, false, None, None);
-        }
-        // Mark only the requests this frame answers: one made while it was
-        // composed stays pending for the next.
-        self.screenshot.answer(due.screenshot);
-        self.frame.answer(due.frame);
+        let stats = self.status.lock().snapshot(std::time::Instant::now(), 0);
+        renderer.present(&mut screen, &mut local.overlay, &mut local.status, &mut local.texture, &stats, false, None, None);
     }
 
     /// The display thread's last act: release the renderer, unless the stop came
     /// from the main thread, and drop the per-frame overlay state.
     pub fn finish(&self) {
-        self.display_stop.finish(&self.renderer);
+        self.display_stop.finish(&self.out().window.renderer);
         self.local.lock().take();
     }
 }
 
 impl GfxDisplay for Display {
+    fn screens(&self) -> &[Arc<Screen>] {
+        &self.screens
+    }
+
     fn display_stop(&self) -> &DisplayStop {
         &self.display_stop
-    }
-
-    fn renderer_slot(&self) -> &Mutex<Option<Box<dyn Renderer>>> {
-        &self.renderer
-    }
-
-    fn screen(&self) -> &Mutex<Rex3Screen> {
-        &self.screen
-    }
-
-    fn request_screenshot(&self) {
-        self.screenshot.request();
-    }
-
-    fn screenshot_pending(&self) -> bool {
-        self.screenshot.pending()
     }
 
     fn cycles(&self) -> CyclesPtr {
@@ -177,87 +124,28 @@ impl GfxDisplay for Display {
         // Read live from the registers, not from the last composed frame.
         self.tables.get()?.lock().snapshot().hw_cursor()
     }
-
-    fn request_frame(&self) {
-        self.frame.request();
-    }
-
-    fn frame_pending(&self) -> bool {
-        self.frame.pending()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn frame(w: usize, h: usize, px: u32) -> Vec<u32> {
-        vec![px; w * h]
-    }
-
-    /// A presented frame lands in the screen's buffers, row by row at the
-    /// screen's stride, and a requested frame clears when it is presented.
+    /// A frame handed to a renderer reaches it at the size given, and a short
+    /// or wide one is cut to what the screen holds.
     #[test]
-    fn a_presented_frame_lands_in_the_screen() {
+    fn a_wide_frame_is_cut_to_the_screen() {
+        struct Sizes(Arc<Mutex<Vec<(usize, usize)>>>);
+        impl crate::dev::ng1::rex3::Renderer for Sizes {
+            fn present(&mut self, s: &mut Rex3Screen, _: &mut crate::debug_overlay::DebugOverlay, _: &mut crate::disp::StatusBar,
+                _: &mut crate::disp::StatusBarTexture, _: &crate::disp::BarStats, _: bool, _: Option<&[u32]>, _: Option<&[u32]>) {
+                self.0.lock().push((s.width, s.height));
+            }
+        }
         let d = Display::detached();
-        let mut f = frame(4, 3, 0xff00_0001);
-        f[4 + 2] = 0xff12_3456;
-        d.request_frame();
-        assert!(d.frame_pending());
-        let due = d.note();
-        d.present(&f, 4, 3, due);
-        assert!(!d.frame_pending());
-        let s = d.screen().lock();
-        assert_eq!((s.width, s.height, s.frame_seq), (4, 3, 1));
-        assert_eq!(s.rgba[FB_STRIDE + 2], 0xff12_3456);
-        assert_eq!(s.fb_rgb[FB_STRIDE + 2], 0xff12_3456);
-        assert_eq!(s.rgba[3], 0xff00_0001);
-        assert!(s.prebuilt);
-    }
-
-    /// A short frame presents what it has, and a wide one is cut to the screen.
-    #[test]
-    fn a_short_or_wide_frame_is_cut_to_what_it_has() {
-        let d = Display::detached();
-        d.present(&frame(5, 2, 0xff00_0002)[..7], 5, 2, d.note());
-        assert_eq!(d.screen().lock().height, 1);
-        d.present(&frame(3000, 1, 0xff00_0003), 3000, 1, d.note());
-        assert_eq!(d.screen().lock().width, FB_STRIDE);
-    }
-
-    /// A request made while a frame is composed is not lost when that frame is
-    /// presented: it is still pending, and the next frame answers it.
-    #[test]
-    fn a_request_made_during_composition_is_not_lost() {
-        let d = Display::detached();
-        d.request_frame();
-        let due = d.note();
-        d.request_frame(); // arrives while the frame is composed
-        d.present(&frame(2, 2, 0xff00_0004), 2, 2, due);
-        assert!(d.frame_pending(), "the second request is still pending");
-        let due = d.note();
-        d.present(&frame(2, 2, 0xff00_0004), 2, 2, due);
-        assert!(!d.frame_pending());
-        // Two requests answered by one frame are both answered.
-        d.request_frame();
-        d.request_frame();
-        d.present(&frame(2, 2, 0xff00_0004), 2, 2, d.note());
-        assert!(!d.frame_pending());
-    }
-
-    /// A request made after the requests were noted and before the frame is
-    /// presented is not answered by that frame: it stays pending and makes the
-    /// next one due.
-    #[test]
-    fn a_request_after_the_note_waits_for_the_next_frame() {
-        let d = Display::detached();
-        let noted = d.note();
-        d.request_frame();
-        let due = noted;
-        d.present(&frame(2, 2, 0xff00_0005), 2, 2, due);
-        assert!(d.frame_pending(), "the request made while the frame was composed is still pending");
-        let due = d.note();
-        d.present(&frame(2, 2, 0xff00_0005), 2, 2, due);
-        assert!(!d.frame_pending());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        *d.out().window.renderer.lock() = Some(Box::new(Sizes(seen.clone())));
+        d.present(&vec![0xff00_0002; 7], 5, 2);
+        d.present(&vec![0xff00_0003; 3000], 3000, 1);
+        assert_eq!(*seen.lock(), [(5, 1), (FB_STRIDE, 1)]);
     }
 }

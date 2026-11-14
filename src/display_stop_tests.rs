@@ -152,7 +152,7 @@ fn stopping_from_the_main_thread_never_waits_on_the_renderer() {
                 None => {
                     let cfg = config(&dir, profile, board);
                     let mut m = big_stack(move || crate::workstation::build(cfg).expect("machine"));
-                    *m.get_display().expect("a display").renderer_slot().lock() = Some(Box::new(probe.clone()));
+                    *m.get_display().expect("a display").screens()[0].window.renderer.lock() = Some(Box::new(probe.clone()));
                     m.start();
                     m
                 }
@@ -192,7 +192,7 @@ fn the_octane_stops_its_disks_before_its_graphics() {
     let mut machine = big_stack(move || crate::ip30_machine::OctaneMachine::new(&cfg).expect("Octane"));
     let (scsi, ioc3) = (machine.scsi.clone(), machine.ioc3.clone());
     let (probe, overlap) = Probe::watching(move || ioc3.is_running() || scsi.iter().any(|s| s.is_running()));
-    *machine.gfx.as_ref().expect("graphics").display().renderer_slot().lock() = Some(Box::new(probe.clone()));
+    *machine.gfx.as_ref().expect("graphics").display().screens()[0].window.renderer.lock() = Some(Box::new(probe.clone()));
     machine.restart_peripherals();
     assert!(!machine.scsi.is_empty() && machine.scsi.iter().all(|s| s.is_running()), "the SCSI controllers are running");
     assert!(machine.ioc3.is_running(), "IOC3 is running");

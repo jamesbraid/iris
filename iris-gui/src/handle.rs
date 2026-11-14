@@ -511,12 +511,12 @@ fn worker_loop(
                     // so the very first REX3 frame already lands in the
                     // sink the GUI can read.
                     if let Some(display) = m.get_display() {
-                        *display.renderer_slot().lock() =
+                        *display.screens()[0].window.renderer.lock() =
                             Some(new_capture_renderer(sink_for_machine));
                     }
                     if heads >= 2 {
                         if let Some(display) = m.get_display_head1() {
-                            *display.renderer_slot().lock() =
+                            *display.screens()[0].window.renderer.lock() =
                                 Some(new_capture_renderer(sink_for_head1));
                         }
                     }
@@ -749,10 +749,8 @@ fn worker_loop(
                 //
                 // Not `frame_sink.snapshot()`: the sink carries only the
                 // damaged band of the newest frame (see `framebuffer`), so it
-                // cannot serve a whole picture. `screen.rgba` can, and the
-                // board keeps it current the moment something asks — a
-                // `request_frame` makes REX3's refresh loop compose and copy,
-                // which costs nothing until a screenshot is taken.
+                // cannot serve a whole picture. A capture can: it asks the board
+                // for a frame, which costs nothing until a screenshot is taken.
                 let Some(m) = machine.as_ref() else {
                     let _ = evt_tx.send(Evt::Error(t!("emu-not-running")));
                     continue;
@@ -761,17 +759,18 @@ fn worker_loop(
                     let _ = evt_tx.send(Evt::Error(t!("emu-screenshot-no-frame")));
                     continue;
                 };
-                let mut px: Vec<u32> = Vec::new();
-                let Some((w, h, _)) = iris::gfx_display::fresh_frame(
-                    &*display, &mut px, std::time::Duration::from_secs(2),
-                ) else {
+                let Some(frame) = display.screens()[0]
+                    .capture(std::time::Duration::from_secs(2))
+                    .filter(|f| f.width > 0 && f.height > 0)
+                else {
                     let _ = evt_tx.send(Evt::Error(t!("emu-screenshot-no-frame")));
                     continue;
                 };
-                // Tight RGBA bytes from the tightly-packed words `copy_frame`
-                // hands over (`w` a row, 0xAABBGGRR, R in the low byte).
+                let (w, h) = (frame.width as usize, frame.height as usize);
+                // Tight RGBA bytes from the tightly-packed words (`w` a row,
+                // 0xAABBGGRR, R in the low byte).
                 let mut rgba = Vec::with_capacity(w * h * 4);
-                for &word in &px[..w * h] {
+                for &word in &frame.words[..w * h] {
                     rgba.extend_from_slice(&(word | 0xFF00_0000).to_le_bytes());
                 }
                 match iris::disp::write_png(&path, w as u32, h as u32, png::ColorType::Rgba, &rgba).map_err(|e| e.to_string()) {

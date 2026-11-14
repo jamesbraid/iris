@@ -1398,7 +1398,6 @@ mod tests {
     #[test]
     #[ignore = "needs KONA_RECORDINGS: cargo test -- --ignored"]
     fn a_frame_request_on_the_running_board_returns_the_prom_frame() {
-        use crate::gfx_display::GfxDisplay;
         use crate::traits::Device;
         let dir = recordings_dir();
         let (rec_path, png_path) = (dir.join("onyx2-deskside-prom.kona.rec"), dir.join("onyx2-deskside-prom-graphics-console.png"));
@@ -1406,25 +1405,25 @@ mod tests {
         let rec = Recording::parse(&std::fs::read(&rec_path).unwrap()).unwrap();
         let (kona, display) = replay_board_with_display(&rec, None).unwrap();
         kona.start();
-        display.request_frame();
+        let screen = display.out().clone();
+        screen.requests.request();
         let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while display.frame_pending() && std::time::Instant::now() < end {
+        while screen.requests.pending() && std::time::Instant::now() < end {
             std::thread::yield_now();
         }
-        assert!(!display.frame_pending(), "the request was answered at a retrace");
+        assert!(!screen.requests.pending(), "the request was answered at a retrace");
         let theirs = decode_png(&png_path);
-        let screen = display.screen().lock();
-        assert_eq!((screen.width, screen.height), (theirs.0, theirs.1));
+        let frame = screen.latest().expect("a frame");
+        assert_eq!((frame.width as usize, frame.height as usize), (theirs.0, theirs.1));
         let mut bad = 0;
         for y in 0..theirs.1 {
             for x in 0..theirs.0 {
-                let p = screen.rgba[y * crate::disp::FB_STRIDE + x];
+                let p = frame.words[y * theirs.0 + x];
                 let ours = [p as u8, (p >> 8) as u8, (p >> 16) as u8];
                 let at = (y * theirs.0 + x) * 3;
                 bad += ours.iter().zip(&theirs.2[at..at + 3]).any(|(a, b)| a.abs_diff(*b) > 8) as usize;
             }
         }
-        drop(screen);
         kona.stop();
         let share = bad as f64 / (theirs.0 * theirs.1) as f64;
         eprintln!("{bad} pixels differ ({share:.4})");

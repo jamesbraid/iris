@@ -168,8 +168,14 @@ fn grab_loop(s: &Shared) {
     while !s.stop.load(Ordering::Relaxed) {
         let start = Instant::now();
         let watching = s.clients.load(Ordering::Relaxed) > 0;
+        let screen = &s.display.screens()[0];
         if watching != capturing {
-            s.display.set_capture(watching);
+            screen.requests.capture(watching);
+            if watching {
+                // A frame at once, so the new viewer is not left waiting for a change.
+                screen.requests.request();
+                screen.changed.wake();
+            }
             capturing = watching;
             last_seq = None;
         }
@@ -179,11 +185,12 @@ fn grab_loop(s: &Shared) {
             s.changed.wait_for(&mut f, Duration::from_millis(200));
             continue;
         }
-        let seq = s.display.screen().lock().frame_seq;
-        if last_seq != Some(seq) {
-            if let Some((w, h, seq)) = crate::gfx_display::copy_frame(&*s.display, &mut cur) {
-                last_seq = Some(seq);
-                publish(s, w, h, &mut cur);
+        if let Some(frame) = screen.latest().filter(|f| f.width > 0 && f.height > 0) {
+            if last_seq != Some(frame.seq) {
+                last_seq = Some(frame.seq);
+                cur.clear();
+                cur.extend_from_slice(&frame.words);
+                publish(s, frame.width as usize, frame.height as usize, &mut cur);
             }
         }
         let spent = start.elapsed();
@@ -192,7 +199,7 @@ fn grab_loop(s: &Shared) {
         }
     }
     if capturing {
-        s.display.set_capture(false);
+        s.display.screens()[0].requests.capture(false);
     }
 }
 
