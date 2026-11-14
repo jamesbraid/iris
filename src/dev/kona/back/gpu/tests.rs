@@ -991,3 +991,47 @@ fn accumulation_and_stencil_writes_match_the_cpu_arm() {
     assert_eq!(p.g().stats().cpu_ops, 0, "every op ran on the GPU");
     p.finish("accumulation and stencil writes");
 }
+
+/// The overlay and popup planes are planes of the GPU arm like the rest: fills, bitmaps, a
+/// triangle drawn into two of them, and a clear.
+#[test]
+fn overlay_and_popup_planes_match_the_cpu_arm() {
+    use crate::dev::kona::back::store::{OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE};
+    let _serial = serial();
+    let Some(dev) = gpu() else { return };
+    let (w, h) = (96u32, 64u32);
+    let mut r = Lcg(121);
+    let mut words = WORDS.to_vec();
+    words.extend([OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE]);
+    let p = Pair::build(dev, w, h, &mut r, 100, None, &TextureStore::default, words);
+    let overlays = [OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE];
+    let mut states: Vec<DrawState> = (0..4).map(|_| state_full(w, h, &mut r)).collect();
+    for ds in &mut states {
+        ds.colour = [OVERLAY0_PLANE as u32, POPUP_PLANE as u32];
+    }
+    for step in 0..300 {
+        match r.next() % 6 {
+            0 | 1 => {
+                let (x, y) = (r.range(-5, w as i32) as i64, r.range(-5, h as i32) as i64);
+                p.both(StoreOpOwned::Fill { word: overlays[r.next() as usize % 3], x1: x, y1: y, x2: x + r.range(0, 40) as i64, y2: y + r.range(0, 30) as i64, value: r.next() & 0xff });
+            }
+            2 => {
+                let StoreOpOwned::Bitmap { x0, y0, width, height, bits, value, .. } = rand_bitmap(&mut r, w, h) else { unreachable!() };
+                p.both(StoreOpOwned::Bitmap { word: overlays[r.next() as usize % 3], x0, y0, width, height, bits, value: value & 0xff });
+            }
+            3 | 4 => {
+                let ds = &states[r.next() as usize % states.len()];
+                let tri = rand_tri(&mut r, w, h, 30);
+                if let Ok(job) = setup::shaped(&tri, ds, 0, Shape::Plain) {
+                    p.both(StoreOpOwned::Tri(*ds, job));
+                }
+            }
+            _ => p.both(StoreOpOwned::Clear(states[r.next() as usize % states.len()], rand_clear(&mut r, w, h))),
+        }
+        if step % 50 == 49 {
+            p.gpu.observe(POPUP_PLANE, p.screen());
+        }
+    }
+    assert_eq!(p.g().stats().cpu_ops, 0, "every op ran on the GPU");
+    p.finish("overlay and popup planes");
+}

@@ -9,11 +9,9 @@
 //! (`Bracket`). Which ops stay on the CPU, by what the GPU kernels do not do yet:
 //!
 //! - an edge step that does not fit 32 bits; a multisampled layout whose runs of words are longer
-//!   than the kernel holds (more than six words of colour or depth, or two of stencil a pixel); textures when the store holds more pages than
-//!   the GPU's pool can (one storage binding);
-//! - X pixel writes with a host payload and GL pixel writes;
-//! - the overlay and popup planes (word positions past the display-ID plane, which never go to the
-//!   GPU), X fills with more than four clip rectangles, bitmaps of more than 1792 bits.
+//!   than the kernel holds (more than six words of colour or depth, or two of stencil a pixel);
+//!   textures when the store holds more pages than the GPU's pool can (one storage binding);
+//! - X fills and copies with more than four clip rectangles, bitmaps of more than 1792 bits.
 //!
 //! # The mirror
 //!
@@ -60,7 +58,7 @@ use super::raster::smooth::Cover;
 use super::raster::{lit, ClearReq, DrawState, Rect};
 use super::store::seam::StoreOp;
 use super::store::texture::TextureStore;
-use super::store::{PixelStore, DID_PLANE};
+use super::store::{PixelStore, DID_PLANE, POSITIONS};
 use super::x::fill::LoweredFill;
 use super::x::pixel::LoweredCopy;
 use super::gpu_lib::{pack_desc, FRAGMENT, LOD_MATH, TEXTURE, TEXTURE_MEM};
@@ -102,9 +100,9 @@ const BITMAP_BITS: u64 = 56 * 32;
 /// Clip rectangles an X fill or copy takes; more run on the CPU.
 const CLIPS: usize = 4;
 
-/// Word positions that live on the GPU: the record's words and the display-ID plane. The overlay
-/// and popup planes stay in the mirror.
-const RESIDENT: usize = DID_PLANE + 1;
+/// Word positions that live on the GPU: the record's words, the display-ID plane and the overlay and
+/// popup planes, which are planes like the others to every record.
+const RESIDENT: usize = POSITIONS;
 /// Chunks bound at once (`kona.wgsl` declares this many), and the bytes of one.
 const MAX_CHUNKS: usize = 4;
 const CHUNK_BYTES: u64 = 128 << 20;
@@ -319,7 +317,6 @@ impl GpuStore {
 
     /// Whether no word of `word` inside `r` can be wider than `mask`, from the records so far.
     pub fn proven(&self, word: usize, r: Rect, mask: u32) -> bool {
-        // The overlay and popup planes are in the mirror alone: nothing to prove, and a check reads them.
         resident(word) && self.state.lock().proven(word, r, mask)
     }
 
