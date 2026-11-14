@@ -184,10 +184,8 @@ impl O2Machine {
         // `[network] mac` is the address in the 1-Wire ID chip. `headless`:
         // no keyboard, so the PROM and the OS take the serial console, as on
         // an O2 booted without one. The GBE stays: it is part of every O2.
-        let mac = match cfg.network.mac.as_deref() {
-            Some(mac) => Some(crate::config::parse_mac(mac).map_err(|e| format!("network.mac: {e}"))?),
-            None => None,
-        };
+        // Unset, it follows `[machine] emu_id`.
+        let mac = Some(cfg.network().mac);
         // The SCSI devices, from the same `[scsi.N]` tables as the other
         // machines; `controller` is the bus (0 internal, 1 external). The
         // buses are filled before the controllers exist.

@@ -453,8 +453,8 @@ pub struct NetworkSection {
     pub nfs_pcap_ip: Option<std::net::Ipv4Addr>,
     /// Ethernet station address for the built-in SEEQ controller (`ec0`), e.g.
     /// "08:00:69:12:34:56" (SGI's registered OUI). Defaults to
-    /// `08:00:69:12:34:56` when unset, or on a machine that takes
-    /// `[machine] emu_id` to the address that gives. Real hardware has no way to leave this
+    /// `08:00:69:12:34:56` when unset, or, when
+    /// `[machine] emu_id` is nonzero, the address that gives. Real hardware has no way to leave this
     /// unset — every SGI ships with a MAC burned into NVRAM (Indy) or a serial
     /// EEPROM (Indigo2) — so iris backdoor-injects it into the emulated
     /// NVRAM/EEPROM before boot rather than requiring a guest-side `setenv`.
@@ -1467,11 +1467,12 @@ pub struct MachineSection {
     /// Tezro.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpus: Option<u8>,
-    /// Mints the machine's system id (what `sysinfo -s` and `lmhostid`
-    /// print) in iris's own layout: 0 to 4095, 0 the default and a plainly
-    /// generic id. Machines with different ids can hold node-locked licenses
-    /// side by side. Only the Fuel and Tezro take it. See
-    /// [`crate::identity`].
+    /// Gives the machine its own identity in iris's layout: 0 to 4095, 0 the
+    /// default and a plainly generic id. Every machine takes it for its
+    /// station address, so machines on one network do not share one. On the
+    /// Fuel and Tezro it is also the system id (what `sysinfo -s` and
+    /// `lmhostid` print), so machines with different ids can hold node-locked
+    /// licenses side by side. See [`crate::identity`].
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub emu_id: u32,
 }
@@ -3741,9 +3742,6 @@ impl MachineConfig {
         if emu_id > crate::identity::EMU_ID_MAX {
             return Err(format!("machine identity: emu_id must be 0 to {}, not {emu_id}", crate::identity::EMU_ID_MAX));
         }
-        if emu_id != 0 && !matches!(self.machine.profile, MachineProfile::FuelIp34 | MachineProfile::TezroIp53) {
-            return Err(format!("machine identity: emu_id = {emu_id} is not taken by this machine; only the Fuel and Tezro take it"));
-        }
         for (id, dev) in &self.scsi {
             // A CD-ROM may legitimately start with an empty tray (no path, no
             // discs) and have media loaded at runtime; any discs list is valid
@@ -3841,15 +3839,13 @@ impl MachineConfig {
     }
 
     /// The station address when `[network] mac` is unset: the address
-    /// `[machine] emu_id` gives on a machine that takes it, else
-    /// [`DEFAULT_MAC`], which is also what emu_id 0 keeps.
+    /// `[machine] emu_id` gives, else [`DEFAULT_MAC`], which is also what
+    /// emu_id 0 keeps.
     fn default_station_mac(&self) -> [u8; 6] {
         use crate::identity::{default_mac, KIND};
-        match self.machine.profile {
-            MachineProfile::FuelIp34 | MachineProfile::TezroIp53 if self.machine.emu_id != 0 => {
-                default_mac(KIND, self.machine.emu_id, 0).expect("node 0 always fits the default address")
-            }
-            _ => DEFAULT_MAC,
+        match self.machine.emu_id {
+            0 => DEFAULT_MAC,
+            id => default_mac(KIND, id, 0).expect("node 0 always fits the default address"),
         }
     }
 
@@ -5685,15 +5681,23 @@ mod fuel_input_tests {
         assert_eq!(cfg.network().mac, [0x08, 0x00, 0x69, 0xaa, 0xbb, 0xcc]);
     }
 
-    /// A machine that does not take emu_id refuses one rather than ignoring
-    /// it, and keeps the station address it had.
+    /// Every machine takes emu_id, so two machines on one network get
+    /// different station addresses; emu_id 0 keeps the address they had.
     #[test]
-    fn emu_id_is_refused_where_it_sets_nothing() {
-        let e = identity_cfg("octane_ip30", "emu_id = 7\n").validate().unwrap_err();
-        assert!(e.contains("emu_id = 7 is not taken by this machine"), "{e}");
-        let cfg = identity_cfg("octane_ip30", "emu_id = 0\n");
-        cfg.validate().unwrap();
-        assert_eq!(cfg.network().mac, DEFAULT_MAC);
+    fn every_machine_takes_emu_id_for_its_station_address() {
+        let profiles = [
+            "indy_ip24", "indigo2_ip22", "indigo2_ip28", "o2_ip32", "octane_ip30",
+            "origin200_ip29", "origin2000_ip27", "onyx2_ip27", "origin3200_ip35",
+            "onyx3000_ip35", "fuel_ip34", "tezro_ip53",
+        ];
+        for profile in profiles {
+            let cfg = identity_cfg(profile, "emu_id = 0\n");
+            assert_eq!(cfg.network().mac, DEFAULT_MAC, "{profile}");
+            let cfg = identity_cfg(profile, "emu_id = 7\n");
+            assert_eq!(cfg.network().mac, [0x08, 0x00, 0x69, 0xe2, 0x00, 0x70], "{profile}");
+        }
+        let e = identity_cfg("indy_ip24", "emu_id = 4096\n").validate().unwrap_err();
+        assert!(e.contains("emu_id must be 0 to 4095"), "{e}");
     }
 
     #[test]

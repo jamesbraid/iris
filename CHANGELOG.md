@@ -13,6 +13,13 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Machine identity
+
+- `[machine] emu_id` now works on every machine, not only the Fuel and Tezro.
+  A nonzero id gives the station address `08:00:69:e2:<emu_id>`, so several
+  IRIS machines on one network no longer share `08:00:69:12:34:56`. Unset or
+  0 keeps the old address; `[network] mac` still wins.
+
 ### Bench rig
 
 - The bare-metal bench rig (`[testdev]`) takes `cpu = "r14000_500"`, the

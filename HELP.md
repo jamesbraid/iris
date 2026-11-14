@@ -100,6 +100,7 @@ address, which prevents networking from working.
 
 **You usually don't have to do anything.** Before boot, IRIS writes a MAC into
 a blank `eaddr` slot: `[network] mac` from `iris.toml` if you set one, otherwise
+the address `[machine] emu_id` gives (`08:00:69:e2:...`), otherwise
 `08:00:69:12:34:56`. It never overwrites an address that is already there.
 iris-gui does the same and offers a guided prompt. Set one yourself when you run
 more than one emulated machine on the same network:
