@@ -3104,7 +3104,7 @@ fn iris_rectcopy_reads_the_readsource_bank() {
 /// HQ2 2-D path; XMAP DID 0 is 8-bit colour index through a CLUT ramp and the
 /// DACs are the identity; `gr2comp::compose` is the scan-out the display
 /// thread runs. Variants Xz and Extreme must give the same frame.
-fn gr2_frame_hash(variant: Gr2Variant) -> String {
+fn gr2_frame_hash(variant: Gr2Variant, gpu: bool) -> String {
     use super::gr2comp;
     use super::hq2::*;
     let g = &live_gr2(variant);
@@ -3154,7 +3154,18 @@ fn gr2_frame_hash(variant: Gr2Variant) -> String {
     g.wait_idle();
     let r = g.regs();
     let mut out = vec![0u32; gr2comp::OUT_STRIDE * 1024];
-    gr2comp::compose(g.vram(), &r.vc1, &r.xmap, &r.dac, &mut out);
+    #[cfg(feature = "wgpu")]
+    if gpu {
+        let dev = super::scanout::test_gpu().expect("an adapter");
+        out = super::scanout::gpu_frame(&dev, g.vram(), &r.vc1, &r.xmap, &r.dac);
+    } else {
+        gr2comp::compose(g.vram(), &r.vc1, &r.xmap, &r.dac, &mut out);
+    }
+    #[cfg(not(feature = "wgpu"))]
+    {
+        assert!(!gpu);
+        gr2comp::compose(g.vram(), &r.vc1, &r.xmap, &r.dac, &mut out);
+    }
     let colours = crate::test_frame_pin::colour_count(1280, 1024, gr2comp::OUT_STRIDE, &out);
     assert!(colours > 20, "{colours} colours");
     crate::test_frame_pin::frame_hash(1280, 1024, gr2comp::OUT_STRIDE, &out)
@@ -3162,9 +3173,19 @@ fn gr2_frame_hash(variant: Gr2Variant) -> String {
 
 #[test]
 fn gr2_composed_frame_is_pinned() {
-    let a = gr2_frame_hash(Gr2Variant::Xz);
+    let a = gr2_frame_hash(Gr2Variant::Xz, false);
     eprintln!("gr2 frame hash {a}");
-    assert_eq!(a, gr2_frame_hash(Gr2Variant::Xz), "two runs");
-    assert_eq!(a, gr2_frame_hash(Gr2Variant::Extreme), "Xz and Extreme");
+    assert_eq!(a, gr2_frame_hash(Gr2Variant::Xz, false), "two runs");
+    assert_eq!(a, gr2_frame_hash(Gr2Variant::Extreme, false), "Xz and Extreme");
     assert_eq!(a, "8522d00003541205becd1900df477acb6fdd992aab70ac125f451e5c5dca0999");
+}
+
+/// The same scene through the GPU scan-out gives the same frame.
+#[cfg(feature = "wgpu")]
+#[test]
+fn gr2_composed_frame_is_pinned_on_the_gpu() {
+    if super::scanout::test_gpu().is_none() {
+        return;
+    }
+    assert_eq!(gr2_frame_hash(Gr2Variant::Xz, true), "8522d00003541205becd1900df477acb6fdd992aab70ac125f451e5c5dca0999");
 }

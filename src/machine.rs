@@ -578,13 +578,26 @@ impl Machine {
             Some(r)
         };
 
+        // The GPU for the IMPACT board when it draws on one, and the GR2's scan-out.
+        let gpu = if cfg.graphics_board().is_impact() || matches!(cfg.graphics_board(), crate::config::GraphicsBoard::Xz | crate::config::GraphicsBoard::Extreme) {
+            crate::workstation::open_gpu(&cfg, &fatal_tx).unwrap_or_else(|e| {
+                eprintln!("graphics: {e}");
+                std::process::exit(1)
+            })
+        } else {
+            None
+        };
+
         // GR2 (XZ / Extreme) in the GIO gfx slot. Created even when headless:
         // selecting the board is explicit, and the PROM needs it to probe.
         let gr2: Option<Arc<crate::dev::gr2::Gr2>> = match cfg.graphics_board() {
             crate::config::GraphicsBoard::Xz | crate::config::GraphicsBoard::Extreme => {
                 use crate::dev::gr2::{Gr2, Gr2Variant};
                 let variant = if cfg.graphics_board() == crate::config::GraphicsBoard::Extreme { Gr2Variant::Extreme } else { Gr2Variant::Xz };
-                let g = Gr2::new(variant, status.clone());
+                let g = Gr2::with_gpu(variant, status.clone(), crate::workstation::share_gpu(&gpu)).unwrap_or_else(|e| {
+                    eprintln!("gr2: {e}");
+                    std::process::exit(1)
+                });
                 // GR2 retrace is GIO interrupt 2 (LIO_GIO_2): on Indigo2 through
                 // the EXTIO SG_RETRACE fan-out, on Indy the direct line. It is a
                 // latch the guest clears (see Ioc::write8/int2_write8), so only
@@ -603,16 +616,6 @@ impl Machine {
                 Some(g)
             }
             _ => None,
-        };
-
-        // The GPU for the IMPACT board when it draws on one.
-        let gpu = if cfg.graphics_board().is_impact() {
-            crate::workstation::open_gpu(&cfg, &fatal_tx).unwrap_or_else(|e| {
-                eprintln!("mgras: {e}");
-                std::process::exit(1)
-            })
-        } else {
-            None
         };
 
         // IMPACT graphics in the GIO graphics slot.
