@@ -25,6 +25,8 @@ pub mod gr2comp;
 pub mod gr2disp;
 pub mod hq2;
 pub mod re3;
+#[cfg(feature = "wgpu")]
+mod scanout;
 #[cfg(feature = "gr2-jit")]
 pub mod re3_jit;
 pub mod vc1;
@@ -228,6 +230,10 @@ pub struct Gr2 {
 
     pub screen: Mutex<Rex3Screen>,
     screens: [Arc<crate::gfx_display::Screen>; 1],
+    /// The scan-out on the GPU, when the machine opened one: the display
+    /// thread's alone. Dropped there if it fails, and the CPU compose takes over.
+    #[cfg(feature = "wgpu")]
+    scanout: UnsafeCell<Option<Box<scanout::Gr2Scanout>>>,
     display_stop: crate::gfx_display::DisplayStop,
     retrace_cb: Mutex<Option<Arc<dyn Fn(bool) + Send + Sync>>>,
     status: Arc<crate::disp::StatusSource>,
@@ -249,6 +255,24 @@ impl Gr2 {
     /// state is zero-initialised without ever touching the stack; only the
     /// runtime fields that are not all-zero-valid are written explicitly.
     pub fn new(variant: Gr2Variant, status: Arc<crate::disp::StatusSource>) -> Arc<Self> {
+        Self::with_gpu(variant, status, None).expect("the CPU scan-out")
+    }
+
+    /// `new` with the scan-out on the host GPU when `gpu` is given: the
+    /// frame is composed there, and a window on the same device shows it
+    /// without a readback. The raster stays on the CPU. The machine opened
+    /// the device and hands the board its own handle on it (`Gpu::share`).
+    pub fn with_gpu(variant: Gr2Variant, status: Arc<crate::disp::StatusSource>, gpu: Option<crate::SharedGpu>) -> Result<Arc<Self>, String> {
+        #[cfg(feature = "wgpu")]
+        let (scanout, device) = match gpu {
+            Some(g) => {
+                eprintln!("gr2: scan-out on the GPU: {}", g.caps);
+                (Some(Box::new(scanout::Gr2Scanout::new(&g)?)), Some(g))
+            }
+            None => (None, None),
+        };
+        #[cfg(not(feature = "wgpu"))]
+        let _ = gpu;
         let mut a: Arc<MaybeUninit<Self>> = Arc::new_zeroed();
         let p = Arc::get_mut(&mut a).unwrap().as_mut_ptr();
         // SAFETY: `p` points at zeroed, exclusively owned memory. Every field
@@ -265,6 +289,8 @@ impl Gr2 {
             addr_of_mut!((*p).re3_thread).write(Mutex::new(None));
             addr_of_mut!((*p).screen).write(Mutex::new(Rex3Screen::new()));
             addr_of_mut!((*p).screens).write([Arc::new(crate::gfx_display::Screen::new(0, Arc::default()))]);
+            #[cfg(feature = "wgpu")]
+            addr_of_mut!((*p).scanout).write(UnsafeCell::new(scanout));
             addr_of_mut!((*p).display_stop).write(Default::default());
             addr_of_mut!((*p).retrace_cb).write(Mutex::new(None));
             addr_of_mut!((*p).status).write(status);
@@ -273,8 +299,12 @@ impl Gr2 {
             #[cfg(feature = "gr2-jit")]
             addr_of_mut!((*(*p).re3.get()).jit.mode).write(re3_jit::default_mode());
             let a = a.assume_init();
+            #[cfg(feature = "wgpu")]
+            if let Some(g) = device {
+                let _ = a.screens[0].gpu.set(g);
+            }
             a.power_on();
-            a
+            Ok(a)
         }
     }
 
