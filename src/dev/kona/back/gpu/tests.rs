@@ -941,9 +941,7 @@ fn multisampled_draws_match_the_cpu_arm() {
     p.finish("multisampled draws");
 }
 
-/// Stencil pixels, the accumulation buffer's operations (every operation, a value of exactly one that
-/// splits in two passes, with and without a colour source, under ownership, a clip and the colour
-/// mask) and glClear of its words.
+/// Every accumulation operation (split passes, with and without a colour source), its clear and stencil pixels.
 #[test]
 fn accumulation_and_stencil_writes_match_the_cpu_arm() {
     use crate::dev::kona::defs::pixel::{ACCUM, ACCUM_ADD, ACCUM_LOAD, ACCUM_MULT, ACCUM_RETURN};
@@ -1099,10 +1097,8 @@ fn x_image_writes_match_the_cpu_arm() {
     p.finish("X image writes");
 }
 
-/// glDrawPixels, glCopyPixels and glBitmap fragments (rectangles of colour and depth fragments, and of
-/// stencil values) through the whole chain: alpha, stencil, depth, blend, logic operation and mask,
-/// ownership and the clip rectangle, single-sample and multisampled, in bands of a ring that is small
-/// enough to wrap.
+/// Colour and stencil fragment rectangles through the whole chain, single-sample and multisampled, in bands of a
+/// ring small enough to wrap.
 #[test]
 fn gl_pixel_fragments_match_the_cpu_arm() {
     let _serial = serial();

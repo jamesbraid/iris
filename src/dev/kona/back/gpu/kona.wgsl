@@ -134,11 +134,8 @@ const S_STIP: u32 = 32u;  // 32 rows
 const S_TEXD: u32 = 64u;  // the texture descriptor's word offset in tex_descs
 const S_FOGC: u32 = 66u;  // fog curve (0 none, 1 linear, 2 exp, 3 exp2), a, b, then colour r, g, b
 const S_LSTIP: u32 = 72u; // line stipple pattern, repeat
-// Multisampling (0 words when the draw has no samples): count, the mask's coverage word,
-// alpha_to_mask | alpha_to_one << 1, the words of the colour, depth and stencil runs, then 8 sample
-// offsets (x | y << 8, eighths of a pixel), 6 colour, 6 depth and 2 stencil plane references.
-// Accumulation (kinds 5 and 6): the accumulation planes' references (up to 8, 4 for an operation),
-// the colour source's (0xffffffff: none), and for a clear the 8 values.
+// Multisampling (count 0: none): count, coverage word, options, run lengths, 8 sample offsets, then 6 + 6 + 2 run plane refs.
+// Accumulation: 4 plane references and the colour source's (0xffffffff: none); a clear's 8 values follow at +8.
 const S_ACC: u32 = 112u;
 const S_MS: u32 = 80u;
 const S_MS_AT: u32 = 86u;
@@ -434,9 +431,7 @@ fn fogged(pi: u32, si: u32, i: f32, j: f32, src: vec4<u32>) -> vec4<u32> {
     return fog_apply(src, vec3<f32>(bitcast<f32>(slots[si].w[S_FOGC + 3u]), bitcast<f32>(slots[si].w[S_FOGC + 4u]), bitcast<f32>(slots[si].w[S_FOGC + 5u])), f);
 }
 
-// ---- texture (back/raster/pixel.rs `run_tri`, `texel.rs`) --------------------------------------
-// A plane of the texture words at pixel offset (i, j): at + dx * i + dy * j with each product
-// rounded before it joins its sum (the CPU never fuses).
+// A texture plane at pixel offset (i, j), each product rounded before its sum as the CPU does.
 fn tex_at(pi: u32, k: u32, i: f32, j: f32) -> f32 {
     let b = T_TEX + 3u * k;
     return (bitcast<f32>(rw(pi, b)) + tex_p(bitcast<f32>(rw(pi, b + 1u)) * i)) + tex_p(bitcast<f32>(rw(pi, b + 2u)) * j);
@@ -553,10 +548,7 @@ fn shade(si: u32, index: u32, src: vec4<u32>, z: u32) {
     }
 }
 
-// ---- multisampled fragments (back/raster/pixel.rs `shade_samples_with`, `clear_samples`) ----------
-// A pixel's samples live in runs of words (colour: 24 bits a sample; depth; stencil: 8 bits), a
-// sample at its index times the stride from the run's first bit. The run is read into registers
-// once, the samples' tests and writes work on the copy and the words go back together.
+// A pixel's samples are runs of words (`stride` bits a sample); a run is read once, worked on and stored together.
 fn ms_load(si: u32, base: u32, n: u32, index: u32) -> array<u32, 6> {
     var run = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
     for (var w = 0u; w < n; w++) {
@@ -571,9 +563,7 @@ fn ms_store(si: u32, base: u32, n: u32, index: u32, run: ptr<function, array<u32
     }
 }
 
-// One fragment of a multisampled window, for each sample of `covered`: the stencil and depth tests
-// and the colour operations run against that sample's own values. The pixel's colour word is the mean
-// of its samples, with the fragment's alpha. `oi`, `oj` are the pixel's offsets from the job's origin.
+// One fragment of a multisampled window for each sample of `covered`; the pixel's word is the mean of its samples.
 fn shade_samples(pi: u32, si: u32, index: u32, src: vec4<u32>, oi: i32, oj: i32, covered: u32, zc: u32, zfix: bool) {
     let fl = slots[si].w[S_FLAGS];
     if (fl & F_ALPHA) != 0u && !cmp(slots[si].w[S_AFUNC], src.w, slots[si].w[S_AREF]) {
@@ -811,10 +801,8 @@ fn clear_px(pi: u32, px: i32, py: i32) {
     }
 }
 
-// ---- Accumulation (kind 5) and its clear (kind 6) -------------------------------------------------
-//   rec:  accumulate: 0 pass count, 1 op, 2 value, 3 op, 4 value, 5 accumulation words, 6 colour
-//         mask (bit 0 red .. 3 alpha: set writes); clear: 0 words
-//   slot: a draw state's (colour references, ownership), then S_ACC.. as above
+// ---- Accumulation (kind 5) and its clear (kind 6) ----
+// rec: pass count, (op, value) twice, words, colour mask; slot: a draw state's plus S_ACC.
 fn accum_px(pi: u32, px: i32, py: i32) {
     let si = recs[pi].slot;
     let index = u32(py) * WIDTH + u32(px);
@@ -860,11 +848,8 @@ fn clear_acc_px(pi: u32, px: i32, py: i32) {
     }
 }
 
-// ---- An X image (kind 8) ---------------------------------------------------------------------
-// The CPU walk's pixels, dense over the record's box in the payload ring: two words a pixel, a flag
-// (1: the walk lands there) and the word the pixel converts to. The write is x/fill.rs `apply`.
-//   slot: 0 plane reference, 1 logic operation, 2 mask, 3 width mask, 4 reads destination,
-//         5 payload offset, 6 box width, 7 box x0, 8 box y0 (i32)
+// ---- An X image (kind 8) ----
+// Dense over the box in the payload ring, two words a pixel (landed, converted word); slot 0..8: plane, gx, masks, needs, offset, box.
 fn image_px(pi: u32, px: i32, py: i32) {
     let si = recs[pi].slot;
     let k = u32(py - bitcast<i32>(slots[si].w[8])) * slots[si].w[6] + u32(px - bitcast<i32>(slots[si].w[7]));
@@ -882,13 +867,8 @@ fn image_px(pi: u32, px: i32, py: i32) {
     st(r, idx, ((logic(slots[si].w[1], payload[base + 1u], old) & m) | (old & ~m)) & slots[si].w[3]);
 }
 
-// ---- GL pixel fragments (kind 9) ---------------------------------------------------------------
-// A rectangle of glDrawPixels, glCopyPixels or glBitmap fragments from the payload ring, three words
-// a pixel (bit 31 of the first: a fragment is there; colour: red | green << 13, blue | alpha << 13,
-// depth; stencil: the value in the first word's low byte), each through the operations after
-// ownership as `Canvas::frag` does on the CPU.
-//   rec:  0 kind (0 colour, 1 stencil), 1 the window has a stencil plane
-//   slot: a draw state's, then S_FRAG: payload offset, box width, box x0 and y0 (i32)
+// ---- GL pixel fragments (kind 9) ----
+// Three payload words a pixel as `frags_cpu` says; rec 0: kind, 1: stencil plane present; slot S_FRAG: offset, width, x0, y0.
 const S_FRAG: u32 = 108u;
 
 fn frag_px(pi: u32, px: i32, py: i32) {

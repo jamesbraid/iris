@@ -157,14 +157,14 @@ const S_FOG: usize = 66;
 const S_LSTIP: usize = 72;
 /// The multisampling block of a slot (`kona.wgsl`): the sample count, coverage word and options,
 /// the words in each run, the sample offsets and the references of the runs' planes.
-const S_ACC: usize = 112;
-/// The payload offset, width and origin of a rectangle of fragments.
-const S_FRAG: usize = 108;
 const S_MS: usize = 80;
 const S_MS_AT: usize = 86;
 const S_MS_COL: usize = 94;
 const S_MS_DEPTH: usize = 100;
 const S_MS_STEN: usize = 106;
+/// The payload offset, width and origin of a rectangle of fragments, and the accumulation block.
+const S_FRAG: usize = 108;
+const S_ACC: usize = 112;
 /// The longest runs the kernel holds in registers: eight samples of 24 bits of colour or depth, and
 /// of 8 of stencil.
 const RUN_COLOUR: u32 = 6;

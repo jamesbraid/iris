@@ -116,9 +116,7 @@ struct Planes {
     /// Pages held across every plane, and the most there have been since power-on.
     resident: usize,
     peak: usize,
-    /// Counts every change to the words, so a reader that keeps a copy (the GPU's) can find
-    /// what changed since it looked: a page whose stamp is past the version it copied, or a
-    /// page it holds that is not held now.
+    /// Counts every change, so a copy (the GPU's) finds what changed: pages stamped after its version, or gone.
     version: u64,
 }
 

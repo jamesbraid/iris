@@ -64,10 +64,8 @@ pub enum StoreOp<'a> {
     /// glClear of the accumulation words: word `first + k` goes to `values[k]` (float bits), under
     /// ownership and the clip rectangle.
     ClearAccumulation { ds: &'a DrawState, first: u32, values: &'a [u32] },
-    /// Fragments of glDrawPixels, glCopyPixels or glBitmap: the window pixel (`x0 + i`, `y0 + j`) of a
-    /// rectangle `w` by `h` takes the three words at `3 * (j * w + i)` of `data` through the
-    /// operations after ownership (`gl::pixels::frags_cpu` says what the words hold). `kind` is
-    /// `FRAG_COLOUR` or `FRAG_STENCIL`.
+    /// Fragments of glDrawPixels, glCopyPixels or glBitmap in a `w` by `h` rectangle from window pixel (`x0`, `y0`),
+    /// through the operations after ownership; `gl::pixels::frags_cpu` says what `data` holds.
     Frags { ds: &'a DrawState, x0: i64, y0: i64, w: usize, h: usize, kind: u8, data: &'a [u32] },
     /// Zero every array.
     Reset(Drained),

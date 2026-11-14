@@ -956,11 +956,8 @@ impl<'a> Canvas<'a> {
 pub const FRAG_COLOUR: u8 = 0;
 pub const FRAG_STENCIL: u8 = 1;
 
-/// `StoreOp::Frags` on the CPU store: the pixel (`x0 + i`, `y0 + j`) of the window takes the three
-/// words at `3 * (j * w + i)` of `data`: bit 31 of the first says a fragment is there; for colour,
-/// red and green in 13 bits each (red low) then blue and alpha likewise, then the depth; for a
-/// stencil value, the first word's low byte. Returns the fragments that landed (a stencil value is not
-/// counted).
+/// `StoreOp::Frags` on the CPU store. Three words a pixel: bit 31 of the first says a fragment is there,
+/// then colour as red and green, blue and alpha (13 bits each) and the depth, or a stencil value in its low byte.
 pub(in crate::dev::kona::back) fn frags_cpu(store: &Store, ds: &DrawState, x0: i64, y0: i64, w: usize, h: usize, kind: u8, data: &[u32]) -> u64 {
     let canvas = Canvas::new(store, *ds);
     let mut fragments = 0;

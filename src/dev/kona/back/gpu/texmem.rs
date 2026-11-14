@@ -1,19 +1,5 @@
-//! The texture store's pages and the bound textures' descriptors on the GPU (group 3 of the raster
-//! kernel; the layout is `gpu_lib/texture_mem.wgsl`'s).
-//!
-//! The CPU keeps texture memory as sparse 64 KiB pages in the mirror's `TextureStore`. Here the
-//! pages that exist sit in a pool of slots behind a table of `planes * pages_per_plane` entries.
-//! A sync, made before a draw that samples, copies only what changed: a page whose stamp is past
-//! the store version the last sync saw is written to its slot (a new page takes a free one), and a
-//! page the store no longer holds gives its slot back and its entry reads absent, so the shader
-//! reads zero there as the CPU does. The pool grows by doubling, up to what the store may hold or
-//! one storage binding takes, whichever is less; a store that holds more than the pool can is
-//! sampled on the CPU (`fits`).
-//!
-//! A descriptor (`gpu_lib::pack_desc`, `TD_WORDS` words) is written once per distinct content and
-//! the slot of a draw names it by word offset. The table of descriptors is not reset by a flush:
-//! its contents never change while an entry is in the map, so a batch that is still to run reads
-//! what its slots named.
+//! The texture store's pages and descriptors on the GPU (group 3), and the payload ring records carry host data in.
+//! A sync copies the pages changed since the last and frees those gone; a store the pool cannot hold is sampled on the CPU.
 
 use std::collections::HashMap;
 use std::sync::Arc;
