@@ -1300,7 +1300,7 @@ impl Board {
         // VPRO_GPU=1 puts every test board on the GPU unit.
         #[cfg(all(test, feature = "wgpu"))]
         if std::env::var("VPRO_GPU").is_ok() {
-            s.enable_gpu(&crate::wgpu::GpuOptions::default())?;
+            s.enable_gpu(&crate::wgpu::Gpu::new(&Default::default(), Box::new(|_| {}))?)?;
         }
         Ok(s)
     }
@@ -1310,19 +1310,18 @@ impl Board {
     /// front end's mirror of it, brought current by `raster_wait`. Before
     /// the threads start.
     #[cfg(feature = "wgpu")]
-    pub fn enable_gpu(&mut self, opts: &crate::wgpu::GpuOptions) -> Result<(), String> {
+    pub fn enable_gpu(&mut self, gpu: &std::sync::Arc<crate::wgpu::Gpu>) -> Result<(), String> {
         use super::wgpu::{GpuRaster, PLANE_SPAN};
 
         if self.raster.threaded() {
             return Err("the GPU unit must be chosen before the board's threads start".into());
         }
-        let gpu = crate::wgpu::Gpu::new(opts)?;
-        let mut unit = GpuRaster::new(&gpu, self.vram.size(), PLANE_SPAN, PLANE_SPAN)?;
+        let mut unit = GpuRaster::new(gpu, self.vram.size(), PLANE_SPAN, PLANE_SPAN)?;
         self.vram.track_dirty();
         unit.attach_mirror(self.vram.ptr());
         // The display composes on the GPU too, from the same memory.
         let (vram, words) = unit.vram_buffer();
-        let scanout = super::wgpu::scanout::VproScanout::new(&gpu, &vram, words)?;
+        let scanout = super::wgpu::scanout::VproScanout::new(gpu, &vram, words)?;
         let _ = self.display.gpu_scanout.set(parking_lot::Mutex::new(scanout));
         // Flips latch only once the unit has submitted the drawing before
         // them (HostInterface::retrace).

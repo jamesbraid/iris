@@ -52,7 +52,7 @@ use crate::dev::xbridge::{XBridge, HEAD_E, HEAD_F, HOST_WIDGET};
 use crate::ip35::inbound::{Inbound, BEDROCK_PORT};
 use crate::ip35::node::Node;
 use crate::pci::{BoardIrq, DevFn};
-use crate::traits::{BusDevice, Device, Resettable};
+use crate::traits::{BusDevice, Device, MachineFatal, Resettable};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -209,7 +209,7 @@ impl Ip35Board for Origin3200 {
         c_bricks(cfg, usize::from(cfg.origin3200.c_bricks), I_BRICK, None)
     }
 
-    fn wire(nodes: &[&Node], cfg: &MachineConfig) -> Result<BoardIo, String> {
+    fn wire(nodes: &[&Node], cfg: &MachineConfig, _faults: &std::sync::mpsc::Sender<MachineFatal>) -> Result<BoardIo, String> {
         wire_ibrick(nodes, cfg, None).map(|(io, _)| io)
     }
 }

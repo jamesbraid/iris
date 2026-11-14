@@ -304,7 +304,7 @@ fn the_configured_station_address_reaches_the_l1_and_the_ethernet() {
         l1: Default::default(),
         graphics: crate::config::GraphicsBoard::None,
         graphics_pool: (2, 32),
-        graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+        graphics_gpu: None,
     }).unwrap();
     assert_eq!(board.l1.station_mac(), mac);
     assert_eq!(board.eth.mac(), mac);
@@ -322,7 +322,7 @@ fn the_l1_identity_overrides_reach_the_controller() {
         ps2_input: true, usb_input: false, l1,
         graphics: crate::config::GraphicsBoard::None,
         graphics_pool: (2, 32),
-        graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+        graphics_gpu: None,
     }).unwrap().l1.config();
     let stock = build(L1Identity::default());
     assert_eq!(stock.revision, Some([1, 48, 1]));
@@ -347,7 +347,7 @@ fn the_fuel_plugs_a_usb_keyboard_and_mouse_only_when_configured_on() {
             l1: Default::default(),
             graphics: crate::config::GraphicsBoard::None,
             graphics_pool: (2, 32),
-            graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+            graphics_gpu: None,
         }).unwrap();
         // Power each port: one with a device shows it connected.
         board.usb.bar_write(0, 0x54, 0x100, 4);
@@ -694,7 +694,7 @@ fn fuel_with_graphics(graphics: crate::config::GraphicsBoard) -> crate::ip34_mac
         l1: Default::default(),
         graphics,
         graphics_pool: (2, 32),
-        graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+        graphics_gpu: None,
     }).unwrap()
 }
 

@@ -314,13 +314,22 @@ pub(super) mod tests {
 
     /// As `live_board_raster`, set up as the Octane's board where `octane`.
     pub fn live_board_with(kind: GraphicsBoard, raster: crate::config::RasterUnit, octane: bool) -> Arc<Mgras> {
-        let m = Mgras::with_raster(kind, std::array::from_fn(|_| crate::irq::IrqLine::unconnected()), crate::disp::StatusSource::detached(), raster, "auto")
+        let gpu = (raster == crate::config::RasterUnit::Wgpu).then(open_gpu);
+        let m = Mgras::with_raster(kind, std::array::from_fn(|_| crate::irq::IrqLine::unconnected()), crate::disp::StatusSource::detached(), gpu)
             .unwrap_or_else(|e| panic!("{e}"));
         if octane {
             crate::dev::mgras::hq4::octane_board(&m, kind);
         }
         m.start_engines();
         m
+    }
+
+    /// The host GPU, for a test board whose raster engines run on it.
+    fn open_gpu() -> crate::SharedGpu {
+        #[cfg(feature = "wgpu")]
+        return crate::wgpu::Gpu::new(&Default::default(), Box::new(|_| {})).unwrap_or_else(|e| panic!("{e}"));
+        #[cfg(not(feature = "wgpu"))]
+        panic!("graphics.raster = \"wgpu\" needs a build with the wgpu feature");
     }
 
     /// Poll `f` until it returns `Some`, giving up after `POLL_LIMIT`. The

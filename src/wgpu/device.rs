@@ -99,10 +99,35 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     pub caps: Caps,
     /// The first asynchronous error (validation outside an error scope, or
-    /// device loss). Checked by `check()`; a kernel bug shows up here.
-    error: Arc<Mutex<Option<String>>>,
+    /// device loss), shared by every `Gpu` on the device. Checked by
+    /// `check()`; a kernel bug shows up here.
+    failure: Arc<Failure>,
     /// Writes waiting for the next submission (`write`).
     uploads: Mutex<Uploads>,
+}
+
+/// The first error on a device, which stays, and the machine's reaction to
+/// it, run once.
+struct Failure {
+    error: Mutex<Option<String>>,
+    fatal: Arc<dyn Fn(&str) + Send + Sync>,
+}
+
+impl Failure {
+    fn set(&self, msg: String) {
+        let first = {
+            let mut e = self.error.lock();
+            let first = e.is_none();
+            if first {
+                *e = Some(msg.clone());
+            }
+            first
+        };
+        // Outside the lock: the machine's reaction may look at the device.
+        if first {
+            (self.fatal)(&msg);
+        }
+    }
 }
 
 /// The writes queued by `Gpu::write` and `Gpu::write_texture`: copies out
@@ -220,9 +245,13 @@ impl Uploads {
     /// `bulk`: this write has already submitted part of itself, so slots
     /// in flight are its own and coming back; wait for one rather than
     /// grow the ring for a one-off large upload.
-    fn reserve(&mut self, gpu: &Gpu, len: u64, bulk: &mut bool) -> (usize, u64) {
+    /// None once the device has failed: its slots never come back.
+    fn reserve(&mut self, gpu: &Gpu, len: u64, bulk: &mut bool) -> Option<(usize, u64)> {
         assert!(len <= UPLOAD_SLOT_BYTES, "an upload piece larger than a slot");
         loop {
+            if gpu.check().is_err() {
+                return None;
+            }
             for s in &mut self.slots {
                 if !s.mapped && s.ready.swap(false, std::sync::atomic::Ordering::Acquire) {
                     s.mapped = true;
@@ -235,7 +264,7 @@ impl Uploads {
                 // Copies need 4-byte offsets, mapped ranges 8-byte ones.
                 s.cursor = (at + len + 7) & !7;
                 s.used = true;
-                return (self.cur, at);
+                return Some((self.cur, at));
             }
             // The current slot is full or in flight: a mapped slot nothing
             // was written to yet; else send the writes queued so far, which
@@ -279,8 +308,10 @@ impl Drop for Gpu {
 
 impl Gpu {
     /// Open the GPU `opts` asks for. Fails with the reasons each candidate
-    /// backend gave when none works.
-    pub fn new(opts: &GpuOptions) -> Result<Arc<Gpu>, String> {
+    /// backend gave when none works. `fatal` runs once, on the first error
+    /// the device reports (or `fail` is given), from whichever thread saw it.
+    pub fn new(opts: &GpuOptions, fatal: Box<dyn Fn(&str) + Send + Sync>) -> Result<Arc<Gpu>, String> {
+        let fatal: Arc<dyn Fn(&str) + Send + Sync> = Arc::from(fatal);
         // wgpu's own `WGPU_BACKEND` (a comma list: vulkan, metal, dx12, gl)
         // overrides `[graphics] gpu_backend`.
         let candidates = match wgpu::Backends::from_env() {
@@ -296,7 +327,7 @@ impl Gpu {
             // refuse it (an EGL with no X11 or Wayland platform), the device
             // still computes and its frames are read back for the window.
             for display in DISPLAY.get().map(Some).into_iter().chain([None]) {
-                match Self::open(backends, opts, display) {
+                match Self::open(backends, opts, display, Arc::clone(&fatal)) {
                     Ok(gpu) => {
                         log::info!("wgpu: {}", gpu.caps);
                         return Ok(gpu);
@@ -311,7 +342,7 @@ impl Gpu {
         Err(format!("no usable GPU for backend={}: {}", opts.backend, failures.join("; ")))
     }
 
-    fn open(backends: wgpu::Backends, opts: &GpuOptions, display: Option<&winit::event_loop::OwnedDisplayHandle>) -> Result<Arc<Gpu>, String> {
+    fn open(backends: wgpu::Backends, opts: &GpuOptions, display: Option<&winit::event_loop::OwnedDisplayHandle>, fatal: Arc<dyn Fn(&str) + Send + Sync>) -> Result<Arc<Gpu>, String> {
         // The rest of wgpu's environment applies as well: the instance flags
         // (WGPU_DEBUG, WGPU_VALIDATION, ...) and the backend options
         // (WGPU_GL_FENCE_BEHAVIOR, WGPU_GLES_MINOR_VERSION, WGPU_DX12_COMPILER, ...).
@@ -376,18 +407,18 @@ impl Gpu {
         }))
         .map_err(|e| format!("request device on {}: {e}", info.name))?;
 
-        let error = Arc::new(Mutex::new(None));
-        let sink = Arc::clone(&error);
+        let failure = Arc::new(Failure { error: Mutex::new(None), fatal });
+        let sink = Arc::clone(&failure);
         device.on_uncaptured_error(Arc::new(move |e| {
             let msg = format!("wgpu error: {e}");
             log::error!("{msg}");
-            sink.lock().get_or_insert(msg);
+            sink.set(msg);
         }));
-        let sink = Arc::clone(&error);
+        let sink = Arc::clone(&failure);
         device.set_device_lost_callback(move |reason, msg| {
             let msg = format!("wgpu device lost ({reason:?}): {msg}");
             log::error!("{msg}");
-            sink.lock().get_or_insert(msg);
+            sink.set(msg);
         });
 
         let caps = Caps {
@@ -404,21 +435,48 @@ impl Gpu {
             timestamps: features.contains(wgpu::Features::TIMESTAMP_QUERY),
         };
         let uploads = Mutex::new(Uploads::new(&device));
-        Ok(Arc::new(Gpu { instance, adapter, device, queue, caps, error, uploads }))
+        Ok(Arc::new(Gpu { instance, adapter, device, queue, caps, failure, uploads }))
     }
 
     /// The first asynchronous error, if any. Kernels that misbehave are
     /// reported here, not at the call that queued them.
     pub fn check(&self) -> Result<(), String> {
-        match self.error.lock().clone() {
+        match self.failure.error.lock().clone() {
             Some(e) => Err(e),
             None => Ok(()),
         }
     }
 
+    /// Record `msg` as the device's error, if it has none yet, and raise the
+    /// fatal callback. For a failure the device did not report itself (a
+    /// refused readback, a wait that timed out): the caller has no result it
+    /// can substitute, so the machine stops rather than carry on with a
+    /// stale mirror.
+    pub fn fail(&self, msg: &str) {
+        log::error!("wgpu: {msg}");
+        self.failure.set(msg.to_string());
+    }
+
+    /// Another handle on the same device and queue with an upload ring of
+    /// its own, for a board on a device that another board already uses.
+    /// The error, and so the fatal callback, is shared: a loss is every
+    /// board's. The ring is per handle, so one board's writes wait for its
+    /// own next submission only, and its lock is held by that board alone.
+    pub fn share(self: &Arc<Self>) -> Arc<Gpu> {
+        Arc::new(Gpu {
+            instance: self.instance.clone(),
+            adapter: self.adapter.clone(),
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            caps: self.caps.clone(),
+            failure: Arc::clone(&self.failure),
+            uploads: Mutex::new(Uploads::new(&self.device)),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn inject_device_loss(&self, message: &str) {
-        self.error.lock().get_or_insert(format!("wgpu device lost (test): {message}"));
+        self.failure.set(format!("wgpu device lost (test): {message}"));
     }
 
     /// Submit one command buffer, after the writes queued so far.
@@ -467,11 +525,13 @@ impl Gpu {
     /// Queue a write of `bytes` at `offset` of `target`, as
     /// `Queue::write_buffer` does: it lands before the work of the next
     /// `submit`. Offset and length must be multiples of 4.
+    /// After a device failure it does nothing: a lost device's mapped slots
+    /// stop mapping, and every call that returns a result reports the failure.
     pub fn write(&self, target: &wgpu::Buffer, offset: u64, bytes: &[u8]) {
         let mut u = self.uploads.lock();
         let mut bulk = false;
         for (i, piece) in bytes.chunks(UPLOAD_SLOT_BYTES as usize).enumerate() {
-            let (slot, at) = u.reserve(self, piece.len() as u64, &mut bulk);
+            let Some((slot, at)) = u.reserve(self, piece.len() as u64, &mut bulk) else { return };
             let buffer = u.slots[slot].buffer.clone();
             u.slots[slot].store(at, piece);
             u.encoder(&self.device).copy_buffer_to_buffer(&buffer, at, target, offset + i as u64 * UPLOAD_SLOT_BYTES, piece.len() as u64);
@@ -489,7 +549,7 @@ impl Gpu {
         let mut y0 = 0;
         while y0 < height {
             let n = per_piece.min(height - y0);
-            let (slot, at) = u.reserve(self, n as u64 * pitch, &mut bulk);
+            let Some((slot, at)) = u.reserve(self, n as u64 * pitch, &mut bulk) else { return };
             let buffer = u.slots[slot].buffer.clone();
             for r in 0..n as usize {
                 let src = &rows[(y0 as usize + r) * stride..][..width as usize];
@@ -511,7 +571,11 @@ impl Gpu {
         // failed to build, a lost device); the error that refused it is
         // the one to report.
         self.check()?;
-        waited.map(|_| ()).map_err(|e| format!("wait for GPU: {e}"))
+        if let Err(e) = waited {
+            // A wait that fails leaves the work in an unknown state.
+            self.fail(&format!("wait for GPU: {e}"));
+        }
+        self.check()
     }
 
     /// Let callbacks run without blocking.

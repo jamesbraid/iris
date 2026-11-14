@@ -221,7 +221,7 @@ pub fn run_with(recs: &[Rec], setup: impl FnOnce(&mut Board), every: usize, opts
     if opts.gpu {
         #[cfg(feature = "wgpu")]
         {
-            b.enable_gpu(&crate::wgpu::GpuOptions::default()).expect("the GPU raster unit");
+            b.enable_gpu(&crate::wgpu::Gpu::new(&Default::default(), Box::new(|_| {})).expect("the GPU")).expect("the GPU raster unit");
             // VPRO_REPLAY_LAZY=1: no readbacks between checkpoints, to time
             // the GPU path alone (the planes the front end reads go stale,
             // so the checkpoints are not expected to hold).

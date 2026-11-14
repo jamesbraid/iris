@@ -66,7 +66,7 @@ use crate::gfx_display::GfxDisplay;
 use crate::ip35::inbound::{Inbound, BEDROCK_PORT};
 use crate::ip35::node::Node;
 use crate::irq::InterruptController;
-use crate::traits::{BusDevice, Device, Resettable};
+use crate::traits::{BusDevice, Device, MachineFatal, Resettable};
 use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock, Weak};
@@ -156,11 +156,11 @@ impl Ip35Board for Onyx3000 {
         }
     }
 
-    fn wire(nodes: &[&Node], cfg: &MachineConfig) -> Result<BoardIo, String> {
+    fn wire(nodes: &[&Node], cfg: &MachineConfig, faults: &std::sync::mpsc::Sender<MachineFatal>) -> Result<BoardIo, String> {
         if cfg.graphics_board().is_vpro() {
             let (mut io, _) = wire_ibrick(nodes, cfg, None)?;
             let v_node = nodes.get(1).ok_or("the V-brick needs a C-brick of its own")?;
-            wire_vbrick(v_node, cfg)?.join(&mut io);
+            wire_vbrick(v_node, cfg, faults)?.join(&mut io);
             return Ok(io);
         }
         let (product, rm_count) = cfg
@@ -205,7 +205,7 @@ impl Ip35Board for Onyx3000 {
 /// Established: the V-brick holds an XBridge and cables to a C-brick of its
 /// own. Inferred: it has no PCI devices; the XBridge's two empty PCI heads
 /// answer as the chip's always do.
-fn wire_vbrick(node: &Node, cfg: &MachineConfig) -> Result<Graphics, String> {
+fn wire_vbrick(node: &Node, cfg: &MachineConfig, faults: &std::sync::mpsc::Sender<MachineFatal>) -> Result<Graphics, String> {
     let bedrock = &node.bedrock;
     let xbridge = XBridge::new(BEDROCK_PORT, &|widget| {
         let port = Inbound::port(bedrock, widget);
@@ -227,7 +227,7 @@ fn wire_vbrick(node: &Node, cfg: &MachineConfig) -> Result<Graphics, String> {
         bedrock.widget_dma(V12_WIDGET),
         status.clone(),
         (cfg.graphics.threads, cfg.graphics.tile),
-        (cfg.graphics.raster, cfg.graphics.gpu_backend.as_str()),
+        crate::workstation::open_gpu(cfg, faults)?,
     )?;
     bedrock.connect_widget(V12_WIDGET, xbridge.attach_widget(V12_WIDGET, v12.clone()));
     // A link reset of the V12's port resets the board behind it.

@@ -172,7 +172,7 @@ fn the_system_serial_moves_and_the_board_serial_stays() {
             chip: &CHIPS[0],
             v12: false,
             graphics_pool: (2, 32),
-            graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+            graphics_gpu: None,
             audio: TezroAudio::Absent,
         })
         .unwrap()
@@ -205,7 +205,7 @@ fn board_with_chip(cpus: usize, chip: &'static TezroChip) -> TezroBoard {
         chip,
         v12: false,
         graphics_pool: (2, 32),
-        graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+        graphics_gpu: None,
         audio: TezroAudio::Absent,
     })
     .unwrap()
@@ -281,7 +281,7 @@ fn the_audio_controller_is_the_only_function_behind_the_bridge_when_audio_is_on(
             chip: &CHIPS[0],
             v12: false,
             graphics_pool: (2, 32),
-            graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+            graphics_gpu: None,
             audio,
         })
         .unwrap()
@@ -457,7 +457,7 @@ fn board_with_clock(cpus: usize) -> (TezroBoard, Arc<AtomicU64>) {
         chip: &CHIPS[0],
         v12: false,
         graphics_pool: (2, 32),
-        graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+        graphics_gpu: None,
         audio: TezroAudio::Absent,
     })
     .unwrap();
@@ -611,7 +611,7 @@ fn the_board_refuses_a_population_it_cannot_fit() {
         chip: one_ghz,
         v12: false,
         graphics_pool: (2, 32),
-        graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+        graphics_gpu: None,
         audio: TezroAudio::Absent,
     });
     assert!(refused.err().is_some_and(|e| e.contains("fitted with 2, 4 processors only")));
@@ -632,7 +632,7 @@ fn board_with(chip: &Part) -> TezroBoard {
         chip: self::chip(chip),
         v12: false,
         graphics_pool: (2, 32),
-        graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+        graphics_gpu: None,
         audio: TezroAudio::Absent,
     })
     .unwrap()
@@ -814,7 +814,7 @@ fn a_store_through_the_ioc4_nvram_window_reaches_the_nvram_file() {
             chip: &CHIPS[0],
             v12: false,
             graphics_pool: (2, 32),
-            graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+            graphics_gpu: None,
             audio: TezroAudio::Absent,
         })
         .unwrap();
@@ -864,7 +864,7 @@ fn board_with_v12(cpus: usize) -> TezroBoard {
         chip: &CHIPS[0],
         v12: true,
         graphics_pool: (2, 32),
-        graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+        graphics_gpu: None,
         audio: TezroAudio::Absent,
     })
     .unwrap()

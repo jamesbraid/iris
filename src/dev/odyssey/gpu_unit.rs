@@ -138,6 +138,10 @@ mod stub {
     pub(crate) struct Unsupported(pub String);
 
     impl GpuRaster {
+        pub fn fail(&self, _why: &str) {
+            match *self {}
+        }
+
         pub fn read_back(&mut self) -> Result<(), String> {
             match *self {}
         }
@@ -237,6 +241,10 @@ mod stub_scanout {
     pub(crate) enum GpuScanout {}
 
     impl GpuScanout {
+        pub fn fail(&self, _why: &str) {
+            match *self {}
+        }
+
         pub fn run(&mut self, _frame: &super::super::frame::Frame, _regs: &super::super::reader::DisplayRegs, _width: u32, _height: u32, _out: &mut [u32]) -> Result<(), String> {
             match *self {}
         }

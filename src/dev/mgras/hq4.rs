@@ -705,18 +705,18 @@ impl ImpactXio {
         mem: Arc<dyn BusDevice>,
         status: Arc<crate::disp::StatusSource>,
     ) -> Arc<Self> {
-        Self::with_raster(widget, kind, irq, mem, status, (crate::config::RasterUnit::Cpu, "auto")).expect("the CPU raster engines")
+        Self::with_raster(widget, kind, irq, mem, status, None).expect("the CPU raster engines")
     }
 
-    /// `with_board` with the raster engines where `raster` says (`[graphics]
-    /// raster` and `gpu_backend`; see `Mgras::with_raster`).
+    /// `with_board` with the raster engines on `gpu` when there is one (see
+    /// `Mgras::with_raster`).
     pub fn with_raster(
         widget: u8,
         kind: GraphicsBoard,
         irq: Arc<dyn InterruptController>,
         mem: Arc<dyn BusDevice>,
         status: Arc<crate::disp::StatusSource>,
-        raster: (crate::config::RasterUnit, &str),
+        gpu: Option<crate::SharedGpu>,
     ) -> Result<Arc<Self>, String> {
         let board = ImpactBoard::for_kind(kind).expect("an IMPACT board kind");
         let shared = Arc::new(Shared {
@@ -732,8 +732,7 @@ impl ImpactXio {
             kind,
             [IrqLine::new(lines.clone(), 0), IrqLine::new(lines.clone(), 1), IrqLine::new(lines, 2)],
             status,
-            raster.0,
-            raster.1,
+            gpu,
         )?;
         // CMAP 0's revision register carries the monitor ID in bits 7:4;
         // CMAP 1's RA revision in 6:4 and, in bit 7, that there is no video

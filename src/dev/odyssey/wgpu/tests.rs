@@ -69,7 +69,7 @@ impl Lcg {
 }
 
 fn gpu() -> Option<Arc<Gpu>> {
-    match Gpu::new(&GpuOptions::default()) {
+    match Gpu::new(&GpuOptions::default(), Box::new(|_| {})) {
         Ok(g) => Some(g),
         Err(e) => {
             eprintln!("skipped: {e}");
@@ -906,4 +906,25 @@ fn scanout_composes_as_the_cpu_frame() {
             panic!("round {round}: {diffs} pixels differ, first at ({}, {}): cpu {a:#08x} gpu {b:#08x}", i % w, i / w);
         }
     }
+}
+
+/// A VPro on a GPU that has failed does not draw on the CPU instead: the
+/// readback that would have brought the mirror current reports the failure
+/// to the machine, once, and the unit's calls return the error.
+#[test]
+fn a_failed_gpu_stops_the_unit_and_does_not_fall_back() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = Arc::clone(&calls);
+    let gpu = match Gpu::new(&GpuOptions::default(), Box::new(move |_| { seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst); })) {
+        Ok(g) => g,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    let mut board = super::super::board::Board::new("v12", 0).expect("board");
+    board.enable_gpu(&gpu.share()).expect("the GPU unit");
+    gpu.device.destroy();
+    // The loss callback runs from a poll, which the unit's submissions make.
+    gpu.poll();
+    board.gpu_sync();
+    assert!(gpu.check().unwrap_err().contains("lost"));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "the machine hears it once");
 }

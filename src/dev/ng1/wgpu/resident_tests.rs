@@ -25,7 +25,7 @@ fn on_large_stack(f: impl FnOnce() + Send + 'static) {
 
 fn required_gpu() -> Arc<Gpu> {
     let backend = std::env::var("REX3_RESIDENT_BACKEND").unwrap_or_else(|_| "auto".into());
-    let gpu = Gpu::new(&GpuOptions { backend: backend.clone(), ..GpuOptions::default() })
+    let gpu = Gpu::new(&GpuOptions { backend: backend.clone(), ..GpuOptions::default() }, Box::new(|_| {}))
         .unwrap_or_else(|error| panic!("required resident backend {backend}: {error}"));
     let expected = match backend.as_str() {
         "vulkan" => Some(wgpu::Backend::Vulkan),

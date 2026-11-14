@@ -136,7 +136,7 @@ impl PipeDraw {
                         crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi-odyssey: gpu unit: {} drawn on the CPU", e.0);
                     }
                     if let Err(e) = g.read_back() {
-                        crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi-odyssey: gpu readback: {e}");
+                        g.fail(&format!("VPro readback: {e}"));
                     }
                     (std::ptr::null_mut(), None)
                 }
