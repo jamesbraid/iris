@@ -71,7 +71,7 @@ impl Gr2 {
                     let pixels = screen.rgba.clone();
                     let n = self.screenshot_counter.fetch_add(1, Ordering::Relaxed);
                     let path = format!("screenshot_{:04}.png", n);
-                    thread::spawn(move || match crate::disp::save_screenshot(&path, &pixels, FB_W, FB_H) {
+                    thread::spawn(move || match crate::disp::write_png_words(&path, &pixels, crate::disp::FB_STRIDE, FB_W, FB_H) {
                         Ok(()) => println!("iris: screenshot saved to {}", path),
                         Err(e) => println!("iris: screenshot failed: {}", e),
                     });

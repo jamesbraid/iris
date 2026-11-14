@@ -1076,7 +1076,7 @@ impl Mgras {
         let mut out = vec![0u32; frame::OUT_STRIDE * frame::H];
         let f = self.snapshot_frame();
         f.compose(&mut out);
-        disp::save_png(path, &out, f.width, f.height)
+        crate::disp::write_png_words(path, &out, frame::OUT_STRIDE, f.width, f.height).map_err(|e| e.to_string())
     }
 
     /// Identity for a board outside the Indigo2 (the Octane's XIO boards):

@@ -117,7 +117,7 @@ impl Display {
             let pixels = screen.rgba.clone();
             let n = self.screenshots.fetch_add(1, Ordering::Relaxed);
             let path = format!("screenshot_{:04}.png", n);
-            std::thread::spawn(move || match crate::disp::save_screenshot(&path, &pixels, w, h) {
+            std::thread::spawn(move || match crate::disp::write_png_words(&path, &pixels, crate::disp::FB_STRIDE, w, h) {
                 Ok(()) => println!("iris: screenshot saved to {}", path),
                 Err(e) => println!("iris: screenshot failed: {}", e),
             });

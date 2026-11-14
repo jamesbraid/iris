@@ -188,22 +188,6 @@ pub fn composite_index(rss: &mut Rss, dcb: &Dcb, x: i32, y: i32, bgra: &[u8], st
     true
 }
 
-/// Write a scanned-out frame (`0xFF_BB_GG_RR`, stride `OUT_STRIDE`) as a PNG.
-pub fn save_png(path: &str, frame: &[u32], width: usize, height: usize) -> Result<(), String> {
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), width as u32, height as u32);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut out = enc.write_header().map_err(|e| e.to_string())?;
-    let mut rows = Vec::with_capacity(width * height * 3);
-    for y in 0..height {
-        for px in &frame[y * frame::OUT_STRIDE..y * frame::OUT_STRIDE + width] {
-            rows.extend_from_slice(&[*px as u8, (px >> 8) as u8, (px >> 16) as u8]);
-        }
-    }
-    out.write_image_data(&rows).map_err(|e| e.to_string())
-}
-
 impl Mgras {
     pub(super) fn refresh_loop(self: &Arc<Self>) {
         let frame = std::time::Duration::from_micros(16_667);
@@ -318,7 +302,7 @@ impl Mgras {
                     let (pixels, w, h) = (screen.fb_rgb.clone(), screen.width, screen.height);
                     let path = format!("screenshot_{shots:04}.png");
                     shots += 1;
-                    std::thread::spawn(move || match save_png(&path, &pixels, w, h) {
+                    std::thread::spawn(move || match crate::disp::write_png_words(&path, &pixels, frame::OUT_STRIDE, w, h) {
                         Ok(()) => println!("iris: screenshot saved to {path}"),
                         Err(e) => println!("iris: screenshot failed: {e}"),
                     });

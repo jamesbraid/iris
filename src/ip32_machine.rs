@@ -981,7 +981,7 @@ impl O2Display {
                     let pixels = screen.rgba.clone();
                     let path = format!("screenshot_{shots:04}.png");
                     shots += 1;
-                    std::thread::spawn(move || match crate::disp::save_screenshot(&path, &pixels, w, h) {
+                    std::thread::spawn(move || match crate::disp::write_png_words(&path, &pixels, crate::disp::FB_STRIDE, w, h) {
                         Ok(()) => println!("iris: screenshot saved to {path}"),
                         Err(e) => println!("iris: screenshot failed: {e}"),
                     });
@@ -1104,7 +1104,7 @@ fn control_command(bus: &Ip32Bus, cmd: &str, arg: &str, rgba: &mut [u8]) -> Stri
     let kb = bus.mace.ps2.devices();
     match cmd {
         "shot" => match bus.render_screen(rgba) {
-            Some((w, h)) => match crate::disp::save_png_rgba8(arg, &rgba[..(w * h * 4) as usize], w, h) {
+            Some((w, h)) => match crate::disp::write_png(arg, w, h, png::ColorType::Rgba, &rgba[..(w * h * 4) as usize]) {
                 Ok(()) => format!("ok {w}x{h}"),
                 Err(e) => format!("err {e}"),
             },

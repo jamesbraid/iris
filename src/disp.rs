@@ -14,6 +14,9 @@ use crate::dev::ng1::vc2::{
 use crate::dev::ng1::xmap9::Xmap9;
 use glow::HasContext;
 use parking_lot::Mutex;
+use std::fs::{self, File};
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -906,7 +909,7 @@ const LED_GREEN_OFF: u32 = 0xFF003000;
 /// Flash color for the jitv2 rectangle right after a `mega_flush` — purple,
 /// distinct from any steady-state green/red fill color so it reads as an
 /// event, not just "100% full and red". 0xAABBGGRR (this file's rgba
-/// convention — see `save_screenshot`'s doc comment).
+/// convention — see `write_png_words`).
 #[cfg(feature = "jitv2")]
 const JIT_FLUSH_FLASH: u32 = 0xFFFF20C0;
 
@@ -1234,40 +1237,113 @@ impl StatusBar {
     }
 }
 
-/// Save `px` (R, G, B, A bytes, `w` x `h`, tightly packed) as a PNG, written
-/// to a temporary name and renamed, so a reader never sees half a file.
-pub fn save_png_rgba8(path: &str, px: &[u8], w: u32, h: u32) -> Result<(), String> {
-    let tmp = format!("{path}.tmp");
-    {
-        let f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-        let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w, h);
-        enc.set_color(png::ColorType::Rgba);
+/// The one PNG writer. `data` holds `w` x `h` tightly packed rows of 8-bit
+/// samples in `color`. The image goes to a sibling `<path>.tmp` that is
+/// renamed over `path` once it is finished, so a reader never sees half a file.
+pub fn write_png(path: impl AsRef<Path>, w: u32, h: u32, color: png::ColorType, data: &[u8]) -> io::Result<()> {
+    let path = path.as_ref();
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let encoded = (|| -> io::Result<()> {
+        let mut enc = png::Encoder::new(io::BufWriter::new(File::create(&tmp)?), w, h);
+        enc.set_color(color);
         enc.set_depth(png::BitDepth::Eight);
-        let mut wr = enc.write_header().map_err(|e| e.to_string())?;
-        wr.write_image_data(px).map_err(|e| e.to_string())?;
+        let mut out = enc.write_header()?;
+        out.write_image_data(data)?;
+        // `finish` reports the last flush; dropping the writer would hide it.
+        out.finish()?;
+        Ok(())
+    })();
+    let written = encoded.and_then(|()| fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    written
 }
 
-/// Save the composited rgba buffer as a PNG file.
-/// `rgba` uses 0xFFBBGGRR (GL-native); swap R↔B when writing PNG.
-pub fn save_screenshot(path: &str, rgba: &[u32], width: usize, height: usize) -> Result<(), String> {
-    use std::io::BufWriter;
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut enc = png::Encoder::new(BufWriter::new(file), width as u32, height as u32);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut writer = enc.write_header().map_err(|e| e.to_string())?;
-    let mut rows: Vec<u8> = Vec::with_capacity(height * width * 3);
-    for y in 0..height {
-        for x in 0..width {
-            let px = rgba[y * 2048 + x];
-            rows.push(( px        & 0xFF) as u8);
-            rows.push(((px >>  8) & 0xFF) as u8);
-            rows.push(((px >> 16) & 0xFF) as u8);
+/// Write `w` x `h` words from `px`, rows `stride` words apart, as an RGB PNG.
+/// Each word is `0xAABBGGRR` or `0xFFBBGGRR`: red is the low byte. The screen
+/// buffers use `FB_STRIDE` as their stride.
+pub fn write_png_words(path: impl AsRef<Path>, px: &[u32], stride: usize, w: usize, h: usize) -> io::Result<()> {
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for &p in &px[y * stride..y * stride + w] {
+            rgb.extend_from_slice(&[p as u8, (p >> 8) as u8, (p >> 16) as u8]);
         }
     }
-    writer.write_image_data(&rows).map_err(|e| e.to_string())
+    write_png(path, w as u32, h as u32, png::ColorType::Rgb, &rgb)
+}
+
+#[cfg(test)]
+mod png_writer_tests {
+    use super::{write_png, write_png_words};
+    use std::path::{Path, PathBuf};
+
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("iris-png-{}-{name}.png", std::process::id()))
+    }
+
+    fn decode(path: &Path) -> (png::OutputInfo, Vec<u8>) {
+        let file = std::fs::File::open(path).unwrap();
+        let mut r = png::Decoder::new(std::io::BufReader::new(file)).read_info().unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        buf.truncate(info.buffer_size());
+        (info, buf)
+    }
+
+    /// Rows are read `stride` words apart, and red is the low byte. The padding
+    /// words hold junk that must not reach the file.
+    #[test]
+    fn words_are_read_by_stride_with_red_in_the_low_byte() {
+        let path = scratch("words");
+        let px = [
+            0xFF30_2010, 0xFF60_5040, 0xFF90_8070, 0xDEAD_BEEF,
+            0xFF00_FF00, 0xFF00_00FF, 0xFFFF_FFFF, 0xDEAD_BEEF,
+        ];
+        write_png_words(&path, &px, 4, 3, 2).unwrap();
+        let (info, rgb) = decode(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!((info.width, info.height, info.color_type), (3, 2, png::ColorType::Rgb));
+        assert_eq!(rgb, [
+            0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90,
+            0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0xFF,
+        ]);
+    }
+
+    /// RGBA keeps its alpha bytes, and a rewrite replaces the old file whole
+    /// with no temporary left behind.
+    #[test]
+    fn rgba_round_trips_and_replaces_the_old_file() {
+        let path = scratch("rgba");
+        std::fs::write(&path, b"old").unwrap();
+        let px = [1u8, 2, 3, 0, 4, 5, 6, 255];
+        write_png(&path, 2, 1, png::ColorType::Rgba, &px).unwrap();
+        let (info, bytes) = decode(&path);
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp_left = Path::new(&tmp).exists();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!((info.width, info.height, info.color_type), (2, 1, png::ColorType::Rgba));
+        assert_eq!(bytes, px);
+        assert!(!tmp_left, "a finished write leaves no temporary file");
+    }
+
+    /// A directory at the target makes the final rename fail. The error comes
+    /// back and the temporary file does not stay behind.
+    #[test]
+    fn a_failed_rename_removes_the_temporary_file() {
+        let path = scratch("blocked");
+        std::fs::create_dir(&path).unwrap();
+        let err = write_png(&path, 1, 1, png::ColorType::Rgb, &[1, 2, 3]);
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp_left = Path::new(&tmp).exists();
+        std::fs::remove_dir(&path).unwrap();
+        assert!(err.is_err(), "renaming a file over a directory must fail");
+        assert!(!tmp_left, "a failed write leaves no temporary file");
+    }
 }
 
 #[cfg(test)]

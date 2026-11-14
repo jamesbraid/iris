@@ -825,13 +825,8 @@ fn decode_rgb(src: impl BufRead + std::io::Seek, what: &str) -> std::result::Res
 }
 
 fn write_rgb(path: &std::path::Path, img: &Rgb) -> std::result::Result<(), String> {
-    let bad = |e: &dyn std::fmt::Display| format!("{}: {}", path.display(), e);
-    let file = std::fs::File::create(path).map_err(|e| bad(&e))?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), img.width, img.height);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut w = enc.write_header().map_err(|e| bad(&e))?;
-    w.write_image_data(&img.px).map_err(|e| bad(&e))
+    iris::disp::write_png(path, img.width, img.height, png::ColorType::Rgb, &img.px)
+        .map_err(|e| format!("{}: {}", path.display(), e))
 }
 
 fn pixel_differs(a: &[u8], b: &[u8], threshold: u8) -> bool {
@@ -1602,11 +1597,7 @@ mod tests {
     #[test]
     fn an_rgba_golden_reads_as_rgb() {
         let path = std::env::temp_dir().join(format!("iris-ci-rgba-golden-{}.png", std::process::id()));
-        let file = std::fs::File::create(&path).unwrap();
-        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 2, 1);
-        enc.set_color(png::ColorType::Rgba);
-        enc.set_depth(png::BitDepth::Eight);
-        enc.write_header().unwrap().write_image_data(&[1, 2, 3, 255, 4, 5, 6, 0]).unwrap();
+        iris::disp::write_png(&path, 2, 1, png::ColorType::Rgba, &[1, 2, 3, 255, 4, 5, 6, 0]).unwrap();
         let img = read_rgb(&path);
         std::fs::remove_file(&path).unwrap();
         let img = img.unwrap();

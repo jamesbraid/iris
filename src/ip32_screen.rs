@@ -1,5 +1,5 @@
 //! Key names for the O2's control port: winit's names for physical keys
-//! (`key KeyA`). Its screen shots go through `disp::save_png_rgba8`.
+//! (`key KeyA`). Its screen shots go through `disp::write_png`.
 
 /// The winit key a name stands for (its `Debug` name, as `KeyA`).
 pub fn keycode(name: &str) -> Option<winit::keyboard::KeyCode> {
