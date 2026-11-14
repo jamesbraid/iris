@@ -874,6 +874,17 @@ pub(crate) fn share_gpu(gpu: &Option<crate::SharedGpu>) -> Option<crate::SharedG
     }
 }
 
+/// Put an InfiniteReality pipe's display on the machine's GPU, when it has one.
+pub(crate) fn fit_kona_gpu(pipe: &crate::dev::kona::Kona, gpu: &Option<crate::SharedGpu>) -> Result<(), String> {
+    #[cfg(feature = "wgpu")]
+    if let Some(g) = share_gpu(gpu) {
+        pipe.set_gpu(g)?;
+    }
+    #[cfg(not(feature = "wgpu"))]
+    let _ = (pipe, gpu);
+    Ok(())
+}
+
 /// Start the reliable, unbounded terminal-device-fault path for `slot`.
 ///
 /// This is separate from the bounded reset/power event queue so a graphics

@@ -181,6 +181,7 @@ impl Ip35Board for Onyx3000 {
         let (mut io, xbridge) = wire_ibrick(nodes, cfg, Some(port_reset))?;
         let status = new_status();
         let pipe = fit_pipe(&nodes[0].bedrock, &xbridge, cfg, KonaConfig::new(product, rm_count)?, &status)?;
+        crate::workstation::fit_kona_gpu(&pipe, &crate::workstation::open_gpu(cfg, faults)?)?;
         let _ = cell.set(Arc::downgrade(&pipe));
         eprintln!("iris: {} on the G-brick at I-brick widget {PIPE_WIDGET}", product.spec().label);
         let (start, stop, reset) = (pipe.clone(), pipe.clone(), pipe.clone());

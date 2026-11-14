@@ -62,6 +62,8 @@
 pub mod channels;
 pub mod clock;
 pub mod dac_cursor;
+#[cfg(feature = "wgpu")]
+pub mod scanout;
 pub mod screen;
 pub mod tables;
 
@@ -262,11 +264,64 @@ pub struct Compositor {
     display: Arc<Display>,
     /// Frames passed over since one was composed.
     idle: u32,
+    /// The scan-out on the GPU, when the machine gave the board one. Then the
+    /// frame is composed there and the CPU compose is not run.
+    #[cfg(feature = "wgpu")]
+    scanout: scanout::Shared,
 }
 
 impl Compositor {
     pub fn new(store: Arc<Store>, word: usize, map: Arc<Mutex<ColourMap>>, tables: Arc<Mutex<Tables>>, display: Arc<Display>) -> Compositor {
-        Compositor { store, word, map, tables, display, idle: 0 }
+        Compositor {
+            store,
+            word,
+            map,
+            tables,
+            display,
+            idle: 0,
+            #[cfg(feature = "wgpu")]
+            scanout: Arc::default(),
+        }
+    }
+
+    /// Compose on `scanout` while it holds one.
+    #[cfg(feature = "wgpu")]
+    pub fn with_scanout(mut self, scanout: scanout::Shared) -> Compositor {
+        self.scanout = scanout;
+        self
+    }
+
+    /// Compose on the GPU into the frame `out`, if the board has a scan-out
+    /// there: Some(published) when it did, None when the CPU composes. A window
+    /// on the same device is shown the GPU's frame as it is, and nothing comes
+    /// back; anything else reads it into `out`. A GPU that fails has stopped the
+    /// machine, and no frame comes from the CPU in its place.
+    #[cfg(feature = "wgpu")]
+    fn compose_on_gpu(&self, screen: &crate::gfx_display::Screen, out: &mut crate::gfx_display::Frame, need: crate::gfx_display::Need, map: &ColourMap, tables: &Baked) -> Option<bool> {
+        let mut guard = self.scanout.lock();
+        let sc = guard.as_mut()?;
+        let (w, h) = (self.store.cpu().width(), self.store.cpu().height());
+        if let Err(e) = sc.compose(self.store.cpu(), self.word, map, tables) {
+            sc.fail(&e);
+            screen.counts.count(false);
+            return Some(false);
+        }
+        if need.gpu && !need.words {
+            self.display.present_gpu(sc.output(), w, h);
+            screen.counts.count(true);
+            return Some(false);
+        }
+        out.width = w;
+        out.height = h;
+        out.words.resize(w as usize * h as usize, 0);
+        if let Err(e) = sc.read(&mut out.words) {
+            sc.fail(&e);
+            screen.counts.count(false);
+            return Some(false);
+        }
+        self.display.present(&out.words, w as usize, h as usize);
+        screen.counts.count(true);
+        Some(true)
     }
 }
 
@@ -275,7 +330,7 @@ impl Compositor {
     /// has changed.
     pub fn frame(&mut self) {
         let screen = self.display.out().clone();
-        screen.tick(|out, _| {
+        screen.tick(|out, need| {
             // The flag is cleared before the pixels are read.
             let drawn = self.store.cpu().take_touched();
             if !drawn && !screen.requests.pending() {
@@ -291,6 +346,11 @@ impl Compositor {
             let map = self.map.lock().clone();
             let (w, h) = (self.store.cpu().width(), self.store.cpu().height());
             let tables = self.tables.lock().snapshot();
+            #[cfg(feature = "wgpu")]
+            if let Some(published) = self.compose_on_gpu(&screen, out, need, &map, &tables) {
+                return published;
+            }
+            let _ = need;
             out.width = w;
             out.height = h;
             out.words.resize(w as usize * h as usize, 0);

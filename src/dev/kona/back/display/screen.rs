@@ -99,6 +99,42 @@ impl Display {
         renderer.present(&mut screen, &mut local.overlay, &mut local.status, &mut local.texture, &stats, false, None, None);
     }
 
+    /// Show a frame composed on the GPU (0xAABBGGRR, rows of `width`) through
+    /// the installed renderer, from where it is: nothing comes back, and the
+    /// screen's words keep their last frame.
+    #[cfg(feature = "wgpu")]
+    pub fn present_gpu(&self, frame: &wgpu::Buffer, width: u32, height: u32) {
+        let mut renderer = self.out().window.renderer.lock();
+        let Some(renderer) = renderer.as_mut() else { return };
+        let mut screen = self.screen.lock();
+        let (w, h) = (width as usize, height as usize);
+        screen.width = w.min(FB_STRIDE);
+        screen.height = h;
+        screen.prebuilt = true;
+        screen.status_bar_only = false;
+        self.out().set_size(width, height);
+        let mut local = self.local.lock();
+        let local = local.get_or_insert_with(|| Local {
+            overlay: crate::debug_overlay::DebugOverlay::new(),
+            status: crate::disp::StatusBar::new(),
+            texture: crate::disp::StatusBarTexture::new(),
+            size: (0, 0),
+        });
+        if local.size != (w, h) {
+            renderer.resize(w, h);
+            local.size = (w, h);
+        }
+        let stats = self.status.lock().snapshot(std::time::Instant::now(), 0);
+        renderer.present_gpu_frame(frame, width, height, &mut screen, &mut local.overlay, &mut local.status, &mut local.texture, &stats);
+    }
+
+    /// Say which device the board composes on, so a window on it presents the
+    /// GPU's frames directly.
+    #[cfg(feature = "wgpu")]
+    pub fn set_gpu(&self, gpu: crate::SharedGpu) {
+        let _ = self.out().gpu.set(gpu);
+    }
+
     /// The display thread's last act: release the renderer, unless the stop came
     /// from the main thread, and drop the per-frame overlay state.
     pub fn finish(&self) {

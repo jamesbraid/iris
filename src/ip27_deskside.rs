@@ -486,7 +486,7 @@ impl Ip27Board for Deskside {
             .collect())
     }
 
-    fn wire(nodes: &[&Node], cfg: &MachineConfig) -> Result<BoardIo, String> {
+    fn wire(nodes: &[&Node], cfg: &MachineConfig, faults: &std::sync::mpsc::Sender<crate::traits::MachineFatal>) -> Result<BoardIo, String> {
         let layout = Self::layout(cfg.machine.profile)?;
         let controller = Self::controller(nodes, cfg)?;
         // The status bar's activity bits, shared with the Bridge's devices.
@@ -512,6 +512,7 @@ impl Ip27Board for Deskside {
             Self::fit_mediaio(host, cfg, &pci_bridge, media, &mut io);
         }
         if let Some(p) = pipe {
+            crate::workstation::fit_kona_gpu(&p, &crate::workstation::open_gpu(cfg, faults)?)?;
             io.display = Some(p.display());
             io.status = Some(status);
             io.devices.push(p.clone());

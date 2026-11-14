@@ -214,6 +214,9 @@ pub struct KonaBackend {
     /// The window the board shows the guest, which the machine keeps a clone
     /// of (`KonaBackend::display`).
     display: Arc<Display>,
+    /// The display's scan-out on the GPU, when the machine gave the board one.
+    #[cfg(feature = "wgpu")]
+    scanout: display::scanout::Shared,
     /// The textport's colour map, copied by the display once a frame.
     map: Arc<parking_lot::Mutex<ColourMap>>,
     /// The X server's colour map and display-ID table, which the display
@@ -289,6 +292,8 @@ impl KonaBackend {
             map,
             tables,
             display,
+            #[cfg(feature = "wgpu")]
+            scanout: Arc::default(),
             contexts: Contexts::default(),
             regions: RegionCounts::default(),
             dac_cursor_loads: 0,
@@ -340,6 +345,21 @@ impl KonaBackend {
             }
             Err(why) => self.refused[why as usize] += 1,
         }
+    }
+
+    /// Compose the display on `gpu` (`[graphics] raster = "wgpu"`): the frame
+    /// is made there, and a window on the same device shows it without a
+    /// readback. The raster still draws on the CPU. The managed area may be too
+    /// big for the device's buffer limits, and then the CPU composes. A GPU that
+    /// fails later stops the machine (it was given the device's fatal callback).
+    #[cfg(feature = "wgpu")]
+    pub fn set_gpu(&mut self, gpu: crate::SharedGpu) -> Result<(), String> {
+        let (w, h) = (self.store.cpu().width(), self.store.cpu().height());
+        let Some(sc) = display::scanout::GpuScanout::new(&gpu, w, h)? else { return Ok(()) };
+        eprintln!("kona: scan-out on the GPU: {}", gpu.caps);
+        self.display.set_gpu(gpu);
+        *self.scanout.lock() = Some(sc);
+        Ok(())
     }
 
     /// The window this board shows the guest, to hand to the machine so
@@ -617,6 +637,8 @@ impl KonaBackend {
             return;
         }
         let sink = Compositor::new(self.store.clone(), textport::COLOUR_WORD, self.map.clone(), self.tables.clone(), self.display.clone());
+        #[cfg(feature = "wgpu")]
+        let sink = sink.with_scanout(self.scanout.clone());
         self.thread = Some(DisplayThread::spawn(self.clock.clone(), handle.clone(), FRAME_PERIOD, sink));
         self.handle = Some(handle);
     }
