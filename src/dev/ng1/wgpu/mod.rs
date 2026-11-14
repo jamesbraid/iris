@@ -188,7 +188,7 @@ impl Ng1Scanout {
     }
 
     /// Compose `src` and submit it with no readback; the buffer the frame
-    /// is in (0x00RRGGBB, rows of `src.width`), for a renderer on this
+    /// is in (0xAABBGGRR, rows of `src.width`), for a renderer on this
     /// device.
     pub fn compose(&mut self, src: &CompositorSource<'_>) -> Result<wgpu::Buffer, String> {
         let slot = self.upload(src);
@@ -201,7 +201,7 @@ impl Ng1Scanout {
         self.scanout.output().clone()
     }
 
-    /// Compose `src` and read the frame back into `out` (0x00RRGGBB, rows
+    /// Compose `src` and read the frame back into `out` (0xAABBGGRR, rows
     /// of `src.width`).
     pub fn run(&mut self, src: &CompositorSource<'_>, out: &mut [u32]) -> Result<(), String> {
         let slot = self.upload(src);

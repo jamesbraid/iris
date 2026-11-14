@@ -15,13 +15,16 @@ use crate::dev::odyssey::frame::Frame;
 use crate::test_frame_pin::frame_hash;
 
 /// The frame a display thread would publish for this board, as (width,
-/// height, 0xAARRGGBB words).
+/// height, 0x00RRGGBB words). The scan-out composes 0xAABBGGRR; the pins
+/// were taken over 0x00RRGGBB and stay so, since the colours are what they
+/// pin.
 fn compose(b: &Board) -> (u32, u32, Vec<u32>) {
     let regs = b.regs().read();
     let frame = Frame::snapshot(&regs, b.front.lock().displayed_buffer).expect("the scan-out is set up");
     let (w, h) = (frame.width, frame.height);
     let mut px = vec![0u32; w as usize * h as usize];
     frame.compose(b.vram.ptr_shared(), &regs, &mut px, w as usize, h as usize);
+    px.iter_mut().for_each(|p| *p = p.swap_bytes() >> 8);
     (w, h, px)
 }
 

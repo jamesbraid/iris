@@ -70,7 +70,7 @@ impl Display {
         &self.screens[0]
     }
 
-    /// Present a frame composed on the GPU (0x00RRGGBB, rows of `width`)
+    /// Present a frame composed on the GPU (0xAABBGGRR, rows of `width`)
     /// through the installed renderer; no words are filled.
     #[cfg(feature = "wgpu")]
     pub(super) fn present_gpu(&self, frame: &wgpu::Buffer, width: u32, height: u32) {
@@ -121,7 +121,7 @@ impl Display {
         false
     }
 
-    /// Convert `rows` (0x00RRGGBB lines of `width` pixels, the first being
+    /// Copy `rows` (0xAABBGGRR lines of `width` pixels, the first being
     /// line `first` of a frame `height` lines tall) into the screen and
     /// present it. No rows: present the screen as it is.
     pub(super) fn present(&self, rows: &[u32], width: usize, height: usize, first: usize, out: &mut Frame, words: bool) {
@@ -136,11 +136,8 @@ impl Display {
             if y >= h {
                 continue;
             }
-            // 0x00RRGGBB to opaque 0xAABBGGRR: a byte swap with alpha set.
             let at = y * FB_STRIDE;
-            for (d, &rgb) in screen.fb_rgb[at..at + w].iter_mut().zip(&src[..w]) {
-                *d = super::frame::to_screen(rgb);
-            }
+            screen.fb_rgb[at..at + w].copy_from_slice(&src[..w]);
         }
         self.present_in_place(screen, width, height, out, words);
     }

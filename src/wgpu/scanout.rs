@@ -6,12 +6,13 @@
 //! (0x00RRGGBB), the display slot its kernel reads at group 1 binding 0
 //! (the scan-out registers and tables of the frame, as the board packs
 //! them), and the bind group layouts of its memory from group 2 up, bound
-//! as its raster kernels bind them. `shaders/scanout.wgsl` is the driver.
+//! as its raster kernels bind them. `shaders/scanout.wgsl` is the driver;
+//! it stores each pixel as 0xAABBGGRR with alpha set, the one order of
+//! frames on the GPU, in readbacks and on the screen.
 
 use std::sync::Arc;
 
 use super::device::Gpu;
-use super::memory::Staging;
 use super::shader::{Fragment, Source};
 
 const DRIVER: Fragment = Fragment::new("scanout.wgsl", include_str!("shaders/scanout.wgsl"));
@@ -89,7 +90,6 @@ pub struct Scanout {
     slot_buf: wgpu::Buffer,
     frame_group: wgpu::BindGroup,
     slot_group: wgpu::BindGroup,
-    staging: Staging,
     max_pixels: u32,
     last_dimensions: Option<(u32, u32)>,
     slot_initialized: bool,
@@ -123,7 +123,7 @@ impl Scanout {
         });
         Scanout {
             gpu: Arc::clone(gpu), header_buf, out_buf, slot_buf, frame_group, slot_group,
-            staging: Staging::default(), max_pixels, last_dimensions: None, slot_initialized: false,
+            max_pixels, last_dimensions: None, slot_initialized: false,
             frames: 0, read_back_bytes: 0, read_back_attempts: 0, read_back_successes: 0,
             read_back_attempted_bytes: 0,
         }
@@ -135,7 +135,8 @@ impl Scanout {
     }
 
     /// Compose a `width` x `height` frame under `slot` with `groups` bound
-    /// from group 2 up, and read it back into `out` (rows of `width`).
+    /// from group 2 up, and read it back into `out` (0xAABBGGRR, rows of
+    /// `width`).
     /// Ordered after every submission so far, so it shows whole batches.
     pub fn run(&mut self, pipeline: &ScanoutPipeline, width: u32, height: u32, slot: &[u8], groups: &[&wgpu::BindGroup], out: &mut [u32]) -> Result<(), String> {
         let pixels = width as u64 * height as u64;
@@ -163,18 +164,13 @@ impl Scanout {
         self.read_back_attempts += 1;
         self.read_back_attempted_bytes += bytes;
         self.gpu.check()?;
-        let readback = self.staging.read(&self.gpu, &self.out_buf, &[(0, bytes)])?;
-        self.gpu.check()?;
-        if readback.len() != bytes as usize {
-            return Err("scanout: incomplete composed-frame readback".into());
-        }
-        out[..pixels as usize].copy_from_slice(bytemuck::cast_slice(&readback));
+        self.gpu.read(&self.out_buf, &[(0, bytes)], bytemuck::cast_slice_mut(&mut out[..pixels as usize]))?;
         self.read_back_successes += 1;
         self.read_back_bytes += bytes;
         Ok(())
     }
 
-    /// The buffer frames are composed into: 0x00RRGGBB words, rows of the
+    /// The buffer frames are composed into: 0xAABBGGRR words, rows of the
     /// last frame's width.
     pub fn output(&self) -> &wgpu::Buffer {
         &self.out_buf

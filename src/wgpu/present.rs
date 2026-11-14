@@ -23,7 +23,7 @@ use super::shader::{Fragment, Source};
 use super::Gpu;
 
 const PRESENT: Fragment = Fragment::new("present.wgsl", include_str!("shaders/present.wgsl"));
-const UNPACK: Fragment = Fragment::new("unpack.wgsl", include_str!("shaders/unpack.wgsl"));
+pub(crate) const UNPACK: Fragment = Fragment::new("unpack.wgsl", include_str!("shaders/unpack.wgsl"));
 
 /// Where a quad goes (normalised device coordinates: x0, top, x1, bottom)
 /// and the texture coordinates it shows (u0, v0, u1, v1).
@@ -39,7 +39,7 @@ pub enum Frame<'a> {
     /// Words with R in the low byte and A in the high (0xAABBGGRR), rows of
     /// `stride` words: what the boards' `Rex3Screen.rgba` holds.
     Cpu { rgba: &'a [u32], stride: usize, width: u32, height: u32 },
-    /// 0x00RRGGBB words on this presenter's device, rows of `width`.
+    /// 0xAABBGGRR words on this presenter's device, rows of `width`.
     Gpu { buffer: &'a wgpu::Buffer, width: u32, height: u32 },
 }
 

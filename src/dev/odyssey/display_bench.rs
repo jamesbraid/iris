@@ -136,7 +136,7 @@ fn reference(s: &Board) -> Vec<u32> {
     for y in 0..h {
         let row = &mut out[y * w..(y + 1) * w];
         for (x, o) in row.iter_mut().enumerate() {
-            *o = frame.pixel(mem, x as u32, y as u32);
+            *o = super::frame::abgr(frame.pixel(mem, x as u32, y as u32));
         }
         regs.cursor_row(y as u32, row, w as u32);
     }
@@ -149,12 +149,6 @@ fn compose_matches_the_pixel_reference() {
         let s = scene_board(scene);
         let want = reference(&s);
         assert!(composed(&s) == want, "{name}");
-        // The display thread's order: the same pixels, as the screen holds them.
-        let regs = s.regs().read();
-        let frame = Frame::snapshot_for_screen(&regs, s.front.lock().displayed_buffer).unwrap();
-        let mut out = vec![0u32; want.len()];
-        frame.compose(s.vram.ptr_shared(), &regs, &mut out, frame.width as usize, frame.height as usize);
-        assert!(out.iter().zip(&want).all(|(&o, &w)| o == super::frame::to_screen(w)), "{name}: screen order");
     }
     // A width that ends inside a tile, and spans of one window id with an
     // overlay byte whose overlay id is disabled (scene_board enables 0, 3, 5
@@ -210,7 +204,7 @@ fn compose_and_present_timings() {
         let (w, h) = { let f = Frame::snapshot(&regs, displayed).unwrap(); (f.width as usize, f.height as usize) };
         let mut out = vec![0u32; w * h];
         let ms = bench(|| {
-            let frame = Frame::snapshot_for_screen(&regs, displayed).unwrap();
+            let frame = Frame::snapshot(&regs, displayed).unwrap();
             frame.compose(mem, &regs, &mut out, w, h);
             std::hint::black_box(&out);
         });
@@ -278,7 +272,7 @@ fn compose_captures() {
             for y in 0..h {
                 let row = &mut want[y * w..(y + 1) * w];
                 for (x, o) in row.iter_mut().enumerate() {
-                    *o = frame.pixel(mem, x as u32, y as u32);
+                    *o = super::frame::abgr(frame.pixel(mem, x as u32, y as u32));
                 }
                 c.regs.cursor_row(y as u32, row, w as u32);
             }

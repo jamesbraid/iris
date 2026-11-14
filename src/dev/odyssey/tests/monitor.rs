@@ -141,7 +141,7 @@ fn pix_decodes_the_pixel_the_scanout_shows() {
     // The same pixel as the display resolves it.
     let s = v.state.test_board();
     s.scanout_update();
-    assert_eq!(s.reader.frame[20 * ODSY_WIDTH as usize + 10] & 0xff_ffff, 0xff0080);
+    assert_eq!(s.reader.frame[20 * ODSY_WIDTH as usize + 10].swap_bytes() >> 8, 0xff0080);
     let err = vpro(&v, "pix 1280 0").expect_err("outside the screen");
     assert!(err.contains("outside"), "{err}");
 }

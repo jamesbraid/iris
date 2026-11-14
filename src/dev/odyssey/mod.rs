@@ -321,9 +321,8 @@ impl Odyssey {
             }
         }
         crate::pf_begin!(crate::perfetto::events::ODSY_FRAME_PLANES);
-        // Composed on the CPU straight into the screen, in its order, under
-        // its lock; the GPU scan-out's readback comes back in `frame`.
-        reader.screen_order = true;
+        // Composed on the CPU straight into the screen under its lock; the
+        // GPU scan-out's readback comes back in `frame`.
         let mut screen = display.screen.lock();
         let composed = reader.update_to(Some((&mut screen.fb_rgb, crate::disp::FB_STRIDE)));
         crate::pf_end!(crate::perfetto::events::ODSY_FRAME_PLANES);

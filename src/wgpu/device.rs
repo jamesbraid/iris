@@ -2,6 +2,7 @@
 //! raster kernels need and the errors wgpu reports asynchronously.
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -102,6 +103,8 @@ pub struct Gpu {
     /// device loss), shared by every `Gpu` on the device. Checked by
     /// `check()`; a kernel bug shows up here.
     failure: Arc<Failure>,
+    /// The readback buffers `read` lends, shared by every `Gpu` on the device.
+    readback: Arc<Readback>,
     /// Writes waiting for the next submission (`write`).
     uploads: Mutex<Uploads>,
 }
@@ -128,6 +131,32 @@ impl Failure {
             (self.fatal)(&msg);
         }
     }
+}
+
+/// Bytes a readback buffer holds: a whole 1280 x 1024 frame and the region
+/// reads the boards make fit at once. Larger reads go through in pieces.
+const READBACK_BYTES: u64 = 16 << 20;
+
+/// The readback buffers of a device, lent to one `Gpu::read` at a time and
+/// kept for the next, so a board that never reads holds none and boards that
+/// read in turn share one.
+#[derive(Default)]
+struct Readback {
+    free: Mutex<Vec<wgpu::Buffer>>,
+    created: AtomicU64,
+    reads: AtomicU64,
+    bytes: AtomicU64,
+}
+
+/// What `Gpu::read` has done on a device so far.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReadStats {
+    /// Completed reads.
+    pub reads: u64,
+    /// Bytes they returned.
+    pub bytes: u64,
+    /// Readback buffers allocated (each `READBACK_BYTES`, none freed unless a read on it failed).
+    pub buffers: u64,
 }
 
 /// The writes queued by `Gpu::write` and `Gpu::write_texture`: copies out
@@ -435,7 +464,7 @@ impl Gpu {
             timestamps: features.contains(wgpu::Features::TIMESTAMP_QUERY),
         };
         let uploads = Mutex::new(Uploads::new(&device));
-        Ok(Arc::new(Gpu { instance, adapter, device, queue, caps, failure, uploads }))
+        Ok(Arc::new(Gpu { instance, adapter, device, queue, caps, failure, readback: Arc::default(), uploads }))
     }
 
     /// The first asynchronous error, if any. Kernels that misbehave are
@@ -470,6 +499,7 @@ impl Gpu {
             queue: self.queue.clone(),
             caps: self.caps.clone(),
             failure: Arc::clone(&self.failure),
+            readback: Arc::clone(&self.readback),
             uploads: Mutex::new(Uploads::new(&self.device)),
         })
     }
@@ -576,6 +606,99 @@ impl Gpu {
             self.fail(&format!("wait for GPU: {e}"));
         }
         self.check()
+    }
+
+    /// Read `ranges` (offset, length; each 4-aligned, inside `src`) of `src`
+    /// into `out`, concatenated in order; `out` must be exactly their total
+    /// length. Waits for every submission so far, so the bytes include all
+    /// work queued before the call, and changes `out` only for the pieces
+    /// that arrived. `src` needs `COPY_SRC`.
+    ///
+    /// The staging buffer is lent from the device's free list for the call.
+    /// A read bigger than a buffer goes through it in pieces; a read that
+    /// fails (a wait that timed out leaves the map pending) drops its
+    /// buffer instead of returning it.
+    pub fn read(&self, src: &wgpu::Buffer, ranges: &[(u64, u64)], out: &mut [u8]) -> Result<(), String> {
+        let span: u64 = ranges.iter().map(|r| r.1).sum();
+        if span != out.len() as u64 {
+            return Err(format!("readback: {} bytes asked for, room for {}", span, out.len()));
+        }
+        if span == 0 {
+            return Ok(());
+        }
+        self.check()?;
+        let staging = self.readback.free.lock().pop().unwrap_or_else(|| {
+            self.readback.created.fetch_add(1, Ordering::Relaxed);
+            self.buffer("readback", READBACK_BYTES, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST)
+        });
+        self.read_through(&staging, src, ranges, out)?;
+        self.readback.free.lock().push(staging);
+        self.check()?;
+        self.readback.reads.fetch_add(1, Ordering::Relaxed);
+        self.readback.bytes.fetch_add(span, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// As `read`, into a new vector.
+    #[cfg(test)]
+    pub(crate) fn read_vec(&self, src: &wgpu::Buffer, ranges: &[(u64, u64)]) -> Result<Vec<u8>, String> {
+        let mut out = vec![0u8; ranges.iter().map(|r| r.1).sum::<u64>() as usize];
+        self.read(src, ranges, &mut out)?;
+        Ok(out)
+    }
+
+    /// Reads, bytes and readback buffers so far, for every `Gpu` on the device.
+    pub fn read_stats(&self) -> ReadStats {
+        ReadStats {
+            reads: self.readback.reads.load(Ordering::Relaxed),
+            bytes: self.readback.bytes.load(Ordering::Relaxed),
+            buffers: self.readback.created.load(Ordering::Relaxed),
+        }
+    }
+
+    fn read_through(&self, staging: &wgpu::Buffer, src: &wgpu::Buffer, ranges: &[(u64, u64)], out: &mut [u8]) -> Result<(), String> {
+        let mut ranges = ranges.iter().copied().peekable();
+        let mut rest: Option<(u64, u64)> = None;
+        let mut done = 0usize;
+        loop {
+            // Fill the buffer with as much of the ranges as fits.
+            let mut enc = self.encoder("readback");
+            let mut at = 0;
+            while at < READBACK_BYTES {
+                let Some((off, len)) = rest.take().or_else(|| ranges.next()) else { break };
+                debug_assert!(off % 4 == 0 && len % 4 == 0 && off + len <= src.size());
+                let n = len.min(READBACK_BYTES - at);
+                enc.copy_buffer_to_buffer(src, off, staging, at, n);
+                at += n;
+                if n < len {
+                    rest = Some((off + n, len - n));
+                }
+            }
+            if at == 0 {
+                return Ok(());
+            }
+            let submission = self.submit(enc);
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            staging.slice(..at).map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            let piece = (|| {
+                self.wait(Some(submission))?;
+                rx.recv().map_err(|e| format!("readback callback: {e}"))?.map_err(|e| format!("map readback: {e}"))?;
+                let view = staging.slice(..at).get_mapped_range().map_err(|e| format!("readback range: {e}"))?;
+                out[done..done + at as usize].copy_from_slice(&view);
+                Ok::<(), String>(())
+            })();
+            // A wait that timed out leaves the map pending: wgpu refuses any
+            // submission that uses a buffer not idle. Unmap aborts it, and
+            // the caller drops the buffer.
+            staging.unmap();
+            piece?;
+            done += at as usize;
+            if rest.is_none() && ranges.peek().is_none() {
+                return Ok(());
+            }
+        }
     }
 
     /// Let callbacks run without blocking.

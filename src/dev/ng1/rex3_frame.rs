@@ -427,7 +427,7 @@ impl ResidentDisplay {
                 for (dst, &src) in screen.rgba[row..row + width]
                     .iter_mut().zip(&self.capture[y * width..(y + 1) * width])
                 {
-                    *dst = 0xff00_0000 | src.swap_bytes() >> 8;
+                    *dst = src;
                 }
             }
             screen.frame_seq = screen.frame_seq.wrapping_add(1);

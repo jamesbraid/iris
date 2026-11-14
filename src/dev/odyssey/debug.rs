@@ -849,8 +849,8 @@ impl Odyssey {
         let (width, height) = (frame.width as usize, frame.height as usize);
         let mut px = vec![0u32; width * height];
         frame.compose(mem, &regs, &mut px, width, height);
-        // Composed words are 0x00RRGGBB.
-        let rgb: Vec<u8> = px.iter().flat_map(|&p| [(p >> 16) as u8, (p >> 8) as u8, p as u8]).collect();
+        // Composed words are 0xAABBGGRR.
+        let rgb: Vec<u8> = px.iter().flat_map(|&p| [p as u8, (p >> 8) as u8, (p >> 16) as u8]).collect();
         crate::disp::write_png(path, width as u32, height as u32, png::ColorType::Rgb, &rgb)
             .map_err(|e| format!("{path}: {e}"))?;
         Ok(format!("saved {path} {width}x{height}\n"))
@@ -867,7 +867,7 @@ impl Odyssey {
         frame.compose(mem, &regs, &mut px, w, h);
         let mut rgb = Vec::with_capacity(w * h * 3);
         for &p in &px {
-            rgb.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
+            rgb.extend_from_slice(&[p as u8, (p >> 8) as u8, (p >> 16) as u8]);
         }
         crate::disp::write_png(dir.join("screen.png"), w as u32, h as u32, png::ColorType::Rgb, &rgb).map_err(io)?;
         std::fs::write(dir.join("board.bin"), mem.address_bytes().collect::<Vec<u8>>()).map_err(io)?;

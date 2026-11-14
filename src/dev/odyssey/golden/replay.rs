@@ -464,7 +464,7 @@ fn save_screen(b: &Board, path: &str) {
     frame.compose(b.vram.ptr_shared(), &regs, &mut px, w as usize, h as usize);
     let mut rgb = Vec::with_capacity(px.len() * 3);
     for p in px {
-        rgb.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
+        rgb.extend_from_slice(&[p as u8, (p >> 8) as u8, (p >> 16) as u8]);
     }
     crate::disp::write_png(path, w, h, png::ColorType::Rgb, &rgb).unwrap();
 }
