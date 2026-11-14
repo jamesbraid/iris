@@ -29,6 +29,8 @@ pub mod textport;
 pub mod x;
 #[cfg(test)]
 mod golden;
+#[cfg(all(test, feature = "wgpu"))]
+mod gpu_spike;
 #[cfg(test)]
 pub mod census;
 #[cfg(test)]
