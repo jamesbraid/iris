@@ -635,6 +635,27 @@ pub struct LoweredCopy<'a> {
     pub clips: &'a [[i32; 4]],
 }
 
+/// An image write as the GPU takes it: the pixels the walk lands on the store, each as its store
+/// index and the word it converts to, and what `apply` reads from the plan.
+#[cfg(feature = "wgpu")]
+pub struct LoweredImage {
+    pub word: usize,
+    pub pitch: usize,
+    pub pixels: Vec<(usize, u32)>,
+    pub gx: u32,
+    pub mask: u32,
+    pub width_mask: u32,
+    pub needs: bool,
+}
+
+/// `draw_by_op` as a record: the pixels of the walk, in row order.
+#[cfg(feature = "wgpu")]
+pub(in crate::dev::kona::back) fn lower_image(p: &Plan<'_>, kind: u8, c: &Conv, g: &Geo, words: &[u32]) -> LoweredImage {
+    let mut pixels = Vec::new();
+    walk_kind(p, kind, c, g, words, &mut Vec::new(), &mut Vec::new(), |i, src| pixels.push((i, src)));
+    LoweredImage { word: p.word(), pitch: p.pitch, pixels, gx: p.gc.gx as u32, mask: p.gc.mask, width_mask: p.gc.width_mask, needs: p.needs }
+}
+
 /// `copy_write` as a record: None when nothing of the rectangle lies on the store.
 #[cfg(feature = "wgpu")]
 pub(in crate::dev::kona::back) fn lower_copy<'a>(plan: &Plan<'a>, s: &Setup, rect @ [sx, sy, dx, dy]: [i64; 4]) -> Option<LoweredCopy<'a>> {

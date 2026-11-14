@@ -1,9 +1,8 @@
 //! WGSL libraries for the KONA raster kernel's texture stage, with the host
 //! side that feeds them.
 //!
-//! Nothing here is wired into a kernel yet: these are the pieces the raster
-//! kernel will include, each held to the CPU's arithmetic by a parity test
-//! (`tests`).
+//! The raster kernel (`gpu/kona.wgsl`) includes these, each held to the CPU's
+//! arithmetic by a parity test (`tests`, `fragment_tests`).
 //!
 //! - `lodmath.wgsl`: `lod_log2` and `lod_exp2`, correctly rounded f32 log2 and
 //!   exp2 on integer halves, for the level of detail and the detail and
@@ -13,17 +12,26 @@
 //! - `texture.wgsl`: `tex_sample`, `tex_sample3`, `tex_sample_enhanced` and
 //!   `tex_environment`, ports of the functions of the same names in
 //!   `raster::texel`, over a bound texture packed by `pack_desc`.
-
-// Not wired into a kernel yet.
-#![allow(dead_code)]
+//! - `fragment.wgsl`: the per-fragment features of the raster path: fog,
+//!   smoothed coverage, multisample sample bits, the accumulation buffer and
+//!   the line and polygon stipples. Each function is the same single-precision
+//!   arithmetic as its CPU counterpart in `raster` and `gl::pixels`. A kernel
+//!   adds `library::FLOAT` (the exact divide) next to it and sets the file's
+//!   `fnz` to 0 from a run-time value before calling anything. What stays for
+//!   the kernel: the integer edge-function tests, the sample-position
+//!   arithmetic of `sample_mask`, and the stencil and depth tests.
 
 use crate::dev::kona::back::raster::texel::{Combine, EnvMode, Filter, TexDesc, TexLevel, Wrap, CURVE_NODES, MAX_LEVELS};
+#[cfg(test)]
 use crate::dev::kona::back::store::texture::{TextureStore, PAGE_WORDS};
-use crate::wgpu::{library, Fragment, Source};
+#[cfg(test)]
+use crate::wgpu::{library, Source};
+use crate::wgpu::Fragment;
 
 pub const LOD_MATH: Fragment = Fragment::new("kona_lodmath.wgsl", include_str!("lodmath.wgsl"));
 pub const TEXTURE_MEM: Fragment = Fragment::new("kona_texture_mem.wgsl", include_str!("texture_mem.wgsl"));
 pub const TEXTURE: Fragment = Fragment::new("kona_texture.wgsl", include_str!("texture.wgsl"));
+pub const FRAGMENT: Fragment = Fragment::new("kona_fragment.wgsl", include_str!("fragment.wgsl"));
 
 /// Words of a packed descriptor (`TD_WORDS` in texture.wgsl).
 pub const TD_WORDS: usize = 166;
@@ -32,6 +40,7 @@ const LEVEL_WORDS: usize = 6;
 
 /// A kernel source with every library the texture stage needs, for `body` to
 /// `#include "kona_texture.wgsl"`. `planes` and `pages_per_plane` size the page table.
+#[cfg(test)]
 pub fn texture_source(label: &str, planes: u32, pages_per_plane: u32) -> Source {
     Source::new(label)
         .define("TEX_PLANES", planes)
@@ -108,11 +117,13 @@ pub const ABSENT: u32 = u32::MAX;
 
 /// A texture store's pages in the form texture_mem.wgsl reads: a page table
 /// of `planes * pages_per_plane` slots and the pool of the pages that exist.
+#[cfg(test)]
 pub struct TexMemory {
     pub pages: Vec<u32>,
     pub pool: Vec<u32>,
 }
 
+#[cfg(test)]
 impl TexMemory {
     /// Every page the store holds in planes `0..planes`. Panics on a page past
     /// `pages_per_plane`, which the shader could not reach.
@@ -136,4 +147,6 @@ impl TexMemory {
 }
 
 #[cfg(test)]
-mod tests;
+mod fragment_tests;
+#[cfg(test)]
+pub(in crate::dev::kona::back) mod tests;

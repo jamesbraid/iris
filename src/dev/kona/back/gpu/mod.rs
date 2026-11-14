@@ -8,12 +8,11 @@
 //! CPU mirror (`observe`), runs the CPU code on the mirror, and puts what the op wrote back
 //! (`Bracket`). Which ops stay on the CPU, by what the GPU kernels do not do yet:
 //!
-//! - triangles with a texture, fog, smoothing, multisampling or a line stipple, and clears of a
-//!   multisampled window; an edge step that does not fit 32 bits;
-//! - X pixel writes with a host payload, GL pixel writes, accumulation and the stencil write
-//!   of glDrawPixels;
-//! - the overlay and popup planes (word positions past the display-ID plane, which never go to the
-//!   GPU), X fills with more than four clip rectangles, bitmaps of more than 1792 bits.
+//! - an edge step that does not fit 32 bits; a multisampled layout whose runs of words are longer
+//!   than the kernel holds (more than six words of colour or depth, or two of stencil a pixel);
+//!   textures when the store holds more pages than the GPU's pool can (one storage binding);
+//! - X fills and copies with more than four clip rectangles, bitmaps of more than 1792 bits, X image
+//!   writes whose box holds more than 2 M pixels (the payload ring).
 //!
 //! # The mirror
 //!
@@ -60,39 +59,60 @@ use super::raster::smooth::Cover;
 use super::raster::{lit, ClearReq, DrawState, Rect};
 use super::store::seam::StoreOp;
 use super::store::texture::TextureStore;
-use super::store::{PixelStore, DID_PLANE};
+use super::store::{PixelStore, DID_PLANE, POSITIONS};
 use super::x::fill::LoweredFill;
 use super::x::pixel::LoweredCopy;
+use super::gpu_lib::{pack_desc, FRAGMENT, LOD_MATH, TEXTURE, TEXTURE_MEM};
+use super::raster::ops::ownership_plane;
+use super::raster::texel::TexDesc;
+use super::gl::pixels::{FRAG_COLOUR, FRAG_STENCIL};
+use crate::dev::kona::defs::pixel::ACCUM_RETURN;
+use super::store::texture::PLANES as TEX_PLANES;
 use crate::wgpu::{library, ArchShaders, Batch, BatchPipelines, Fragment, Full, Gpu, Source, TileGrid};
+use texmem::TexMem;
+
+mod texmem;
 
 const KONA: Fragment = Fragment::new("kona.wgsl", include_str!("kona.wgsl"));
 const COPY: Fragment = Fragment::new("copy.wgsl", include_str!("copy.wgsl"));
 
 /// Words in a record, past its slot index and the constant `one`.
-const REC_W: usize = 38;
+const REC_W: usize = 84;
 /// Record kinds, word 37 (`kona.wgsl`).
 const K_TRI: u32 = 0;
 const K_XFILL: u32 = 1;
 const K_BOX: u32 = 2;
 const K_BITMAP: u32 = 3;
 const K_CLEAR: u32 = 4;
+const K_ACCUM: u32 = 5;
+const K_CLEARACC: u32 = 6;
+const K_FRAGS: u32 = 9;
+const K_IMAGE: u32 = 8;
 /// Where a record's box lives, for every kind but the X fill.
 const R_RECT: usize = 33;
 const R_KIND: usize = 37;
+/// A triangle's texture coordinate planes: s/w, t/w, r/w, q/w, each at, dx, dy.
+const R_TEX: usize = 38;
+/// The fog coordinate / w and 1 / w planes, the distance along a line, and the smoothing cover.
+const R_FOG: usize = 50;
+const R_LD: usize = 56;
+const R_COV: usize = 59;
 
 /// Bits a bitmap slot holds: 56 words after its five header words.
 const BITMAP_BITS: u64 = 56 * 32;
 /// Clip rectangles an X fill or copy takes; more run on the CPU.
 const CLIPS: usize = 4;
 
-/// Word positions that live on the GPU: the record's words and the display-ID plane. The overlay
-/// and popup planes stay in the mirror.
-const RESIDENT: usize = DID_PLANE + 1;
+/// Word positions that live on the GPU: the record's words, the display-ID plane and the overlay and
+/// popup planes, which are planes like the others to every record.
+const RESIDENT: usize = POSITIONS;
 /// Chunks bound at once (`kona.wgsl` declares this many), and the bytes of one.
 const MAX_CHUNKS: usize = 4;
 const CHUNK_BYTES: u64 = 128 << 20;
 /// Storage buffers the batch kernels bind besides the planes.
 const BATCH_STORAGE: u32 = 6;
+/// Storage buffers of group 3: the texture memory (descriptors, page table, page pool) and the payload ring.
+const TEX_BINDINGS: u32 = 4;
 /// Dirty-tracking granularity, in pixels (the readback unit).
 const TILE: u32 = 32;
 /// Verdict words for copies; used up, they are summed and zeroed.
@@ -122,8 +142,34 @@ struct GRec {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct GSlot {
-    w: [u32; 64],
+    w: [u32; SLOT_W],
 }
+
+/// Words in a draw-state slot: the first 64 are the X fill's and the plain draw state's, the
+/// rest are the features past them (`kona.wgsl`).
+const SLOT_W: usize = 128;
+/// The texture descriptor's offset in the descriptor table, and the flag that says there is one.
+const S_TEXD: usize = 64;
+const F_TEX: u32 = 1024;
+const F_LSTIP: u32 = 2048;
+/// The fog and line stipple parameters in a slot.
+const S_FOG: usize = 66;
+const S_LSTIP: usize = 72;
+/// The multisampling block of a slot (`kona.wgsl`): the sample count, coverage word and options,
+/// the words in each run, the sample offsets and the references of the runs' planes.
+const S_MS: usize = 80;
+const S_MS_AT: usize = 86;
+const S_MS_COL: usize = 94;
+const S_MS_DEPTH: usize = 100;
+const S_MS_STEN: usize = 106;
+/// The payload offset, width and origin of a rectangle of fragments, and the accumulation block.
+const S_FRAG: usize = 108;
+const S_ACC: usize = 112;
+/// The longest runs the kernel holds in registers: eight samples of 24 bits of colour or depth, and
+/// of 8 of stencil.
+const RUN_COLOUR: u32 = 6;
+const RUN_DEPTH: u32 = 6;
+const RUN_STENCIL: u32 = 2;
 
 /// What the store did, for tests and the monitor.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -146,6 +192,9 @@ pub struct Stats {
     /// Ops that ran on the CPU for want of a GPU kernel, and the words they wrote back.
     pub cpu_ops: u64,
     pub uploaded_words: u64,
+    /// Texture memory syncs, and the 64 KiB pages they wrote to the GPU.
+    pub tex_syncs: u64,
+    pub tex_pages: u64,
 }
 
 /// A plane on the GPU: where it is, which tiles records have written, and how wide their words can be.
@@ -199,7 +248,8 @@ struct State {
     submitted: u64,
     tiles_x: u32,
     tiles_y: u32,
-    slots: HashMap<[u32; 64], u32>,
+    slots: HashMap<[u32; SLOT_W], u32>,
+    tex: TexMem,
     /// The slot the last draw state got, while the batch it is in is open.
     last: Option<(DrawState, u8, u32)>,
     copy: CopyKernel,
@@ -223,6 +273,8 @@ pub enum Route {
     Reset,
     /// The caller fills the mirror's array, then `upload`s it.
     Restore(usize),
+    /// The GPU took the op, which visited this many pixels (what `Applied::fragments` counts).
+    Counted(u64),
 }
 
 /// The draw-state slot variants: a polygon triangle, a line's triangle (the stipple differs), a clear.
@@ -234,8 +286,9 @@ impl GpuStore {
     /// A store of `width` x `height` pixels with `tex` as its texture memory (which stays in the
     /// mirror), drawing on `gpu`.
     pub fn new(gpu: Arc<Gpu>, width: u32, height: u32, tex: TextureStore) -> Result<GpuStore, String> {
+        let shape = (tex.plane_pages() as u32, tex.cap_pages());
         let mirror = PixelStore::with_texture(width, height, tex);
-        let state = State::new(gpu, width, height, u32::MAX)?;
+        let state = State::new(gpu, width, height, u32::MAX, shape)?;
         Ok(GpuStore { mirror, state: Mutex::new(state) })
     }
 
@@ -243,8 +296,9 @@ impl GpuStore {
     /// whose bindings would hold them all.
     #[cfg(test)]
     pub fn chunked(gpu: Arc<Gpu>, width: u32, height: u32, tex: TextureStore, planes: u32) -> Result<GpuStore, String> {
+        let shape = (tex.plane_pages() as u32, tex.cap_pages());
         let mirror = PixelStore::with_texture(width, height, tex);
-        let state = State::new(gpu, width, height, planes)?;
+        let state = State::new(gpu, width, height, planes, shape)?;
         Ok(GpuStore { mirror, state: Mutex::new(state) })
     }
 
@@ -254,7 +308,8 @@ impl GpuStore {
     }
 
     pub fn stats(&self) -> Stats {
-        self.state.lock().stats.clone()
+        let s = self.state.lock();
+        Stats { tex_syncs: s.tex.syncs, tex_pages: s.tex.pages_written, ..s.stats.clone() }
     }
 
     /// Make the words of `word` inside `r` (store pixels, far corner exclusive) current in the
@@ -267,7 +322,6 @@ impl GpuStore {
 
     /// Whether no word of `word` inside `r` can be wider than `mask`, from the records so far.
     pub fn proven(&self, word: usize, r: Rect, mask: u32) -> bool {
-        // The overlay and popup planes are in the mirror alone: nothing to prove, and a check reads them.
         resident(word) && self.state.lock().proven(word, r, mask)
     }
 
@@ -347,7 +401,7 @@ impl GpuStore {
                 let r = job.rect.intersect(&screen);
                 if r.is_empty() {
                     true
-                } else if tri_on_gpu(ds, job) {
+                } else if tri_on_gpu(ds, job) && (ds.texture.is_none() || s.tex.fits(m.texture())) {
                     s.tri(m, ds, job)
                 } else {
                     return Route::Cpu(ds_planes(ds), r);
@@ -357,7 +411,7 @@ impl GpuStore {
                 let r = req.rect.intersect(&screen);
                 if r.is_empty() {
                     true
-                } else if ds.samples.is_none() {
+                } else if ms_on_gpu(ds) {
                     s.clear(m, ds, req, r)
                 } else {
                     return Route::Cpu(ds_planes(ds), r);
@@ -371,26 +425,56 @@ impl GpuStore {
                     return Route::Cpu(vec![plan.word()], r);
                 }
             }
-            StoreOp::XImage { plan, .. } => return Route::Cpu(vec![plan.word()], plan.bounds_rect()),
+            StoreOp::XImage { plan, kind, conv, geo, words, .. } => {
+                if !resident(plan.word()) {
+                    return Route::Cpu(vec![plan.word()], plan.bounds_rect());
+                }
+                let img = super::x::pixel::lower_image(plan, *kind, conv, geo, words);
+                match s.image(m, &img) {
+                    Some(done) => done,
+                    // More pixels than the payload ring holds.
+                    None => return Route::Cpu(vec![plan.word()], plan.bounds_rect()),
+                }
+            }
             StoreOp::XCopy { plan, setup, rect, .. } => match super::x::pixel::lower_copy(plan, setup, *rect) {
                 None => true,
                 Some(c) if takes_copy(c.word, c.clips.len()) => s.copy(m, &c),
                 // A copy the kernel cannot take reads and writes the plan's bounds.
                 Some(c) => return Route::Cpu(vec![c.word], plan.bounds_rect()),
             },
-            StoreOp::StencilWrite { word, index, .. } => {
-                let (x, y) = ((*index as i64 % w) as i32, (*index as i64 / w) as i32);
-                return Route::Cpu(vec![*word], Rect { x0: x, y0: y, x1: x + 1, y1: y + 1 });
+            StoreOp::Frags { ds, x0, y0, w: fw, h: fh, kind, data } => {
+                if ms_on_gpu(ds) {
+                    let n = s.frags(m, ds, (*x0, *y0, *fw, *fh), *kind, data);
+                    return Route::Counted(n);
+                }
+                return Route::Cpu(ds_planes(ds), ds.clip);
             }
-            StoreOp::Accumulate { ds, accumulation, colour, .. } => {
+            StoreOp::Accumulate { ds, accumulation, colour, passes } => {
+                // The words the CPU would find (`accumulate_cpu` skips an unallocated one).
+                let words: Vec<usize> = accumulation.clone().map(|w| w as usize).filter(|&w| m.array(w).is_some()).collect();
+                let colour = colour.filter(|&w| m.array(w).is_some());
+                let colours = &ds.colour[..ds.colours as usize];
+                let r = ds.clip.intersect(&screen);
+                if words.len() <= 4 && passes.len() <= 2 && words.iter().chain(colour.iter()).all(|&w| resident(w)) && colours.iter().all(|&w| m.array(w as usize).is_some()) && ms_on_gpu(ds) {
+                    let n = s.visited(m, ds, r);
+                    s.accumulate(m, ds, r, &words, colour, passes);
+                    return Route::Counted(n);
+                }
                 let mut planes: Vec<usize> = accumulation.clone().map(|w| w as usize).collect();
-                planes.extend(*colour);
+                planes.extend(colour);
                 if ds.ownership.is_some() {
                     planes.push(DID_PLANE);
                 }
                 return Route::Cpu(planes, ds.clip);
             }
             StoreOp::ClearAccumulation { ds, first, values } => {
+                let words: Vec<(usize, u32)> = values.iter().enumerate().map(|(k, &v)| (*first as usize + k, v)).filter(|&(w, _)| m.array(w).is_some()).collect();
+                let r = ds.clip.intersect(&screen);
+                if words.len() <= 8 && words.iter().all(|&(w, _)| resident(w)) && ms_on_gpu(ds) {
+                    let n = s.visited(m, ds, r) * words.len() as u64;
+                    s.clear_accumulation(m, ds, r, &words);
+                    return Route::Counted(n);
+                }
                 let mut planes: Vec<usize> = (*first as usize..*first as usize + values.len()).collect();
                 if ds.ownership.is_some() {
                     planes.push(DID_PLANE);
@@ -468,6 +552,14 @@ impl Drop for Bracket<'_> {
     }
 }
 
+/// Whether the window of `ds` owns pixel (`x`, `y`) by the mirror's display-ID plane, which the caller made current.
+fn owned_at(m: &PixelStore, ds: &DrawState, x: i32, y: i32) -> bool {
+    let Some(o) = &ds.ownership else { return true };
+    // SAFETY: the pixel is inside the managed area, which the array covers.
+    let word = m.array(DID_PLANE).map_or(0, |d| unsafe { d.load(y as usize * m.width() as usize + x as usize) });
+    o.owns(ownership_plane(word))
+}
+
 /// The planes a draw state reads or writes, on the GPU or not.
 pub fn ds_planes(ds: &DrawState) -> Vec<usize> {
     let mut v: Vec<usize> = ds.colour[..ds.colours as usize].iter().map(|&w| w as usize).collect();
@@ -493,30 +585,39 @@ pub fn takes_copy(word: usize, clips: usize) -> bool {
     resident(word) && clips <= CLIPS
 }
 
-/// Whether the kernels draw this triangle: a plain one, with no texture, fog, smoothing or
-/// multisampling, and no line stipple.
+/// Whether the kernel takes a draw's multisampling: none, or four or eight samples whose runs of
+/// words fit its registers. A layout with longer runs is the CPU's.
+fn ms_on_gpu(ds: &DrawState) -> bool {
+    let Some(ms) = &ds.samples else { return true };
+    matches!(ms.count, 4 | 8)
+        && (1..=RUN_COLOUR).contains(&ms.colour.1)
+        && ms.depth.1 <= RUN_DEPTH
+        && ms.stencil.1 <= RUN_STENCIL
+}
+
+/// Whether the kernels draw this triangle, texture memory aside (the pool must hold the store's
+/// pages: `TexMem::fits`): one whose edge steps fit 32 bits and whose multisampling the kernel holds.
 fn tri_on_gpu(ds: &DrawState, job: &TriJob) -> bool {
     let t = &job.tri;
-    ds.texture.is_none()
-        && ds.samples.is_none()
-        && curve_of(ds) == 0
-        && t.cover == Cover::None
-        && !(job.line && ds.line_stipple.is_some())
+    ms_on_gpu(ds)
         && (0..3).all(|k| i32::try_from(t.a[k]).is_ok() && i32::try_from(t.b[k]).is_ok())
         && ds_planes(ds).iter().all(|&w| resident(w))
 }
 
 impl State {
-    fn new(gpu: Arc<Gpu>, w: u32, h: u32, chunk_planes: u32) -> Result<State, String> {
+    fn new(gpu: Arc<Gpu>, w: u32, h: u32, chunk_planes: u32, (tex_per_plane, tex_cap_pages): (u32, usize)) -> Result<State, String> {
         let plane_bytes = w as u64 * h as u64 * 4;
         let cap = gpu.caps.max_storage_binding.min(gpu.caps.max_buffer).min(CHUNK_BYTES);
         if plane_bytes == 0 || plane_bytes > cap {
             return Err(format!("kona: a {w} x {h} plane of {plane_bytes} bytes does not fit one storage binding of {cap} bytes"));
         }
         let bound = gpu.device.limits().max_storage_buffers_per_shader_stage;
-        if bound < BATCH_STORAGE + MAX_CHUNKS as u32 {
-            return Err(format!("kona: the GPU binds {bound} storage buffers to a shader; {} are needed", BATCH_STORAGE + MAX_CHUNKS as u32));
+        let needed = BATCH_STORAGE + MAX_CHUNKS as u32 + TEX_BINDINGS;
+        if bound < needed {
+            return Err(format!("kona: the GPU binds {bound} storage buffers to a shader; {needed} are needed"));
         }
+        let tex_pages = (cap / texmem::PAGE_BYTES).min(tex_cap_pages as u64) as u32;
+        let tex = TexMem::new(gpu.clone(), TEX_PLANES as u32, tex_per_plane, tex_pages);
         let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -534,9 +635,9 @@ impl State {
                 label: "kona",
                 raster: &[KONA],
                 bin_accept: None,
-                library: &[library::I64, library::WIDE],
-                defines: &[("WIDTH", w), ("HEIGHT", h), ("PLANE", w * h)],
-                layouts: &[&layout],
+                library: &[library::I64, library::WIDE, library::F64, library::FLOAT, LOD_MATH, TEXTURE_MEM, TEXTURE, FRAGMENT],
+                defines: &[("WIDTH", w), ("HEIGHT", h), ("PLANE", w * h), ("TEX_PLANES", TEX_PLANES as u32), ("TEX_PAGES_PER_PLANE", tex_per_plane)],
+                layouts: &[&layout, &tex.layout],
             },
         )?;
         let batch = Batch::new(&gpu, &pipelines, TileGrid::new(w, h), 256);
@@ -579,6 +680,7 @@ impl State {
             tiles_x: w.div_ceil(TILE),
             tiles_y: h.div_ceil(TILE),
             slots: HashMap::new(),
+            tex,
             last: None,
             copy,
             stats: Stats::default(),
@@ -631,7 +733,7 @@ impl State {
         }
         self.ensure_group();
         let group = self.group.as_ref().expect("made above");
-        match self.batch.try_flush(&self.pipelines, &[group]) {
+        match self.batch.try_flush(&self.pipelines, &[group, self.tex.group()]) {
             Ok(_) => {
                 self.slots.clear();
                 self.last = None;
@@ -756,7 +858,7 @@ impl State {
         let Some(plane) = self.plane(m, word) else { return false };
         self.gen += 1;
         self.stats.records += 1;
-        let mut slot = GSlot { w: [0; 64] };
+        let mut slot = GSlot { w: [0; SLOT_W] };
         slot.w[0] = plane;
         let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
         rec.w[0] = value;
@@ -774,7 +876,7 @@ impl State {
         let Some(plane) = self.plane(m, word) else { return false };
         self.gen += 1;
         self.stats.records += 1;
-        let mut slot = GSlot { w: [0; 64] };
+        let mut slot = GSlot { w: [0; SLOT_W] };
         slot.w[0] = plane;
         slot.w[1] = x0 as u32;
         slot.w[2] = y0 as u32;
@@ -796,7 +898,7 @@ impl State {
 
     /// The slot of a draw state. None with the device failed.
     fn ds_slot(&mut self, m: &PixelStore, ds: &DrawState, mode: u8) -> Option<GSlot> {
-        let mut s = GSlot { w: [0; 64] };
+        let mut s = GSlot { w: [0; SLOT_W] };
         let mut fl = 0u32;
         let stencil_on = ds.stencil_bits != 0 && ds.stencil.enabled;
         if ds.depth_bits != 0 {
@@ -864,6 +966,39 @@ impl State {
         }
         s.w[28] = ds.origin[0] as u32;
         s.w[29] = ds.origin[1] as u32;
+        if let Some(ms) = &ds.samples {
+            s.w[S_MS] = ms.count as u32;
+            s.w[S_MS + 1] = ms.cover;
+            s.w[S_MS + 2] = ms.alpha_to_mask as u32 | (ms.alpha_to_one as u32) << 1;
+            s.w[S_MS + 3] = ms.colour.1;
+            s.w[S_MS + 4] = ms.depth.1;
+            s.w[S_MS + 5] = ms.stencil.1;
+            for (k, a) in ms.at.iter().enumerate() {
+                s.w[S_MS_AT + k] = a[0] as u32 | (a[1] as u32) << 8;
+            }
+            for (base, (first, n)) in [(S_MS_COL, ms.colour), (S_MS_DEPTH, ms.depth), (S_MS_STEN, ms.stencil)] {
+                for k in 0..n {
+                    s.w[base + k as usize] = self.plane(m, (first + k) as usize)?;
+                }
+            }
+        }
+        if let Some(d) = &ds.texture {
+            s.w[0] |= F_TEX;
+            s.w[S_TEXD] = self.desc_offset(d)?;
+        }
+        if let (Some(f), true) = (&ds.fog, mode != MODE_CLEAR) {
+            s.w[S_FOG] = curve_of(ds) as u32;
+            s.w[S_FOG + 1] = f.a.to_bits();
+            s.w[S_FOG + 2] = f.b.to_bits();
+            for k in 0..3 {
+                s.w[S_FOG + 3 + k] = f.colour[k].to_bits();
+            }
+        }
+        if let (Some((pattern, repeat)), MODE_LINE) = (ds.line_stipple, mode) {
+            s.w[0] |= F_LSTIP;
+            s.w[S_LSTIP] = pattern as u32;
+            s.w[S_LSTIP + 1] = repeat;
+        }
         if mode == MODE_POLY {
             if let Some(rows) = &ds.polygon_stipple {
                 s.w[32..64].copy_from_slice(rows);
@@ -872,7 +1007,38 @@ impl State {
         Some(s)
     }
 
+    /// Where the descriptor of `d` is in the table the kernel reads. None with the device failed.
+    fn desc_offset(&mut self, d: &TexDesc) -> Option<u32> {
+        let words = pack_desc(d);
+        loop {
+            if let Some(o) = self.tex.desc(&words) {
+                return Some(o);
+            }
+            // The table is full: the records that name its entries go out first.
+            if !self.flush_batch() {
+                return None;
+            }
+            self.tex.reset_descs();
+        }
+    }
+
+    /// Bring the GPU's texture memory up to the store's, for a draw that samples. The records still
+    /// open read the old words, so they are submitted first.
+    fn tex_sync(&mut self, m: &PixelStore) -> bool {
+        if !self.tex.stale(m.texture()) {
+            return true;
+        }
+        if !self.flush_batch() {
+            return false;
+        }
+        self.tex.sync(m.texture());
+        true
+    }
+
     fn tri(&mut self, m: &PixelStore, ds: &DrawState, job: &TriJob) -> bool {
+        if ds.texture.is_some() && !self.tex_sync(m) {
+            return false;
+        }
         self.gen += 1;
         self.stats.records += 1;
         let r = job.rect;
@@ -892,17 +1058,22 @@ impl State {
         self.stats.records += 1;
         // What the CPU path writes: each only if the window has the plane (`pixel::run`).
         let colour = q.colour.filter(|_| ds.colours != 0);
-        let depth = q.depth.filter(|_| ds.depth_bits != 0 && q.depth_mask);
-        let stencil = q.stencil.filter(|_| ds.stencil_bits != 0);
+        let depth = q.depth.filter(|_| ds.depth_bits != 0 && q.depth_mask && ds.samples.is_none());
+        let stencil = q.stencil.filter(|_| ds.stencil_bits != 0 && ds.samples.is_none());
         let m_ = q.colour_mask;
         let keep = (!m_[0] as u32 * 0xff) << 16 | (!m_[1] as u32 * 0xff) << 8 | (!m_[2] as u32 * 0xff) | (!m_[3] as u32 * 0xff) << 24;
         let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
-        rec.w[0] = colour.unwrap_or(0);
-        rec.w[1] = depth.unwrap_or(0);
-        rec.w[2] = stencil.unwrap_or(0) as u32;
+        // A multisampled window clears its samples as well (`pixel::run`): bits 8 to 64 of the word
+        // say which, from the request and the layout's runs.
+        let samples = ds.samples.as_ref().map_or(0, |ms| {
+            8 | (q.colour.is_some() as u32) << 4 | ((q.depth.is_some() && q.depth_mask && ms.depth.1 != 0) as u32) << 5 | ((q.stencil.is_some() && ms.stencil.1 != 0) as u32) << 6
+        });
+        rec.w[0] = q.colour.unwrap_or(0);
+        rec.w[1] = q.depth.unwrap_or(0);
+        rec.w[2] = q.stencil.unwrap_or(0) as u32;
         rec.w[3] = q.stencil_mask as u32;
         rec.w[4] = keep;
-        rec.w[5] = colour.is_some() as u32 | (depth.is_some() as u32) << 1 | (stencil.is_some() as u32) << 2;
+        rec.w[5] = colour.is_some() as u32 | (depth.is_some() as u32) << 1 | (stencil.is_some() as u32) << 2 | samples;
         rec.w[R_RECT] = r.x0 as u32;
         rec.w[R_RECT + 1] = r.y0 as u32;
         rec.w[R_RECT + 2] = r.x1 as u32;
@@ -922,8 +1093,228 @@ impl State {
             self.plane(m, ds.stencil_word as usize);
             self.mark(ds.stencil_word as usize, r, 0);
         }
+        if let Some(ms) = &ds.samples {
+            for (first, n) in [ms.colour, ms.depth, ms.stencil] {
+                for w in first..first + n {
+                    self.plane(m, w as usize);
+                    self.mark(w as usize, r, 3);
+                }
+            }
+        }
         let ds_ = *ds;
         self.push_ds((*ds, MODE_CLEAR), move |s| s.ds_slot(m, &ds_, MODE_CLEAR), move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1))
+    }
+
+    /// The pixels of `r` the draw state's ownership lets through, which is what an accumulation visits:
+    /// all of them with no ownership test, else counted in the display-ID plane.
+    fn visited(&mut self, m: &PixelStore, ds: &DrawState, r: Rect) -> u64 {
+        if r.is_empty() {
+            return 0;
+        }
+        if ds.ownership.is_none() {
+            return (r.x1 - r.x0) as u64 * (r.y1 - r.y0) as u64;
+        }
+        self.observe(m, DID_PLANE, r);
+        (r.y0..r.y1).flat_map(|y| (r.x0..r.x1).map(move |x| (x, y))).filter(|&(x, y)| owned_at(m, ds, x, y)).count() as u64
+    }
+
+    /// The fragments of a GL pixel write in bands that fit the payload ring, one record each; the count of those
+    /// that landed is made on the CPU from the data, the clip and the display-ID plane.
+    fn frags(&mut self, m: &PixelStore, ds: &DrawState, (x0, y0, w, h): (i64, i64, usize, usize), kind: u8, data: &[u32]) -> u64 {
+        let (px0, py0) = (ds.origin[0] as i64 + x0, ds.origin[1] as i64 + y0);
+        let screen = Rect { x0: 0, y0: 0, x1: self.w as i32, y1: self.h as i32 };
+        let full = Rect { x0: px0.max(i32::MIN as i64) as i32, y0: py0 as i32, x1: (px0 + w as i64) as i32, y1: (py0 + h as i64) as i32 };
+        let b = full.intersect(&ds.clip).intersect(&screen);
+        if b.is_empty() || w == 0 {
+            return 0;
+        }
+        // Fragments that land: a fragment there, inside the box, on a pixel the window owns.
+        if ds.ownership.is_some() {
+            self.observe(m, DID_PLANE, b);
+        }
+        let mut landed = 0;
+        if kind == FRAG_COLOUR {
+            for y in b.y0..b.y1 {
+                for x in b.x0..b.x1 {
+                    let k = 3 * ((y as i64 - py0) as usize * w + (x as i64 - px0) as usize);
+                    landed += (data[k] >> 31 != 0 && owned_at(m, ds, x, y)) as u64;
+                }
+            }
+        }
+        // Rows of the box in bands of at most the ring's room.
+        let band = (self.tex.payload_cap() / (3 * w)).max(1);
+        let mut j = (b.y0 as i64 - py0) as usize;
+        let end = (b.y1 as i64 - py0) as usize;
+        while j < end {
+            let jb = (j + band).min(end);
+            let rows = &data[3 * j * w..3 * jb * w];
+            if !self.tex.payload_room(rows.len()) {
+                if !self.flush_batch() {
+                    return landed;
+                }
+                self.tex.payload_reset();
+            }
+            let at = self.tex.payload_put(rows);
+            let Some(mut slot) = self.ds_slot(m, ds, MODE_CLEAR) else { return landed };
+            self.gen += 1;
+            self.stats.records += 1;
+            slot.w[S_FRAG] = at;
+            slot.w[S_FRAG + 1] = w as u32;
+            slot.w[S_FRAG + 2] = px0 as i32 as u32;
+            slot.w[S_FRAG + 3] = (py0 + j as i64) as i32 as u32;
+            let r = Rect { x0: b.x0, y0: (py0 + j as i64) as i32, x1: b.x1, y1: (py0 + jb as i64) as i32 };
+            let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
+            rec.w[0] = kind as u32;
+            rec.w[1] = (ds.stencil_bits != 0) as u32;
+            rec.w[R_RECT] = r.x0 as u32;
+            rec.w[R_RECT + 1] = r.y0 as u32;
+            rec.w[R_RECT + 2] = r.x1 as u32;
+            rec.w[R_RECT + 3] = r.y1 as u32;
+            rec.w[R_KIND] = K_FRAGS;
+            if kind == FRAG_STENCIL {
+                let word = ds.stencil_word as usize;
+                if ds.stencil_bits != 0 && ds.samples.is_none() {
+                    self.plane(m, word);
+                    self.mark(word, r, 0);
+                }
+                if let Some(ms) = &ds.samples {
+                    for w in ms.stencil.0..ms.stencil.0 + ms.stencil.1 {
+                        self.plane(m, w as usize);
+                        self.mark(w as usize, r, 3);
+                    }
+                }
+            } else {
+                for (word, class) in ds_written(ds) {
+                    self.plane(m, word);
+                    self.mark(word, r, class);
+                }
+            }
+            if !self.push(&slot, move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1)) {
+                return landed;
+            }
+            j = jb;
+        }
+        landed
+    }
+
+    /// An accumulation operation over `r`, as its passes (`accumulate_cpu`).
+    fn accumulate(&mut self, m: &PixelStore, ds: &DrawState, r: Rect, words: &[usize], colour: Option<usize>, passes: &[(u32, f32)]) -> bool {
+        if r.is_empty() {
+            return true;
+        }
+        let Some(mut slot) = self.ds_slot(m, ds, MODE_CLEAR) else { return false };
+        self.gen += 1;
+        self.stats.records += 1;
+        for (k, &w) in words.iter().enumerate() {
+            let Some(p) = self.plane(m, w) else { return false };
+            slot.w[S_ACC + k] = p;
+            self.mark(w, r, 3);
+        }
+        slot.w[S_ACC + 4] = match colour {
+            Some(w) => {
+                let Some(p) = self.plane(m, w) else { return false };
+                p
+            }
+            None => u32::MAX,
+        };
+        let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
+        rec.w[0] = passes.len() as u32;
+        for (n, (op, v)) in passes.iter().enumerate() {
+            rec.w[1 + 2 * n] = *op;
+            rec.w[2 + 2 * n] = v.to_bits();
+        }
+        rec.w[5] = words.len() as u32;
+        let wm = ds.colour_mask;
+        rec.w[6] = wm[0] as u32 | (wm[1] as u32) << 1 | (wm[2] as u32) << 2 | (wm[3] as u32) << 3;
+        rec.w[R_RECT] = r.x0 as u32;
+        rec.w[R_RECT + 1] = r.y0 as u32;
+        rec.w[R_RECT + 2] = r.x1 as u32;
+        rec.w[R_RECT + 3] = r.y1 as u32;
+        rec.w[R_KIND] = K_ACCUM;
+        if passes.iter().any(|&(op, _)| op == ACCUM_RETURN) {
+            for &c in &ds.colour[..ds.colours as usize] {
+                self.mark(c as usize, r, 3);
+            }
+        }
+        self.push(&slot, move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1))
+    }
+
+    /// glClear of the accumulation words: each of `words` goes to its value, over `r`.
+    fn clear_accumulation(&mut self, m: &PixelStore, ds: &DrawState, r: Rect, words: &[(usize, u32)]) -> bool {
+        if r.is_empty() {
+            return true;
+        }
+        let Some(mut slot) = self.ds_slot(m, ds, MODE_CLEAR) else { return false };
+        self.gen += 1;
+        self.stats.records += 1;
+        for (k, &(w, v)) in words.iter().enumerate() {
+            let Some(p) = self.plane(m, w) else { return false };
+            slot.w[S_ACC + k] = p;
+            slot.w[S_ACC + 8 + k] = v;
+            self.mark(w, r, 3);
+        }
+        let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
+        rec.w[0] = words.len() as u32;
+        rec.w[R_RECT] = r.x0 as u32;
+        rec.w[R_RECT + 1] = r.y0 as u32;
+        rec.w[R_RECT + 2] = r.x1 as u32;
+        rec.w[R_RECT + 3] = r.y1 as u32;
+        rec.w[R_KIND] = K_CLEARACC;
+        self.push(&slot, move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1))
+    }
+
+    /// An X image write: the pixels the walk found, as one record over their box. None when the box
+    /// holds more pixels than the payload ring.
+    fn image(&mut self, m: &PixelStore, img: &super::x::pixel::LoweredImage) -> Option<bool> {
+        if img.pixels.is_empty() {
+            return Some(true);
+        }
+        let pitch = img.pitch;
+        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+        for &(i, _) in &img.pixels {
+            let (x, y) = (i % pitch, i / pitch);
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+        }
+        let (bw, bh) = (x1 - x0, y1 - y0);
+        if 2 * bw * bh > self.tex.payload_cap() {
+            return None;
+        }
+        let plane = self.plane(m, img.word)?;
+        let mut dense = vec![0u32; 2 * bw * bh];
+        for &(i, src) in &img.pixels {
+            let k = ((i / pitch - y0) * bw + (i % pitch - x0)) * 2;
+            dense[k] = 1;
+            dense[k + 1] = src;
+        }
+        if !self.tex.payload_room(dense.len()) {
+            // Everything open reads the ring: submit it, then start over.
+            if !self.flush_batch() {
+                return Some(false);
+            }
+            self.tex.payload_reset();
+        }
+        let at = self.tex.payload_put(&dense);
+        self.gen += 1;
+        self.stats.records += 1;
+        let r = Rect { x0: x0 as i32, y0: y0 as i32, x1: x1 as i32, y1: y1 as i32 };
+        let mut slot = GSlot { w: [0; SLOT_W] };
+        slot.w[0] = plane;
+        slot.w[1] = img.gx;
+        slot.w[2] = img.mask;
+        slot.w[3] = img.width_mask;
+        slot.w[4] = img.needs as u32;
+        slot.w[5] = at;
+        slot.w[6] = bw as u32;
+        slot.w[7] = x0 as u32;
+        slot.w[8] = y0 as u32;
+        let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
+        rec.w[R_RECT] = r.x0 as u32;
+        rec.w[R_RECT + 1] = r.y0 as u32;
+        rec.w[R_RECT + 2] = r.x1 as u32;
+        rec.w[R_RECT + 3] = r.y1 as u32;
+        rec.w[R_KIND] = K_IMAGE;
+        self.mark(img.word, r, class_of(img.width_mask));
+        Some(self.push(&slot, move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1)))
     }
 
     /// An X fill: one clipped box of a request.
@@ -933,7 +1324,7 @@ impl State {
         self.gen += 1;
         self.stats.records += 1;
         let (w, h) = (self.w as i64, self.h as i64);
-        let mut s = GSlot { w: [0; 64] };
+        let mut s = GSlot { w: [0; SLOT_W] };
         s.w[0] = plane;
         s.w[1] = f.fg;
         s.w[2] = f.bg;
@@ -1238,6 +1629,13 @@ impl State {
 /// full colour words and depths, and stencil is 8 bits.
 fn ds_written(ds: &DrawState) -> Vec<(usize, u8)> {
     let mut v: Vec<(usize, u8)> = ds.colour[..ds.colours as usize].iter().map(|&c| (c as usize, 3)).collect();
+    if let Some(ms) = &ds.samples {
+        // A multisampled draw writes the sample runs in place of the depth and stencil planes.
+        for (first, n) in [ms.colour, ms.depth, ms.stencil] {
+            v.extend((first..first + n).map(|w| (w as usize, 3)));
+        }
+        return v;
+    }
     if ds.depth_bits != 0 {
         v.push((ds.depth_word as usize, 3));
     }
@@ -1268,6 +1666,36 @@ fn tri_rec(job: &TriJob) -> GRec {
     for (n, v) in [t.z.at, t.z.dx, t.z.dy].into_iter().enumerate() {
         w[27 + 2 * n] = v as u64 as u32;
         w[28 + 2 * n] = (v as u64 >> 32) as u32;
+    }
+    for (k, plane) in t.tex.iter().enumerate() {
+        for (n, v) in plane.iter().enumerate() {
+            w[R_TEX + 3 * k + n] = v.to_bits();
+        }
+    }
+    for (k, plane) in t.fog.iter().enumerate() {
+        for (n, v) in plane.iter().enumerate() {
+            w[R_FOG + 3 * k + n] = v.to_bits();
+        }
+    }
+    for (n, v) in t.line_d.iter().enumerate() {
+        w[R_LD + n] = v.to_bits();
+    }
+    match &t.cover {
+        Cover::None => {}
+        Cover::Edges { inner, n, plane } => {
+            w[R_COV] = 1 | (inner[0] as u32) << 2 | (inner[1] as u32) << 3 | (inner[2] as u32) << 4 | (*n as u32) << 8 | (job.line as u32) << 16;
+            for (k, e) in plane.iter().enumerate().take(*n as usize) {
+                for (c, v) in e.iter().enumerate() {
+                    w[R_COV + 1 + 3 * k + c] = v.to_bits();
+                }
+            }
+        }
+        Cover::Disc { x, y, r } => {
+            w[R_COV] = 2;
+            w[R_COV + 1] = x.to_bits();
+            w[R_COV + 2] = y.to_bits();
+            w[R_COV + 3] = r.to_bits();
+        }
     }
     w[R_RECT] = job.rect.x0 as u32;
     w[R_RECT + 1] = job.rect.y0 as u32;

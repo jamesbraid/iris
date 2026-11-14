@@ -13,36 +13,36 @@ use crate::dev::kona::back::raster::texel::{self, default_weights, Combine, Deta
 use crate::dev::kona::back::store::texture::{TextureStore, PAGE_WORDS};
 use crate::wgpu::{library, Fragment, Gpu, GpuOptions, Source};
 
-const PLANES: u32 = 4;
+pub(in crate::dev::kona::back) const PLANES: u32 = 4;
 const PAGES: u32 = 8;
 
-struct Rng(u64);
+pub(in crate::dev::kona::back) struct Rng(pub u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub fn next(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
         self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
-    fn below(&mut self, n: u32) -> u32 {
+    pub fn below(&mut self, n: u32) -> u32 {
         (self.next() >> 32) as u32 % n
     }
 
-    fn range(&mut self, lo: i32, hi: i32) -> i32 {
+    pub fn range(&mut self, lo: i32, hi: i32) -> i32 {
         lo + self.below((hi - lo) as u32) as i32
     }
 
-    fn unit(&mut self) -> f32 {
+    pub fn unit(&mut self) -> f32 {
         (self.next() >> 40) as f32 / (1u64 << 24) as f32
     }
 
-    fn f(&mut self, lo: f32, hi: f32) -> f32 {
+    pub fn f(&mut self, lo: f32, hi: f32) -> f32 {
         lo + (hi - lo) * self.unit()
     }
 
-    fn coin(&mut self, one_in: u32) -> bool {
+    pub fn coin(&mut self, one_in: u32) -> bool {
         self.below(one_in) == 0
     }
 }
@@ -268,7 +268,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
 );
 
 /// A store with random words in pages 0 to 3 and 5 of planes 0 to 3, the rest absent.
-fn random_store(rng: &mut Rng) -> TextureStore {
+pub(in crate::dev::kona::back) fn random_store(rng: &mut Rng) -> TextureStore {
     let store = TextureStore::default();
     for plane in 0..PLANES as u16 {
         for pg in [0u32, 1, 2, 3, 5] {
@@ -306,13 +306,13 @@ fn random_wrap(rng: &mut Rng) -> [Wrap; 3] {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Flavour {
+pub(in crate::dev::kona::back) enum Flavour {
     Plain,
     Volume,
     Enhanced,
 }
 
-fn random_desc(rng: &mut Rng, flavour: Flavour) -> TexDesc {
+pub(in crate::dev::kona::back) fn random_desc(rng: &mut Rng, flavour: Flavour) -> TexDesc {
     let mut d = TexDesc {
         count: 1 + rng.below(6) as u8,
         min: random_filter(rng),

@@ -18,8 +18,10 @@
 // below.
 
 #include "wide.wgsl"
+#include "kona_texture.wgsl"
+#include "kona_fragment.wgsl"
 
-const REC_W: u32 = 38u;
+const REC_W: u32 = 84u;
 
 struct Rec {
     slot: u32,
@@ -29,7 +31,7 @@ struct Rec {
 }
 
 struct Slot {
-    w: array<u32, 64>,
+    w: array<u32, 128>,
 }
 
 @group(1) @binding(0) var<storage, read> recs: array<Rec>;
@@ -38,6 +40,8 @@ struct Slot {
 @group(2) @binding(1) var<storage, read_write> pl1: array<u32>;
 @group(2) @binding(2) var<storage, read_write> pl2: array<u32>;
 @group(2) @binding(3) var<storage, read_write> pl3: array<u32>;
+// Host data records carry (group 3 also holds the texture memory).
+@group(3) @binding(3) var<storage, read> payload: array<u32>;
 
 fn ld(r: u32, i: u32) -> u32 {
     let o = (r & 0x0fffffffu) + i;
@@ -64,6 +68,10 @@ const K_XFILL: u32 = 1u;
 const K_BOX: u32 = 2u;
 const K_BITMAP: u32 = 3u;
 const K_CLEAR: u32 = 4u;
+const K_ACCUM: u32 = 5u;
+const K_CLEARACC: u32 = 6u;
+const K_FRAGS: u32 = 9u;
+const K_IMAGE: u32 = 8u;
 const R_KIND: u32 = 37u;
 
 // Triangle record words.
@@ -77,6 +85,11 @@ const T_DX: u32 = 19u;   // 4 x f32
 const T_DY: u32 = 23u;   // 4 x f32
 const T_Z: u32 = 27u;    // at, dx, dy: 3 x I64 (32.16)
 const T_RECT: u32 = 33u; // x0, y0, x1, y1 (far corner exclusive); the box of every kind but X fill
+const T_TEX: u32 = 38u;  // 4 x (at, dx, dy) f32: s/w, t/w, r/w, q/w
+const T_FOG: u32 = 50u;  // 2 x (at, dx, dy) f32: fog coordinate / w, 1 / w
+const T_LD: u32 = 56u;   // at, dx, dy f32: distance along a line
+const T_COV: u32 = 59u;  // smoothing: kind | inner << 2 | n << 8 | line << 16, then 8 x (nx, ny, d)
+                         // for edges or x, y, r for a disc
 
 // Draw-state slot words (triangles and clears).
 const S_FLAGS: u32 = 0u;
@@ -90,6 +103,8 @@ const F_LOGIC: u32 = 64u;
 const F_OWN: u32 = 128u;
 const F_STIPPLE: u32 = 256u;
 const F_CMASK: u32 = 512u;
+const F_TEX: u32 = 1024u;
+const F_LSTIP: u32 = 2048u;
 const S_NCOL: u32 = 1u;
 const S_COL0: u32 = 2u;   // plane references
 const S_COL1: u32 = 3u;
@@ -116,6 +131,17 @@ const S_OWN_MASK: u32 = 26u;
 const S_DID: u32 = 27u;
 const S_WORG: u32 = 28u;  // window origin x, y (stipple)
 const S_STIP: u32 = 32u;  // 32 rows
+const S_TEXD: u32 = 64u;  // the texture descriptor's word offset in tex_descs
+const S_FOGC: u32 = 66u;  // fog curve (0 none, 1 linear, 2 exp, 3 exp2), a, b, then colour r, g, b
+const S_LSTIP: u32 = 72u; // line stipple pattern, repeat
+// Multisampling (count 0: none): count, coverage word, options, run lengths, 8 sample offsets, then 6 + 6 + 2 run plane refs.
+// Accumulation: 4 plane references and the colour source's (0xffffffff: none); a clear's 8 values follow at +8.
+const S_ACC: u32 = 112u;
+const S_MS: u32 = 80u;
+const S_MS_AT: u32 = 86u;
+const S_MS_COL: u32 = 94u;
+const S_MS_DEPTH: u32 = 100u;
+const S_MS_STEN: u32 = 106u;
 
 const FULL: u32 = 8191u;
 const DEPTH_MAX: u32 = 4294967040u;
@@ -272,6 +298,25 @@ fn depth_at(pi: u32, i: i32, j: i32) -> u32 {
     var v = r64(pi, T_Z);
     v = i64_madd(v, r64(pi, T_Z + 2u), i);
     v = i64_madd(v, r64(pi, T_Z + 4u), j);
+    return depth_clamp(v);
+}
+
+// The depth at sample offset (ox, oy) eighths from pixel (i, j): the plane's step to the sample is
+// divided by 8 truncating toward zero, as the CPU's signed division does.
+fn depth_at_sample(pi: u32, i: i32, j: i32, ox: i32, oy: i32) -> u32 {
+    var v = r64(pi, T_Z);
+    v = i64_madd(v, r64(pi, T_Z + 2u), i);
+    v = i64_madd(v, r64(pi, T_Z + 4u), j);
+    var q = i64_madd(i64_madd(I64(0u, 0u), r64(pi, T_Z + 2u), ox), r64(pi, T_Z + 4u), oy);
+    if i64_is_neg(q) {
+        q = i64_neg(u64_shr(i64_neg(q), 3u));
+    } else {
+        q = u64_shr(q, 3u);
+    }
+    return depth_clamp(i64_add(v, q));
+}
+
+fn depth_clamp(v: I64) -> u32 {
     let s = i64_shr(v, 16u);
     if i64_is_neg(s) {
         return 0u;
@@ -290,19 +335,174 @@ fn attr(pi: u32, k: u32, i: f32, j: f32) -> u32 {
     return u32(clamp(v, 0.0, 8191.0) + 0.5);
 }
 
-fn covered(pi: u32, px: i32, py: i32) -> bool {
+// The samples of pixel (px, py) inside the triangle, as bits: each at its offset in eighths from the
+// pixel's corner. The edges' steps are multiples of 8, so the step to a sample divides exactly.
+fn sample_mask(pi: u32, si: u32, px: i32, py: i32) -> u32 {
+    let count = slots[si].w[S_MS];
     let tie = rw(pi, T_TIE);
+    var mask = 0u;
+    for (var k = 0u; k < count; k++) {
+        let at = slots[si].w[S_MS_AT + k];
+        let ox = i32(at & 0xffu);
+        let oy = i32(at >> 8u);
+        var inside = true;
+        for (var e = 0u; e < 3u; e++) {
+            let a = bitcast<i32>(rw(pi, T_A + e));
+            let b = bitcast<i32>(rw(pi, T_B + e));
+            var v = r64(pi, T_C + 2u * e);
+            v = i64_add(v, i64_mul_i32(a, px));
+            v = i64_add(v, i64_mul_i32(b, py));
+            v = i64_add(v, i64_shr(i64_add(i64_mul_i32(a, ox), i64_mul_i32(b, oy)), 3u));
+            let pos = !i64_is_neg(v) && !i64_is_zero(v);
+            let own = i64_is_zero(v) && ((tie >> e) & 1u) != 0u;
+            if !(pos || own) {
+                inside = false;
+            }
+        }
+        mask |= select(0u, 1u << k, inside);
+    }
+    return mask;
+}
+
+// Whether the sample of pixel (px, py) is inside edge k, a tie going to a right or top edge.
+fn inside_edge(pi: u32, k: u32, px: i32, py: i32) -> bool {
+    let tie = rw(pi, T_TIE);
+    var e = r64(pi, T_C + 2u * k);
+    e = i64_add(e, i64_mul_i32(bitcast<i32>(rw(pi, T_A + k)), px));
+    e = i64_add(e, i64_mul_i32(bitcast<i32>(rw(pi, T_B + k)), py));
+    let pos = !i64_is_neg(e) && !i64_is_zero(e);
+    let own = i64_is_zero(e) && ((tie >> k) & 1u) != 0u;
+    return pos || own;
+}
+
+fn covered(pi: u32, px: i32, py: i32) -> bool {
     for (var k = 0u; k < 3u; k++) {
-        var e = r64(pi, T_C + 2u * k);
-        e = i64_add(e, i64_mul_i32(bitcast<i32>(rw(pi, T_A + k)), px));
-        e = i64_add(e, i64_mul_i32(bitcast<i32>(rw(pi, T_B + k)), py));
-        let pos = !i64_is_neg(e) && !i64_is_zero(e);
-        let own = i64_is_zero(e) && ((tie >> k) & 1u) != 0u;
-        if !(pos || own) {
+        if !inside_edge(pi, k, px, py) {
             return false;
         }
     }
     return true;
+}
+
+// The share of the pixel a smoothed triangle covers (raster/smooth.rs `coverage`), 0 when the
+// pixel is not drawn. A line's or point's share is quantised to the 8-bit alpha the ramps give.
+fn smooth_cover(pi: u32, cv: u32, px: i32, py: i32) -> f32 {
+    if (cv & 3u) == 2u {
+        if !covered(pi, px, py) {
+            return 0.0;
+        }
+        return smooth_quantise(smooth_disc(bitcast<f32>(rw(pi, T_COV + 1u)), bitcast<f32>(rw(pi, T_COV + 2u)), bitcast<f32>(rw(pi, T_COV + 3u)), px, py));
+    }
+    for (var k = 0u; k < 3u; k++) {
+        if ((cv >> (2u + k)) & 1u) != 0u && !inside_edge(pi, k, px, py) {
+            return 0.0;
+        }
+    }
+    let i = f32(px - bitcast<i32>(rw(pi, T_ORG)));
+    let j = f32(py - bitcast<i32>(rw(pi, T_ORG + 1u)));
+    let n = (cv >> 8u) & 15u;
+    var planes: array<vec4<f32>, 8>;
+    for (var k = 0u; k < n; k++) {
+        let b = T_COV + 1u + 3u * k;
+        planes[k] = vec4<f32>(bitcast<f32>(rw(pi, b)), bitcast<f32>(rw(pi, b + 1u)), bitcast<f32>(rw(pi, b + 2u)), 0.0);
+    }
+    let c = smooth_edges(n, &planes, i, j);
+    if ((cv >> 16u) & 1u) != 0u {
+        return smooth_quantise(c);
+    }
+    return c;
+}
+
+// A fog plane (coordinate / w, then 1 / w) at pixel offset (i, j).
+fn fog_at(pi: u32, k: u32, i: f32, j: f32) -> f32 {
+    let b = T_FOG + 3u * k;
+    return (bitcast<f32>(rw(pi, b)) + fp(bitcast<f32>(rw(pi, b + 1u)) * i)) + fp(bitcast<f32>(rw(pi, b + 2u)) * j);
+}
+
+// The fragment colour after fog: the coordinate is the plane of coordinate / w over the plane of 1 / w.
+fn fogged(pi: u32, si: u32, i: f32, j: f32, src: vec4<u32>) -> vec4<u32> {
+    let n = fog_at(pi, 0u, i, j);
+    let q = fog_at(pi, 1u, i, j);
+    var c = n;
+    if !is_nan(q) && abs(q) > 1e-30 {
+        c = div_exact(n, q);
+    }
+    let f = fog_factor(slots[si].w[S_FOGC], bitcast<f32>(slots[si].w[S_FOGC + 1u]), bitcast<f32>(slots[si].w[S_FOGC + 2u]), c);
+    return fog_apply(src, vec3<f32>(bitcast<f32>(slots[si].w[S_FOGC + 3u]), bitcast<f32>(slots[si].w[S_FOGC + 4u]), bitcast<f32>(slots[si].w[S_FOGC + 5u])), f);
+}
+
+// A texture plane at pixel offset (i, j), each product rounded before its sum as the CPU does.
+fn tex_at(pi: u32, k: u32, i: f32, j: f32) -> f32 {
+    let b = T_TEX + 3u * k;
+    return (bitcast<f32>(rw(pi, b)) + tex_p(bitcast<f32>(rw(pi, b + 1u)) * i)) + tex_p(bitcast<f32>(rw(pi, b + 2u)) * j);
+}
+
+// The coordinates s, t, r at pixel (x, y): the planes over q, or the planes themselves when q is
+// nearly zero. r is taken only for a volume.
+fn tex_coord(pi: u32, x: i32, y: i32, volume: bool) -> vec3<f32> {
+    let i = f32(x - bitcast<i32>(rw(pi, T_ORG)));
+    let j = f32(y - bitcast<i32>(rw(pi, T_ORG + 1u)));
+    let q = tex_at(pi, 3u, i, j);
+    let s = tex_at(pi, 0u, i, j);
+    let t = tex_at(pi, 1u, i, j);
+    var r = 0.0;
+    if volume {
+        r = tex_at(pi, 2u, i, j);
+    }
+    let nan = (bitcast<u32>(q) & 0x7fffffffu) > 0x7f800000u;
+    if !nan && abs(q) > 1e-30 {
+        var rq = 0.0;
+        if volume {
+            rq = div_exact(r, q);
+        }
+        return vec3<f32>(div_exact(s, q), div_exact(t, q), rq);
+    }
+    return vec3<f32>(s, t, r);
+}
+
+// The level of detail of the 2 x 2 quad (aligned to even coordinates) that holds pixel (px, py):
+// log2 of the largest step of s and t in texels of level 0, times the scale over 16.
+fn tex_lod(pi: u32, d: u32, px: i32, py: i32, volume: bool) -> f32 {
+    let qx = px & -2;
+    let qy = py & -2;
+    let c0 = tex_coord(pi, qx, qy, volume);
+    let cx = tex_coord(pi, qx + 1, qy, volume);
+    let cy = tex_coord(pi, qx, qy + 1, volume);
+    let l0 = tex_level_at(d, 0u);
+    let fw = f32(tex_lw(l0));
+    let fh = f32(tex_lh(l0));
+    var rho = max(max(abs((cx.x - c0.x) * fw), abs((cy.x - c0.x) * fw)), max(abs((cx.y - c0.y) * fh), abs((cy.y - c0.y) * fh)));
+    let ls = tex_descs[d + TD_LODSCALE];
+    var scale = f32(max(ls & 0xffu, 1u));
+    if volume {
+        let fd = f32(tex_ld(l0));
+        let rr = max(abs((cx.z - c0.z) * fd), abs((cy.z - c0.z) * fd));
+        let rs = f32(max((ls >> 16u) & 0xffu, 1u));
+        if rr * rs > rho * scale {
+            rho = rr;
+            scale = rs;
+        }
+    }
+    let v = max(rho * scale / 16.0, 1e-6);
+    return bitcast<f32>(lod_log2(bitcast<u32>(v)));
+}
+
+// The fragment colour `src` after the bound texture and its environment.
+fn textured(pi: u32, si: u32, px: i32, py: i32, src: vec4<u32>) -> vec4<u32> {
+    tex_nz = recs[pi].one ^ 0x3f800000u;
+    let d = slots[si].w[S_TEXD];
+    let volume = ((tex_descs[d + TD_FLAGS] >> 16u) & 1u) != 0u;
+    let lod = tex_lod(pi, d, px, py, volume);
+    let c = tex_coord(pi, px, py, volume);
+    var texel: vec4<u32>;
+    if volume {
+        texel = tex_sample3(d, c.x, c.y, c.z, lod);
+    } else if tex_descs[d + TD_COMBINE] != 0u {
+        texel = tex_sample_enhanced(d, c.x, c.y, lod);
+    } else {
+        texel = tex_sample(d, c.x, c.y, lod);
+    }
+    return tex_environment(d, src, texel);
 }
 
 fn shade(si: u32, index: u32, src: vec4<u32>, z: u32) {
@@ -346,6 +546,137 @@ fn shade(si: u32, index: u32, src: vec4<u32>, z: u32) {
         }
         st(cref, index, colour_out(si, src, old));
     }
+}
+
+// A pixel's samples are runs of words (`stride` bits a sample); a run is read once, worked on and stored together.
+fn ms_load(si: u32, base: u32, n: u32, index: u32) -> array<u32, 6> {
+    var run = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
+    for (var w = 0u; w < n; w++) {
+        run[w] = ld(slots[si].w[base + w], index);
+    }
+    return run;
+}
+
+fn ms_store(si: u32, base: u32, n: u32, index: u32, run: ptr<function, array<u32, 6>>) {
+    for (var w = 0u; w < n; w++) {
+        st(slots[si].w[base + w], index, (*run)[w]);
+    }
+}
+
+// One fragment of a multisampled window for each sample of `covered`; the pixel's word is the mean of its samples.
+fn shade_samples(pi: u32, si: u32, index: u32, src: vec4<u32>, oi: i32, oj: i32, covered: u32, zc: u32, zfix: bool) {
+    let fl = slots[si].w[S_FLAGS];
+    if (fl & F_ALPHA) != 0u && !cmp(slots[si].w[S_AFUNC], src.w, slots[si].w[S_AREF]) {
+        return;
+    }
+    let count = slots[si].w[S_MS];
+    let cn = slots[si].w[S_MS + 3u];
+    let dn = slots[si].w[S_MS + 4u];
+    let sn = slots[si].w[S_MS + 5u];
+    let cstride = cn * 32u / count;
+    let dwidth = dn * 32u / count;
+    let stencil_on = (fl & F_STENCIL) != 0u && sn != 0u;
+    let test = (fl & F_DEPTH_TEST) != 0u && dn != 0u;
+    var crun = ms_load(si, S_MS_COL, cn, index);
+    var drun = ms_load(si, S_MS_DEPTH, dn, index);
+    var srun = ms_load(si, S_MS_STEN, sn, index);
+    let sref = slots[si].w[S_SREF];
+    let rm = slots[si].w[S_SRMASK];
+    let swm = slots[si].w[S_SWMASK];
+    var live = 0u;
+    for (var k = 0u; k < count; k++) {
+        if ((covered >> k) & 1u) == 0u {
+            continue;
+        }
+        var stored = 0u;
+        if stencil_on {
+            stored = ms_sample_get(&srun, k, 8u, 8u);
+            if !cmp(slots[si].w[S_SFUNC], sref & rm, stored & rm) {
+                let v = stencil_apply(slots[si].w[S_SFAIL], stored, sref);
+                ms_sample_set(&srun, k, 8u, 8u, (stored & ~swm) | (v & swm));
+                continue;
+            }
+        }
+        let at = slots[si].w[S_MS_AT + k];
+        var zf = zc;
+        if !zfix {
+            zf = depth_at_sample(pi, oi, oj, i32(at & 0xffu), i32(at >> 8u));
+        }
+        let z = zf >> (32u - clamp(dwidth, 1u, 32u));
+        var zpass = true;
+        if test {
+            zpass = cmp(slots[si].w[S_DFUNC], z, ms_sample_get(&drun, k, dwidth, dwidth));
+        }
+        if stencil_on {
+            let v = stencil_apply(select(slots[si].w[S_ZFAIL], slots[si].w[S_ZPASS], zpass), stored, sref);
+            ms_sample_set(&srun, k, 8u, 8u, (stored & ~swm) | (v & swm));
+        }
+        if !zpass {
+            continue;
+        }
+        if test && (fl & F_DEPTH_MASK) != 0u {
+            ms_sample_set(&drun, k, dwidth, dwidth, z);
+        }
+        live |= 1u << k;
+    }
+    ms_store(si, S_MS_STEN, sn, index, &srun);
+    ms_store(si, S_MS_DEPTH, dn, index, &drun);
+    if live == 0u {
+        return;
+    }
+    // Samples keep no alpha: blending reads the main word's.
+    let ncol = slots[si].w[S_NCOL];
+    var alpha = 0u;
+    if ncol != 0u {
+        alpha = (ld(slots[si].w[S_COL0], index) >> 24u) & 0xffu;
+    }
+    var sum = vec3<u32>(0u);
+    for (var k = 0u; k < count; k++) {
+        var rgb = ms_sample_get(&crun, k, cstride, 24u);
+        if ((live >> k) & 1u) != 0u {
+            rgb = colour_out(si, src, (alpha << 24u) | rgb) & 0xffffffu;
+            ms_sample_set(&crun, k, cstride, 24u, rgb);
+        }
+        sum += vec3<u32>((rgb >> 16u) & 0xffu, (rgb >> 8u) & 0xffu, rgb & 0xffu);
+    }
+    ms_store(si, S_MS_COL, cn, index, &crun);
+    let m = (sum + vec3<u32>(count / 2u)) / vec3<u32>(count);
+    let word = (to8(src.w) << 24u) | (m.x << 16u) | (m.y << 8u) | m.z;
+    for (var b = 0u; b < ncol; b++) {
+        st(slots[si].w[S_COL0 + b], index, word);
+    }
+}
+
+// A clear of the samples of a pixel: colour under the colour mask, depth under the depth mask, stencil
+// under its mask (rec: 0 colour word, 1 depth, 2 stencil value, 3 stencil mask, 4 colour bits kept).
+fn clear_samples(pi: u32, si: u32, index: u32, what: u32) {
+    let count = slots[si].w[S_MS];
+    let cn = slots[si].w[S_MS + 3u];
+    let dn = slots[si].w[S_MS + 4u];
+    let sn = slots[si].w[S_MS + 5u];
+    let cstride = cn * 32u / count;
+    let dwidth = dn * 32u / count;
+    var crun = ms_load(si, S_MS_COL, cn, index);
+    var drun = ms_load(si, S_MS_DEPTH, dn, index);
+    var srun = ms_load(si, S_MS_STEN, sn, index);
+    let keep = rw(pi, 4u);
+    for (var k = 0u; k < count; k++) {
+        if (what & 16u) != 0u {
+            let old = ms_sample_get(&crun, k, cstride, 24u);
+            ms_sample_set(&crun, k, cstride, 24u, ((rw(pi, 0u) & ~keep) | (old & keep)) & 0xffffffu);
+        }
+        if (what & 32u) != 0u {
+            ms_sample_set(&drun, k, dwidth, dwidth, rw(pi, 1u) >> (32u - clamp(dwidth, 1u, 32u)));
+        }
+        if (what & 64u) != 0u {
+            let old = ms_sample_get(&srun, k, 8u, 8u);
+            let m = rw(pi, 3u);
+            ms_sample_set(&srun, k, 8u, 8u, (old & ~m) | (rw(pi, 2u) & m));
+        }
+    }
+    ms_store(si, S_MS_COL, cn, index, &crun);
+    ms_store(si, S_MS_DEPTH, dn, index, &drun);
+    ms_store(si, S_MS_STEN, sn, index, &srun);
 }
 
 fn arch_tile_begin(tile: u32, px: i32, py: i32, lane: u32) {
@@ -465,6 +796,125 @@ fn clear_px(pi: u32, px: i32, py: i32) {
         let sref = slots[si].w[S_STENCIL];
         st(sref, index, (ld(sref, index) & ~m) | (rw(pi, 2u) & m));
     }
+    if (what & 8u) != 0u {
+        clear_samples(pi, si, index, what);
+    }
+}
+
+// ---- Accumulation (kind 5) and its clear (kind 6) ----
+// rec: pass count, (op, value) twice, words, colour mask; slot: a draw state's plus S_ACC.
+fn accum_px(pi: u32, px: i32, py: i32) {
+    let si = recs[pi].slot;
+    let index = u32(py) * WIDTH + u32(px);
+    if (slots[si].w[S_FLAGS] & F_OWN) != 0u && !owned(si, index) {
+        return;
+    }
+    fnz = recs[pi].one ^ 0x3f800000u;
+    let nwords = rw(pi, 5u);
+    var acc = vec4<f32>(0.0);
+    for (var k = 0u; k < nwords; k++) {
+        acc[k] = bitcast<f32>(ld(slots[si].w[S_ACC + k], index));
+    }
+    var src = vec4<f32>(0.0);
+    let sref = slots[si].w[S_ACC + 4u];
+    if sref != 0xffffffffu {
+        src = acc_components8(ld(sref, index));
+    }
+    for (var p = 0u; p < rw(pi, 0u); p++) {
+        let op = rw(pi, 1u + 2u * p);
+        let v = bitcast<f32>(rw(pi, 2u + 2u * p));
+        if op == ACCUM_RETURN {
+            for (var b = 0u; b < slots[si].w[S_NCOL]; b++) {
+                let cref = slots[si].w[S_COL0 + b];
+                st(cref, index, acc_return(acc, nwords, v, ld(cref, index), rw(pi, 6u)));
+            }
+        } else {
+            acc_pass(&acc, nwords, op, v, src);
+        }
+    }
+    for (var k = 0u; k < nwords; k++) {
+        st(slots[si].w[S_ACC + k], index, bitcast<u32>(acc[k]));
+    }
+}
+
+fn clear_acc_px(pi: u32, px: i32, py: i32) {
+    let si = recs[pi].slot;
+    let index = u32(py) * WIDTH + u32(px);
+    if (slots[si].w[S_FLAGS] & F_OWN) != 0u && !owned(si, index) {
+        return;
+    }
+    for (var k = 0u; k < rw(pi, 0u); k++) {
+        st(slots[si].w[S_ACC + k], index, slots[si].w[S_ACC + 8u + k]);
+    }
+}
+
+// ---- An X image (kind 8) ----
+// Dense over the box in the payload ring, two words a pixel (landed, converted word); slot 0..8: plane, gx, masks, needs, offset, box.
+fn image_px(pi: u32, px: i32, py: i32) {
+    let si = recs[pi].slot;
+    let k = u32(py - bitcast<i32>(slots[si].w[8])) * slots[si].w[6] + u32(px - bitcast<i32>(slots[si].w[7]));
+    let base = slots[si].w[5] + 2u * k;
+    if payload[base] == 0u {
+        return;
+    }
+    let r = slots[si].w[0];
+    let idx = u32(py) * WIDTH + u32(px);
+    var old = 0u;
+    if slots[si].w[4] != 0u {
+        old = ld(r, idx);
+    }
+    let m = slots[si].w[2];
+    st(r, idx, ((logic(slots[si].w[1], payload[base + 1u], old) & m) | (old & ~m)) & slots[si].w[3]);
+}
+
+// ---- GL pixel fragments (kind 9) ----
+// Three payload words a pixel as `frags_cpu` says; rec 0: kind, 1: stencil plane present; slot S_FRAG: offset, width, x0, y0.
+const S_FRAG: u32 = 108u;
+
+fn frag_px(pi: u32, px: i32, py: i32) {
+    let si = recs[pi].slot;
+    let k = u32(py - bitcast<i32>(slots[si].w[S_FRAG + 3u])) * slots[si].w[S_FRAG + 1u] + u32(px - bitcast<i32>(slots[si].w[S_FRAG + 2u]));
+    let base = slots[si].w[S_FRAG] + 3u * k;
+    let w0 = payload[base];
+    if (w0 >> 31u) == 0u {
+        return;
+    }
+    let index = u32(py) * WIDTH + u32(px);
+    if (slots[si].w[S_FLAGS] & F_OWN) != 0u && !owned(si, index) {
+        return;
+    }
+    let count = slots[si].w[S_MS];
+    if rw(pi, 0u) == 1u {
+        // A stencil image's value under the write mask, into the plane or every sample.
+        if rw(pi, 1u) == 0u {
+            return;
+        }
+        let value = w0 & 0xffu;
+        let mask = slots[si].w[S_SWMASK];
+        if count != 0u {
+            let sn = slots[si].w[S_MS + 5u];
+            if sn == 0u {
+                return;
+            }
+            var srun = ms_load(si, S_MS_STEN, sn, index);
+            for (var s = 0u; s < count; s++) {
+                let old = ms_sample_get(&srun, s, 8u, 8u);
+                ms_sample_set(&srun, s, 8u, 8u, (old & ~mask) | (value & mask));
+            }
+            ms_store(si, S_MS_STEN, sn, index, &srun);
+        } else {
+            let r = slots[si].w[S_STENCIL];
+            st(r, index, ((ld(r, index) & 0xffu & ~mask) | (value & mask)) & 0xffu);
+        }
+        return;
+    }
+    let w1 = payload[base + 1u];
+    let src = vec4<u32>(w0 & 0x1fffu, (w0 >> 13u) & 0x1fffu, w1 & 0x1fffu, (w1 >> 13u) & 0x1fffu);
+    if count != 0u {
+        shade_samples(pi, si, index, src, 0, 0, (1u << count) - 1u, payload[base + 2u], true);
+    } else {
+        shade(si, index, src, payload[base + 2u]);
+    }
 }
 
 fn arch_prim(pi: u32, px: i32, py: i32, lane: u32) {
@@ -498,10 +948,43 @@ fn arch_prim(pi: u32, px: i32, py: i32, lane: u32) {
         clear_px(pi, px, py);
         return;
     }
-    if !covered(pi, px, py) {
+    if kind == K_IMAGE {
+        image_px(pi, px, py);
         return;
     }
+    if kind == K_ACCUM {
+        accum_px(pi, px, py);
+        return;
+    }
+    if kind == K_CLEARACC {
+        clear_acc_px(pi, px, py);
+        return;
+    }
+    if kind == K_FRAGS {
+        frag_px(pi, px, py);
+        return;
+    }
+    fnz = recs[pi].one ^ 0x3f800000u;
+    let cv = rw(pi, T_COV);
     let si = recs[pi].slot;
+    let count = slots[si].w[S_MS];
+    var cov = 1.0;
+    var cmask = 1u;
+    if (cv & 3u) != 0u {
+        // A smoothed pixel with any coverage writes every sample in a multisampled window.
+        cov = smooth_cover(pi, cv, px, py);
+        if !(cov > 0.0) {
+            return;
+        }
+        cmask = select(1u, (1u << count) - 1u, count != 0u);
+    } else if count != 0u {
+        cmask = sample_mask(pi, si, px, py);
+        if cmask == 0u {
+            return;
+        }
+    } else if !covered(pi, px, py) {
+        return;
+    }
     let fl = slots[si].w[S_FLAGS];
     let index = u32(py) * WIDTH + u32(px);
     if (fl & F_OWN) != 0u && !owned(si, index) {
@@ -514,11 +997,45 @@ fn arch_prim(pi: u32, px: i32, py: i32, lane: u32) {
             return;
         }
     }
+    if (fl & F_LSTIP) != 0u {
+        let d0 = bitcast<f32>(rw(pi, T_LD));
+        let d1 = bitcast<f32>(rw(pi, T_LD + 1u));
+        let d2 = bitcast<f32>(rw(pi, T_LD + 2u));
+        let ox = f32(px - bitcast<i32>(rw(pi, T_ORG)));
+        let oy = f32(py - bitcast<i32>(rw(pi, T_ORG + 1u)));
+        if !stipple_line(slots[si].w[S_LSTIP], slots[si].w[S_LSTIP + 1u], d0, d1, d2, ox, oy) {
+            return;
+        }
+    }
     let oi = px - bitcast<i32>(rw(pi, T_ORG));
     let oj = py - bitcast<i32>(rw(pi, T_ORG + 1u));
     let i = f32(oi);
     let j = f32(oj);
-    let src = vec4<u32>(attr(pi, 0u, i, j), attr(pi, 1u, i, j), attr(pi, 2u, i, j), attr(pi, 3u, i, j));
+    var src = vec4<u32>(attr(pi, 0u, i, j), attr(pi, 1u, i, j), attr(pi, 2u, i, j), attr(pi, 3u, i, j));
+    if (fl & F_TEX) != 0u {
+        src = textured(pi, si, px, py, src);
+    }
+    // Fog follows the texture environment and the share covered scales alpha after it, before the alpha test.
+    if slots[si].w[S_FOGC] != 0u {
+        src = fogged(pi, si, i, j, src);
+    }
+    if (cv & 3u) != 0u {
+        src.w = sat_u32(fp(fp(f32(src.w) * cov) + 0.5));
+    }
+    if count != 0u {
+        var m = cmask & ms_allowed(slots[si].w[S_MS + 1u], count, px);
+        let opts = slots[si].w[S_MS + 2u];
+        if (opts & 1u) != 0u {
+            m &= ms_alpha_samples(src.w, count);
+        }
+        if (opts & 2u) != 0u {
+            src.w = FULL;
+        }
+        if m != 0u {
+            shade_samples(pi, si, index, src, oi, oj, m, 0u, false);
+        }
+        return;
+    }
     shade(si, index, src, depth_at(pi, oi, oj));
 }
 
