@@ -29,6 +29,9 @@ pub mod context;
 pub mod gl;
 pub mod textport;
 pub mod x;
+pub mod lodmath;
+#[cfg(feature = "wgpu")]
+pub mod gpu_lib;
 #[cfg(test)]
 mod golden;
 #[cfg(test)]
