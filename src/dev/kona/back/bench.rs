@@ -13,7 +13,7 @@
 //! scenes of their own, in megapixels of the image.
 
 use super::raster::Surface;
-use super::store::PixelStore;
+use super::store::{Store, StoreOp};
 use super::display::tables::Tables;
 use super::display::{compose, compose_default, ColourMap};
 use super::store::DID_PLANE;
@@ -50,12 +50,12 @@ fn rate(pixels: u64, mut f: impl FnMut()) -> f64 {
 
 /// Whether any pixel of the store was drawn: a scene that draws nothing
 /// would report a fast rate for no work.
-fn drawn(store: &PixelStore) -> bool {
+fn drawn(store: &Store) -> bool {
     (0..H).any(|y| (0..W).any(|x| store.read(x, y, 1) != 0))
 }
 
 fn x_scene(name: &str, setup: impl FnOnce(&mut XState), box_words: [u32; 2]) {
-    let store = PixelStore::new(W, H);
+    let store = Store::new(W, H);
     let surface = Surface::new(&store, 1);
     let mut x = XState::default();
     x.command(0x129, &GC_COPY);
@@ -74,7 +74,7 @@ fn x_scene(name: &str, setup: impl FnOnce(&mut XState), box_words: [u32; 2]) {
 /// An 8-bit image `w` x `h` written at (0, 0) through the setup, the write and
 /// its rows, as the back end takes them.
 fn write_scene(name: &str, w: u32, h: u32) {
-    let store = PixelStore::new(W, H);
+    let store = Store::new(W, H);
     let surface = Surface::new(&store, 1);
     let mut x = XState::default();
     x.command(0x129, &GC_COPY);
@@ -92,7 +92,7 @@ fn write_scene(name: &str, w: u32, h: u32) {
 
 /// A copy of the screen's interior four pixels down and right.
 fn copy_scene(name: &str, gx: u32) {
-    let store = PixelStore::new(W, H);
+    let store = Store::new(W, H);
     let surface = Surface::new(&store, 1);
     let mut x = XState::default();
     let mut gc = GC_COPY;
@@ -115,7 +115,7 @@ fn copy_scene(name: &str, gx: u32) {
 
 /// A 64 x 64 read of 8-bit pixels (the high byte of each index).
 fn read_scene(name: &str) {
-    let store = PixelStore::new(W, H);
+    let store = Store::new(W, H);
     let surface = Surface::new(&store, 1);
     let mut x = XState::default();
     let mut gc = [0u32; 13];
@@ -136,7 +136,7 @@ fn read_scene(name: &str) {
 /// (textport) composition, and with the X server's tables loaded and the
 /// screen in runs of 16 pixels of four windows (8-bit, 12-bit, direct, cleared).
 fn compose_scene(name: &str, tables: Option<&Tables>, run: u32) {
-    let store = PixelStore::new(W, H);
+    let store = Store::new(W, H);
     let mut map = ColourMap::default();
     for i in 0..256u32 {
         map.load(&[i, i * 4, 1020 - i * 4, i * 2]);
@@ -226,9 +226,11 @@ fn fill_rate() {
         full,
     );
 
-    let store = PixelStore::new(W, H);
+    let store = Store::new(W, H);
     let surface = Surface::new(&store, 1);
-    let mpix = rate((W * H) as u64, || surface.fill_box(0, 0, W as i64, H as i64, 7));
+    let mpix = rate((W * H) as u64, || {
+        store.apply(StoreOp::FillBox { word: 1, x1: 0, y1: 0, x2: W as i64, y2: H as i64, value: 7 });
+    });
     assert!(drawn(&store), "the textport box drew nothing");
     println!("{:<44} {mpix:>9.1} Mpix/s", "textport box, whole screen");
     // 16 x 16 glyphs at scattered positions, half the bits set.
@@ -241,7 +243,7 @@ fn fill_rate() {
     let mpix = rate(16 * 16 * 64, || {
         for _ in 0..64 {
             let (x, y) = place();
-            surface.bitmap(x, y, 16, 16, &bits, 9);
+            store.apply(StoreOp::Bitmap { word: 1, x0: x, y0: y, width: 16, height: 16, bits: &bits, value: 9 });
         }
     });
     assert!(drawn(&store), "the glyphs drew nothing");

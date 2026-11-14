@@ -187,15 +187,15 @@ impl XState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dev::kona::back::store::PixelStore;
+    use crate::dev::kona::back::store::Store;
 
     /// An index-16 context: foreground 0x5a00, full mask.
     const GC: [u32; 13] = [0x5a000, 0x1ffe, 0xa5000, 0x1ffe, 0xf00fff, 0, 0x180c, 0x40001, 1, 6, 5, 1, 1];
 
-    fn rig() -> (XState, PixelStore) {
+    fn rig() -> (XState, Store) {
         let mut x = XState::default();
         x.command(0x129, &GC);
-        (x, PixelStore::new(32, 32))
+        (x, Store::new(32, 32))
     }
 
     fn pack(a: i32, b: i32) -> u32 {
@@ -203,7 +203,7 @@ mod tests {
     }
 
     /// The lit pixels, as X coordinates, in row order.
-    fn lit(s: &PixelStore) -> Vec<(u32, u32)> {
+    fn lit(s: &Store) -> Vec<(u32, u32)> {
         (0..32).flat_map(|y| (0..32).map(move |x| (x, y))).filter(|&(x, y)| s.read(x, 31 - y, 1) != 0).collect()
     }
 

@@ -32,7 +32,7 @@ use super::raster::pixel;
 use super::raster::setup::TriJob;
 use super::raster::{ClearReq, DrawState, Rect};
 use super::super::handle::DisplayHandle;
-use super::store::PixelStore;
+use super::store::Store;
 use crate::tile_pool::{Rect as PoolRect, Tile, TilePool, GRID_SPAN};
 use std::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -127,7 +127,7 @@ const STATES: usize = 64;
 
 /// What the pool's workers share with the producer.
 struct Shared {
-    store: Arc<PixelStore>,
+    store: Arc<Store>,
     states: Vec<StateCell>,
     poisoned: AtomicBool,
     tile_runs: AtomicU64,
@@ -170,14 +170,14 @@ impl Tiles {
     /// Tiles for a `store`'s screen cut into `tile`-pixel squares (a power of
     /// two), `threads` workers (0: inline), `ring` slots (a power of two) and a
     /// budget in pixels of cost.
-    pub fn new(store: Arc<PixelStore>, tile: u32, threads: usize, ring: usize, budget: u64, handle: Option<DisplayHandle>) -> Result<Tiles, Invalid> {
+    pub fn new(store: Arc<Store>, tile: u32, threads: usize, ring: usize, budget: u64, handle: Option<DisplayHandle>) -> Result<Tiles, Invalid> {
         if !tile.is_power_of_two() {
             return Err(Invalid::Tile(tile));
         }
         if !ring.is_power_of_two() || ring < 2 {
             return Err(Invalid::Ring(ring));
         }
-        let (w, h) = (store.width() as i32, store.height() as i32);
+        let (w, h) = (store.cpu().width() as i32, store.cpu().height() as i32);
         debug_assert!(w <= GRID_SPAN && h <= GRID_SPAN, "a {w}x{h} screen wraps the tile grid");
         let states = (0..STATES).map(|_| StateCell(UnsafeCell::new(DrawState::default()))).collect();
         let shared = Arc::new(Shared { store, states, poisoned: AtomicBool::new(false), tile_runs: AtomicU64::new(0) });
@@ -188,10 +188,10 @@ impl Tiles {
                 let ds = unsafe { &*s.states[job.state() as usize].0.get() };
                 // The tile's rectangle, cut at the screen's edge.
                 let clip = Rect { x0: tile.x, y0: tile.y, x1: (tile.x + tile.size).min(w), y1: (tile.y + tile.size).min(h) };
-                if catch_unwind(AssertUnwindSafe(|| pixel::run(&s.store, job, ds, clip))).is_err() {
+                if catch_unwind(AssertUnwindSafe(|| pixel::run(s.store.cpu(), job, ds, clip))).is_err() {
                     s.poisoned.store(true, SeqCst);
                 }
-                s.store.touch();
+                s.store.cpu().touch();
                 s.tile_runs.fetch_add(1, Relaxed);
             });
             TilePool::new("kona-tile", ring, tile, threads, run)
@@ -270,8 +270,8 @@ impl Tiles {
             if !r.is_empty() {
                 // SAFETY: the entry is the producer's and nothing else reads it.
                 let ds = unsafe { &*self.shared.states[job.state() as usize].0.get() };
-                pixel::run(&self.shared.store, &self.scratch, ds, self.screen);
-                self.shared.store.touch();
+                pixel::run(self.shared.store.cpu(), &self.scratch, ds, self.screen);
+                self.shared.store.cpu().touch();
             }
             self.tail = self.stats.submitted;
             return Ok(());
@@ -358,7 +358,7 @@ mod tests {
     }
 
     /// Tiles with the draw state of the above entered.
-    fn tiles(store: Arc<PixelStore>, tile: u32, threads: usize, ring: usize, budget: u64) -> (Tiles, u16) {
+    fn tiles(store: Arc<Store>, tile: u32, threads: usize, ring: usize, budget: u64) -> (Tiles, u16) {
         let mut t = Tiles::new(store, tile, threads, ring, budget, None).unwrap();
         let s = t.state(draw_state());
         (t, s)
@@ -369,8 +369,8 @@ mod tests {
         RasterJob::Clear(ClearJob { req: ClearReq { rect: r, colour: Some(colour), ..Default::default() }, state })
     }
 
-    fn store() -> Arc<PixelStore> {
-        let s = Arc::new(PixelStore::new(W, H));
+    fn store() -> Arc<Store> {
+        let s = Arc::new(Store::new(W, H));
         s.ensure(1);
         s
     }
@@ -507,7 +507,7 @@ mod tests {
     /// panics in the pixel module.)
     #[test]
     fn a_panicking_job_poisons_the_tiles() {
-        let store = Arc::new(PixelStore::new(W, H));
+        let store = Arc::new(Store::new(W, H));
         let (mut t, s) = tiles(store, 16, 2, 4, 1 << 20);
         t.submit(clear(Rect { x0: 0, y0: 0, x1: 10, y1: 10 }, 1, s)).unwrap();
         assert_eq!(t.drain(), Err(Poisoned));

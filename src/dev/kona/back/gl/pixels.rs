@@ -58,7 +58,7 @@ use crate::dev::gl::math;
 use crate::dev::kona::back::raster::ops::ownership_plane;
 use crate::dev::kona::back::raster::pixel::Planes;
 use crate::dev::kona::back::raster::DrawState;
-use crate::dev::kona::back::store::{PixelStore, WordArray, DID_PLANE};
+use crate::dev::kona::back::store::{Store, StoreOp, WordArray, DID_PLANE};
 use crate::dev::kona::defs::pixel::*;
 use crate::dev::kona::defs::*;
 use crate::dev::kona::stream::Stream;
@@ -887,7 +887,7 @@ pub fn pack(img: &Image, format: u32, ty: u32, low: u32, rec: &Record) -> Option
 
 /// Where fragments land: the draw state's planes, with ownership resolved.
 struct Canvas<'a> {
-    store: &'a PixelStore,
+    store: &'a Store,
     ds: DrawState,
     planes: Planes<'a>,
     did: Option<WordArray<'a>>,
@@ -895,12 +895,13 @@ struct Canvas<'a> {
 }
 
 impl<'a> Canvas<'a> {
-    fn new(store: &'a PixelStore, mut ds: DrawState) -> Canvas<'a> {
+    fn new(store: &'a Store, mut ds: DrawState) -> Canvas<'a> {
         // A pixel rectangle is not textured, and the model does not stipple it (see the module doc).
         ds.texture = None;
         ds.polygon_stipple = None;
-        let did = ds.ownership.is_some().then(|| store.array(DID_PLANE)).flatten();
-        Canvas { store, planes: Planes::new(store, &ds), ds, did, pitch: store.width() as usize }
+        let cpu = store.cpu();
+        let did = ds.ownership.is_some().then(|| cpu.array(DID_PLANE)).flatten();
+        Canvas { store, planes: Planes::new(cpu, &ds), ds, did, pitch: cpu.width() as usize }
     }
 
     /// The plane index of window pixel (`x`, `y`), when it is inside the clip rectangle and owned.
@@ -1028,11 +1029,7 @@ fn emit(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, img: &Image) {
                             if let (Some(index), true, true) = (canvas.at(x, y), canvas.ds.stencil_bits != 0, canvas.ds.samples.is_some()) {
                                 canvas.planes.set_stencil(&canvas.ds, index, value, canvas.ds.stencil.write_mask);
                             } else if let (Some(index), true) = (canvas.at(x, y), canvas.ds.stencil_bits != 0) {
-                                if let Some(a) = canvas.store.array(canvas.ds.stencil_word as usize) {
-                                    let wm = canvas.ds.stencil.write_mask;
-                                    // SAFETY: the index is inside the clip rectangle, inside the screen.
-                                    unsafe { a.store(index, ((a.load(index) as u8 & !wm) | (value & wm)) as u32) };
-                                }
+                                canvas.store.apply(StoreOp::StencilWrite { word: canvas.ds.stencil_word as usize, index, value, mask: canvas.ds.stencil.write_mask });
                             }
                         }
                     }
@@ -1048,10 +1045,15 @@ fn emit(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, img: &Image) {
 /// The rectangle of the read buffer, as an image of `kind`. Pixels outside the window read zero.
 fn capture(gl: &Gl, canvas: &Canvas<'_>, x: i32, y: i32, w: usize, h: usize, kind: u32) -> Option<Image> {
     let ds = &canvas.ds;
-    let colour = (kind == COPY_COLOUR).then(|| read_word(gl, ds).and_then(|word| canvas.store.array(word))).flatten();
+    // Whatever is read lies inside the window's clip rectangle (`Canvas::at`).
+    let words = |word: usize| {
+        canvas.store.observe(word, ds.clip);
+        canvas.store.cpu().array(word)
+    };
+    let colour = (kind == COPY_COLOUR).then(|| read_word(gl, ds).and_then(&words)).flatten();
     let plain = ds.samples.is_none();
-    let depth = (kind == COPY_DEPTH && ds.depth_bits != 0 && plain).then(|| canvas.store.array(ds.depth_word as usize)).flatten();
-    let stencil = (kind == COPY_STENCIL && ds.stencil_bits != 0 && plain).then(|| canvas.store.array(ds.stencil_word as usize)).flatten();
+    let depth = (kind == COPY_DEPTH && ds.depth_bits != 0 && plain).then(|| words(ds.depth_word as usize)).flatten();
+    let stencil = (kind == COPY_STENCIL && ds.stencil_bits != 0 && plain).then(|| words(ds.stencil_word as usize)).flatten();
     let mut col = Vec::new();
     let mut ints = Vec::new();
     let mut zs = Vec::new();
@@ -1160,7 +1162,7 @@ pub fn read_dma(gl: &Gl, c: &mut Counts, env: &Env<'_>, a: &[u32]) -> Option<(us
 
 /// What a plane-touching token needs of the board around it.
 pub struct Env<'a> {
-    pub store: &'a PixelStore,
+    pub store: &'a Store,
     pub ds: DrawState,
 }
 
@@ -1330,8 +1332,17 @@ fn accumulate(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, op: u32, v: f32) {
         return;
     }
     let passes = accumulation_passes(op, v);
-    let words: Vec<WordArray<'_>> = l.accumulation.clone().filter_map(|w| canvas.store.array(w as usize)).collect();
-    let colour = read_word(gl, &canvas.ds).and_then(|w| canvas.store.array(w));
+    let colour = read_word(gl, &canvas.ds);
+    c.fragments += canvas.store.apply(StoreOp::Accumulate { ds: &canvas.ds, accumulation: l.accumulation.clone(), colour, passes: &passes }).fragments;
+}
+
+/// `accumulate` on the CPU store: `passes` over the window `ds` names, to the accumulation words.
+/// Returns the pixels visited.
+pub(in crate::dev::kona::back) fn accumulate_cpu(store: &Store, ds: &DrawState, accumulation: std::ops::Range<u32>, colour: Option<usize>, passes: &[(u32, f32)]) -> u64 {
+    let canvas = Canvas::new(store, *ds);
+    let mut fragments = 0;
+    let words: Vec<WordArray<'_>> = accumulation.filter_map(|w| store.cpu().array(w as usize)).collect();
+    let colour = colour.and_then(|w| store.cpu().array(w));
     let ds = &canvas.ds;
     let r = ds.clip;
     for y in r.y0..r.y1 {
@@ -1347,7 +1358,7 @@ fn accumulate(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, op: u32, v: f32) {
             };
             // SAFETY: as above.
             let src = colour.map_or([0.0; 4], |a| components8(unsafe { a.load(index) }));
-            for &(op, v) in &passes {
+            for &(op, v) in passes {
                 match op {
                     ACCUM | ACCUM_LOAD => (0..words.len().min(4)).for_each(|k| put(k, if op == ACCUM { get(k) } else { 0.0 } + v * src[k])),
                     ACCUM_MULT => (0..words.len()).for_each(|k| put(k, get(k) * v)),
@@ -1356,7 +1367,7 @@ fn accumulate(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, op: u32, v: f32) {
                         // Return: the accumulated colour times the value, to the draw buffers under the colour mask.
                         let out = [0, 1, 2, 3].map(|k| (get(k) * v).clamp(0.0, 1.0));
                         for &w in &ds.colour[..ds.colours as usize] {
-                            if let Some(a) = canvas.store.array(w as usize) {
+                            if let Some(a) = store.cpu().array(w as usize) {
                                 // SAFETY: as above.
                                 let old = unsafe { a.load(index) };
                                 let keep = (!ds.colour_mask[0] as u32 * 0xff) << 16 | (!ds.colour_mask[1] as u32 * 0xff) << 8 | (!ds.colour_mask[2] as u32 * 0xff) | (!ds.colour_mask[3] as u32 * 0xff) << 24;
@@ -1369,30 +1380,38 @@ fn accumulate(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, op: u32, v: f32) {
                     }
                 }
             }
-            c.fragments += 1;
+            fragments += 1;
         }
     }
+    fragments
 }
 
 /// glClear's accumulation bit: the accumulation words of the window go to the clear value, one
 /// component a word, under ownership and the clip rectangle.
 pub fn clear_accumulation(gl: &Gl, c: &mut Counts, env: &Env<'_>) {
     let Some(l) = &gl.layout else { return };
-    let canvas = Canvas::new(env.store, env.ds);
-    let r = env.ds.clip;
-    for w in l.accumulation.clone() {
-        let Some(a) = env.store.array(w as usize) else { continue };
-        let v = gl.pix.accum_clear[(w - l.accumulation.start) as usize].to_bits();
+    let values: Vec<u32> = l.accumulation.clone().map(|w| gl.pix.accum_clear[(w - l.accumulation.start) as usize].to_bits()).collect();
+    c.fragments += env.store.apply(StoreOp::ClearAccumulation { ds: &env.ds, first: l.accumulation.start, values: &values }).fragments;
+}
+
+/// `clear_accumulation` on the CPU store: word `first + k` goes to `values[k]`.
+pub(in crate::dev::kona::back) fn clear_accumulation_cpu(store: &Store, ds: &DrawState, first: u32, values: &[u32]) -> u64 {
+    let canvas = Canvas::new(store, *ds);
+    let r = ds.clip;
+    let mut fragments = 0;
+    for (k, &v) in values.iter().enumerate() {
+        let Some(a) = store.cpu().array(first as usize + k) else { continue };
         for y in r.y0..r.y1 {
             for x in r.x0..r.x1 {
-                if let Some(index) = canvas.at((x - env.ds.origin[0]) as i64, (y - env.ds.origin[1]) as i64) {
+                if let Some(index) = canvas.at((x - ds.origin[0]) as i64, (y - ds.origin[1]) as i64) {
                     // SAFETY: the pixel is inside the clip rectangle, inside the screen.
                     unsafe { a.store(index, v) };
-                    c.fragments += 1;
+                    fragments += 1;
                 }
             }
         }
     }
+    fragments
 }
 
 #[cfg(test)]
