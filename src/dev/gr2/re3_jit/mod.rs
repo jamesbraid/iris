@@ -30,9 +30,8 @@ pub mod key;
 pub use key::{Blend, Fmt, Pat, Prim, SpanKey, Stencil, Wid};
 
 use super::re3::{self, Re3};
-use std::collections::HashMap;
-use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Mutex, OnceLock, RwLock};
+use crate::jit::shader_store;
+use std::sync::OnceLock;
 
 /// The shader ABI: the RE3 state, everything reached through it.
 pub type ShaderFn = unsafe extern "C" fn(*mut Re3);
@@ -194,128 +193,27 @@ pub fn run(re3: &mut Re3, ir: u32) -> bool {
 
 // ── shader store and compiler thread ─────────────────────────────────────────
 
-enum Entry {
-    Queued,
-    Ready(ShaderFn, u32),
-    Failed,
-}
-
-struct Request {
-    key: u64,
-    /// Signalled when the key is settled (sync requests).
-    done: Option<SyncSender<()>>,
-}
-
-/// The process-wide shader map. Shaders depend on nothing but their key, so
-/// every board shares them; the compiler thread and its code live for the
-/// rest of the process.
-pub struct Store {
-    map: RwLock<HashMap<u64, Entry>>,
-    tx: Mutex<Option<SyncSender<Request>>>,
-}
+pub type Store = shader_store::Store<compiler::Compiler>;
 
 pub fn store() -> &'static Store {
     static STORE: OnceLock<Store> = OnceLock::new();
-    STORE.get_or_init(|| Store { map: RwLock::new(HashMap::new()), tx: Mutex::new(None) })
+    STORE.get_or_init(Store::new)
 }
 
-impl Store {
-    fn sender(&self) -> SyncSender<Request> {
-        let mut tx = self.tx.lock().unwrap();
-        tx.get_or_insert_with(|| {
-            let (tx, rx) = mpsc::sync_channel::<Request>(256);
-            std::thread::Builder::new()
-                .name("gr2-jit".into())
-                .spawn(move || {
-                    let mut comp = compiler::Compiler::new();
-                    for req in rx {
-                        let s = store();
-                        let settled = matches!(s.map.read().unwrap().get(&req.key), Some(Entry::Ready(..) | Entry::Failed));
-                        if !settled {
-                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| comp.compile(req.key)));
-                            let entry = match r {
-                                Ok(Some((f, bytes))) => Entry::Ready(f, bytes),
-                                Ok(None) => Entry::Failed,
-                                Err(_) => {
-                                    eprintln!("GR2 JIT: compiler panicked on {}", SpanKey::unpack(req.key));
-                                    comp = compiler::Compiler::new();
-                                    Entry::Failed
-                                }
-                            };
-                            s.map.write().unwrap().insert(req.key, entry);
-                        }
-                        if let Some(done) = req.done {
-                            let _ = done.send(());
-                        }
-                    }
-                })
-                .expect("spawn gr2-jit thread");
-            tx
-        })
-        .clone()
+impl shader_store::Compile for compiler::Compiler {
+    type Shader = ShaderFn;
+    const THREAD: &'static str = "gr2-jit";
+    const LABEL: &'static str = "GR2 JIT";
+
+    fn fresh() -> Self {
+        compiler::Compiler::new()
     }
 
-    /// The shader for a packed key. Async: None until it is compiled (the
-    /// first miss queues it). Sync: compile now if need be and wait.
-    pub fn get(&self, key: u64, sync: bool) -> Option<ShaderFn> {
-        match self.map.read().unwrap().get(&key) {
-            Some(Entry::Ready(f, _)) => return Some(*f),
-            Some(Entry::Failed) => return None,
-            Some(Entry::Queued) if !sync => return None,
-            _ => {}
-        }
-        if sync {
-            let (dtx, drx) = mpsc::sync_channel(1);
-            self.sender().send(Request { key, done: Some(dtx) }).ok()?;
-            drx.recv().ok()?;
-            return match self.map.read().unwrap().get(&key) {
-                Some(Entry::Ready(f, _)) => Some(*f),
-                _ => None,
-            };
-        }
-        {
-            let mut map = self.map.write().unwrap();
-            if map.contains_key(&key) {
-                return None;
-            }
-            map.insert(key, Entry::Queued);
-        }
-        // Never block the RE3 thread: a full queue drops the request, and a
-        // later span asks again.
-        if self.sender().try_send(Request { key, done: None }).is_err() {
-            self.map.write().unwrap().remove(&key);
-        }
-        None
+    fn compile_key(&mut self, key: u64) -> Option<(ShaderFn, u32)> {
+        self.compile(key)
     }
 
-    /// (compiled, queued, failed, code bytes) for `gr2 jit`.
-    pub fn summary(&self) -> (usize, usize, usize, u64) {
-        let map = self.map.read().unwrap();
-        let mut s = (0, 0, 0, 0u64);
-        for e in map.values() {
-            match e {
-                Entry::Ready(_, b) => {
-                    s.0 += 1;
-                    s.3 += *b as u64;
-                }
-                Entry::Queued => s.1 += 1,
-                Entry::Failed => s.2 += 1,
-            }
-        }
-        s
-    }
-
-    /// Compiled keys, for listings.
-    pub fn compiled(&self) -> Vec<(u64, u32)> {
-        let map = self.map.read().unwrap();
-        let mut v: Vec<(u64, u32)> = map
-            .iter()
-            .filter_map(|(k, e)| match e {
-                Entry::Ready(_, b) => Some((*k, *b)),
-                _ => None,
-            })
-            .collect();
-        v.sort_unstable();
-        v
+    fn key_text(key: u64) -> String {
+        SpanKey::unpack(key).to_string()
     }
 }

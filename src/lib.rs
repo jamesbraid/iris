@@ -221,6 +221,7 @@ pub mod xtalk;
 pub mod ui;
 pub mod cpu;
 pub mod dev;
+pub mod jit;
 pub mod gfifo;
 #[cfg(feature = "wgpu")]
 pub mod wgpu;
