@@ -117,6 +117,9 @@ pub struct O2Machine {
     /// every O2 device's, through the bus.
     monitor: Arc<crate::monitor::Monitor>,
     monitor_port: u16,
+    /// The first failure the GPU reports, and where it arrives.
+    fatal_rx: Option<std::sync::mpsc::Receiver<crate::traits::MachineFatal>>,
+    fatal_fault: Option<crate::traits::MachineFatal>,
     /// The console UART's in-process host end in CI mode (`--ci`), which the
     /// CI socket types into and reads.
     ci_serial: Option<Arc<crate::dev::serial_host::CiSerialBackend>>,
@@ -318,6 +321,17 @@ impl O2Machine {
         status.set_cpu_cycles(cpu.cycles_ptr());
         status.set_count_hz(cpu.count_hz_atomic());
         let display = Arc::new(O2Display::new(bus.clone(), status, running.clone()));
+        // `[graphics] raster = "wgpu"`: GBE scans out on the host GPU. CRIME's
+        // rendering engine stays on the CPU.
+        let (fatal_tx, fatal_rx) = std::sync::mpsc::channel();
+        let gpu = crate::workstation::open_gpu(cfg, &fatal_tx)?;
+        #[cfg(feature = "wgpu")]
+        if let Some(g) = crate::workstation::share_gpu(&gpu) {
+            eprintln!("o2: GBE scan-out on the GPU: {}", g.caps);
+            display.use_gpu(&g)?;
+        }
+        #[cfg(not(feature = "wgpu"))]
+        let _ = gpu;
         if let Some(port) = o2.control_port {
             match std::net::TcpListener::bind(("127.0.0.1", port)) {
                 Ok(l) => {
@@ -382,6 +396,8 @@ impl O2Machine {
             disks,
             flash_path: Some(cfg.nvram.clone()),
             scratch_path,
+            fatal_rx: Some(fatal_rx),
+            fatal_fault: None,
         })
     }
 
@@ -833,8 +849,15 @@ impl Workstation for O2Machine {
         let slot = self.machine_slot();
         let events = self.event_rx.take();
         assert!(events.is_some(), "register_system_controller called twice");
-        crate::workstation::register_system_controller(&self.monitor, slot, events);
+        crate::workstation::register_system_controller(&self.monitor, slot.clone(), events);
+        crate::workstation::register_fatal_controller(slot, self.fatal_rx.take());
         self.controller_up.store(true, Ordering::SeqCst);
+    }
+    fn fatal_fault(&self) -> Option<crate::traits::MachineFatal> {
+        self.fatal_fault.clone()
+    }
+    fn latch_fatal_fault(&mut self, fault: crate::traits::MachineFatal) -> bool {
+        self.fatal_fault.is_none() && self.fatal_fault.replace(fault).is_none()
     }
     fn monitor_addr(&self) -> Option<std::net::SocketAddr> { self.monitor.bound_addr() }
     /// The PROM's flash, where `setenv` keeps its settings, and the RTC's RAM,
@@ -922,6 +945,9 @@ pub struct O2Display {
     /// which has no 8254).
     status: Arc<crate::disp::StatusSource>,
     running: Arc<AtomicBool>,
+    /// The GPU scan-out (`[graphics] raster = "wgpu"`): the display thread's.
+    #[cfg(feature = "wgpu")]
+    gpu: Mutex<Option<crate::dev::o2gfx_wgpu::O2Scanout>>,
 }
 
 /// How long a watched screen goes without a scan, marks or not.
@@ -940,7 +966,99 @@ impl O2Display {
             screen: Mutex::new(Rex3Screen::new()),
             status,
             running,
+            #[cfg(feature = "wgpu")]
+            gpu: Mutex::new(None),
         }
+    }
+
+    /// Scan out on `gpu` from now on: a wgpu window on the same device shows
+    /// the picture where it is made, and a read of the words comes back from
+    /// there. The CPU compose stays for what the kernel does not do.
+    #[cfg(feature = "wgpu")]
+    fn use_gpu(&self, gpu: &crate::SharedGpu) -> Result<(), String> {
+        let scanout = crate::dev::o2gfx_wgpu::O2Scanout::new(gpu, &self.bus.ram)?;
+        let _ = self.out().gpu.set(scanout.gpu());
+        *self.gpu.lock() = Some(scanout);
+        Ok(())
+    }
+
+    /// Whether a window takes this tick's frame from the GPU scan-out: it
+    /// shows frames on the device the scan-out runs on, and nobody pulls the
+    /// words. A `pixel X Y` probe describes a point as the CPU compose finds
+    /// it, so it keeps the frame there.
+    fn on_gpu(&self, need: crate::gfx_display::Need) -> bool {
+        #[cfg(feature = "wgpu")]
+        return need.gpu && self.gpu.lock().is_some() && self.bus.gbe.probe.lock().unwrap().0.is_none();
+        #[cfg(not(feature = "wgpu"))]
+        {
+            let _ = need;
+            false
+        }
+    }
+
+    /// GBE's picture into `out` (`0xAABBGGRR`), from the GPU when the board
+    /// has one and from the CPU when it has not, or when the kernel does not
+    /// take the picture (see [`Self::on_gpu`]); None while the display is off.
+    /// A failed GPU has stopped the machine and is not covered by the CPU.
+    fn scan(&self, out: &mut [u32]) -> Option<(u32, u32)> {
+        #[cfg(feature = "wgpu")]
+        if self.bus.gbe.probe.lock().unwrap().0.is_none() {
+            if let Some(sc) = self.gpu.lock().as_mut() {
+                // Whatever the CPU stored into the frame buffer since the
+                // last scan is wanted, as a scan of RAM finds it.
+                use crate::dev::o2gfx_wgpu::Composed;
+                match sc.compose(&self.bus.gbe, &self.bus.ram, true) {
+                    Ok(Composed::Frame(w, h)) => return sc.read(out).ok().map(|()| (w, h)),
+                    Ok(Composed::Off) | Err(_) => return None,
+                    Ok(Composed::Unsupported) => {}
+                }
+            }
+        }
+        self.bus.render_screen(out)
+    }
+
+    /// One frame composed on the GPU and shown by the renderer from there; the
+    /// size. None when the frame is left to the CPU compose: the display is
+    /// off, or the kernel does not take this picture. Err: the GPU failed and
+    /// the machine is stopping.
+    #[cfg(feature = "wgpu")]
+    #[allow(clippy::too_many_arguments)]
+    fn present_on_gpu(
+        &self,
+        compose: bool,
+        full: bool,
+        sized: &mut (usize, usize),
+        overlay: &mut crate::debug_overlay::DebugOverlay,
+        status_bar: &mut crate::disp::StatusBar,
+        sbtex: &mut crate::disp::StatusBarTexture,
+        stats: &crate::disp::BarStats,
+    ) -> Result<Option<(usize, usize)>, ()> {
+        use crate::dev::o2gfx_wgpu::Composed;
+        let mut gpu = self.gpu.lock();
+        let Some(sc) = gpu.as_mut() else { return Ok(None) };
+        // A frame with nothing new on it is shown again as it stands.
+        if compose || sc.shown.is_none() {
+            match sc.compose(&self.bus.gbe, &self.bus.ram, full) {
+                Ok(Composed::Frame(..)) => {}
+                Ok(Composed::Off | Composed::Unsupported) => return Ok(None),
+                Err(_) => return Err(()),
+            }
+        }
+        let Some((w, h)) = sc.shown else { return Ok(None) };
+        let mut canvas = self.screen.lock();
+        canvas.width = w as usize;
+        canvas.height = h as usize;
+        canvas.prebuilt = true;
+        canvas.status_bar_only = false;
+        self.out().set_size(w, h);
+        if let Some(r) = self.out().window.renderer.lock().as_mut() {
+            if *sized != (w as usize, h as usize) {
+                *sized = (w as usize, h as usize);
+                r.resize(w as usize, h as usize);
+            }
+            r.present_gpu_frame(sc.output(), w, h, &mut canvas, overlay, status_bar, sbtex, stats);
+        }
+        Ok(Some((w as usize, h as usize)))
     }
 
     /// The renderer slot and the requests the front-end makes.
@@ -977,6 +1095,12 @@ impl O2Display {
         let mut idle = 0u32;
         let mut had_renderer = false;
         let mut scanned = Instant::now();
+        // The GPU keeps copies of the frame's tiles. The engine's writes keep
+        // them current, and a store by the CPU, which marks nothing, reaches
+        // them at a full copy; this is when the last one was.
+        #[cfg(feature = "wgpu")]
+        let mut copied = Instant::now();
+        let mut was_on_gpu = false;
         crate::gfx_display::run_display(
             screen,
             &self.running,
@@ -990,15 +1114,43 @@ impl O2Display {
                 // runs is for the next frame.
                 let marked = changed.take() | self.bus.gbe.latch_pending();
                 let has_renderer = need.redraw;
+                let on_gpu = self.on_gpu(need);
                 // A renderer that has just arrived has nothing to show yet.
-                let compose = first || marked || need.words || (has_renderer && !had_renderer) || scanned.elapsed() >= RESCAN;
+                let compose = first || marked || need.words || (has_renderer && !had_renderer) || on_gpu != was_on_gpu || scanned.elapsed() >= RESCAN;
                 had_renderer = has_renderer;
+                was_on_gpu = on_gpu;
                 idle = if compose { 0 } else { idle.saturating_add(1) };
                 let refresh = !compose && has_renderer && idle >= crate::gfx_display::IDLE_REFRESH;
+                #[cfg(feature = "wgpu")]
+                if on_gpu && (compose || refresh) {
+                    let full = copied.elapsed() >= RESCAN;
+                    let stats = self.status.snapshot(start, 0);
+                    let presented = self.present_on_gpu(compose, full, &mut sized, &mut overlay, &mut status_bar, &mut sbtex, &stats);
+                    // A failed GPU has stopped the machine; no frame is made
+                    // on the CPU in its place.
+                    let Ok(presented) = presented else {
+                        screen.counts.count(false);
+                        return false;
+                    };
+                    if let Some(shown) = presented {
+                        if compose {
+                            first = false;
+                            scanned = Instant::now();
+                        }
+                        if full && compose {
+                            copied = Instant::now();
+                        }
+                        idle = 0;
+                        size = shown;
+                        screen.counts.count(compose);
+                        // The words were not made; a request would have asked.
+                        return false;
+                    }
+                }
                 if compose {
                     first = false;
                     scanned = Instant::now();
-                    let shown = self.bus.render_screen(&mut scan);
+                    let shown = self.scan(&mut scan);
                     // Off: keep the last size, black.
                     let (w, h) = shown.map(|(w, h)| (w as usize, h as usize)).unwrap_or(if size.0 == 0 { (1280, 1024) } else { size });
                     let mut canvas = self.screen.lock();
