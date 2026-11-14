@@ -3098,3 +3098,73 @@ fn iris_rectcopy_reads_the_readsource_bank() {
     assert_eq!(gl_px(g, 50, 40), 0xfff_fff, "bank 1 copied into bank 0");
     assert_eq!(gl_px(g, 53, 40), 0xfff_000, "outside the copy bank 0 is untouched");
 }
+
+/// A composed-frame pin for GR2, with no guest. The icon tile scene
+/// (`ddx_tile_large_icon`) draws a gradient of colour indices through the
+/// HQ2 2-D path; XMAP DID 0 is 8-bit colour index through a CLUT ramp and the
+/// DACs are the identity; `gr2comp::compose` is the scan-out the display
+/// thread runs. Variants Xz and Extreme must give the same frame.
+fn gr2_frame_hash(variant: Gr2Variant) -> String {
+    use super::gr2comp;
+    use super::hq2::*;
+    let g = &live_gr2(variant);
+    tp_init(g);
+    w32(g, 0x6c1a0 + 0x10, 0);
+    w32(g, 0x6c1a0 + 0x14, 0);
+    w32(g, 0x6c1a0 + 0x04, 0x8200_0000);
+    w32(g, 0x6c1a0 + 0x14, 0x10);
+    for i in 0..256u32 {
+        w32(g, 0x6c1a0 + 0x10, i);
+        for c in [(i * 3) as u8, (255 - i) as u8, (i * 7) as u8] {
+            assert_eq!(g.write8(GR2_BASE + 0x6c1a0 + 0x08, c), BUS_OK);
+        }
+    }
+    for dac in [0x6c0a0u32, 0x6c0c0, 0x6c0e0] {
+        w32(g, dac, 0);
+        for i in 0..256 {
+            w32(g, dac + 4, i);
+        }
+        w32(g, dac, 4);
+        w32(g, dac + 8, 0xff);
+    }
+    cmd(g, HQ2_2D_BEGIN, 0);
+    cmd(g, HQ2_2D_MODE, 0x1009);
+    cmd(g, HQ2_2D_COLOR_AUX, 0);
+    cmd(g, HQ2_2D_ROP, 0);
+    for v in [0xff, 3, 0] { data(g, v); }
+    cmd(g, HQ2_2D_TILE_SETUP, 0x40);
+    for v in [85, 67, 2, 0xd022] { data(g, v); }
+    let mut words = Vec::new();
+    for y in 0..67u32 {
+        for w in 0..22u32 {
+            let mut v = 0;
+            for k in 0..4 {
+                let x = w * 4 + k;
+                let p = if x == 84 { 0xee } else if x < 84 { y + 1 } else { 0 };
+                v |= p << (24 - 8 * k);
+            }
+            words.push(v);
+        }
+    }
+    words.resize(1480, 0);
+    cmd(g, HQ2_2D_TILE_DATA_FIRST, words[0]);
+    for &v in &words[1..] { data(g, v); }
+    cmd(g, HQ2_2D_TILE_RECT_ODD, 0);
+    for v in [40, 210, 16, 16, 295, 83] { data(g, v); }
+    g.wait_idle();
+    let r = g.regs();
+    let mut out = vec![0u32; gr2comp::OUT_STRIDE * 1024];
+    gr2comp::compose(g.vram(), &r.vc1, &r.xmap, &r.dac, &mut out);
+    let colours = crate::test_frame_pin::colour_count(1280, 1024, gr2comp::OUT_STRIDE, &out);
+    assert!(colours > 20, "{colours} colours");
+    crate::test_frame_pin::frame_hash(1280, 1024, gr2comp::OUT_STRIDE, &out)
+}
+
+#[test]
+fn gr2_composed_frame_is_pinned() {
+    let a = gr2_frame_hash(Gr2Variant::Xz);
+    eprintln!("gr2 frame hash {a}");
+    assert_eq!(a, gr2_frame_hash(Gr2Variant::Xz), "two runs");
+    assert_eq!(a, gr2_frame_hash(Gr2Variant::Extreme), "Xz and Extreme");
+    assert_eq!(a, "8522d00003541205becd1900df477acb6fdd992aab70ac125f451e5c5dca0999");
+}

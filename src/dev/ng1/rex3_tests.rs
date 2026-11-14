@@ -10886,3 +10886,6 @@ fn burst_ordering_the_last_draw_is_marked_after_the_frame_that_missed_it() {
     assert_ne!(seen, after, "the held GO must draw after the frame read");
     assert!(leftover, "the draw landed after the frame (mark taken during the hold: {during}) and nothing marked it afterwards, so the next idle frame leaves it unseen");
 }
+
+#[path = "rex3_frame_pins.rs"]
+mod frame_pins;
