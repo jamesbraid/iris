@@ -1038,7 +1038,7 @@ impl O2Display {
                     let pixels = screen.rgba.clone();
                     let path = format!("screenshot_{shots:04}.png");
                     shots += 1;
-                    std::thread::spawn(move || match crate::disp::save_screenshot(&path, &pixels, w, h) {
+                    std::thread::spawn(move || match crate::disp::write_png_words(&path, &pixels, w as usize, w as usize, h as usize) {
                         Ok(()) => println!("iris: screenshot saved to {path}"),
                         Err(e) => println!("iris: screenshot failed: {e}"),
                     });
