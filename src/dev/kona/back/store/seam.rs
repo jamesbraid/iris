@@ -262,6 +262,7 @@ impl Store {
                 use super::super::gpu::Route;
                 match g.route(&op) {
                     Route::Done => Applied::default(),
+                    Route::Counted(fragments) => Applied { fragments },
                     Route::Cpu(planes, r) => {
                         let b = g.bracket(&planes, r);
                         b.wrote();

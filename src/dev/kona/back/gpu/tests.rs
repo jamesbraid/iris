@@ -199,9 +199,13 @@ fn rand_tri(r: &mut Lcg, w: u32, h: u32, size: i32) -> [WVertex; 3] {
 
 /// The word positions the tests use: the record's first five and the display-ID plane.
 const WORDS: [usize; 6] = [1, 2, 3, 4, 5, DID_PLANE];
+/// The first of the four accumulation words in the tests of that buffer.
+const ACC0: usize = 6;
 
 /// Planes of random words, with a few too wide for an index target in word 1.
 fn fill_random(store: &PixelStore, w: u32, h: u32, r: &mut Lcg, wide_one_in: u32, words: &[usize]) {
+    // The accumulation words of the tests that use them hold floats.
+    let floats = ACC0..ACC0 + 4;
     for &pos in words {
         for y in 0..h {
             for x in 0..w {
@@ -216,6 +220,7 @@ fn fill_random(store: &PixelStore, w: u32, h: u32, r: &mut Lcg, wide_one_in: u32
                     3 => r.next() << 1 | (r.next() & 1),
                     4 => r.next() & 0xff,
                     DID_PLANE => (r.next() % 64) << 2 | (r.coin(8) as u32 * 0x1f) << 8,
+                    p if floats.contains(&p) && words.len() > WORDS.len() && !words.contains(&(ACC0 + 12)) => r.f(-2.0, 2.0).to_bits(),
                     _ => r.next(),
                 };
                 store.write(x, y, pos, v);
@@ -270,8 +275,8 @@ impl Pair {
 
     /// Do `op` on both.
     fn both(&self, op: StoreOpOwned) {
-        op.apply(&self.cpu);
-        op.apply(&self.gpu);
+        let (a, b) = (op.apply(&self.cpu), op.apply(&self.gpu));
+        assert_eq!(a, b, "pixels visited");
     }
 
     /// Words the GPU's planes hold that differ from the CPU arm's, straight from the planes.
@@ -325,18 +330,24 @@ enum StoreOpOwned {
     Fill { word: usize, x1: i64, y1: i64, x2: i64, y2: i64, value: u32 },
     Plot { word: usize, x: i64, y: i64, value: u32 },
     Bitmap { word: usize, x0: i64, y0: i64, width: u32, height: u32, bits: Vec<u32>, value: u32 },
+    Stencil { word: usize, index: usize, value: u8, mask: u8 },
+    Accumulate { ds: DrawState, words: std::ops::Range<u32>, colour: Option<usize>, passes: Vec<(u32, f32)> },
+    ClearAccumulation { ds: DrawState, first: u32, values: Vec<u32> },
 }
 
 impl StoreOpOwned {
-    fn apply(&self, s: &Store) {
+    fn apply(&self, s: &Store) -> crate::dev::kona::back::store::seam::Applied {
         let op = match self {
             StoreOpOwned::Tri(ds, job) => StoreOp::Tri { ds, job },
             StoreOpOwned::Clear(ds, req) => StoreOp::Clear { ds, req },
             StoreOpOwned::Fill { word, x1, y1, x2, y2, value } => StoreOp::FillBox { word: *word, x1: *x1, y1: *y1, x2: *x2, y2: *y2, value: *value },
             StoreOpOwned::Plot { word, x, y, value } => StoreOp::Plot { word: *word, x: *x, y: *y, value: *value },
             StoreOpOwned::Bitmap { word, x0, y0, width, height, bits, value } => StoreOp::Bitmap { word: *word, x0: *x0, y0: *y0, width: *width, height: *height, bits, value: *value },
+            StoreOpOwned::Stencil { word, index, value, mask } => StoreOp::StencilWrite { word: *word, index: *index, value: *value, mask: *mask },
+            StoreOpOwned::Accumulate { ds, words, colour, passes } => StoreOp::Accumulate { ds, accumulation: words.clone(), colour: *colour, passes },
+            StoreOpOwned::ClearAccumulation { ds, first, values } => StoreOp::ClearAccumulation { ds, first: *first, values },
         };
-        s.apply(op);
+        s.apply(op)
     }
 }
 
@@ -923,4 +934,60 @@ fn multisampled_draws_match_the_cpu_arm() {
     assert_eq!(p.g().stats().cpu_ops, 0, "every op ran on the GPU");
     assert!(tris > 300 && clears > 20);
     p.finish("multisampled draws");
+}
+
+/// Stencil pixels, the accumulation buffer's operations (every operation, a value of exactly one that
+/// splits in two passes, with and without a colour source, under ownership, a clip and the colour
+/// mask) and glClear of its words.
+#[test]
+fn accumulation_and_stencil_writes_match_the_cpu_arm() {
+    use crate::dev::kona::defs::pixel::{ACCUM, ACCUM_ADD, ACCUM_LOAD, ACCUM_MULT, ACCUM_RETURN};
+    let _serial = serial();
+    let Some(dev) = gpu() else { return };
+    let (w, h) = (96u32, 64u32);
+    let mut r = Lcg(111);
+    let mut words = WORDS.to_vec();
+    words.extend(ACC0..ACC0 + 4);
+    let p = Pair::build(dev, w, h, &mut r, 100, None, &TextureStore::default, words);
+    let mut states: Vec<DrawState> = (0..6).map(|_| state_full(w, h, &mut r)).collect();
+    for ds in &mut states {
+        // A window inside the screen, as the front end's clip rectangle is.
+        let (x0, y0) = (r.range(0, 30), r.range(0, 20));
+        ds.clip = Rect { x0, y0, x1: x0 + 20 + r.range(0, 50), y1: y0 + 15 + r.range(0, 40) }.intersect(&Rect { x0: 0, y0: 0, x1: w as i32, y1: h as i32 });
+    }
+    let ops = [ACCUM, ACCUM_LOAD, ACCUM_RETURN, ACCUM_MULT, ACCUM_ADD];
+    let (mut accs, mut clears, mut stencils) = (0, 0, 0);
+    for _ in 0..300 {
+        let ds = states[r.next() as usize % states.len()];
+        match r.next() % 8 {
+            0 | 1 => {
+                let first = ACC0 as u32 + r.next() % 2;
+                let values = (0..(4 - (first - ACC0 as u32) as usize)).map(|_| r.f(-1.0, 1.5).to_bits()).collect();
+                clears += 1;
+                p.both(StoreOpOwned::ClearAccumulation { ds, first, values });
+            }
+            2 => {
+                let (x, y) = (r.range(0, w as i32) as usize, r.range(0, h as i32) as usize);
+                stencils += 1;
+                p.both(StoreOpOwned::Stencil { word: 4, index: y * w as usize + x, value: r.next() as u8, mask: r.next() as u8 });
+            }
+            _ => {
+                let op = ops[r.next() as usize % ops.len()];
+                let v = if r.coin(4) { 1.0 } else if r.coin(5) { 0.5 } else { r.f(-1.5, 1.5) };
+                // The passes the front end makes of an operation and its value.
+                let passes = match (op, v == 1.0) {
+                    (ACCUM | ACCUM_ADD, true) => vec![(op, 0.5), (op, 0.5)],
+                    (ACCUM_LOAD, true) => vec![(ACCUM_LOAD, 0.5), (ACCUM, 0.5)],
+                    (ACCUM_MULT, true) => Vec::new(),
+                    _ => vec![(op, v)],
+                };
+                let nwords = 3 + r.next() % 2;
+                accs += 1;
+                p.both(StoreOpOwned::Accumulate { ds, words: ACC0 as u32..ACC0 as u32 + nwords, colour: r.coin(4).then_some(5), passes });
+            }
+        }
+    }
+    eprintln!("{accs} accumulations, {clears} clears, {stencils} stencil pixels; {:?}", p.g().stats());
+    assert_eq!(p.g().stats().cpu_ops, 0, "every op ran on the GPU");
+    p.finish("accumulation and stencil writes");
 }

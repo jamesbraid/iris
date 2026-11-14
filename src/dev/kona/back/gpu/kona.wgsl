@@ -66,6 +66,9 @@ const K_XFILL: u32 = 1u;
 const K_BOX: u32 = 2u;
 const K_BITMAP: u32 = 3u;
 const K_CLEAR: u32 = 4u;
+const K_ACCUM: u32 = 5u;
+const K_CLEARACC: u32 = 6u;
+const K_STENCILW: u32 = 7u;
 const R_KIND: u32 = 37u;
 
 // Triangle record words.
@@ -131,6 +134,9 @@ const S_LSTIP: u32 = 72u; // line stipple pattern, repeat
 // Multisampling (0 words when the draw has no samples): count, the mask's coverage word,
 // alpha_to_mask | alpha_to_one << 1, the words of the colour, depth and stencil runs, then 8 sample
 // offsets (x | y << 8, eighths of a pixel), 6 colour, 6 depth and 2 stencil plane references.
+// Accumulation (kinds 5 and 6): the accumulation planes' references (up to 8, 4 for an operation),
+// the colour source's (0xffffffff: none), and for a clear the 8 values.
+const S_ACC: u32 = 112u;
 const S_MS: u32 = 80u;
 const S_MS_AT: u32 = 86u;
 const S_MS_COL: u32 = 94u;
@@ -798,6 +804,56 @@ fn clear_px(pi: u32, px: i32, py: i32) {
     }
 }
 
+// ---- Accumulation (kind 5), its clear (kind 6) and a stencil pixel (kind 7) ------------------------
+//   rec:  accumulate: 0 pass count, 1 op, 2 value, 3 op, 4 value, 5 accumulation words, 6 colour
+//         mask (bit 0 red .. 3 alpha: set writes); clear: 0 words; stencil: 0 value, 1 mask
+//   slot: a draw state's (colour references, ownership), then S_ACC.. as above; a stencil pixel's
+//         slot word 0 is the plane
+fn accum_px(pi: u32, px: i32, py: i32) {
+    let si = recs[pi].slot;
+    let index = u32(py) * WIDTH + u32(px);
+    if (slots[si].w[S_FLAGS] & F_OWN) != 0u && !owned(si, index) {
+        return;
+    }
+    fnz = recs[pi].one ^ 0x3f800000u;
+    let nwords = rw(pi, 5u);
+    var acc = vec4<f32>(0.0);
+    for (var k = 0u; k < nwords; k++) {
+        acc[k] = bitcast<f32>(ld(slots[si].w[S_ACC + k], index));
+    }
+    var src = vec4<f32>(0.0);
+    let sref = slots[si].w[S_ACC + 4u];
+    if sref != 0xffffffffu {
+        src = acc_components8(ld(sref, index));
+    }
+    for (var p = 0u; p < rw(pi, 0u); p++) {
+        let op = rw(pi, 1u + 2u * p);
+        let v = bitcast<f32>(rw(pi, 2u + 2u * p));
+        if op == ACCUM_RETURN {
+            for (var b = 0u; b < slots[si].w[S_NCOL]; b++) {
+                let cref = slots[si].w[S_COL0 + b];
+                st(cref, index, acc_return(acc, nwords, v, ld(cref, index), rw(pi, 6u)));
+            }
+        } else {
+            acc_pass(&acc, nwords, op, v, src);
+        }
+    }
+    for (var k = 0u; k < nwords; k++) {
+        st(slots[si].w[S_ACC + k], index, bitcast<u32>(acc[k]));
+    }
+}
+
+fn clear_acc_px(pi: u32, px: i32, py: i32) {
+    let si = recs[pi].slot;
+    let index = u32(py) * WIDTH + u32(px);
+    if (slots[si].w[S_FLAGS] & F_OWN) != 0u && !owned(si, index) {
+        return;
+    }
+    for (var k = 0u; k < rw(pi, 0u); k++) {
+        st(slots[si].w[S_ACC + k], index, slots[si].w[S_ACC + 8u + k]);
+    }
+}
+
 fn arch_prim(pi: u32, px: i32, py: i32, lane: u32) {
     let kind = rw(pi, R_KIND);
     if kind == K_XFILL {
@@ -827,6 +883,21 @@ fn arch_prim(pi: u32, px: i32, py: i32, lane: u32) {
     }
     if kind == K_CLEAR {
         clear_px(pi, px, py);
+        return;
+    }
+    if kind == K_ACCUM {
+        accum_px(pi, px, py);
+        return;
+    }
+    if kind == K_CLEARACC {
+        clear_acc_px(pi, px, py);
+        return;
+    }
+    if kind == K_STENCILW {
+        let r = slots[recs[pi].slot].w[0];
+        let index = u32(py) * WIDTH + u32(px);
+        let m = rw(pi, 1u);
+        st(r, index, ((ld(r, index) & 0xffu & ~m) | (rw(pi, 0u) & m)) & 0xffu);
         return;
     }
     fnz = recs[pi].one ^ 0x3f800000u;

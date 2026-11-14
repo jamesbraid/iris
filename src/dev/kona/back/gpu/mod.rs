@@ -11,8 +11,7 @@
 //! - an edge step that does not fit 32 bits; a multisampled layout whose runs of words are longer
 //!   than the kernel holds (more than six words of colour or depth, or two of stencil a pixel); textures when the store holds more pages than
 //!   the GPU's pool can (one storage binding);
-//! - X pixel writes with a host payload, GL pixel writes, accumulation and the stencil write
-//!   of glDrawPixels;
+//! - X pixel writes with a host payload and GL pixel writes;
 //! - the overlay and popup planes (word positions past the display-ID plane, which never go to the
 //!   GPU), X fills with more than four clip rectangles, bitmaps of more than 1792 bits.
 //!
@@ -65,7 +64,9 @@ use super::store::{PixelStore, DID_PLANE};
 use super::x::fill::LoweredFill;
 use super::x::pixel::LoweredCopy;
 use super::gpu_lib::{pack_desc, FRAGMENT, LOD_MATH, TEXTURE, TEXTURE_MEM};
+use super::raster::ops::ownership_plane;
 use super::raster::texel::TexDesc;
+use crate::dev::kona::defs::pixel::ACCUM_RETURN;
 use super::store::texture::PLANES as TEX_PLANES;
 use crate::wgpu::{library, ArchShaders, Batch, BatchPipelines, Fragment, Full, Gpu, Source, TileGrid};
 use texmem::TexMem;
@@ -83,6 +84,9 @@ const K_XFILL: u32 = 1;
 const K_BOX: u32 = 2;
 const K_BITMAP: u32 = 3;
 const K_CLEAR: u32 = 4;
+const K_ACCUM: u32 = 5;
+const K_CLEARACC: u32 = 6;
+const K_STENCILW: u32 = 7;
 /// Where a record's box lives, for every kind but the X fill.
 const R_RECT: usize = 33;
 const R_KIND: usize = 37;
@@ -152,6 +156,7 @@ const S_FOG: usize = 66;
 const S_LSTIP: usize = 72;
 /// The multisampling block of a slot (`kona.wgsl`): the sample count, coverage word and options,
 /// the words in each run, the sample offsets and the references of the runs' planes.
+const S_ACC: usize = 112;
 const S_MS: usize = 80;
 const S_MS_AT: usize = 86;
 const S_MS_COL: usize = 94;
@@ -265,6 +270,8 @@ pub enum Route {
     Reset,
     /// The caller fills the mirror's array, then `upload`s it.
     Restore(usize),
+    /// The GPU took the op, which visited this many pixels (what `Applied::fragments` counts).
+    Counted(u64),
 }
 
 /// The draw-state slot variants: a polygon triangle, a line's triangle (the stipple differs), a clear.
@@ -423,19 +430,41 @@ impl GpuStore {
                 // A copy the kernel cannot take reads and writes the plan's bounds.
                 Some(c) => return Route::Cpu(vec![c.word], plan.bounds_rect()),
             },
-            StoreOp::StencilWrite { word, index, .. } => {
+            StoreOp::StencilWrite { word, index, value, mask } => {
                 let (x, y) = ((*index as i64 % w) as i32, (*index as i64 / w) as i32);
-                return Route::Cpu(vec![*word], Rect { x0: x, y0: y, x1: x + 1, y1: y + 1 });
+                let r = Rect { x0: x, y0: y, x1: x + 1, y1: y + 1 };
+                if resident(*word) {
+                    s.stencil_write(m, *word, r, *value, *mask)
+                } else {
+                    return Route::Cpu(vec![*word], r);
+                }
             }
-            StoreOp::Accumulate { ds, accumulation, colour, .. } => {
+            StoreOp::Accumulate { ds, accumulation, colour, passes } => {
+                // The words the CPU would find (`accumulate_cpu` skips an unallocated one).
+                let words: Vec<usize> = accumulation.clone().map(|w| w as usize).filter(|&w| m.array(w).is_some()).collect();
+                let colour = colour.filter(|&w| m.array(w).is_some());
+                let colours = &ds.colour[..ds.colours as usize];
+                let r = ds.clip.intersect(&screen);
+                if words.len() <= 4 && passes.len() <= 2 && words.iter().chain(colour.iter()).all(|&w| resident(w)) && colours.iter().all(|&w| m.array(w as usize).is_some()) && ms_on_gpu(ds) {
+                    let n = s.visited(m, ds, r);
+                    s.accumulate(m, ds, r, &words, colour, passes);
+                    return Route::Counted(n);
+                }
                 let mut planes: Vec<usize> = accumulation.clone().map(|w| w as usize).collect();
-                planes.extend(*colour);
+                planes.extend(colour);
                 if ds.ownership.is_some() {
                     planes.push(DID_PLANE);
                 }
                 return Route::Cpu(planes, ds.clip);
             }
             StoreOp::ClearAccumulation { ds, first, values } => {
+                let words: Vec<(usize, u32)> = values.iter().enumerate().map(|(k, &v)| (*first as usize + k, v)).filter(|&(w, _)| m.array(w).is_some()).collect();
+                let r = ds.clip.intersect(&screen);
+                if words.len() <= 8 && words.iter().all(|&(w, _)| resident(w)) && ms_on_gpu(ds) {
+                    let n = s.visited(m, ds, r) * words.len() as u64;
+                    s.clear_accumulation(m, ds, r, &words);
+                    return Route::Counted(n);
+                }
                 let mut planes: Vec<usize> = (*first as usize..*first as usize + values.len()).collect();
                 if ds.ownership.is_some() {
                     planes.push(DID_PLANE);
@@ -1056,6 +1085,111 @@ impl State {
         }
         let ds_ = *ds;
         self.push_ds((*ds, MODE_CLEAR), move |s| s.ds_slot(m, &ds_, MODE_CLEAR), move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1))
+    }
+
+    /// The pixels of `r` the draw state's ownership lets through, which is what an accumulation visits:
+    /// all of them with no ownership test, else counted in the display-ID plane.
+    fn visited(&mut self, m: &PixelStore, ds: &DrawState, r: Rect) -> u64 {
+        if r.is_empty() {
+            return 0;
+        }
+        let Some(o) = &ds.ownership else { return (r.x1 - r.x0) as u64 * (r.y1 - r.y0) as u64 };
+        self.observe(m, DID_PLANE, r);
+        let Some(did) = m.array(DID_PLANE) else { return 0 };
+        let mut n = 0;
+        for y in r.y0..r.y1 {
+            for x in r.x0..r.x1 {
+                // SAFETY: inside the managed area, which the array covers.
+                let word = unsafe { did.load(y as usize * self.w as usize + x as usize) };
+                n += o.owns(ownership_plane(word)) as u64;
+            }
+        }
+        n
+    }
+
+    /// One pixel of a stencil plane: the bits `mask` take `value`'s.
+    fn stencil_write(&mut self, m: &PixelStore, word: usize, r: Rect, value: u8, mask: u8) -> bool {
+        let Some(plane) = self.plane(m, word) else { return false };
+        self.gen += 1;
+        self.stats.records += 1;
+        let mut slot = GSlot { w: [0; SLOT_W] };
+        slot.w[0] = plane;
+        let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
+        rec.w[0] = value as u32;
+        rec.w[1] = mask as u32;
+        rec.w[R_RECT] = r.x0 as u32;
+        rec.w[R_RECT + 1] = r.y0 as u32;
+        rec.w[R_RECT + 2] = r.x1 as u32;
+        rec.w[R_RECT + 3] = r.y1 as u32;
+        rec.w[R_KIND] = K_STENCILW;
+        self.mark(word, r, 0);
+        self.push(&slot, move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1))
+    }
+
+    /// An accumulation operation over `r`, as its passes (`accumulate_cpu`).
+    fn accumulate(&mut self, m: &PixelStore, ds: &DrawState, r: Rect, words: &[usize], colour: Option<usize>, passes: &[(u32, f32)]) -> bool {
+        if r.is_empty() {
+            return true;
+        }
+        let Some(mut slot) = self.ds_slot(m, ds, MODE_CLEAR) else { return false };
+        self.gen += 1;
+        self.stats.records += 1;
+        for (k, &w) in words.iter().enumerate() {
+            let Some(p) = self.plane(m, w) else { return false };
+            slot.w[S_ACC + k] = p;
+            self.mark(w, r, 3);
+        }
+        slot.w[S_ACC + 4] = match colour {
+            Some(w) => {
+                let Some(p) = self.plane(m, w) else { return false };
+                p
+            }
+            None => u32::MAX,
+        };
+        let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
+        rec.w[0] = passes.len() as u32;
+        for (n, (op, v)) in passes.iter().enumerate() {
+            rec.w[1 + 2 * n] = *op;
+            rec.w[2 + 2 * n] = v.to_bits();
+        }
+        rec.w[5] = words.len() as u32;
+        let wm = ds.colour_mask;
+        rec.w[6] = wm[0] as u32 | (wm[1] as u32) << 1 | (wm[2] as u32) << 2 | (wm[3] as u32) << 3;
+        rec.w[R_RECT] = r.x0 as u32;
+        rec.w[R_RECT + 1] = r.y0 as u32;
+        rec.w[R_RECT + 2] = r.x1 as u32;
+        rec.w[R_RECT + 3] = r.y1 as u32;
+        rec.w[R_KIND] = K_ACCUM;
+        if passes.iter().any(|&(op, _)| op == ACCUM_RETURN) {
+            for &c in &ds.colour[..ds.colours as usize] {
+                self.mark(c as usize, r, 3);
+            }
+        }
+        self.push(&slot, move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1))
+    }
+
+    /// glClear of the accumulation words: each of `words` goes to its value, over `r`.
+    fn clear_accumulation(&mut self, m: &PixelStore, ds: &DrawState, r: Rect, words: &[(usize, u32)]) -> bool {
+        if r.is_empty() {
+            return true;
+        }
+        let Some(mut slot) = self.ds_slot(m, ds, MODE_CLEAR) else { return false };
+        self.gen += 1;
+        self.stats.records += 1;
+        for (k, &(w, v)) in words.iter().enumerate() {
+            let Some(p) = self.plane(m, w) else { return false };
+            slot.w[S_ACC + k] = p;
+            slot.w[S_ACC + 8 + k] = v;
+            self.mark(w, r, 3);
+        }
+        let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
+        rec.w[0] = words.len() as u32;
+        rec.w[R_RECT] = r.x0 as u32;
+        rec.w[R_RECT + 1] = r.y0 as u32;
+        rec.w[R_RECT + 2] = r.x1 as u32;
+        rec.w[R_RECT + 3] = r.y1 as u32;
+        rec.w[R_KIND] = K_CLEARACC;
+        self.push(&slot, move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1))
     }
 
     /// An X fill: one clipped box of a request.
