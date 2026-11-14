@@ -485,6 +485,12 @@ impl ScanoutReader {
         }
     }
 
+    /// Compose the next frame whether or not anything changed: a consumer
+    /// wants the picture again that it has not got.
+    pub fn recompose(&mut self) {
+        self.composed = None;
+    }
+
     /// Every retrace due at `now_ns`, in turn: the host interface latches
     /// the swaps armed and raises the retrace source.
     pub fn poll(&mut self, now_ns: i64) {

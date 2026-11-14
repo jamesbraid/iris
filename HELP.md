@@ -574,9 +574,9 @@ it, and a port already in use is reported rather than failing the start.
 
 What you see is the guest's screen, without the window's status bar. Only
 the parts of the screen that change are sent, so an idle desktop costs next
-to nothing. With Newport, the window uses the software compositor while a
-viewer is connected (`disp compositor gl` is refused) and switches back when
-the last one leaves.
+to nothing. With Newport, the board composes the screen on the CPU for as
+long as a viewer is connected, and a GL window then draws those words instead
+of composing the planes in its shader.
 
 **The mouse.** The guest's mouse sends movements, not positions, and IRIX
 accelerates fast ones. iris steers the guest pointer onto the spot you point

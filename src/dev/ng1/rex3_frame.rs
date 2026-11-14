@@ -6,11 +6,12 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex, MutexGuard};
 
-use super::{RasterMode, Rex3, Renderer, GFIFO_RESIDENT_FRAME, STATUS_VRINT};
+use super::{RasterMode, Rex3, GFIFO_RESIDENT_FRAME, STATUS_VRINT};
+use crate::gfx_display::{Frame, Renderer};
 use crate::dev::ng1::wgpu::direct::{CaptureFault, Ng1ResidentScanout, ResidentFrameStamp, ResidentScanoutTraffic};
 use crate::dev::ng1::wgpu::resident::{Position, ResidentError};
 use crate::dev::ng1::wgpu::Ng1Scanout;
-use crate::disp::{BarStats, StatusBar, StatusBarTexture, FB_STRIDE};
+use crate::disp::{BarStats, FB_STRIDE};
 use crate::debug_overlay::DebugOverlay;
 use crate::wgpu::Gpu;
 
@@ -295,11 +296,8 @@ impl Rex3 {
 }
 
 pub(super) fn validate_presenter(renderer: &dyn Renderer, gpu: &Arc<Gpu>) -> Result<(), ResidentError> {
-    if !renderer.takes_gpu_frames() {
-        return Err(ResidentError::Unsupported("resident frames require a wgpu presenter"));
-    }
-    let device = renderer.resident_gpu_device()
-        .ok_or(ResidentError::Unsupported("presenter did not identify its GPU"))?;
+    let device = renderer.gpu()
+        .ok_or(ResidentError::Unsupported("resident frames require a wgpu presenter"))?;
     if !Arc::ptr_eq(device, gpu) {
         return Err(ResidentError::DeviceMismatch);
     }
@@ -310,8 +308,6 @@ pub(super) fn validate_presenter(renderer: &dyn Renderer, gpu: &Arc<Gpu>) -> Res
 pub(crate) struct ResidentDisplay {
     scanout: Ng1ResidentScanout,
     overlay: DebugOverlay,
-    status: StatusBar,
-    sbtex: StatusBarTexture,
     capture: Vec<u32>,
     resize_pending: bool,
 }
@@ -325,8 +321,6 @@ impl ResidentDisplay {
         Ok(Self {
             scanout,
             overlay: DebugOverlay::new(),
-            status: StatusBar::new(),
-            sbtex: StatusBarTexture::new(),
             capture: Vec::new(),
             resize_pending: true,
         })
@@ -358,7 +352,6 @@ impl ResidentDisplay {
         let mut screen = rex.screen.lock();
         rex.resident_frame.invalidate();
         screen.topscan = cut.topscan;
-        screen.status_bar_only = false;
         let resized = screen.refresh_resident_display_state(
             &rex.vc2,
             &rex.xmap0,
@@ -413,10 +406,8 @@ impl ResidentDisplay {
         let gpu = Arc::clone(frame.gpu);
         if let Some(renderer) = renderer.as_deref_mut() {
             validate_presenter(renderer, &gpu)?;
-            renderer.present_resident_gpu_frame(
-                &buffer, stamp.width, stamp.height, &mut screen, &mut self.overlay,
-                &mut self.status, &mut self.sbtex, &stats,
-            ).map_err(ResidentError::Failed)?;
+            let shown = Frame { width: stamp.width, height: stamp.height, gpu: Some(buffer), ..Frame::default() };
+            renderer.present_resident_gpu_frame(&shown, &stats).map_err(ResidentError::Failed)?;
         }
         if capture {
             let (width, height) = (stamp.width as usize, stamp.height as usize);

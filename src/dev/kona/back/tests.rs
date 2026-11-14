@@ -1948,23 +1948,12 @@ fn a_state_command_answers_busy_when_the_state_stays_out() {
 /// has the display thread release it as its last act.
 #[test]
 fn a_stop_from_the_main_thread_leaves_the_renderer_alone() {
-    use crate::dev::ng1::rex3::Renderer;
+    use crate::gfx_display::{Frame, Renderer};
     use crate::traits::Device;
     use std::sync::atomic::AtomicU32;
     struct Spy(Arc<AtomicU32>);
     impl Renderer for Spy {
-        fn present(
-            &mut self,
-            _: &mut crate::disp::Rex3Screen,
-            _: &mut crate::debug_overlay::DebugOverlay,
-            _: &mut crate::disp::StatusBar,
-            _: &mut crate::disp::StatusBarTexture,
-            _: &crate::disp::BarStats,
-            _: bool,
-            _: Option<&[u32]>,
-            _: Option<&[u32]>,
-        ) {
-        }
+        fn present(&mut self, _: &Frame, _: &crate::disp::BarStats) {}
 
         fn stop(&mut self) {
             self.0.fetch_add(1, Relaxed);

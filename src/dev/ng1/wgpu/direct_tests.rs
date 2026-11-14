@@ -148,7 +148,6 @@ fn cpu_source<'a>(state: &'a Ng1DisplaySource<'_>, rgb: &'a [u32], aux: &'a [u32
         width: state.width,
         height: state.height,
         status_bar_only: false,
-        prebuilt: None,
     }
 }
 
@@ -1128,38 +1127,19 @@ struct QueuePresenter {
     resizes: Arc<Mutex<Vec<(usize, usize)>>>,
 }
 
-impl crate::dev::ng1::rex3::Renderer for QueuePresenter {
-    fn present(
-        &mut self,
-        _screen: &mut Rex3Screen,
-        _overlay: &mut crate::debug_overlay::DebugOverlay,
-        _status: &mut crate::disp::StatusBar,
-        _sbtex: &mut crate::disp::StatusBarTexture,
-        _stats: &crate::disp::BarStats,
-        _need_readback: bool,
-        _rgb: Option<&[u32]>,
-        _aux: Option<&[u32]>,
-    ) {
+impl crate::gfx_display::Renderer for QueuePresenter {
+    fn present(&mut self, _: &crate::gfx_display::Frame, _: &crate::disp::BarStats) {
         panic!("resident frame fell through to the CPU-plane renderer");
     }
 
-    fn takes_gpu_frames(&self) -> bool { self.accepts }
-    fn resident_gpu_device(&self) -> Option<&Arc<Gpu>> { self.gpu.as_ref() }
+    fn gpu(&self) -> Option<&Arc<Gpu>> { self.gpu.as_ref().filter(|_| self.accepts) }
     fn resize(&mut self, width: usize, height: usize) {
         self.resizes.lock().push((width, height));
     }
 
-    fn present_resident_gpu_frame(
-        &mut self,
-        frame: &wgpu::Buffer,
-        width: u32,
-        height: u32,
-        _screen: &mut Rex3Screen,
-        _overlay: &mut crate::debug_overlay::DebugOverlay,
-        _status: &mut crate::disp::StatusBar,
-        _sbtex: &mut crate::disp::StatusBarTexture,
-        _stats: &crate::disp::BarStats,
-    ) -> Result<(), String> {
+    fn present_resident_gpu_frame(&mut self, frame: &crate::gfx_display::Frame, _: &crate::disp::BarStats) -> Result<(), String> {
+        let (width, height) = (frame.width, frame.height);
+        let frame = frame.gpu.as_ref().expect("a resident frame is on the device");
         let gpu = self.gpu.as_ref().unwrap();
         let bytes = u64::from(width) * u64::from(height) * 4;
         let output = gpu.buffer("resident test presenter output", bytes,

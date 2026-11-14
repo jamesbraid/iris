@@ -1,12 +1,13 @@
 //! Headless renderer that captures the composited REX3 framebuffer into a
 //! shared buffer pool for egui to upload as a texture each frame.
 //!
-//! Default path: `CaptureRenderer` (CPU `SwCompositor`).
-//! Set `IRIS_GUI_GL=1` for GPU `GlCompositor` + readback (faster for GL demos).
+//! Default path: `CaptureRenderer`, which takes the words a board published.
+//! Set `IRIS_GUI_GL=1` for `GlCaptureRenderer`: Newport's planes composed by the
+//! GPU `GlCompositor` and read back (faster for GL demos).
 //!
 //! ## Frame hand-off
 //!
-//! The REX3 refresh thread composes a frame and *publishes* it into the sink;
+//! The board's display thread hands the renderer a frame, which it *publishes* into the sink;
 //! the egui thread *takes* it. A small pool of [`Frame`] buffers is recycled
 //! between the two so a frame is never copied on the way through: the renderer
 //! fills a free buffer and publishes it, the GUI takes that buffer, uploads it,
@@ -40,17 +41,13 @@
 //!
 //! A published frame holds only its damaged band, so the sink cannot answer
 //! "give me the whole picture". Screenshots and VNC do not ask it: they read
-//! `Rex3Screen::rgba`, which the renderer keeps current — band by band, and only
-//! when `need_readback` says someone outside this process is looking (see
-//! [`mirror_band`]). That is the difference between a frame that costs nothing
-//! and one that costs a multi-megabyte copy.
+//! the screen's newest frame (`Screen::latest`), which the board composes
+//! when they ask. A renderer never reads a frame back for them.
 
-use iris::compositor::{Compositor, SwCompositor};
-use iris::debug_overlay::DebugOverlay;
-use iris::disp::{BarStats, Rex3Screen, StatusBar, StatusBarTexture, FB_STRIDE};
+use iris::disp::{BarStats, FB_MAX_H, FB_STRIDE};
 use iris::gl_compositor::GlCompositor;
+use iris::gfx_display::Renderer;
 use iris::headless_gl::HeadlessGl;
-use iris::dev::ng1::rex3::Renderer;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -195,11 +192,13 @@ impl FrameSink {
     }
 }
 
-/// Headless `Renderer` that captures the composited frame into a `FrameSink`.
+/// Headless `Renderer` that captures the published frame into a `FrameSink`.
 pub struct CaptureRenderer {
     sink:       FrameSink,
     seq:        u64,
-    compositor: SwCompositor,
+    /// The newest board frame this renderer is done with: published, or
+    /// found to hold nothing the GUI lacks.
+    done_seq:   u64,
     damage:     RowDamage,
 }
 
@@ -208,76 +207,69 @@ impl CaptureRenderer {
         Self {
             sink,
             seq: 0,
-            compositor: SwCompositor::new(),
+            done_seq: 0,
             damage: RowDamage::new(),
         }
     }
 }
 
-impl Renderer for CaptureRenderer {
-    fn present(
-        &mut self,
-        screen:         &mut Rex3Screen,
-        _overlay:       &mut DebugOverlay,
-        _status:        &mut StatusBar,
-        _sbtex:         &mut StatusBarTexture,
-        _stats:         &BarStats,
-        need_readback:  bool,
-        live_fb_rgb:    Option<&[u32]>,
-        live_fb_aux:    Option<&[u32]>,
-    ) {
-        let _ = (live_fb_rgb, live_fb_aux);
-        let width  = screen.width;
-        let height = screen.height;
-        if width == 0 || height == 0 { return; }
+/// Diff `pixels` (rows `stride` words apart) against what the GUI shows and
+/// publish the changed band. The frame's sequence number is `*done` once it
+/// needs no more work.
+fn capture(
+    sink: &FrameSink,
+    damage: &mut RowDamage,
+    seq: &mut u64,
+    pixels: &[u32],
+    stride: usize,
+    (width, height): (usize, usize),
+) -> bool {
+    // Band of scanlines that changed since the frame the GUI is showing.
+    // `None` = nothing moved at all: no pack, no publish, no wake. The GUI
+    // keeps the texture it already has and goes back to sleep.
+    let Some((dirty_y, dirty_h)) = damage.diff(pixels, stride, width, height) else { return true };
 
-        // Heartbeat-only refresh: the compositor sets `status_bar_only` when
-        // nothing in the guest display changed and only the emulator's own
-        // status bar would. iris-gui shows its own status chrome and never bakes
-        // that bar into the frame, so there's nothing to push here.
-        if screen.status_bar_only && self.sink.seq() > 0 {
-            return;
-        }
-
-        let src = screen.compositor_source_from(live_fb_rgb, live_fb_aux);
-        self.compositor.compose_pixels(&src);
-        drop(src);
-
-        // Band of scanlines that changed since the frame the GUI is showing.
-        // `None` = nothing moved at all: no pack, no publish, no wake. The GUI
-        // keeps the texture it already has and goes back to sleep.
-        let Some((dirty_y, dirty_h)) = self.damage.diff(self.compositor.pixels(), width, height)
-            else { return };
-
-        let mut frame = self.sink.take_free();
-        pack_frame(&mut frame, self.compositor.pixels(), width, height, dirty_y, dirty_h);
-        self.seq = self.seq.wrapping_add(1);
-        frame.seq = self.seq;
-        if self.sink.publish(frame) {
-            // Only now does the GUI's texture come to match this frame.
-            self.damage.remember(self.compositor.pixels(), width, height);
-            if need_readback {
-                mirror_band(screen, self.compositor.pixels(), width, height, dirty_y, dirty_h);
-            }
-        } else if need_readback {
-            // The GUI is behind and this frame was dropped, so `screen.rgba`
-            // still holds the last *published* frame — the same baseline the
-            // band above was diffed against, which makes a banded mirror wrong.
-            // Copy the whole frame instead: VNC must not stall behind a slow
-            // GUI, and this is the rare path.
-            mirror_band(screen, self.compositor.pixels(), width, height, 0, height as u32);
-        }
+    let mut frame = sink.take_free();
+    pack_frame(&mut frame, pixels, stride, width, height, dirty_y, dirty_h);
+    *seq = seq.wrapping_add(1);
+    frame.seq = *seq;
+    if sink.publish(frame) {
+        // Only now does the GUI's texture come to match this frame.
+        damage.remember(pixels, stride, width, height);
+        true
+    } else {
+        // The GUI has not taken the previous frame; this one was dropped and
+        // the baseline stays, so the next one is diffed against what the GUI
+        // will have.
+        false
     }
-
-    fn resize(&mut self, _width: usize, _height: usize) {}
 }
 
-/// GPU compositor path: `GlCompositor` on a hidden GL context (REX3-Refresh thread).
+impl Renderer for CaptureRenderer {
+    fn present(&mut self, frame: &iris::gfx_display::Frame, _stats: &BarStats) {
+        let (width, height) = (frame.width as usize, frame.height as usize);
+        if width == 0 || height == 0 || frame.words.len() < width * height { return; }
+
+        // The same frame shown again for the status bar: iris-gui shows its
+        // own status chrome and never bakes that bar into the frame, so
+        // there's nothing to push.
+        if frame.seq == self.done_seq && self.sink.seq() > 0 {
+            return;
+        }
+        if capture(&self.sink, &mut self.damage, &mut self.seq, &frame.words, width, (width, height)) {
+            self.done_seq = frame.seq;
+        }
+    }
+}
+
+/// GPU compositor path: `GlCompositor` on a hidden GL context (the board's display thread).
 pub struct GlCaptureRenderer {
     sink:       FrameSink,
     seq:        u64,
+    done_seq:   u64,
     headless:   HeadlessGl,
     compositor: GlCompositor,
+    /// Newport's composed planes read back, `FB_STRIDE` words to a row.
     rgba:       Vec<u32>,
     damage:     RowDamage,
 }
@@ -289,6 +281,7 @@ impl GlCaptureRenderer {
         Some(Self {
             sink,
             seq: 0,
+            done_seq: 0,
             headless,
             compositor: GlCompositor::new(),
             rgba: Vec::new(),
@@ -298,64 +291,42 @@ impl GlCaptureRenderer {
 }
 
 impl Renderer for GlCaptureRenderer {
-    fn present(
-        &mut self,
-        screen:         &mut Rex3Screen,
-        _overlay:       &mut DebugOverlay,
-        _status:        &mut StatusBar,
-        _sbtex:         &mut StatusBarTexture,
-        _stats:         &BarStats,
-        need_readback:  bool,
-        live_fb_rgb:    Option<&[u32]>,
-        live_fb_aux:    Option<&[u32]>,
-    ) {
-        let _ = (live_fb_rgb, live_fb_aux);
-        let width  = screen.width;
-        let height = screen.height;
+    fn present(&mut self, frame: &iris::gfx_display::Frame, _stats: &BarStats) {
+        let (width, height) = (frame.width as usize, frame.height as usize);
         if width == 0 || height == 0 { return; }
 
-        // See CaptureRenderer::present — no baked status bar, so a heartbeat-only
-        // refresh has nothing to push.
-        if screen.status_bar_only && self.sink.seq() > 0 {
+        // See CaptureRenderer::present.
+        if frame.seq == self.done_seq && self.sink.seq() > 0 {
             return;
         }
 
-        let needed = FB_STRIDE * iris::disp::FB_MAX_H;
-        if self.rgba.len() < needed {
-            self.rgba.resize(needed, 0);
-        }
-        if screen.prebuilt {
-            // GR2 hands over a finished frame (stride 2048, RGBA bytes):
-            // no GPU round trip needed.
-            self.rgba.copy_from_slice(&screen.fb_rgb[..needed]);
-        } else {
-            let src = screen.compositor_source_from(live_fb_rgb, live_fb_aux);
-            let gl = &self.headless.gl;
-            let _tex = self.compositor.compose(&src, gl);
-            drop(src);
-            self.compositor.readback_to_screen(&mut self.rgba, width, height, gl);
-        }
-
-        let Some((dirty_y, dirty_h)) = self.damage.diff(&self.rgba, width, height)
-            else { return };
-
-        let mut frame = self.sink.take_free();
-        pack_frame(&mut frame, &self.rgba, width, height, dirty_y, dirty_h);
-        self.seq = self.seq.wrapping_add(1);
-        frame.seq = self.seq;
-        if self.sink.publish(frame) {
-            self.damage.remember(&self.rgba, width, height);
-            if need_readback {
-                mirror_band(screen, &self.rgba, width, height, dirty_y, dirty_h);
+        let done = if let Some(planes) = &frame.planes {
+            // Newport's planes: composed on the GPU, read back for the sink.
+            let needed = FB_STRIDE * FB_MAX_H;
+            if self.rgba.len() < needed {
+                self.rgba.resize(needed, 0);
             }
-        } else if need_readback {
-            // Dropped: `screen.rgba` still holds the last published frame, so a
-            // band diffed against that baseline would be wrong — mirror it all.
-            mirror_band(screen, &self.rgba, width, height, 0, height as u32);
+            let gl = &self.headless.gl;
+            {
+                let planes = planes.0.lock();
+                let _tex = self.compositor.compose(&planes.compositor_source(), gl);
+            }
+            self.compositor.readback_to_screen(&mut self.rgba, width, height, gl);
+            capture(&self.sink, &mut self.damage, &mut self.seq, &self.rgba, FB_STRIDE, (width, height))
+        } else if frame.words.len() >= width * height {
+            // A board that composed its own frame: no GPU round trip needed.
+            capture(&self.sink, &mut self.damage, &mut self.seq, &frame.words, width, (width, height))
+        } else {
+            return;
+        };
+        if done {
+            self.done_seq = frame.seq;
         }
     }
 
-    fn resize(&mut self, _width: usize, _height: usize) {}
+    fn takes_planes(&self) -> bool {
+        true
+    }
 }
 
 impl Drop for GlCaptureRenderer {
@@ -364,8 +335,8 @@ impl Drop for GlCaptureRenderer {
     }
 }
 
-/// Convert `pixels` (stride 2048, `0xFFBBGGRR`) into `frame.rgba` (tightly packed
-/// RGBA bytes), filling only the band `dirty_y..dirty_y + dirty_h`.
+/// Convert `pixels` (rows `stride` words apart, `0xFFBBGGRR`) into `frame.rgba`
+/// (tightly packed RGBA bytes), filling only the band `dirty_y..dirty_y + dirty_h`.
 ///
 /// Whether the band covers the whole picture decides what the GUI does with the
 /// buffer: a full band is uploaded whole (and the buffer must be complete, which
@@ -375,6 +346,7 @@ impl Drop for GlCaptureRenderer {
 fn pack_frame(
     frame:   &mut Frame,
     pixels:  &[u32],
+    stride:  usize,
     width:   usize,
     height:  usize,
     dirty_y: u32,
@@ -392,40 +364,11 @@ fn pack_frame(
     let first = dirty_y as usize;
     let last  = (first + dirty_h as usize).min(height);
     for y in first..last {
-        let src_row = &pixels[y * FB_STRIDE..y * FB_STRIDE + width];
+        let src_row = &pixels[y * stride..y * stride + width];
         let dst_row = &mut frame.rgba[y * width * 4..(y + 1) * width * 4];
         for (dst_px, &word) in dst_row.chunks_exact_mut(4).zip(src_row) {
             dst_px.copy_from_slice(&(word | 0xFF00_0000).to_le_bytes());
         }
-    }
-}
-
-/// Copy the band `dirty_y..dirty_y + dirty_h` of a composed frame (stride
-/// 2048, `0xAABBGGRR`) into `screen.rgba`, where everything outside this process
-/// reads it: the VNC server's `grab_loop`, `Screen::capture`, and the screenshot
-/// path. Same layout, same word format, so it is a row-wise copy — no
-/// conversion, exactly like the `--ci` path in REX3's refresh loop.
-///
-/// Only run when `need_readback` says someone is actually reading. The GUI
-/// never touches `screen.rgba`, so on the normal path this is the difference
-/// between a free frame and a multi-megabyte copy per frame.
-///
-/// A band is only meaningful against whatever `screen.rgba` already holds, so
-/// callers pass the band of the frame that was *published*: that is the frame
-/// `screen.rgba` was last synced to, and the one the GUI's texture holds.
-fn mirror_band(
-    screen:   &mut Rex3Screen,
-    pixels:   &[u32],
-    width:    usize,
-    height:   usize,
-    dirty_y:  u32,
-    dirty_h:  u32,
-) {
-    let first = dirty_y as usize;
-    let last  = (first + dirty_h as usize).min(height);
-    for y in first..last {
-        let row = y * FB_STRIDE;
-        screen.rgba[row..row + width].copy_from_slice(&pixels[row..row + width]);
     }
 }
 
@@ -436,8 +379,9 @@ fn mirror_band(
 /// is taken and uploaded before the next is composed — so a band of changed rows
 /// is exactly the region the GUI still has to upload.
 struct RowDamage {
-    /// Previous frame, stride 2048 (same layout as `SwCompositor::pixels`).
+    /// Previous frame, rows `stride` words apart.
     prev: Vec<u32>,
+    stride: usize,
     w: usize,
     h: usize,
     /// `prev` holds a frame at `w`×`h`. False until the second frame, so the
@@ -446,20 +390,20 @@ struct RowDamage {
 }
 
 impl RowDamage {
-    fn new() -> Self { Self { prev: Vec::new(), w: 0, h: 0, primed: false } }
+    fn new() -> Self { Self { prev: Vec::new(), stride: 0, w: 0, h: 0, primed: false } }
 
     /// `(first_row, row_count)` of the band that differs from the previous
     /// frame, or `None` when nothing did. A full frame when there is no previous
     /// frame to compare against, or when the resolution changed.
-    fn diff(&self, pixels: &[u32], w: usize, h: usize) -> Option<(u32, u32)> {
-        if !self.primed || self.w != w || self.h != h {
+    fn diff(&self, pixels: &[u32], stride: usize, w: usize, h: usize) -> Option<(u32, u32)> {
+        if !self.primed || self.w != w || self.h != h || self.stride != stride {
             return Some((0, h as u32));
         }
         let mut first = usize::MAX;
         let mut last = 0usize;
         for y in 0..h {
-            let a = &pixels[y * FB_STRIDE..y * FB_STRIDE + w];
-            let b = &self.prev[y * FB_STRIDE..y * FB_STRIDE + w];
+            let a = &pixels[y * stride..y * stride + w];
+            let b = &self.prev[y * stride..y * stride + w];
             if a != b {
                 if first == usize::MAX { first = y; }
                 last = y;
@@ -476,11 +420,12 @@ impl RowDamage {
     /// frame has actually been published: a dropped frame must not move the
     /// baseline, or the next band would be diffed against a screen the GUI never
     /// received.
-    fn remember(&mut self, pixels: &[u32], w: usize, h: usize) {
-        if self.prev.len() < pixels.len() {
-            self.prev.resize(pixels.len(), 0);
+    fn remember(&mut self, pixels: &[u32], stride: usize, w: usize, h: usize) {
+        self.prev.resize(stride * h, 0);
+        for y in 0..h {
+            self.prev[y * stride..y * stride + w].copy_from_slice(&pixels[y * stride..y * stride + w]);
         }
-        self.prev.copy_from_slice(pixels);
+        self.stride = stride;
         self.w = w;
         self.h = h;
         self.primed = true;
@@ -490,36 +435,42 @@ impl RowDamage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iris::disp::{FB_MAX_H, MORE_CPUS};
+    use iris::disp::MORE_CPUS;
 
-    /// `screen.rgba` words are `0xAABBGGRR`, so R sits in the low byte — the
+    /// A board frame's words are `0xAABBGGRR`, so R sits in the low byte — the
     /// opposite of the `0x00RRGGBB` a reader might expect.
     const RED:   u32 = 0x0000_00FF;
     const GREEN: u32 = 0x0000_FF00;
     const BLUE:  u32 = 0x00FF_0000;
 
-    /// A screen whose composed frame is whatever the test writes into `fb_rgb`:
-    /// `prebuilt` makes `compose_pixels` copy the rows straight through, so a
-    /// test drives the picture without depending on mode decoding.
-    fn prebuilt_screen(w: usize, h: usize) -> Rex3Screen {
-        let mut s = Rex3Screen::new();
-        s.width = w;
-        s.height = h;
-        s.prebuilt = true;
-        s
+    /// The picture a board is showing, `w` by `h`: a test draws rows into it
+    /// and takes a numbered frame of it, as the screen publishes one.
+    struct Picture {
+        w: usize,
+        h: usize,
+        words: Vec<u32>,
+        seq: u64,
     }
 
-    fn fill_row(screen: &mut Rex3Screen, y: usize, word: u32) {
-        let row = y * FB_STRIDE;
-        for x in 0..screen.width {
-            screen.fb_rgb[row + x] = word;
+    impl Picture {
+        fn new(w: usize, h: usize) -> Self {
+            Self { w, h, words: vec![0; w * h], seq: 0 }
         }
-    }
 
-    fn fill_pixels_row(pixels: &mut [u32], y: usize, w: usize, word: u32) {
-        let row = y * FB_STRIDE;
-        for x in 0..w {
-            pixels[row + x] = word;
+        fn fill_row(&mut self, y: usize, word: u32) {
+            self.words[y * self.w..(y + 1) * self.w].fill(word);
+        }
+
+        /// The next frame of the picture.
+        fn frame(&mut self) -> iris::gfx_display::Frame {
+            self.seq += 1;
+            iris::gfx_display::Frame {
+                seq: self.seq,
+                width: self.w as u32,
+                height: self.h as u32,
+                words: self.words.clone(),
+                ..Default::default()
+            }
         }
     }
 
@@ -539,36 +490,14 @@ mod tests {
         }
     }
 
-    /// `present` ignores the overlay, status bar and stats, but it wants them.
-    struct Dummies {
-        overlay: DebugOverlay,
-        status:  StatusBar,
-        sbtex:   StatusBarTexture,
-        stats:   BarStats,
+    fn present(r: &mut CaptureRenderer, frame: &iris::gfx_display::Frame) {
+        r.present(frame, &bar_stats());
     }
 
-    impl Dummies {
-        fn new() -> Self {
-            Self {
-                overlay: DebugOverlay::new(),
-                status:  StatusBar::new(),
-                sbtex:   StatusBarTexture::new(),
-                stats:   bar_stats(),
-            }
-        }
-    }
-
-    fn present(r: &mut CaptureRenderer, screen: &mut Rex3Screen, d: &mut Dummies) {
-        r.present(screen, &mut d.overlay, &mut d.status, &mut d.sbtex, &d.stats, false, None, None);
-    }
-
-    /// Copy `w`×`h` of a strided picture, as the GUI's texture would end up
-    /// holding after uploading a frame.
-    fn copy_pic(dst: &mut [u32], src: &[u32], w: usize, h: usize) {
-        for y in 0..h {
-            let row = y * FB_STRIDE;
-            dst[row..row + w].copy_from_slice(&src[row..row + w]);
-        }
+    /// Copy a picture, as the GUI's texture would end up holding it after
+    /// uploading a frame.
+    fn copy_pic(dst: &mut [u32], src: &[u32]) {
+        dst.copy_from_slice(src);
     }
 
     /// An independent row diff, so the assertions below are an oracle rather
@@ -577,8 +506,8 @@ mod tests {
         let mut first = None;
         let mut last = 0;
         for y in 0..h {
-            let a = &cur[y * FB_STRIDE..y * FB_STRIDE + w];
-            let b = &prev[y * FB_STRIDE..y * FB_STRIDE + w];
+            let a = &cur[y * w..(y + 1) * w];
+            let b = &prev[y * w..(y + 1) * w];
             if a != b {
                 if first.is_none() { first = Some(y); }
                 last = y;
@@ -591,11 +520,10 @@ mod tests {
     fn first_frame_is_full_then_a_band_then_nothing() {
         let sink = FrameSink::new();
         let mut r = CaptureRenderer::new(sink.clone());
-        let mut d = Dummies::new();
-        let mut screen = prebuilt_screen(64, 32);
-        fill_row(&mut screen, 0, RED);
+        let mut pic = Picture::new(64, 32);
+        pic.fill_row(0, RED);
 
-        present(&mut r, &mut screen, &mut d);
+        present(&mut r, &pic.frame());
         let f = sink.take().expect("the first frame must publish");
         assert_eq!((f.width, f.height), (64, 32));
         // Nothing to diff against yet, so the whole picture has to go up.
@@ -605,15 +533,15 @@ mod tests {
         sink.recycle(f);
 
         // Two rows apart: one band covering both, not two uploads.
-        fill_row(&mut screen, 3, GREEN);
-        fill_row(&mut screen, 20, GREEN);
-        present(&mut r, &mut screen, &mut d);
+        pic.fill_row(3, GREEN);
+        pic.fill_row(20, GREEN);
+        present(&mut r, &pic.frame());
         let f = sink.take().expect("a changed row must publish");
         assert_eq!((f.dirty_y, f.dirty_h), (3, 18));
         sink.recycle(f);
 
         // Nothing moved: no pack, no publish, and the GUI goes back to sleep.
-        present(&mut r, &mut screen, &mut d);
+        present(&mut r, &pic.frame());
         assert!(sink.take().is_none(), "an unchanged frame must not publish");
         assert_eq!(sink.seq(), 2);
     }
@@ -625,17 +553,16 @@ mod tests {
     fn a_dropped_frame_does_not_move_the_baseline() {
         let sink = FrameSink::new();
         let mut r = CaptureRenderer::new(sink.clone());
-        let mut d = Dummies::new();
-        let mut screen = prebuilt_screen(64, 32);
-        fill_row(&mut screen, 0, RED);
+        let mut pic = Picture::new(64, 32);
+        pic.fill_row(0, RED);
 
-        present(&mut r, &mut screen, &mut d);
+        present(&mut r, &pic.frame());
 
         // A second frame arrives before the GUI looks. The display always wants
         // the newest, so this one is dropped rather than queued — which leaves
         // the first frame waiting, not the second.
-        fill_row(&mut screen, 5, GREEN);
-        present(&mut r, &mut screen, &mut d);
+        pic.fill_row(5, GREEN);
+        present(&mut r, &pic.frame());
         let held = sink.take().expect("the dropped frame leaves the previous one waiting");
         assert_eq!((held.dirty_y, held.dirty_h), (0, 32), "it is still the first, full frame");
         sink.recycle(held);
@@ -643,8 +570,8 @@ mod tests {
         // Row 7 changes too. The band has to cover both, because the GUI's
         // texture still holds the frame from before row 5 turned green: had the
         // dropped frame moved the baseline, row 5 would never be uploaded.
-        fill_row(&mut screen, 7, BLUE);
-        present(&mut r, &mut screen, &mut d);
+        pic.fill_row(7, BLUE);
+        present(&mut r, &pic.frame());
         let f = sink.take().expect("the third frame must publish");
         assert_eq!((f.dirty_y, f.dirty_h), (5, 3));
     }
@@ -653,42 +580,60 @@ mod tests {
     fn a_resolution_change_forces_a_full_frame() {
         let sink = FrameSink::new();
         let mut r = CaptureRenderer::new(sink.clone());
-        let mut d = Dummies::new();
-        let mut screen = prebuilt_screen(64, 32);
-        fill_row(&mut screen, 0, RED);
+        let mut pic = Picture::new(64, 32);
+        pic.fill_row(0, RED);
 
-        present(&mut r, &mut screen, &mut d);
+        present(&mut r, &pic.frame());
         assert_eq!(sink.take().map(|f| (f.dirty_y, f.dirty_h)), Some((0, 32)));
 
         // A band is only valid against a texture of the same size, so a resize
         // starts over rather than trying to patch rows that moved.
-        screen.width = 128;
-        screen.height = 64;
-        present(&mut r, &mut screen, &mut d);
+        let mut bigger = Picture::new(128, 64);
+        bigger.seq = pic.seq;
+        bigger.fill_row(0, RED);
+        present(&mut r, &bigger.frame());
         let f = sink.take().expect("the first frame at the new size must publish");
         assert_eq!((f.dirty_y, f.dirty_h), (0, 64));
         assert_eq!(f.rgba.len(), 128 * 64 * 4);
     }
 
+    /// The screen shows an unchanged frame again at the idle rate so a status
+    /// bar moves. iris-gui draws its own chrome and never bakes that bar into a
+    /// frame, so a repeat is nothing to push.
     #[test]
-    fn a_heartbeat_refresh_publishes_nothing() {
+    fn a_repeated_frame_publishes_nothing() {
         let sink = FrameSink::new();
         let mut r = CaptureRenderer::new(sink.clone());
-        let mut d = Dummies::new();
-        let mut screen = prebuilt_screen(64, 32);
-        fill_row(&mut screen, 0, RED);
+        let mut pic = Picture::new(64, 32);
+        pic.fill_row(0, RED);
 
-        present(&mut r, &mut screen, &mut d);
+        let frame = pic.frame();
+        present(&mut r, &frame);
         assert!(sink.take().is_some());
 
-        // The compositor says only its own status bar would change. iris-gui
-        // draws its own chrome and never bakes that bar into a frame, so there
-        // is nothing to push — even though the guest framebuffer did move.
-        screen.status_bar_only = true;
-        fill_row(&mut screen, 9, GREEN);
-        present(&mut r, &mut screen, &mut d);
-        assert!(sink.take().is_none(), "a heartbeat must not publish");
+        present(&mut r, &frame);
+        assert!(sink.take().is_none(), "a repeat must not publish");
         assert_eq!(sink.seq(), 1);
+    }
+
+    /// A repeat of a frame the GUI never got is not skipped: the frame was
+    /// dropped, and the repeat is the chance to send it.
+    #[test]
+    fn a_repeat_of_a_dropped_frame_is_published_when_the_gui_catches_up() {
+        let sink = FrameSink::new();
+        let mut r = CaptureRenderer::new(sink.clone());
+        let mut pic = Picture::new(64, 32);
+        pic.fill_row(0, RED);
+        present(&mut r, &pic.frame());
+
+        pic.fill_row(5, GREEN);
+        let second = pic.frame();
+        present(&mut r, &second);
+        assert!(sink.take().is_some(), "the first frame, still waiting");
+
+        present(&mut r, &second);
+        let f = sink.take().expect("the repeat sends the dropped frame");
+        assert_eq!((f.dirty_y, f.dirty_h), (5, 1));
     }
 
     /// Drives the renderer through a scripted mix of idle frames, damage and a
@@ -698,16 +643,15 @@ mod tests {
     fn every_band_covers_exactly_what_the_gui_still_needs() {
         let sink = FrameSink::new();
         let mut r = CaptureRenderer::new(sink.clone());
-        let mut d = Dummies::new();
-        let mut screen = prebuilt_screen(64, 32);
+        let mut pic = Picture::new(64, 32);
         let (w, h) = (64, 32);
 
         // `baseline` is the picture the renderer last published — the frame its
         // damage tracker diffs against. `shown` is the picture the GUI's texture
         // holds. They are equal whenever the GUI has taken everything published,
         // which is the only state in which a band means anything.
-        let mut baseline = vec![0u32; FB_STRIDE * FB_MAX_H];
-        let mut shown    = vec![0u32; FB_STRIDE * FB_MAX_H];
+        let mut baseline = vec![0u32; w * h];
+        let mut shown    = vec![0u32; w * h];
         let mut gui_primed = false;
         let mut dropped = 0;
 
@@ -732,19 +676,19 @@ mod tests {
                         Some((f.dirty_y, f.dirty_h)), want,
                         "step {i}: the frame the GUI takes must cover what its texture still needs"
                     );
-                    copy_pic(&mut shown, &baseline, w, h);
+                    copy_pic(&mut shown, &baseline);
                     gui_primed = true;
                     sink.recycle(f);
                 }
             }
 
-            fill_row(&mut screen, row, word);
+            pic.fill_row(row, word);
             let before = sink.seq();
-            present(&mut r, &mut screen, &mut d);
+            present(&mut r, &pic.frame());
 
             if sink.seq() != before {
                 // Published, so this is now what every band is diffed against.
-                copy_pic(&mut baseline, &screen.fb_rgb, w, h);
+                copy_pic(&mut baseline, &pic.words);
             } else if i == slow {
                 // The GUI took nothing last step, so the sink still holds that
                 // frame and this one had to be dropped — and the baseline must
@@ -758,11 +702,11 @@ mod tests {
         // Row 6 went green on a frame the GUI never took, and row 20 went blue
         // on a frame that was dropped outright. Both must have arrived.
         assert_eq!(
-            band_between(&shown, &screen.fb_rgb, w, h), None,
+            band_between(&shown, &pic.words, w, h), None,
             "the GUI's texture must end up holding the whole picture"
         );
         assert_eq!(
-            band_between(&baseline, &screen.fb_rgb, w, h), None,
+            band_between(&baseline, &pic.words, w, h), None,
             "the renderer's baseline must end up matching the picture"
         );
     }
@@ -772,39 +716,19 @@ mod tests {
         let mut frame = Frame::default();
         // A recycled buffer still holds the previous picture.
         frame.rgba = vec![0xAA; 64 * 32 * 4];
+        // Rows 2048 words apart, as the GL readback leaves them.
         let mut pixels = vec![0u32; FB_STRIDE * FB_MAX_H];
-        fill_pixels_row(&mut pixels, 4, 64, RED);
-        fill_pixels_row(&mut pixels, 5, 64, RED);
+        for y in [4, 5] {
+            pixels[y * FB_STRIDE..y * FB_STRIDE + 64].fill(RED);
+        }
 
-        pack_frame(&mut frame, &pixels, 64, 32, 4, 2);
+        pack_frame(&mut frame, &pixels, FB_STRIDE, 64, 32, 4, 2);
 
         assert_eq!((frame.dirty_y, frame.dirty_h), (4, 2));
         assert_eq!(frame.rgba.len(), 64 * 32 * 4, "the buffer is reused, not reallocated");
         assert!(frame.rgba[..4 * 64 * 4].iter().all(|&b| b == 0xAA), "rows above the band are left alone");
         assert!(frame.rgba[6 * 64 * 4..].iter().all(|&b| b == 0xAA), "rows below the band are left alone");
         assert_eq!(&frame.rgba[4 * 64 * 4..4 * 64 * 4 + 4], &[0xFF, 0x00, 0x00, 0xFF]);
-    }
-
-    #[test]
-    fn mirror_band_writes_only_the_band() {
-        let mut screen = Rex3Screen::new();
-        screen.width = 64;
-        screen.height = 32;
-        let mut pixels = vec![0u32; FB_STRIDE * FB_MAX_H];
-        fill_pixels_row(&mut pixels, 1, 64, RED);
-        fill_pixels_row(&mut pixels, 2, 64, RED);
-
-        // VNC reads `screen.rgba`, which the GUI never touches, so only the
-        // published band may be rewritten.
-        mirror_band(&mut screen, &pixels, 64, 32, 2, 1);
-        assert_eq!(screen.rgba[2 * FB_STRIDE], RED);
-        assert_eq!(screen.rgba[1 * FB_STRIDE], 0, "row 1 was not in the band");
-
-        // The dropped-frame path mirrors the whole frame instead: a band would
-        // be diffed against a screen the GUI never received.
-        mirror_band(&mut screen, &pixels, 64, 32, 0, 32);
-        assert_eq!(screen.rgba[1 * FB_STRIDE], RED, "a full mirror brings row 1 too");
-        assert_eq!(screen.rgba[3 * FB_STRIDE], 0, "rows the frame does not carry stay as they were");
     }
 
     #[test]

@@ -763,10 +763,10 @@ fn assert_frame_is_whole_resolve(h: &BoardLocks, display: &Display, what: &str) 
     let frame = crate::dev::odyssey::frame::Frame::snapshot(&regs, displayed).expect("the scan-out is set up");
     let mut want = vec![0u32; w * ht];
     frame.compose(s.vram.ptr_shared(), &regs, &mut want, w, ht);
-    let screen = display.screen.lock();
-    let stride = crate::disp::FB_STRIDE;
+    let shown = display.out().latest().expect("a presented frame");
+    assert_eq!((shown.width as usize, shown.height as usize), (w, ht), "{what}: size");
     for y in 0..ht {
-        assert_eq!(&screen.fb_rgb[y * stride..y * stride + w], &want[y * w..(y + 1) * w], "{what}: row {y}");
+        assert_eq!(&shown.words[y * w..(y + 1) * w], &want[y * w..(y + 1) * w], "{what}: row {y}");
     }
 }
 
@@ -846,11 +846,11 @@ fn stress(seed: u64, last_is_lut: bool) {
     // is carried from one frame to the next), so an idle frame is a pure
     // recompute; ten of them, after the four settled ones above, still catch a
     // frame that drifts with no writer.
-    let before = display.screen.lock().fb_rgb.clone();
+    let before = display.out().latest().expect("a presented frame").words.clone();
     for _ in 0..10 {
         Odyssey::frame(&h, &display);
     }
-    assert!(display.screen.lock().fb_rgb == before, "an idle frame changed the picture");
+    assert!(display.out().latest().unwrap().words == before, "an idle frame changed the picture");
     assert_frame_is_whole_resolve(&h, &display, "after idle frames");
     h.raster.stop();
 }
@@ -893,9 +893,11 @@ fn swap_atomicity() {
             while !stop.load(SeqCst) {
                 Odyssey::frame(&h, &display);
                 let reader = display.reader.lock();
-                let screen = display.screen.lock();
-                let stride = crate::disp::FB_STRIDE;
+                let Some(screen) = display.out().latest() else { continue };
                 let w = reader.frame_width as usize;
+                if screen.width as usize != w {
+                    continue;
+                }
                 let bit = (h.front.lock().displayed_buffer & 1) as usize;
                 let want = colours[bit].load(SeqCst) as u32;
                 // Every 8th pixel of every 8th line, and the corners.
@@ -903,7 +905,7 @@ fn swap_atomicity() {
                 for y in (0..reader.frame_height as usize).step_by(8).chain([1023]) {
                     for x in (0..w).step_by(8).chain([w - 1]) {
                         // The screen's 0xAABBGGRR as 0x00RRGGBB.
-                        let p = screen.fb_rgb[y * stride + x];
+                        let p = screen.words[y * w + x];
                         seen.insert((p & 0xff) << 16 | (p & 0xff00) | (p >> 16) & 0xff);
                     }
                 }
@@ -1043,8 +1045,9 @@ fn the_sphere_map_reflects_the_eye_vector_about_the_normal() {
     assert!((tt - 0.5).abs() < 1e-6, "{tt}");
 }
 
-/// What the display thread presents: an idle board is presented only on
-/// the display's refresh frames, and a change shows on the next frame.
+/// What the display thread presents: an idle board composes no new frame, its
+/// renderer sees the standing one again only at the refresh rate, and a change
+/// shows on the next frame.
 #[test]
 fn an_idle_display_presents_only_its_refresh_frames() {
     if super::gpu_unit_tests() {
@@ -1061,12 +1064,14 @@ fn an_idle_display_presents_only_its_refresh_frames() {
     // mark was seen ahead of.
     Odyssey::frame(&h, &display);
     assert_eq!(seq(&display), 2);
-    let refresh = (1..=10).filter(|_| {
-        let before = seq(&display);
+    let probe = crate::display_stop_tests::Probe::new(|| {});
+    let presents = probe.presents.clone();
+    *display.out().window.renderer.lock() = Some(Box::new(probe));
+    for _ in 0..10 {
         Odyssey::frame(&h, &display);
-        seq(&display) != before
-    }).count();
-    assert_eq!(refresh, 1, "ten idle frames present once, at the refresh");
+    }
+    assert_eq!(seq(&display), 2, "ten idle frames compose none");
+    assert_eq!(presents.load(SeqCst), 2, "the renderer sees the frame on arrival and once more at the refresh");
 
     h.raster.wait_idle();
     h.test_board().vram.ptr().store(0x1000, 4, 0x55);
@@ -1136,10 +1141,9 @@ mod unwatched {
         assert_eq!(counts(&display).1, 1);
         assert_frame_is_whole_resolve(&h, &display, "the requested frame");
         {
-            let screen = display.screen.lock();
             let frame = display.out().latest().expect("the requested frame");
             assert_eq!(frame.seq, 1);
-            assert_eq!(&frame.words[..64], &screen.fb_rgb[..64], "the frame holds what the request got");
+            assert_eq!(frame.words.len(), (frame.width * frame.height) as usize, "the frame holds the picture whole");
         }
         // And frames are skipped again.
         Odyssey::frame(&h, &display);

@@ -101,7 +101,6 @@ fn the_gpu_compose_matches_the_software_compositor() {
             width,
             height,
             status_bar_only: false,
-            prebuilt: None,
         };
         sw.compose_pixels(&src);
         let mut out = vec![0u32; width * height];
@@ -170,7 +169,6 @@ fn a_heartbeat_uploads_no_plane_data() {
         width,
         height,
         status_bar_only,
-        prebuilt: None,
     };
     let mut full = vec![0u32; 1280 * 1024];
     let mut beat = vec![0u32; 1280 * 1024];

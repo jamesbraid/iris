@@ -301,7 +301,8 @@ impl Odyssey {
         reader.poll(monotonic_ns());
         display.polled.store(true, Ordering::Relaxed);
         // On the GPU raster unit with the wgpu renderer on the same device,
-        // the frame is composed and presented there with no readback.
+        // the frame is composed there and presented from there, with no
+        // readback.
         #[cfg(feature = "wgpu")]
         if need.gpu {
             crate::pf_begin!(crate::perfetto::events::ODSY_FRAME_PLANES);
@@ -311,47 +312,46 @@ impl Odyssey {
                 display.out().counts.count(true);
                 set_display_fifo_pending(state.fifo.level() as usize + state.raster.pending() as usize);
                 crate::pf_end!(crate::perfetto::events::ODSY_CAPTURE);
-                drop(reader);
-                if display.due(true, false) {
-                    crate::pf_begin!(crate::perfetto::events::ODSY_PRESENT);
-                    display.present_gpu(&buffer, w, h);
-                    crate::pf_end!(crate::perfetto::events::ODSY_PRESENT);
-                }
-                return false;
+                out.width = w;
+                out.height = h;
+                out.gpu = Some(buffer);
+                display.words.store(false, Ordering::Relaxed);
+                return true;
             }
         }
+        // A pull consumer after device frames gets the picture again whole.
+        if need.words && !display.words.load(Ordering::Relaxed) {
+            reader.recompose();
+        }
         crate::pf_begin!(crate::perfetto::events::ODSY_FRAME_PLANES);
-        // Composed on the CPU straight into the screen under its lock; the
-        // GPU scan-out's readback comes back in `frame`.
-        let mut screen = display.screen.lock();
-        let composed = reader.update_to(Some((&mut screen.fb_rgb, crate::disp::FB_STRIDE)));
-        crate::pf_end!(crate::perfetto::events::ODSY_FRAME_PLANES);
+        // Composed on the CPU straight into the frame;
+        // the GPU scan-out's readback comes back in `frame`.
         let (w, h) = (reader.frame_width as usize, reader.frame_height as usize);
+        out.words.resize(w * h, 0);
+        let composed = reader.update_to(Some((&mut out.words, w.max(1))));
+        crate::pf_end!(crate::perfetto::events::ODSY_FRAME_PLANES);
         set_display_fifo_pending(state.fifo.level() as usize + state.raster.pending() as usize);
         crate::pf_end!(crate::perfetto::events::ODSY_CAPTURE);
         let changed = !matches!(composed, reader::Composed::No);
         display.out().counts.count(changed);
-        if w == 0 || h == 0 || !display.due(changed, display.out().requests.pending()) {
+        if w == 0 || h == 0 || !changed {
             return false;
         }
-        crate::pf_begin!(crate::perfetto::events::ODSY_PRESENT);
-        match composed {
-            reader::Composed::InFrame => {
-                drop(screen);
-                display.present(&reader.frame[..w * h], w, h, 0, out, need.words);
-            }
-            // In the screen already, or unchanged: present it as it is.
-            reader::Composed::InTarget | reader::Composed::No => display.present_in_place(screen, w, h, out, need.words),
+        if let reader::Composed::InFrame = composed {
+            // The GPU scan-out's readback, in the same order.
+            out.words.copy_from_slice(&reader.frame[..w * h]);
         }
-        crate::pf_end!(crate::perfetto::events::ODSY_PRESENT);
-        need.words
+        out.width = w as u32;
+        out.height = h as u32;
+        display.words.store(true, Ordering::Relaxed);
+        true
     }
 
     /// One display frame by hand, as the display thread runs it: compose if
     /// anything looks, then the retrace.
     #[cfg(test)]
     fn frame(state: &BoardLocks, display: &Display) {
-        display.out().tick(|out, need| Odyssey::compose(state, display, out, need));
+        display.out().tick(|| display.stats(), |out, need| Odyssey::compose(state, display, out, need));
         Odyssey::retrace(state, display);
     }
 }
@@ -423,10 +423,10 @@ impl Device for Odyssey {
                         display.out(),
                         &running,
                         &display.display_stop,
+                        || display.stats(),
                         || Odyssey::retrace(&state, &display),
                         |out, need| Odyssey::compose(&state, &display, out, need),
                     );
-                    display.local_done();
                 })
                 .expect("odyssey display thread"),
         );

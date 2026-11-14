@@ -1,4 +1,3 @@
-use glow::HasContext;
 use crate::dev::ng1::rex3::{DrawRecord, DrawMode0, DrawMode1, ModeEntry,
     DRAWMODE0_OPCODE_READ, DRAWMODE0_OPCODE_DRAW, DRAWMODE0_OPCODE_SCR2SCR};
 use crate::dev::ng1::vc2::{
@@ -32,12 +31,12 @@ pub struct SeenMode {
 }
 
 /// Debug overlay: renders CMAP swatches, DID/XMAP mode info, and draw-record
-/// annotations into a GL texture that is alpha-blended over the compositor output.
+/// annotations into a pixel buffer that Newport publishes with its frame
+/// ([`Frame::overlay`](crate::gfx_display::Frame::overlay)) and the presenter
+/// alpha-blends over the picture.
 pub struct DebugOverlay {
     /// CPU pixel buffer for the overlay (transparent=0 where inactive), stride 2048.
     buf:         Vec<u32>,
-    /// GL texture backing the overlay.
-    tex:         Option<glow::Texture>,
 
     /// SGI Screen 8×16 font (256 glyphs × 16 rows × 1 byte).
     font:        Vec<u8>,
@@ -59,7 +58,6 @@ impl DebugOverlay {
     pub fn new() -> Self {
         Self {
             buf:              vec![0u32; crate::disp::FB_STRIDE * crate::disp::FB_MAX_H],
-            tex:              None,
             font:             crate::vga_font::SCREEN_8X16.to_vec(),
             show_cmap:        false,
             show_disp_debug:  false,
@@ -88,33 +86,8 @@ impl DebugOverlay {
         }
     }
 
-    /// Render overlay into the CPU buffer and upload to the GL texture.
-    /// Returns the GL texture handle.
-    pub fn render(&mut self, src: &OverlaySource<'_>, gl: &glow::Context) -> glow::Texture {
-        self.render_pixels(src);
-        // Upload to GL texture and return handle
-        let tex = self.ensure_tex(gl);
-        unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 2048);
-            let u8_slice = std::slice::from_raw_parts(
-                self.buf.as_ptr() as *const u8,
-                self.buf.len() * 4,
-            );
-            gl.tex_sub_image_2d(
-                glow::TEXTURE_2D, 0,
-                0, 0, src.width as i32, src.height as i32,
-                glow::RGBA, glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(u8_slice)),
-            );
-            gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
-        }
-        tex
-    }
-
     /// The overlay drawn into its CPU buffer (stride 2048, 0xAABBGGRR,
-    /// transparent where nothing is shown), with no GL: what a renderer
-    /// other than the GL one uploads itself.
+    /// transparent where nothing is shown).
     pub fn render_pixels(&mut self, src: &OverlaySource<'_>) -> &[u32] {
         let width  = src.width;
         let height = src.height;
@@ -409,27 +382,6 @@ impl DebugOverlay {
             }
         }
         &self.buf
-    }
-
-    pub fn destroy(&mut self, gl: &glow::Context) {
-        if let Some(t) = self.tex.take() {
-            unsafe { gl.delete_texture(t); }
-        }
-    }
-
-    fn ensure_tex(&mut self, gl: &glow::Context) -> glow::Texture {
-        if let Some(t) = self.tex { return t; }
-        let t = unsafe {
-            let t = gl.create_texture().unwrap();
-            gl.bind_texture(glow::TEXTURE_2D, Some(t));
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA as i32,
-                2048, crate::disp::FB_MAX_H as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
-            t
-        };
-        self.tex = Some(t);
-        t
     }
 
     /// Draw a line of text into `self.buf` using the SGI Screen 8×16 font.

@@ -8,14 +8,50 @@
 //! a fresh one, and the counts of what the thread did. [`GfxDisplay`] only
 //! hands the screens out, with the hardware cursor and the CPU cycle counter.
 
-use std::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
 use crate::cpu::mips_core::CyclesPtr;
-use crate::dev::ng1::rex3::Renderer;
+use crate::disp::{BarStats, Ng1Planes};
+
+/// What the front-end draws a screen's frames with: the GL window, the wgpu
+/// window, iris-gui's capture. It owns the status bar and draws it under the
+/// frame, and it never reads the picture back: the consumers that want words
+/// ask the screen for them ([`Need::words`]).
+///
+/// [`Screen::publish`] calls [`present`](Self::present) on the board's display
+/// thread, once for each new frame and again at the idle rate for an unchanged
+/// one (same [`Frame::seq`]), so the status bar moves. A renderer skips the
+/// upload of a frame it has already seen.
+pub trait Renderer: Send {
+    fn present(&mut self, frame: &Frame, stats: &BarStats);
+
+    /// The device this renderer presents on, if it takes frames composed
+    /// there ([`Frame::gpu`]).
+    #[cfg(feature = "wgpu")]
+    fn gpu(&self) -> Option<&Arc<crate::wgpu::Gpu>> { None }
+
+    /// Whether it composes Newport's planes itself ([`Frame::planes`]). Only
+    /// the GL window does, in a fragment shader: the CPU compose it would
+    /// otherwise be handed costs 7.4 ms for each changed Newport frame.
+    fn takes_planes(&self) -> bool { false }
+
+    fn resize(&mut self, _width: usize, _height: usize) {}
+
+    /// The display thread is ending (or the screen is no longer shown here):
+    /// release what only that thread may.
+    fn stop(&mut self) {}
+
+    /// The test-only resident path presents a frame already on the device,
+    /// and reports its failure rather than logging it.
+    #[cfg(all(test, feature = "wgpu"))]
+    fn present_resident_gpu_frame(&mut self, _frame: &Frame, _stats: &BarStats) -> Result<(), String> {
+        Err("renderer does not support resident GPU frames".into())
+    }
+}
 
 pub trait GfxDisplay: Send + Sync {
     /// The board's screens in head order. Most boards have one.
@@ -349,10 +385,14 @@ pub struct Frame {
     /// `0xAABBGGRR`, `width` to a row, no padding. Empty when only `gpu` was
     /// needed.
     pub words: Vec<u32>,
-    /// The same pixels in the same order on the screen's device.
+    /// The same pixels in the same order on the screen's device, `0xAABBGGRR`.
     #[cfg(feature = "wgpu")]
     pub gpu: Option<::wgpu::Buffer>,
-    /// Newport's debug overlay, only while it is on.
+    /// Newport's planes and display state, for the one presenter that composes
+    /// them itself; `words` is then empty. Only [`Need::planes`] asks for it.
+    pub planes: Option<Ng1Planes>,
+    /// Newport's debug overlay, `width` to a row in the same order as `words`
+    /// (transparent where nothing is shown), only while it is on.
     pub overlay: Option<Vec<u32>>,
 }
 
@@ -365,6 +405,9 @@ pub struct Need {
     /// The shown renderer takes frames on the board's device, and no pull
     /// consumer wants words.
     pub gpu: bool,
+    /// The shown renderer composes Newport's planes itself, and no pull
+    /// consumer wants words.
+    pub planes: bool,
     /// A renderer is shown: the board redraws what changed, and at its idle
     /// rate so the status bar moves.
     pub redraw: bool,
@@ -372,7 +415,7 @@ pub struct Need {
 
 impl Need {
     pub fn any(&self) -> bool {
-        self.words || self.gpu || self.redraw
+        self.words || self.gpu || self.planes || self.redraw
     }
 }
 
@@ -407,6 +450,13 @@ pub struct Screen {
     pub gpu: std::sync::OnceLock<Arc<crate::wgpu::Gpu>>,
     /// The frame size last published or set, packed height << 32 | width.
     size: AtomicU64,
+    /// The size last given to the renderer, packed the same way.
+    sized: AtomicU64,
+    /// Which renderer was last shown a frame (its address), so one installed
+    /// since gets the newest frame at once.
+    shown: AtomicUsize,
+    /// Ticks since a renderer was last shown a frame.
+    idle: AtomicU32,
     /// The requests the frame being composed will answer.
     noted: AtomicU64,
     /// Held only to clone or swap an `Arc`.
@@ -428,6 +478,9 @@ impl Screen {
             #[cfg(feature = "wgpu")]
             gpu: std::sync::OnceLock::new(),
             size: AtomicU64::new(0),
+            sized: AtomicU64::new(0),
+            shown: AtomicUsize::new(0),
+            idle: AtomicU32::new(0),
             noted: AtomicU64::new(0),
             latest: Mutex::new(None),
             spare: Mutex::new(Vec::new()),
@@ -435,15 +488,33 @@ impl Screen {
     }
 
     /// What this tick has to compose: a request or a capturing client wants
-    /// words, a renderer is shown (and takes device frames, when it does).
+    /// words; a renderer is shown (and takes device frames or Newport's
+    /// planes, when it does and nobody wants words).
     pub fn need(&self) -> Need {
         let words = self.requests.pending() || self.requests.capturing();
         let renderer = self.window.renderer.lock();
+        let renderer = renderer.as_ref();
+        // A frame on a device is valid only there: the board's own, when it
+        // has one, else whichever one the window presents on.
         #[cfg(feature = "wgpu")]
-        let gpu = !words && renderer.as_ref().is_some_and(|r| r.takes_gpu_frames());
+        let gpu = !words
+            && renderer.is_some_and(|r| r.gpu().is_some_and(|d| self.gpu.get().is_none_or(|g| Arc::ptr_eq(g, d))));
         #[cfg(not(feature = "wgpu"))]
         let gpu = false;
-        Need { words, gpu, redraw: self.always || renderer.is_some() }
+        let planes = !words && renderer.is_some_and(|r| r.takes_planes());
+        Need { words, gpu, planes, redraw: self.always || renderer.is_some() }
+    }
+
+    /// The device the shown renderer presents on, for a board that composes
+    /// there and has no device of its own: it keeps that one from now on.
+    #[cfg(feature = "wgpu")]
+    pub fn adopt_window_gpu(&self) -> Option<&Arc<crate::wgpu::Gpu>> {
+        if self.gpu.get().is_none() {
+            if let Some(d) = self.window.renderer.lock().as_ref().and_then(|r| r.gpu().cloned()) {
+                let _ = self.gpu.set(d);
+            }
+        }
+        self.gpu.get()
     }
 
     /// A frame to compose into, `w` by `h` words, in a buffer no consumer
@@ -458,16 +529,24 @@ impl Screen {
     }
 
     /// One tick of the display: compose if anything looks, and publish what
-    /// `compose` filled (see [`run_display`]). Returns what was needed.
-    pub fn tick(&self, compose: impl FnOnce(&mut Frame, Need) -> bool) -> Need {
+    /// `compose` filled (see [`run_display`]). Returns what was needed. `stats`
+    /// is the status bar's input, taken only for a frame a renderer is shown.
+    pub fn tick(&self, mut stats: impl FnMut() -> BarStats, compose: impl FnOnce(&mut Frame, Need) -> bool) -> Need {
         let need = self.need();
         if need.any() {
             let mut frame = self.frame(0, 0);
             if compose(&mut frame, need) {
-                self.publish(frame);
+                // A tick with nobody shown has no use for the bar's figures.
+                let stats = if need.redraw { stats() } else { self.idle_stats() };
+                self.publish(frame, &stats);
             } else {
-                // The picture stands; what was asked for is answered by it.
+                // The picture stands; what was asked for is answered by it,
+                // and a renderer sees it again at the idle rate.
+                *self.spare.lock() = frame.words;
                 self.requests.answer(self.noted.load(Ordering::Acquire));
+                if need.redraw {
+                    self.repeat(&mut stats);
+                }
             }
         } else {
             // Nothing looked, so a mark has no frame to make. Taken, so that
@@ -476,6 +555,38 @@ impl Screen {
             self.counts.count(false);
         }
         need
+    }
+
+    fn idle_stats(&self) -> BarStats {
+        crate::disp::StatusSource::detached().snapshot(Instant::now(), 0)
+    }
+
+    /// Show the newest frame to the renderer again, so its status bar moves:
+    /// every [`IDLE_REFRESH`] ticks, and at once to a renderer that has not
+    /// seen it.
+    fn repeat(&self, stats: &mut impl FnMut() -> BarStats) {
+        let Some(frame) = self.latest() else { return };
+        let mut renderer = self.window.renderer.lock();
+        let Some(renderer) = renderer.as_mut() else { return };
+        let idle = self.idle.fetch_add(1, Ordering::Relaxed) + 1;
+        if idle < IDLE_REFRESH && self.shown.load(Ordering::Relaxed) == renderer_id(&**renderer) {
+            return;
+        }
+        self.show(renderer, &frame, &stats());
+    }
+
+    /// Hand `frame` to `renderer`, telling it first when the size changed.
+    fn show(&self, renderer: &mut Box<dyn Renderer>, frame: &Frame, stats: &BarStats) {
+        self.idle.store(0, Ordering::Relaxed);
+        let arrived = self.shown.swap(renderer_id(&**renderer), Ordering::Relaxed) != renderer_id(&**renderer);
+        if frame.width == 0 || frame.height == 0 {
+            return;
+        }
+        let size = u64::from(frame.height) << 32 | u64::from(frame.width);
+        if self.sized.swap(size, Ordering::Relaxed) != size || arrived {
+            renderer.resize(frame.width as usize, frame.height as usize);
+        }
+        renderer.present(frame, stats);
     }
 
     /// The size of the picture the board shows, known before any frame is
@@ -491,14 +602,20 @@ impl Screen {
         self.size.store(u64::from(h) << 32 | u64::from(w), Ordering::Relaxed);
     }
 
-    /// Store `f` as the newest frame and answer the requests it was noted for.
-    pub fn publish(&self, mut f: Frame) {
+    /// Store `f` as the newest frame, show it to the renderer if one is
+    /// installed, and answer the requests it was noted for.
+    pub fn publish(&self, mut f: Frame, stats: &BarStats) {
         self.set_size(f.width, f.height);
-        let old = {
+        let (new, old) = {
             let mut latest = self.latest.lock();
             f.seq = latest.as_ref().map_or(0, |o| o.seq).wrapping_add(1);
-            latest.replace(Arc::new(f))
+            let new = Arc::new(f);
+            (new.clone(), latest.replace(new))
         };
+        if let Some(renderer) = self.window.renderer.lock().as_mut() {
+            self.show(renderer, &new, stats);
+        }
+        drop(new);
         if let Some(Ok(old)) = old.map(Arc::try_unwrap) {
             *self.spare.lock() = old.words;
         }
@@ -522,6 +639,11 @@ impl Screen {
         }
         self.latest()
     }
+}
+
+/// A renderer's identity: its address.
+fn renderer_id(r: &dyn Renderer) -> usize {
+    r as *const dyn Renderer as *const () as usize
 }
 
 /// The hotkey's screenshot: the screen's next frame, written as
@@ -553,17 +675,20 @@ pub fn save_screenshot(screen: &Arc<Screen>) {
 /// board's hardware duty (the retrace pulse and its interrupt, trace flushes,
 /// the status counters). It runs every tick, watched or not, after the frame
 /// is taken, so a flip the guest makes at the retrace shows from the next one.
+/// `stats` is the status bar's input; it is called for each frame a renderer is
+/// shown.
 /// The thread ends by releasing the renderer ([`DisplayStop`]).
 pub fn run_display(
     screen: &Screen,
     running: &AtomicBool,
     stop: &DisplayStop,
+    mut stats: impl FnMut() -> BarStats,
     mut retrace: impl FnMut(),
     mut compose: impl FnMut(&mut Frame, Need) -> bool,
 ) {
     let mut wait = FrameWait::new(&screen.changed, FRAME_PERIOD);
     while running.load(Ordering::Relaxed) {
-        let need = screen.tick(&mut compose);
+        let need = screen.tick(&mut stats, &mut compose);
         retrace();
         if need.any() || !screen.parks {
             wait.wait();
@@ -626,13 +751,13 @@ pub(crate) mod testing {
             // The picture a stuck board still has from before.
             let mut first = screens[0].frame(w, h);
             first.words.fill(0xff00_0000);
-            screens[0].publish(first);
+            screens[0].publish(first, &crate::disp::StatusSource::detached().snapshot(Instant::now(), 0));
             let stop = Arc::new(DisplayStop::default());
             let running = Arc::new(AtomicBool::new(!stuck));
             let thread = (!stuck).then(|| {
                 let (screen, stop, running) = (screens[0].clone(), stop.clone(), running.clone());
                 std::thread::spawn(move || {
-                    run_display(&screen, &running, &stop, || {}, |out, _| {
+                    run_display(&screen, &running, &stop, || crate::disp::StatusSource::detached().snapshot(Instant::now(), 0), || {}, |out, _| {
                         out.width = w;
                         out.height = h;
                         out.words.resize(w as usize * h as usize, 0);
@@ -669,13 +794,34 @@ mod tests {
         Screen::new(0, Arc::default())
     }
 
+    fn stats() -> BarStats {
+        crate::disp::StatusSource::detached().snapshot(Instant::now(), 0)
+    }
+
+    /// A renderer that notes what it was shown: (seq, width, height) of each
+    /// present, and each size it was told.
+    #[derive(Clone, Default)]
+    struct Shown {
+        presents: Arc<Mutex<Vec<(u64, u32, u32)>>>,
+        sizes: Arc<Mutex<Vec<(usize, usize)>>>,
+    }
+
+    impl Renderer for Shown {
+        fn present(&mut self, f: &Frame, _: &BarStats) {
+            self.presents.lock().push((f.seq, f.width, f.height));
+        }
+        fn resize(&mut self, w: usize, h: usize) {
+            self.sizes.lock().push((w, h));
+        }
+    }
+
     /// With nothing looking the board composes nothing, and a request, a
     /// capturing client or a renderer each bring the compose back.
     #[test]
     fn a_screen_nobody_looks_at_is_not_composed() {
         let s = screen();
         let composes = std::cell::Cell::new(0);
-        let tick = |s: &Screen| s.tick(|f, _| { composes.set(composes.get() + 1); f.width = 1; f.height = 1; f.words.push(7); true });
+        let tick = |s: &Screen| s.tick(stats, |f, _| { composes.set(composes.get() + 1); f.width = 1; f.height = 1; f.words.push(7); true });
         assert_eq!(tick(&s), Need::default());
         assert_eq!(composes.get(), 0);
         assert_eq!(s.counts.get(), (1, 0, 1), "a tick nobody looked at is counted as skipped");
@@ -689,13 +835,8 @@ mod tests {
         s.requests.capture(false);
         assert!(!tick(&s).any());
         assert_eq!(composes.get(), 2);
-        struct Quiet;
-        impl Renderer for Quiet {
-            fn present(&mut self, _: &mut crate::disp::Rex3Screen, _: &mut crate::debug_overlay::DebugOverlay, _: &mut crate::disp::StatusBar,
-                _: &mut crate::disp::StatusBarTexture, _: &crate::disp::BarStats, _: bool, _: Option<&[u32]>, _: Option<&[u32]>) {}
-        }
-        *s.window.renderer.lock() = Some(Box::new(Quiet));
-        assert_eq!(tick(&s), Need { words: false, gpu: false, redraw: true });
+        *s.window.renderer.lock() = Some(Box::new(Shown::default()));
+        assert_eq!(tick(&s), Need { words: false, gpu: false, planes: false, redraw: true });
         assert_eq!(composes.get(), 3);
     }
 
@@ -705,7 +846,7 @@ mod tests {
     fn a_request_made_during_a_compose_is_answered_by_the_next_frame() {
         let s = screen();
         s.requests.request();
-        s.tick(|f, _| {
+        s.tick(stats, |f, _| {
             f.words.push(1);
             f.width = 1;
             f.height = 1;
@@ -714,13 +855,13 @@ mod tests {
         });
         assert!(s.requests.pending(), "the second request needs a frame composed after it");
         assert_eq!(s.latest().unwrap().seq, 1);
-        s.tick(|f, _| { f.words.push(2); f.width = 1; f.height = 1; true });
+        s.tick(stats, |f, _| { f.words.push(2); f.width = 1; f.height = 1; true });
         assert!(!s.requests.pending());
         assert_eq!(s.latest().unwrap().words, [2]);
         assert_eq!(s.latest().unwrap().seq, 2);
         // An unchanged picture still answers the request.
         s.requests.request();
-        s.tick(|_, _| false);
+        s.tick(stats, |_, _| false);
         assert!(!s.requests.pending());
         assert_eq!(s.latest().unwrap().seq, 2, "and the newest frame stands");
     }
@@ -732,11 +873,11 @@ mod tests {
         let s = screen();
         let mut f = s.frame(2, 1);
         f.words.copy_from_slice(&[1, 2]);
-        s.publish(f);
+        s.publish(f, &stats());
         let held = s.latest().unwrap();
         let mut f = s.frame(2, 1);
         f.words.copy_from_slice(&[3, 4]);
-        s.publish(f);
+        s.publish(f, &stats());
         assert_eq!(held.words, [1, 2]);
         assert_eq!(s.latest().unwrap().words, [3, 4]);
         assert_eq!(s.size(), (2, 1));
@@ -751,7 +892,7 @@ mod tests {
         let stop = Arc::new(DisplayStop::default());
         let t = {
             let (s, running, stop) = (s.clone(), running.clone(), stop.clone());
-            std::thread::spawn(move || run_display(&s, &running, &stop, || {}, |f, _| {
+            std::thread::spawn(move || run_display(&s, &running, &stop, stats, || {}, |f, _| {
                 f.width = 2;
                 f.height = 1;
                 f.words.extend([5, 6]);
@@ -764,6 +905,34 @@ mod tests {
         running.store(false, Ordering::SeqCst);
         s.changed.wake();
         t.join().unwrap();
+    }
+
+    /// A frame reaches the renderer once, with the size told first; an unchanged
+    /// picture is shown again only at the idle rate, and a renderer installed
+    /// later gets the newest frame at once.
+    #[test]
+    fn a_renderer_is_shown_each_new_frame_and_the_old_one_at_the_idle_rate() {
+        let s = screen();
+        let shown = Shown::default();
+        *s.window.renderer.lock() = Some(Box::new(shown.clone()));
+        s.tick(stats, |f, _| { f.width = 4; f.height = 2; f.words.resize(8, 1); true });
+        assert_eq!(*shown.sizes.lock(), [(4, 2)]);
+        assert_eq!(*shown.presents.lock(), [(1, 4, 2)]);
+        for _ in 0..IDLE_REFRESH - 1 {
+            s.tick(stats, |_, _| false);
+        }
+        assert_eq!(shown.presents.lock().len(), 1, "an unchanged picture waits for the idle rate");
+        s.tick(stats, |_, _| false);
+        assert_eq!(*shown.presents.lock(), [(1, 4, 2), (1, 4, 2)], "the same frame again, so the status bar moves");
+        assert_eq!(shown.sizes.lock().len(), 1, "the size is told once");
+        // A second renderer has not seen the frame.
+        let second = Shown::default();
+        *s.window.renderer.lock() = Some(Box::new(second.clone()));
+        s.tick(stats, |_, _| false);
+        assert_eq!(*second.presents.lock(), [(1, 4, 2)]);
+        // A new size is told before its frame.
+        s.tick(stats, |f, _| { f.width = 2; f.height = 2; f.words.resize(4, 2); true });
+        assert_eq!(*second.sizes.lock(), [(4, 2), (2, 2)]);
     }
 
     #[test]

@@ -33,8 +33,6 @@ use crate::cpu::mips_cache_v2::MipsCache;
 use crate::cpu::mips_tlb::MipsTlb;
 use crate::dev::crime_mem::O2Memory;
 use crate::dev::prom_image;
-use crate::dev::ng1::rex3::Renderer;
-use crate::disp::Rex3Screen;
 use crate::hptimer::TimerManager;
 use crate::ip32::{Ip32Bus, Ip32Options, FIRMWARE_LOAD_VA, FIRMWARE_SPAN, NO_ECC_BASE, PROM_SIZE, RAM_BASE, RAM_WINDOW_SIZE};
 use crate::traits::{BusDevice, Device, MachineEvent, Signal};
@@ -938,8 +936,6 @@ pub struct O2Display {
     bus: Arc<Ip32Bus>,
     screens: [Arc<crate::gfx_display::Screen>; 1],
     display_stop: crate::gfx_display::DisplayStop,
-    /// What the installed renderer presents from.
-    screen: Mutex<Rex3Screen>,
     /// The status bar's inputs; the heartbeat is the MACE ID chip's, and the
     /// Hz is the CPU's Compare-match count (IRIX's clock tick on the O2,
     /// which has no 8254).
@@ -963,7 +959,6 @@ impl O2Display {
             bus,
             screens: [Arc::new(screen)],
             display_stop: Default::default(),
-            screen: Mutex::new(Rex3Screen::new()),
             status,
             running,
             #[cfg(feature = "wgpu")]
@@ -1017,47 +1012,24 @@ impl O2Display {
         self.bus.render_screen(out)
     }
 
-    /// One frame composed on the GPU and shown by the renderer from there; the
-    /// size. None when the frame is left to the CPU compose: the display is
-    /// off, or the kernel does not take this picture. Err: the GPU failed and
-    /// the machine is stopping.
+    /// One frame composed on the GPU into `out.gpu`, for a window on the same
+    /// device; the size. None when the frame is left to the CPU compose: the
+    /// display is off, or the kernel does not take this picture. Err: the GPU
+    /// failed and the machine is stopping.
     #[cfg(feature = "wgpu")]
-    #[allow(clippy::too_many_arguments)]
-    fn present_on_gpu(
-        &self,
-        compose: bool,
-        full: bool,
-        sized: &mut (usize, usize),
-        overlay: &mut crate::debug_overlay::DebugOverlay,
-        status_bar: &mut crate::disp::StatusBar,
-        sbtex: &mut crate::disp::StatusBarTexture,
-        stats: &crate::disp::BarStats,
-    ) -> Result<Option<(usize, usize)>, ()> {
+    fn compose_on_gpu(&self, full: bool, out: &mut crate::gfx_display::Frame) -> Result<Option<(usize, usize)>, ()> {
         use crate::dev::o2gfx_wgpu::Composed;
         let mut gpu = self.gpu.lock();
         let Some(sc) = gpu.as_mut() else { return Ok(None) };
-        // A frame with nothing new on it is shown again as it stands.
-        if compose || sc.shown.is_none() {
-            match sc.compose(&self.bus.gbe, &self.bus.ram, full) {
-                Ok(Composed::Frame(..)) => {}
-                Ok(Composed::Off | Composed::Unsupported) => return Ok(None),
-                Err(_) => return Err(()),
-            }
+        match sc.compose(&self.bus.gbe, &self.bus.ram, full) {
+            Ok(Composed::Frame(..)) => {}
+            Ok(Composed::Off | Composed::Unsupported) => return Ok(None),
+            Err(_) => return Err(()),
         }
         let Some((w, h)) = sc.shown else { return Ok(None) };
-        let mut canvas = self.screen.lock();
-        canvas.width = w as usize;
-        canvas.height = h as usize;
-        canvas.prebuilt = true;
-        canvas.status_bar_only = false;
-        self.out().set_size(w, h);
-        if let Some(r) = self.out().window.renderer.lock().as_mut() {
-            if *sized != (w as usize, h as usize) {
-                *sized = (w as usize, h as usize);
-                r.resize(w as usize, h as usize);
-            }
-            r.present_gpu_frame(sc.output(), w, h, &mut canvas, overlay, status_bar, sbtex, stats);
-        }
+        out.width = w;
+        out.height = h;
+        out.gpu = Some(sc.output().clone());
         Ok(Some((w as usize, h as usize)))
     }
 
@@ -1084,15 +1056,9 @@ impl O2Display {
     fn display_loop(&self) {
         let screen = self.out();
         let changed = &screen.changed;
-        let mut status_bar = crate::disp::StatusBar::new();
-        let mut overlay = crate::debug_overlay::DebugOverlay::new();
-        let mut sbtex = crate::disp::StatusBarTexture::new();
         let mut scan = vec![0u32; 2048 * 2048];
         let mut size = (0usize, 0usize);
-        // The size the renderer was last given.
-        let mut sized = (0usize, 0usize);
         let mut first = true;
-        let mut idle = 0u32;
         let mut had_renderer = false;
         let mut scanned = Instant::now();
         // The GPU keeps copies of the frame's tiles. The engine's writes keep
@@ -1105,11 +1071,11 @@ impl O2Display {
             screen,
             &self.running,
             &self.display_stop,
+            || self.status.snapshot(Instant::now(), 0),
             // A shadow control still to go live at blanking is looked at every
             // period: it marks only when something next looks.
             || if self.bus.gbe.latch_pending() { changed.mark() },
             |out, need| {
-                let start = Instant::now();
                 // Taken before the scan reads anything, so a mark made while it
                 // runs is for the next frame.
                 let marked = changed.take() | self.bus.gbe.latch_pending();
@@ -1119,32 +1085,24 @@ impl O2Display {
                 let compose = first || marked || need.words || (has_renderer && !had_renderer) || on_gpu != was_on_gpu || scanned.elapsed() >= RESCAN;
                 had_renderer = has_renderer;
                 was_on_gpu = on_gpu;
-                idle = if compose { 0 } else { idle.saturating_add(1) };
-                let refresh = !compose && has_renderer && idle >= crate::gfx_display::IDLE_REFRESH;
                 #[cfg(feature = "wgpu")]
-                if on_gpu && (compose || refresh) {
+                if on_gpu && compose {
                     let full = copied.elapsed() >= RESCAN;
-                    let stats = self.status.snapshot(start, 0);
-                    let presented = self.present_on_gpu(compose, full, &mut sized, &mut overlay, &mut status_bar, &mut sbtex, &stats);
                     // A failed GPU has stopped the machine; no frame is made
                     // on the CPU in its place.
-                    let Ok(presented) = presented else {
+                    let Ok(composed) = self.compose_on_gpu(full, out) else {
                         screen.counts.count(false);
                         return false;
                     };
-                    if let Some(shown) = presented {
-                        if compose {
-                            first = false;
-                            scanned = Instant::now();
-                        }
-                        if full && compose {
+                    if let Some(shown) = composed {
+                        first = false;
+                        scanned = Instant::now();
+                        if full {
                             copied = Instant::now();
                         }
-                        idle = 0;
                         size = shown;
-                        screen.counts.count(compose);
-                        // The words were not made; a request would have asked.
-                        return false;
+                        screen.counts.count(true);
+                        return true;
                     }
                 }
                 if compose {
@@ -1153,43 +1111,19 @@ impl O2Display {
                     let shown = self.scan(&mut scan);
                     // Off: keep the last size, black.
                     let (w, h) = shown.map(|(w, h)| (w as usize, h as usize)).unwrap_or(if size.0 == 0 { (1280, 1024) } else { size });
-                    let mut canvas = self.screen.lock();
-                    let stride = crate::disp::FB_STRIDE;
-                    for y in 0..h {
-                        let row = &mut canvas.fb_rgb[y * stride..y * stride + w];
-                        if shown.is_some() {
-                            row.copy_from_slice(&scan[y * w..(y + 1) * w]);
-                        } else {
-                            row.fill(0xff00_0000);
-                        }
-                    }
-                    canvas.width = w;
-                    canvas.height = h;
                     size = (w, h);
                     out.width = w as u32;
                     out.height = h as u32;
                     out.words.clear();
-                    for y in 0..h {
-                        out.words.extend_from_slice(&canvas.fb_rgb[y * stride..y * stride + w]);
-                    }
-                }
-                if compose || refresh {
-                    idle = 0;
-                    let mut canvas = self.screen.lock();
-                    canvas.prebuilt = true;
-                    canvas.status_bar_only = !compose;
-                    let (w, h) = (canvas.width, canvas.height);
-                    let stats = self.status.snapshot(start, 0);
-                    if let Some(r) = screen.window.renderer.lock().as_mut() {
-                        if (w, h) != sized {
-                            r.resize(w, h);
-                            sized = (w, h);
-                        }
-                        r.present(&mut canvas, &mut overlay, &mut status_bar, &mut sbtex, &stats, false, None, None);
+                    if shown.is_some() {
+                        out.words.extend_from_slice(&scan[..w * h]);
+                    } else {
+                        out.words.resize(w * h, 0xff00_0000);
                     }
                 }
                 // Counted when the frame is in the screen, which is what a
-                // reader of the counts waits for.
+                // reader of the counts waits for. A window has the unchanged
+                // frame shown again every few frames so its status bar moves.
                 screen.counts.count(compose);
                 compose
             },
@@ -1621,7 +1555,6 @@ mod display_tests {
         assert!(!screen.requests.pending());
         assert!(frame.width > 0 && frame.words.len() == (frame.width * frame.height) as usize);
         assert_eq!(frame.words[0], 0xff33_2211, "scan-out, in the renderers' format, opaque");
-        assert_eq!(display.screen.lock().fb_rgb[0], 0xff33_2211);
         assert_eq!(composed(), 1);
 
         // A renderer watches: a frame at once for its arrival, then marks.

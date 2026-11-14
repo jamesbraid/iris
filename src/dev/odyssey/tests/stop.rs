@@ -7,7 +7,7 @@ use crate::dev::odyssey::command::CFIFO_PREAMBLE;
 use std::sync::Arc;
 use crate::dev::heart::{host_clock, Heart, HeartConfig};
 use crate::dev::heart_mem::HeartRam;
-use crate::dev::ng1::rex3::Renderer;
+use crate::gfx_display::{Frame, Renderer};
 use crate::traits::Device;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::mpsc;
@@ -25,18 +25,7 @@ struct MainBoundRenderer {
 }
 
 impl Renderer for MainBoundRenderer {
-    fn present(
-        &mut self,
-        _screen: &mut crate::disp::Rex3Screen,
-        _overlay: &mut crate::debug_overlay::DebugOverlay,
-        _status: &mut crate::disp::StatusBar,
-        _sbtex: &mut crate::disp::StatusBarTexture,
-        _stats: &crate::disp::BarStats,
-        _need_readback: bool,
-        _live_fb_rgb: Option<&[u32]>,
-        _live_fb_aux: Option<&[u32]>,
-    ) {
-    }
+    fn present(&mut self, _: &Frame, _: &crate::disp::BarStats) {}
 
     fn stop(&mut self) {
         let (answer, answered) = mpsc::channel();

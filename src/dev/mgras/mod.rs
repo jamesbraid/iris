@@ -77,7 +77,6 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::config::GraphicsBoard;
-use crate::dev::ng1::rex3::Renderer;
 use crate::gfifo::GFifo;
 use crate::locks::SpinLock;
 use crate::traits::{BusDevice, BusRead8, BusRead16, BusRead32, BusRead64, BUS_BUSY, BUS_OK, Device, Saveable};
@@ -379,9 +378,6 @@ pub struct Mgras {
     refresh: SpinLock<Option<thread::JoinHandle<()>>>,
     screens: [Arc<crate::gfx_display::Screen>; 1],
     display_stop: crate::gfx_display::DisplayStop,
-    /// The finished frame, handed to the renderer as a prebuilt picture
-    /// (`Rex3Screen::prebuilt`), as GR2 does.
-    screen: Mutex<crate::disp::Rex3Screen>,
     /// Frames the GPU scan-out presented on the GPU, and read back.
     gpu_frames: [AtomicU64; 2],
     /// The GPU scan-out over the GPU unit's pixel pages, the display
@@ -592,7 +588,6 @@ impl Mgras {
             addr_of_mut!((*p).refresh).write(SpinLock::new(None));
             addr_of_mut!((*p).screens).write([Arc::new(crate::gfx_display::Screen::new(0, Arc::default()))]);
             addr_of_mut!((*p).display_stop).write(Default::default());
-            addr_of_mut!((*p).screen).write(Mutex::new(crate::disp::Rex3Screen::new()));
             addr_of_mut!((*p).status).write(status);
             addr_of_mut!((*p).trace).write(SpinLock::new(debug::MgrasTrace::new()));
             a.assume_init()
@@ -641,7 +636,6 @@ impl Mgras {
         register_spin("mgras::refresh", self, |m| &m.refresh);
         register_spin("mgras::trace", self, |m| &m.trace);
         register_mutex_fn("mgras::renderer", self, |m| m.screens[0].window.renderer.is_locked());
-        register_mutex_fn("mgras::screen", self, |m| m.screen.is_locked());
     }
 
     /// The CPU-side state, locked.
