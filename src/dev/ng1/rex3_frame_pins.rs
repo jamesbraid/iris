@@ -115,7 +115,19 @@ fn composed(rex: &Rex3) -> (usize, usize, Vec<u32>) {
     let diag = AtomicU64::new(0);
     let rgb = unsafe { &*rex.fb_rgb.get() };
     let aux = unsafe { &*rex.fb_aux.get() };
-    screen.refresh(&rgb[..], &aux[..], true, &rex.vc2, &rex.xmap0, &rex.cmap0, &rex.bt445, &diag);
+    // The first refresh copies everything; under dirty upload that is a full-damage snapshot.
+    #[cfg(feature = "rex-dirty-upload")]
+    let copy_fb = {
+        let mut all = crate::dev::ng1::rex3_dirty::DamageSnapshot::default();
+        all.mark_full(crate::dev::ng1::rex3_dirty::DamagePlane::Rgb);
+        all.mark_full(crate::dev::ng1::rex3_dirty::DamagePlane::Aux);
+        all
+    };
+    #[cfg(feature = "rex-dirty-upload")]
+    let copy_fb = &copy_fb;
+    #[cfg(not(feature = "rex-dirty-upload"))]
+    let copy_fb = true;
+    screen.refresh(&rgb[..], &aux[..], copy_fb, &rex.vc2, &rex.xmap0, &rex.cmap0, &rex.bt445, &diag);
     assert_eq!((screen.width, screen.height), (W, H));
     // What the refresh thread latches at each retrace (rex3.rs, `screen.topscan = topscan`).
     screen.topscan = unsafe { (*rex.context.get()).topscan as usize };

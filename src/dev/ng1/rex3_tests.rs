@@ -64,7 +64,6 @@ fn make_rex3_unstarted() -> TestBoard<Rex3> {
         .expect("make_rex3_unstarted thread panicked")
 }
 
-#[cfg(any(not(feature = "rex-dirty-upload"), feature = "rex-gpu"))]
 fn start_rex3_processor_only(rex: &Rex3) {
     assert!(!rex.running.swap(true, Ordering::SeqCst));
     let rex3 = unsafe { std::mem::transmute::<&Rex3, &'static Rex3>(rex) };
