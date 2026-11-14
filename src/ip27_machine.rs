@@ -67,7 +67,7 @@ use crate::machine_state::GuestState;
 use crate::monitor::{Monitor, DEFAULT_PORT as DEFAULT_MONITOR_PORT};
 use crate::net::{GatewayConfig, Link, NatControl};
 use crate::scsi::ScsiBus;
-use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Signal, BUS_ERR};
+use crate::traits::{BusDevice, Device, MachineEvent, MachineFatal, Resettable, Signal, BUS_ERR};
 use crate::xtalk::Upstream;
 use crate::workstation::{register_system_controller, DiscChanger, MachineRef, MachineSlot, Workstation};
 use parking_lot::Mutex;
@@ -267,7 +267,7 @@ pub trait Ip27Board: 'static {
     /// The nodes the board carries, in slot order.
     fn specs(cfg: &MachineConfig) -> Result<Vec<BoardSpec>, String>;
     /// Wire the board's I/O to the nodes, and the nodes to each other.
-    fn wire(nodes: &[&Node], cfg: &MachineConfig) -> Result<BoardIo, String>;
+    fn wire(nodes: &[&Node], cfg: &MachineConfig, faults: &Sender<MachineFatal>) -> Result<BoardIo, String>;
 }
 
 pub type Origin200Machine = Ip27Machine<Origin200>;
@@ -291,6 +291,8 @@ pub struct Ip27Machine<B: Ip27Board> {
     /// The product's name, for messages.
     name: &'static str,
     events: Option<Receiver<MachineEvent>>,
+    fatal_rx: Option<Receiver<MachineFatal>>,
+    fatal_fault: Option<MachineFatal>,
     slot: Option<MachineSlot>,
     lifecycle: GuestState,
 }
@@ -485,7 +487,8 @@ impl<B: Ip27Board> Ip27Machine<B> {
         }
 
         let nodes: Vec<&Node> = parts.iter().collect();
-        let io = B::wire(&nodes, cfg)?;
+        let (fatal_tx, fatal_rx) = channel();
+        let io = B::wire(&nodes, cfg, &fatal_tx)?;
 
         let (tx, rx) = channel();
         let windows = Arc::new(ip27::Windows::default());
@@ -541,6 +544,8 @@ impl<B: Ip27Board> Ip27Machine<B> {
             nvram: cfg.nvram.clone(),
             name: product(cfg),
             events: Some(rx),
+            fatal_rx: Some(fatal_rx),
+            fatal_fault: None,
             slot: None,
             lifecycle: GuestState::Idle,
         })
@@ -725,7 +730,14 @@ impl<B: Ip27Board> Workstation for Ip27Machine<B> {
     fn register_system_controller(&mut self) {
         let slot = self.machine_slot();
         let events = self.events.take().expect("system controller registered twice");
-        register_system_controller(&self.monitor, slot, Some(events));
+        register_system_controller(&self.monitor, slot.clone(), Some(events));
+        crate::workstation::register_fatal_controller(slot, self.fatal_rx.take());
+    }
+    fn fatal_fault(&self) -> Option<MachineFatal> {
+        self.fatal_fault.clone()
+    }
+    fn latch_fatal_fault(&mut self, fault: MachineFatal) -> bool {
+        self.fatal_fault.is_none() && self.fatal_fault.replace(fault).is_none()
     }
     fn monitor_addr(&self) -> Option<SocketAddr> {
         self.monitor.bound_addr()
@@ -911,7 +923,7 @@ impl Ip27Board for Origin200 {
         }])
     }
 
-    fn wire(nodes: &[&Node], cfg: &MachineConfig) -> Result<BoardIo, String> {
+    fn wire(nodes: &[&Node], cfg: &MachineConfig, _faults: &Sender<MachineFatal>) -> Result<BoardIo, String> {
         let node = nodes[0];
         let controller = Origin200Controller::new(node, section(cfg).controller_store.as_deref().map(Path::new))?;
         let bridge = Bridge::new(Upstream::new().with(node.hub.host_port(HUB_HOST_WIDGET)), &PIN_WIRING);

@@ -590,6 +590,32 @@ impl Baked {
         self.default
     }
 
+    /// The whole colour map as opaque `0xAABBGGRR` pixels, for a scan-out that
+    /// resolves windows itself.
+    #[cfg(feature = "wgpu")]
+    pub(super) fn cmap(&self) -> &[u32] {
+        &self.cmap
+    }
+
+    /// Direct colour's bytes through the gamma RAM, by channel (red, green, blue).
+    #[cfg(feature = "wgpu")]
+    pub(super) fn lut(&self) -> &[[u8; 256]; 3] {
+        &self.lut
+    }
+
+    /// The glyph cursor: its box's top-left, its third colour, foreground and
+    /// background, and its rows, as `draw_cursor` reads them.
+    #[cfg(feature = "wgpu")]
+    pub(super) fn glyph(&self) -> Option<(i64, i64, [u32; 3], &[u32; 256])> {
+        self.cursor.as_ref().map(|c| (c.x0, c.y0, [c.third, c.fg, c.bg], &c.rows))
+    }
+
+    /// The DAC cursor, if one is drawn.
+    #[cfg(feature = "wgpu")]
+    pub(super) fn dac_draw(&self) -> Option<&DacDraw> {
+        self.dac_cursor.as_ref()
+    }
+
     pub fn window(&self, id: usize) -> Window {
         self.windows[id]
     }
