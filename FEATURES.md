@@ -354,7 +354,7 @@ Omit `[nfs]` to disable the share; the default forward list is empty.
 
 | Key | Default | Values and behavior |
 |---|---|---|
-| `vnc.listen` | `unset` (no server) | `host:port`, or a port on 127.0.0.1, to serve the screen, keyboard and mouse over VNC (RFB 3.8; Raw and ZRLE; no password). Every board, with a window or `ci`; not `headless`. Standalone `iris` and iris-gui. See [HELP.md](HELP.md#vnc) and [iris-gui-README.md](iris-gui-README.md#vnc). |
+| `vnc.listen` | `unset` (no server) | `host:port`, or a port on 127.0.0.1, to serve the screen (a machine with several screens serves screen N on the port N above), keyboard and mouse over VNC (RFB 3.8; Raw and ZRLE; no password). Every board, with a window or `ci`; not `headless`. Standalone `iris` and iris-gui. See [HELP.md](HELP.md#vnc) and [iris-gui-README.md](iris-gui-README.md#vnc). |
 | `vnc.max_fps` | `30` | Most updates a second sent to a viewer (1–120). |
 | `vnc.password_file` | `unset` | File holding the VNC password (RFB VNC Authentication: first 8 bytes). Unset: `IRIS_VNC_PASSWORD_FILE`, then `IRIS_VNC_PASSWORD` (the password itself) from the environment, then no password. Standalone `iris` only; see [HELP.md](HELP.md#vnc). |
 

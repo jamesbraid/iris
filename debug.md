@@ -533,6 +533,8 @@ to learn the cursor's hotspot exactly.
 
 | Command | Description |
 |---|---|
+| `screen [N] <verb>` | With several screens (dual-head Newport), N is the screen's place in `screen list` (default 0); every `screen` verb below takes it first, as `cpu N <verb>` does. One screen needs no index |
+| `screen list` | Each screen's index, where it sits ("pipe 1, channel 0") and its size |
 | `screen info` | Size, hardware cursor, pointer position, whether the guest has enabled the mouse, buttons held |
 | `screen shot <file.png> [x y w h]` | The composed screen as PNG (no host status bar), optionally cropped |
 | `screen pix <x> <y>` | One pixel, `rrggbb` |
