@@ -4,6 +4,8 @@ name: xplat-gpu
 # D3D12/WARP), with a Linux lavapipe run as the control. Dispatch only.
 on:
   workflow_dispatch:
+  push:
+    branches: [ "spike/xplat-gpu" ]
 
 env:
   CARGO_TERM_COLOR: always
