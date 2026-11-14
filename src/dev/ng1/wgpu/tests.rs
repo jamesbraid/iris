@@ -124,3 +124,68 @@ fn the_gpu_compose_matches_the_software_compositor() {
         assert_eq!(bad, 0, "round {round}: {bad} pixels differ");
     }
 }
+
+/// A heartbeat frame (only the status bar changed) leaves the planes on the
+/// GPU: it uploads no plane or window-id bytes and composes the same frame.
+/// A change of size uploads everything again.
+#[test]
+fn a_heartbeat_uploads_no_plane_data() {
+    let Some(gpu) = gpu() else { return };
+    let mut scan = Ng1Scanout::new(&gpu).unwrap_or_else(|e| panic!("{e}"));
+    let mut rng = Lcg(11);
+    let stride = crate::disp::FB_STRIDE;
+    let mut fb_rgb = vec![0u32; stride * crate::disp::FB_MAX_H];
+    let mut fb_aux = vec![0u32; stride * crate::disp::FB_MAX_H];
+    for v in fb_rgb[..stride * 1024].iter_mut() {
+        *v = rng.next();
+    }
+    for v in fb_aux[..stride * 1024].iter_mut() {
+        *v = rng.next() & !0xc;
+    }
+    let did = vec![0u8; stride * crate::disp::FB_MAX_H];
+    let xmap = [0u32; 32];
+    let mut cmap = [0u32; 8192];
+    for c in cmap.iter_mut() {
+        *c = rng.next() & 0x00ff_ffff;
+    }
+    let ramdac = [0u32; 256];
+    let vc2_ram = vec![0u16; 32768];
+    let vc2_regs = [0u16; 32];
+    let source = |width, height, status_bar_only| CompositorSource {
+        fb_rgb: &fb_rgb,
+        fb_aux: &fb_aux,
+        fb_rgb_damage: &[],
+        fb_aux_damage: &[],
+        did: &did,
+        xmap_mode: &xmap,
+        xmap_config: 0,
+        xmap_cursor_cmap: 0,
+        xmap_popup_cmap: 0,
+        cmap: &cmap,
+        ramdac: &ramdac,
+        vc2_ram: &vc2_ram,
+        vc2_regs: &vc2_regs,
+        topscan: 0,
+        cursor_x_adjust: 0,
+        width,
+        height,
+        status_bar_only,
+        prebuilt: None,
+    };
+    let mut full = vec![0u32; 1280 * 1024];
+    let mut beat = vec![0u32; 1280 * 1024];
+    scan.run(&source(1280, 1024, false), &mut full).unwrap_or_else(|e| panic!("{e}"));
+    let after_full = scan.uploaded;
+    assert!(after_full > 4 * 2048 * 1024, "the full frame uploaded the planes: {after_full} bytes");
+
+    scan.run(&source(1280, 1024, true), &mut beat).unwrap_or_else(|e| panic!("{e}"));
+    let heartbeat = scan.uploaded - after_full;
+    assert!(heartbeat <= 2 * 32768, "a heartbeat uploaded {heartbeat} bytes, more than the VC2 RAM");
+    assert!(beat == full, "the heartbeat composed a different frame");
+
+    // A new size has no plane on the GPU to reuse, whatever the flag says.
+    let before_resize = scan.uploaded;
+    let mut small = vec![0u32; 640 * 480];
+    scan.run(&source(640, 480, true), &mut small).unwrap_or_else(|e| panic!("{e}"));
+    assert!(scan.uploaded - before_resize > 4 * 2048 * 1024, "a resize must upload the planes");
+}

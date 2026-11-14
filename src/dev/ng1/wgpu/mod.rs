@@ -117,6 +117,8 @@ pub struct Ng1Scanout {
     group: wgpu::BindGroup,
     /// Bytes of planes uploaded so far.
     pub uploaded: u64,
+    /// The size of the frame the plane buffers last held a full upload for.
+    uploaded_size: Option<(usize, usize)>,
 }
 
 impl Ng1Scanout {
@@ -149,7 +151,7 @@ impl Ng1Scanout {
             ],
         });
         gpu.check()?;
-        Ok(Ng1Scanout { pipeline, scanout, rgb, aux, did, vc2, group, uploaded: 0 })
+        Ok(Ng1Scanout { pipeline, scanout, rgb, aux, did, vc2, group, uploaded: 0, uploaded_size: None })
     }
 
     /// The device it runs on.
@@ -158,19 +160,30 @@ impl Ng1Scanout {
     }
 
     /// The planes and the slot of `src` up to the GPU.
+    ///
+    /// A heartbeat (`status_bar_only`) means no plane or window id changed
+    /// since the last full frame, so the buffers on the GPU are current and
+    /// the 19 MB of planes stay where they are. The tables and the slot
+    /// still go, and the frame is composed again: the cursor, scroll and
+    /// colour maps can move without touching the planes.
     fn upload(&mut self, src: &CompositorSource<'_>) -> Vec<u8> {
         let q = self.scanout.gpu();
-        let words = |s: &[u32]| PLANE_WORDS.min(s.len()) & !1;
-        let n = words(src.fb_rgb);
-        q.write(&self.rgb, 0, bytemuck::cast_slice(&src.fb_rgb[..n]));
-        let m = words(src.fb_aux);
-        q.write(&self.aux, 0, bytemuck::cast_slice(&src.fb_aux[..m]));
-        // The window-id map's rows on screen, whole words.
-        let d = (src.height.max(1) * crate::disp::FB_STRIDE).min(src.did.len()).min(DID_BYTES) & !3;
-        q.write(&self.did, 0, &src.did[..d]);
         let v = src.vc2_ram.len().min(VC2_WORDS) & !1;
         q.write(&self.vc2, 0, bytemuck::cast_slice(&src.vc2_ram[..v]));
-        self.uploaded += 4 * (n + m) as u64 + d as u64 + 2 * v as u64;
+        self.uploaded += 2 * v as u64;
+        let size = (src.width, src.height);
+        if !(src.status_bar_only && self.uploaded_size == Some(size)) {
+            let words = |s: &[u32]| PLANE_WORDS.min(s.len()) & !1;
+            let n = words(src.fb_rgb);
+            q.write(&self.rgb, 0, bytemuck::cast_slice(&src.fb_rgb[..n]));
+            let m = words(src.fb_aux);
+            q.write(&self.aux, 0, bytemuck::cast_slice(&src.fb_aux[..m]));
+            // The window-id map's rows on screen, whole words.
+            let d = (src.height.max(1) * crate::disp::FB_STRIDE).min(src.did.len()).min(DID_BYTES) & !3;
+            q.write(&self.did, 0, &src.did[..d]);
+            self.uploaded += 4 * (n + m) as u64 + d as u64;
+            self.uploaded_size = Some(size);
+        }
         bytemuck::bytes_of(&Ng1Slot::of(src)).to_vec()
     }
 
