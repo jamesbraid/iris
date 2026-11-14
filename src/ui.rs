@@ -10,12 +10,9 @@ use winit::{
 };
 use glow::HasContext;
 use crate::dev::ps2::Ps2Controller;
-use crate::dev::ng1::rex3::Renderer;
-use crate::gfx_display::GfxDisplay;
-use crate::disp::{Rex3Screen, StatusBar, StatusBarTexture, BarStats, STATUS_BAR_HEIGHT};
-use crate::compositor::{Compositor, SwCompositor};
+use crate::gfx_display::{Frame, GfxDisplay, Renderer};
+use crate::disp::{StatusBar, StatusBarTexture, BarStats, STATUS_BAR_HEIGHT};
 use crate::gl_compositor::GlCompositor;
-use crate::debug_overlay::DebugOverlay;
 use crate::hptimer::{TimerManager, TimerReturn};
 use crate::workstation::DiscChanger;
 use glutin::config::ConfigTemplateBuilder;
@@ -85,8 +82,9 @@ enum ResizeRequest {
 
 // Which context we actually got. GlCompositor and the texelFetch/integer-sampler
 // shaders need GL 3.2 core (usampler2D, #version 150). If the driver can't give us
-// that, we drop to a plain GL 2.1-compatible context and switch to SwCompositor +
-// a legacy (#version 120) copy-only shader — no integer textures, no texelFetch.
+// that, we drop to a plain GL 2.1-compatible context, Newport composes on the CPU,
+// and a legacy (#version 120) copy-only shader draws the words — no integer
+// textures, no texelFetch.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum GlTier { Core32, Legacy }
 
@@ -129,14 +127,19 @@ struct GlRenderer {
     // event thread so it can lock the window to the right aspect ratio.
     display_res: Arc<Mutex<(u32, u32)>>,
     state:       Option<GlState>,
-    compositor:  Box<dyn Compositor>,
-    use_gl_compositor: bool,
-    // Compositor swap asked for by `disp compositor <gl|sw>`, which arrives on
-    // a monitor/CI socket thread. Swapping means `glDeleteTextures` on the old
-    // compositor, and GL calls belong to the refresh thread that owns the
-    // context — so the request is only recorded here and serviced at the top of
-    // `present()`. See clanker/gui/gl-teardown-must-run-on-the-refresh-thread.md.
-    pending_compositor: Option<bool>,
+    // Newport's planes composed in a fragment shader: the frame's planes kind.
+    // None on a legacy context, where Newport composes on the CPU instead.
+    compositor:  Option<GlCompositor>,
+    // The status bar, drawn here under every board's frame.
+    status:      StatusBar,
+    sbtex:       StatusBarTexture,
+    // Textures for the frame's words and its debug overlay, made on first use.
+    words_tex:   Option<glow::Texture>,
+    overlay_tex: Option<glow::Texture>,
+    // The texture the last new frame left, and that frame's sequence number:
+    // a repeat of it is drawn again without composing or uploading.
+    main_tex:    Option<glow::Texture>,
+    seen_seq:    u64,
     current_w:     usize,
     current_h:     usize,
     current_win_w: usize,
@@ -336,7 +339,7 @@ impl GlRenderer {
                 .expect("fallback program must link");
 
             // If integer program failed, reuse fallback as integer_program too (same draw path,
-            // just won't do texelFetch). compositor_status() will reflect this.
+            // just won't do texelFetch).
             let integer_program = int_prog.unwrap_or(fb_prog);
 
             let viewport_info_loc = gl.get_uniform_location(integer_program, "viewport_info");
@@ -482,34 +485,10 @@ impl GlRenderer {
         let y0 = ((win_h - disp_h - sb_h) * 0.5).floor();
         (x0, y0, x0 + disp_w, y0 + disp_h, scale)
     }
-
-    /// Service a pending `disp compositor` swap. Refresh thread only: this is
-    /// where the old compositor's GL objects are actually deleted.
-    fn apply_pending_compositor(&mut self, gl: &glow::Context) {
-        let Some(use_gl) = self.pending_compositor.take() else { return };
-        if use_gl == self.use_gl_compositor { return; }
-        self.use_gl_compositor = use_gl;
-        self.compositor.destroy(gl);
-        self.compositor = if use_gl {
-            Box::new(GlCompositor::new())
-        } else {
-            Box::new(SwCompositor::new())
-        };
-    }
 }
 
 impl Renderer for GlRenderer {
-    fn present(
-        &mut self,
-        screen:        &mut Rex3Screen,
-        overlay:       &mut DebugOverlay,
-        status:        &mut StatusBar,
-        sbtex:         &mut StatusBarTexture,
-        stats:         &BarStats,
-        need_readback: bool,
-        live_fb_rgb:   Option<&[u32]>,
-        live_fb_aux:   Option<&[u32]>,
-    ) {
+    fn present(&mut self, frame: &Frame, stats: &BarStats) {
         // ensure_init(): runs the one-time GL setup (shader compile, VAO/
         // VBO creation, etc.) on whichever thread's first `present()` call
         // reaches it — the context genuinely does need to be created here
@@ -531,20 +510,9 @@ impl Renderer for GlRenderer {
             return;
         }
 
-        let width  = screen.width;
-        let height = screen.height;
+        let width  = frame.width as usize;
+        let height = frame.height as usize;
         if width == 0 || height == 0 { return; }
-
-        // Apply any pending `disp compositor` swap now, on the thread that owns
-        // the GL context. Done before the frame's `state` borrow so the old
-        // compositor's textures are deleted with a live, current context.
-        if self.pending_compositor.is_some() {
-            // Move the context out of `self.state` for the call: destroy() needs
-            // `&mut self` (it replaces `self.compositor`) and `&gl` at once.
-            let state = self.state.take().unwrap();
-            self.apply_pending_compositor(&state.gl);
-            self.state = Some(state);
-        }
 
         let state = self.state.as_mut().unwrap();
         let gl    = &state.gl;
@@ -616,9 +584,23 @@ impl Renderer for GlRenderer {
         let main_quad_y_bottom = (win_h_f - qy1) as i32;
 
         unsafe {
-            // ── Compositor runs first — it sets its own FBO/viewport ─────────
-            let src      = screen.compositor_source_from(live_fb_rgb, live_fb_aux);
-            let main_tex = self.compositor.compose(&src, gl);
+            // ── The picture first: composing sets its own FBO/viewport ───────
+            let new_frame = frame.seq != self.seen_seq || self.main_tex.is_none();
+            if new_frame {
+                self.main_tex = match (&frame.planes, &mut self.compositor) {
+                    // Newport's planes, composed here in the shader.
+                    (Some(planes), Some(compositor)) => {
+                        let planes = planes.0.lock();
+                        Some(compositor.compose(&planes.compositor_source(), gl))
+                    }
+                    _ if !frame.words.is_empty() => {
+                        Some(upload_words(gl, &mut self.words_tex, &frame.words, width, height))
+                    }
+                    _ => None,
+                };
+                self.seen_seq = frame.seq;
+            }
+            let Some(main_tex) = self.main_tex else { return };
 
             // Restore full-window viewport/scissor — compositor FBO left them dirty.
             gl.viewport(0, 0, win_w_i, win_h_i);
@@ -626,27 +608,6 @@ impl Renderer for GlRenderer {
             gl.scissor(0, 0, win_w_i, win_h_i);
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
-
-            // A prebuilt frame (GR2) is already final in `screen.rgba`; reading
-            // the GL framebuffer back would only replace it (it came back black).
-            let readback_bytes = if need_readback && !screen.prebuilt {
-                width * height * std::mem::size_of::<u32>()
-            } else {
-                0
-            };
-            crate::pf_counter!(crate::perfetto::events::REX3_READBACK_BYTES, readback_bytes);
-            if readback_bytes != 0 {
-                crate::pf_scope!(crate::perfetto::events::REX3_READBACK, readback_bytes);
-                if let Some(pixels) = self.compositor.read_pixels() {
-                    // Visible rows only: VNC capture reads every frame back.
-                    for y in 0..height {
-                        let row = y * crate::disp::FB_STRIDE;
-                        screen.rgba[row..row + width].copy_from_slice(&pixels[row..row + width]);
-                    }
-                } else {
-                    self.compositor.readback_to_screen(&mut screen.rgba, width, height, gl);
-                }
-            }
 
             // ── Pass 1: main display ─────────────────────────────────────────
             gl.scissor(0, 0, win_w_i, win_h_i);
@@ -660,11 +621,10 @@ impl Renderer for GlRenderer {
             }
 
             // ── Pass 2: debug overlay (alpha-blended) ────────────────────────
-            if overlay.active() {
+            if let Some(overlay) = frame.overlay.as_deref() {
                 gl.enable(glow::BLEND);
                 gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-                let ov_src = screen.overlay_source();
-                let ov_tex = overlay.render(&ov_src, gl);
+                let ov_tex = upload_words(gl, &mut self.overlay_tex, overlay, width, height);
                 if use_integer {
                     Self::draw_tex_integer(gl, state, state.main_vbo, ov_tex,
                         width as i32, height as i32, main_quad_y_bottom, scale_i,
@@ -678,7 +638,7 @@ impl Renderer for GlRenderer {
 
             // ── Pass 3: status bar ───────────────────────────────────────────
             gl.scissor(0, 0, win_w_i, win_h_i);
-            let sb_tex = sbtex.render_and_upload(status, stats, width, gl);
+            let sb_tex = self.sbtex.render_and_upload(&mut self.status, stats, width, gl);
             Self::draw_tex_fallback(gl, state, state.status_vbo, sb_tex, win_w_f, win_h_f);
 
             gl.disable(glow::SCISSOR_TEST);
@@ -703,7 +663,15 @@ impl Renderer for GlRenderer {
 
     fn stop(&mut self) {
         if let Some(state) = self.state.take() {
-            self.compositor.destroy(&state.gl);
+            if let Some(compositor) = &mut self.compositor {
+                compositor.destroy(&state.gl);
+            }
+            self.sbtex.destroy(&state.gl);
+            for tex in [self.words_tex.take(), self.overlay_tex.take()].into_iter().flatten() {
+                unsafe { state.gl.delete_texture(tex) };
+            }
+            self.main_tex = None;
+            self.seen_seq = 0;
             // Hand the context back to `not_current_context` so the next
             // `ensure_init()` call (on whatever thread REX3's next
             // start() respawns) sees a genuine "first call ever since the
@@ -732,36 +700,43 @@ impl Renderer for GlRenderer {
         self.current_win_h = 0;
     }
 
-    fn gl_compositor(&self) -> bool {
-        self.pending_compositor.unwrap_or(self.use_gl_compositor)
+    fn takes_planes(&self) -> bool {
+        self.compositor.is_some()
     }
+}
 
-    fn compositor_status(&self) -> String {
-        let comp = if self.use_gl_compositor { "gl" } else { "sw" };
-        format!("compositor={} shader=integer+fallback", comp)
+/// Words of a `width` by `height` picture, rows `width` apart, in a 2048 by
+/// `FB_MAX_H` texture made on first use; the texture holds the picture at
+/// its top left.
+fn upload_words(gl: &glow::Context, tex: &mut Option<glow::Texture>, words: &[u32], width: usize, height: usize) -> glow::Texture {
+    let (w, h) = (width.min(crate::disp::FB_STRIDE), height.min(crate::disp::FB_MAX_H));
+    unsafe {
+        let t = *tex.get_or_insert_with(|| {
+            let t = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(t));
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA as i32,
+                crate::disp::FB_STRIDE as i32, crate::disp::FB_MAX_H as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+            t
+        });
+        gl.bind_texture(glow::TEXTURE_2D, Some(t));
+        gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, width as i32);
+        let bytes = std::slice::from_raw_parts(words.as_ptr() as *const u8, words.len() * 4);
+        gl.tex_sub_image_2d(
+            glow::TEXTURE_2D, 0, 0, 0, w as i32, h as i32,
+            glow::RGBA, glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(bytes)),
+        );
+        gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
+        t
     }
-
-    // Called from the monitor/CI socket thread — NOT the context-owning refresh
-    // thread — so it must not touch GL. Record the request; `present()` applies
-    // it. The returned name is what the swap will settle on, which for a Legacy
-    // (GL 2.1) context is always "sw": GlCompositor needs 3.2 core.
-    fn switch_compositor(&mut self, use_gl: bool) -> &'static str {
-        let use_gl = use_gl && self.gl_tier == GlTier::Core32;
-        if use_gl == self.use_gl_compositor {
-            self.pending_compositor = None;
-            return if use_gl { "gl" } else { "sw" };
-        }
-        self.pending_compositor = Some(use_gl);
-        if use_gl { "gl" } else { "sw" }
-    }
-
 }
 
 /// The window drawn through wgpu (`renderer = "wgpu"`): the frame, the
 /// debug overlay and the status bar presented by `crate::wgpu::Presenter`,
-/// on the device of the board that draws on one, else on its own. Newport's
-/// CPU-owned planes are composed on that device; a board that composes its
-/// own frame hands it over finished.
+/// on the device of the board that draws on one, else on its own. A board
+/// hands over words, or a frame already on the device.
 #[cfg(feature = "wgpu")]
 struct WgpuRenderer {
     presenter: crate::wgpu::Presenter,
@@ -770,17 +745,12 @@ struct WgpuRenderer {
     event_proxy: EventLoopProxy<()>,
     scale: u32,
     display_res: Arc<Mutex<(u32, u32)>>,
-    compositor: SwCompositor,
-    /// Newport's planes composed on the presenter's device; None until the
-    /// first such frame, or when it cannot be made (then `compositor`).
-    ng1: Option<Result<crate::dev::ng1::wgpu::Ng1Scanout, ()>>,
-    /// The frame read back for screenshots and VNC, 0xAABBGGRR.
-    readback: Vec<u32>,
+    status: StatusBar,
+    sbtex: StatusBarTexture,
+    /// The status bar's rows cut to the frame's width.
+    bar: Vec<u32>,
     /// The first presentation error, reported once.
     failed: bool,
-    /// The presenter is on the board's own device, so frames the board
-    /// composes there can be presented as they are.
-    board_device: bool,
 }
 
 #[cfg(feature = "wgpu")]
@@ -793,89 +763,40 @@ impl WgpuRenderer {
             }
         }
     }
-}
 
-#[cfg(feature = "wgpu")]
-impl Renderer for WgpuRenderer {
-    fn present(
-        &mut self,
-        screen:        &mut Rex3Screen,
-        overlay:       &mut DebugOverlay,
-        status:        &mut StatusBar,
-        sbtex:         &mut StatusBarTexture,
-        stats:         &BarStats,
-        need_readback: bool,
-        live_fb_rgb:   Option<&[u32]>,
-        live_fb_aux:   Option<&[u32]>,
-    ) {
-        let (width, height) = (screen.width, screen.height);
-        if width == 0 || height == 0 {
-            return;
-        }
+    /// The window's size and the frame's, and the status bar for `width`:
+    /// what every presentation needs first.
+    fn prepare(&mut self, width: usize, height: usize, stats: &BarStats) {
         if let Some((w, h)) = self.window_size.lock().take() {
             self.presenter.resize(w, h);
         }
         *self.display_res.lock() = (width as u32, height as u32);
-        let prebuilt = screen.prebuilt;
-        // Newport's planes: composed on the GPU, presented from there, read
-        // back only for screenshots and VNC (`need_readback`).
-        if !prebuilt {
-            if self.ng1.is_none() {
-                self.ng1 = Some(crate::dev::ng1::wgpu::Ng1Scanout::new(self.presenter.gpu()).map_err(|e| {
-                    eprintln!("iris: Newport's compositor on the GPU is unavailable ({e}); composing on the CPU");
-                }));
-            }
-            if let Some(Ok(ng1)) = &mut self.ng1 {
-                let src = screen.compositor_source_from(live_fb_rgb, live_fb_aux);
-                let composed = if need_readback {
-                    self.readback.resize(width * height, 0);
-                    ng1.run(&src, &mut self.readback).map(|()| Ok(ng1.output()))
-                } else {
-                    Ok(ng1.compose(&src))
-                };
-                match composed {
-                    Ok(Ok(buffer)) => {
-                        if need_readback {
-                            for y in 0..height {
-                                let row = y * crate::disp::FB_STRIDE;
-                                for (d, &v) in screen.rgba[row..row + width].iter_mut().zip(&self.readback[y * width..(y + 1) * width]) {
-                                    *d = v;
-                                }
-                            }
-                        }
-                        let ov = if overlay.active() { Some(overlay.render_pixels(&screen.overlay_source())) } else { None };
-                        let sb = sbtex.render_pixels(status, stats, width);
-                        let frame = crate::wgpu::Frame::Gpu { buffer: &buffer, width: width as u32, height: height as u32 };
-                        let r = self.presenter.present(frame, ov, sb, crate::disp::FB_STRIDE);
-                        self.report(r);
-                        return;
-                    }
-                    Ok(Err(e)) | Err(e) => {
-                        eprintln!("iris: Newport's compositor on the GPU failed ({e}); composing on the CPU");
-                        self.ng1 = Some(Err(()));
-                    }
-                }
-            }
-            let src = screen.compositor_source_from(live_fb_rgb, live_fb_aux);
-            self.compositor.compose_pixels(&src);
+        // The presenter reads the bar at the frame's row length.
+        let rows = self.sbtex.render_pixels(&mut self.status, stats, width);
+        self.bar.clear();
+        for y in 0..STATUS_BAR_HEIGHT {
+            self.bar.extend_from_slice(&rows[y * crate::disp::FB_STRIDE..][..width]);
         }
-        let ov = if overlay.active() { Some(overlay.render_pixels(&screen.overlay_source())) } else { None };
-        let sb = sbtex.render_pixels(status, stats, width);
-        // A prebuilt frame is in `fb_rgb`, as the GL renderer takes it;
-        // `rgba` may lag it until something asks for a frame.
-        let rgba: &[u32] = if prebuilt { &screen.fb_rgb } else { self.compositor.pixels() };
-        let frame = crate::wgpu::Frame::Cpu { rgba, stride: crate::disp::FB_STRIDE, width: width as u32, height: height as u32 };
-        let r = self.presenter.present(frame, ov, sb, crate::disp::FB_STRIDE);
+    }
+}
+
+#[cfg(feature = "wgpu")]
+impl Renderer for WgpuRenderer {
+    fn present(&mut self, frame: &Frame, stats: &BarStats) {
+        let (width, height) = (frame.width as usize, frame.height as usize);
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.prepare(width, height, stats);
+        let shown = match &frame.gpu {
+            Some(buffer) => crate::wgpu::Frame::Gpu { buffer, width: frame.width, height: frame.height },
+            None if !frame.words.is_empty() => {
+                crate::wgpu::Frame::Cpu { rgba: &frame.words, stride: width, width: frame.width, height: frame.height }
+            }
+            None => return,
+        };
+        let r = self.presenter.present(shown, frame.overlay.as_deref(), &self.bar, width);
         self.report(r);
-        // Screenshots and VNC read the composed frame from `screen.rgba`; a
-        // prebuilt frame is there already.
-        if need_readback && !prebuilt {
-            let pixels = self.compositor.pixels();
-            for y in 0..height {
-                let row = y * crate::disp::FB_STRIDE;
-                screen.rgba[row..row + width].copy_from_slice(&pixels[row..row + width]);
-            }
-        }
     }
 
     fn resize(&mut self, width: usize, height: usize) {
@@ -886,71 +807,27 @@ impl Renderer for WgpuRenderer {
         let _ = self.event_proxy.send_event(());
     }
 
-    fn compositor_status(&self) -> String {
-        let comp = if matches!(self.ng1, Some(Ok(_))) { "gpu" } else { "sw" };
-        format!("renderer=wgpu compositor={comp} adapter={}", self.presenter.gpu().caps.adapter)
-    }
-
-    fn takes_gpu_frames(&self) -> bool {
-        self.board_device
-    }
-
-    fn present_gpu_frame(
-        &mut self,
-        frame:   &wgpu::Buffer,
-        width:   u32,
-        height:  u32,
-        screen:  &mut Rex3Screen,
-        overlay: &mut DebugOverlay,
-        status:  &mut StatusBar,
-        sbtex:   &mut StatusBarTexture,
-        stats:   &BarStats,
-    ) {
-        if width == 0 || height == 0 {
-            return;
-        }
-        if let Some((w, h)) = self.window_size.lock().take() {
-            self.presenter.resize(w, h);
-        }
-        *self.display_res.lock() = (width, height);
-        let ov = if overlay.active() { Some(overlay.render_pixels(&screen.overlay_source())) } else { None };
-        let sb = sbtex.render_pixels(status, stats, width as usize);
-        let r = self.presenter.present(crate::wgpu::Frame::Gpu { buffer: frame, width, height }, ov, sb, crate::disp::FB_STRIDE);
-        self.report(r);
-    }
-
-    #[cfg(test)]
-    fn resident_gpu_device(&self) -> Option<&Arc<crate::wgpu::Gpu>> {
+    fn gpu(&self) -> Option<&Arc<crate::wgpu::Gpu>> {
         Some(self.presenter.gpu())
     }
 
     #[cfg(test)]
-    fn present_resident_gpu_frame(
-        &mut self,
-        frame: &wgpu::Buffer,
-        width: u32,
-        height: u32,
-        _screen: &mut Rex3Screen,
-        overlay: &mut DebugOverlay,
-        status: &mut StatusBar,
-        sbtex: &mut StatusBarTexture,
-        stats: &BarStats,
-    ) -> Result<(), String> {
+    fn present_resident_gpu_frame(&mut self, frame: &Frame, stats: &BarStats) -> Result<(), String> {
+        let Some(buffer) = &frame.gpu else {
+            return Err("the frame is not on the device".into());
+        };
         // The debug overlay's pixel inspector expects CPU plane snapshots,
         // which are intentionally stale in resident mode.
-        if overlay.active() {
+        if frame.overlay.is_some() {
             return Err("resident debug overlays require a raw-plane observation".into());
         }
-        if let Some((w, h)) = self.window_size.lock().take() {
-            self.presenter.resize(w, h);
-        }
-        *self.display_res.lock() = (width, height);
-        let sb = sbtex.render_pixels(status, stats, width as usize);
+        let width = frame.width as usize;
+        self.prepare(width, frame.height as usize, stats);
         self.presenter.present(
-            crate::wgpu::Frame::Gpu { buffer: frame, width, height },
+            crate::wgpu::Frame::Gpu { buffer, width: frame.width, height: frame.height },
             None,
-            sb,
-            crate::disp::FB_STRIDE,
+            &self.bar,
+            width,
         )
     }
 }
@@ -1117,14 +994,9 @@ impl Ui {
         // the real resolution on the first frame and on any mode change.
         let display_res = Arc::new(Mutex::new((1280u32, 1024u32)));
 
-        // GlCompositor needs GL 3.2 core (usampler2D/texelFetch); Legacy tier falls
-        // back to SwCompositor, which only ever uploads a plain RGBA texture.
-        let use_gl_compositor = gl_tier == GlTier::Core32;
-        let compositor: Box<dyn Compositor> = if use_gl_compositor {
-            Box::new(GlCompositor::new())
-        } else {
-            Box::new(SwCompositor::new())
-        };
+        // GlCompositor needs GL 3.2 core (usampler2D/texelFetch); a legacy
+        // context takes words, which Newport then composes on the CPU.
+        let compositor = (gl_tier == GlTier::Core32).then(GlCompositor::new);
 
         let renderer = GlRenderer {
             window:      window.clone(),
@@ -1140,8 +1012,12 @@ impl Ui {
             display_res: display_res.clone(),
             state:       None,
             compositor,
-            use_gl_compositor,
-            pending_compositor: None,
+            status: StatusBar::new(),
+            sbtex: StatusBarTexture::new(),
+            words_tex: None,
+            overlay_tex: None,
+            main_tex: None,
+            seen_seq: 0,
             current_w:     0,
             current_h:     0,
             current_win_w: 0,
@@ -1190,11 +1066,10 @@ impl Ui {
             event_proxy: event_loop.create_proxy(),
             scale,
             display_res: display_res.clone(),
-            compositor: SwCompositor::new(),
-            ng1: None,
-            readback: Vec::new(),
+            status: StatusBar::new(),
+            sbtex: StatusBarTexture::new(),
+            bar: Vec::new(),
             failed: false,
-            board_device: display.screens()[0].gpu.get().is_some_and(|g| Arc::ptr_eq(g, &gpu)),
         };
         *display.screens()[0].window.renderer.lock() = Some(Box::new(renderer));
         Ok((window, window_size, resize_request, display_res))

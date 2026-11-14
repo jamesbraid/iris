@@ -12,7 +12,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use crate::config::{GraphicsBoard, MachineConfig, MachineProfile};
-use crate::dev::ng1::rex3::Renderer;
+use crate::gfx_display::{Frame, Renderer};
 use crate::test_temp::TempPath;
 use crate::workstation::Workstation;
 
@@ -41,11 +41,7 @@ impl Probe {
 }
 
 impl Renderer for Probe {
-    fn present(
-        &mut self, _: &mut crate::disp::Rex3Screen, _: &mut crate::debug_overlay::DebugOverlay,
-        _: &mut crate::disp::StatusBar, _: &mut crate::disp::StatusBarTexture, _: &crate::disp::BarStats,
-        _: bool, _: Option<&[u32]>, _: Option<&[u32]>,
-    ) {
+    fn present(&mut self, _: &Frame, _: &crate::disp::BarStats) {
         self.presents.fetch_add(1, SeqCst);
     }
 
@@ -199,4 +195,58 @@ fn the_octane_stops_its_disks_before_its_graphics() {
     machine.stop();
     assert!(probe.stopped.load(SeqCst), "the display thread released its renderer");
     assert!(!overlap.load(SeqCst), "a disk controller was still running when the graphics stopped");
+}
+
+/// What Newport hands a window: its composed words, or its planes when the
+/// window composes them itself (the GL window's shader), and never both.
+#[test]
+fn a_newport_window_is_handed_words_or_planes_as_it_asks() {
+    struct Kinds {
+        planes: bool,
+        seen: Arc<std::sync::Mutex<Vec<(bool, bool)>>>,
+    }
+    impl Renderer for Kinds {
+        fn present(&mut self, f: &Frame, _: &crate::disp::BarStats) {
+            self.seen.lock().unwrap().push((!f.words.is_empty(), f.planes.is_some()));
+        }
+        fn takes_planes(&self) -> bool {
+            self.planes
+        }
+    }
+    for planes in [false, true] {
+        let dir = scratch(&format!("kinds-{planes}"));
+        let cfg = config(&dir, MachineProfile::IndyIp24, GraphicsBoard::Newport);
+        let mut machine = big_stack(move || crate::workstation::build(cfg).expect("machine"));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        *machine.get_display().expect("a display").screens()[0].window.renderer.lock() =
+            Some(Box::new(Kinds { planes, seen: seen.clone() }));
+        machine.start();
+        let up = Instant::now() + Duration::from_secs(10);
+        while seen.lock().unwrap().is_empty() && Instant::now() < up {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        machine.stop();
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.first(), Some(&(!planes, planes)), "planes requested: {planes}");
+    }
+}
+
+/// A Newport scan-out that fails on the window's device stops the machine
+/// through the device, as the other boards' GPU failures do; no frame is made
+/// on the CPU in its place.
+#[cfg(feature = "wgpu")]
+#[test]
+fn a_newport_scanout_failure_is_fatal_not_a_cpu_frame() {
+    let fatal = Arc::new(AtomicBool::new(false));
+    let flag = fatal.clone();
+    let gpu = match crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default(), Box::new(move |_| flag.store(true, SeqCst))) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let shown = crate::dev::ng1::rex3::gpu_frame_or_fail(&gpu, Err("kernel refused".into()));
+    assert!(shown.is_none(), "no frame comes from the failure");
+    assert!(fatal.load(SeqCst), "the device was told, and stops the machine");
 }

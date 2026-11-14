@@ -1,4 +1,4 @@
-use crate::compositor::{Compositor, CompositorSource};
+use crate::compositor::CompositorSource;
 #[cfg(feature = "rex-dirty-upload")]
 use crate::dev::ng1::rex3_dirty::{plan_framebuffer_uploads, DamageRect};
 use crate::dev::ng1::vc2::{
@@ -9,7 +9,7 @@ use glow::HasContext;
 
 const FB_W: i32 = 2048;
 const FB_H: i32 = 1024;
-/// Output texture rows (prebuilt frames can be taller than Newport's 1024).
+/// Output texture rows: the window draws every board's frame as the top-left of a 2048 by FB_MAX_H texture.
 const OUT_H: i32 = crate::disp::FB_MAX_H as i32;
 const CURSOR_TEX_SIZE: i32 = 64;
 
@@ -462,34 +462,16 @@ fn extract_cursor(vc2_ram: &[u16], entry: usize, size_64: bool) -> [u8; 64 * 64]
     out
 }
 
-impl Compositor for GlCompositor {
-    fn compose(&mut self, src: &CompositorSource<'_>, gl: &glow::Context) -> glow::Texture {
+impl GlCompositor {
+    /// Compose Newport's planes in the shader and return the texture holding
+    /// the frame, valid until the next call or `destroy`.
+    pub fn compose(&mut self, src: &CompositorSource<'_>, gl: &glow::Context) -> glow::Texture {
         if !self.init_resources(gl) {
             panic!("GlCompositor::compose called after init_resources failed");
         }
 
         let w = src.width as i32;
         let h = src.height as i32;
-
-        // A board that composites on the CPU (GR2) hands over a finished frame
-        // in SwCompositor's format (0xAABBGGRR, R in the low byte = RGBA bytes).
-        // Put it straight into the output texture so the draw and readback
-        // paths see exactly what the shader would have produced.
-        if let Some(frame) = src.prebuilt {
-            let tex_out = self.tex_out.unwrap();
-            unsafe {
-                gl.bind_texture(glow::TEXTURE_2D, Some(tex_out));
-                gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, FB_W);
-                let bytes = std::slice::from_raw_parts(frame.as_ptr() as *const u8, frame.len() * 4);
-                gl.tex_sub_image_2d(
-                    glow::TEXTURE_2D, 0, 0, 0, w, h,
-                    glow::RGBA, glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(bytes)),
-                );
-                gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
-            }
-            return tex_out;
-        }
 
         let program    = self.program.unwrap();
         let tex_rgb    = self.tex_rgb.unwrap();
@@ -647,7 +629,8 @@ impl Compositor for GlCompositor {
         tex_out
     }
 
-    fn destroy(&mut self, gl: &glow::Context) {
+    /// Release the GL objects; the context must be current.
+    pub fn destroy(&mut self, gl: &glow::Context) {
         unsafe {
             if let Some(t) = self.tex_rgb.take() {
                 gl.delete_texture(t);
@@ -696,11 +679,8 @@ impl Compositor for GlCompositor {
         }
     }
 
-    fn read_pixels(&self) -> Option<&[u32]> {
-        None
-    }
-
-    fn readback_to_screen(&self, dst: &mut [u32], width: usize, height: usize, gl: &glow::Context) {
+    /// Read the last composed frame back into `dst` (rows 2048 words apart).
+    pub fn readback_to_screen(&self, dst: &mut [u32], width: usize, height: usize, gl: &glow::Context) {
         let Some(fbo) = self.fbo else { return; };
         let row_bytes = width * 4;
         let total_bytes = row_bytes * height;

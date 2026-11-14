@@ -191,18 +191,11 @@ pub fn composite_index(rss: &mut Rss, dcb: &Dcb, x: i32, y: i32, bgra: &[u8], st
 impl Mgras {
     pub(super) fn refresh_loop(self: &Arc<Self>) {
         let screen = &self.screens[0];
-        {
-            let mut canvas = self.screen.lock();
-            (canvas.width, canvas.height) = frame::DEFAULT_SIZE;
-            canvas.fb_rgb.fill(0xFF00_0000);
-            canvas.prebuilt = true;
-        }
-        let mut overlay = crate::debug_overlay::DebugOverlay::new();
-        let mut status_bar = crate::disp::StatusBar::new();
-        let mut sbtex = crate::disp::StatusBarTexture::new();
-        // Size the renderer was last given; the guest can change modes.
-        let mut shown = (0usize, 0usize);
-        let mut idle_frames = 0u32;
+        // The frame as the snapshot composes it, rows `OUT_STRIDE` apart; the
+        // published frame is cut from it row by row.
+        let mut scan = vec![0xFF00_0000u32; frame::OUT_STRIDE * crate::disp::FB_MAX_H];
+        // A frame has been composed since the board started.
+        let mut composed_once = false;
         // Microcode fingerprints: checked every two seconds, logged once
         // the same value is seen twice in a row and differs from the last
         // one logged.
@@ -216,6 +209,9 @@ impl Mgras {
             screen,
             &self.running,
             &self.display_stop,
+            // Both queues: the HQ3's usually drains at once, and the backlog
+            // waits in front of the raster engines.
+            || self.status.snapshot(std::time::Instant::now(), self.hq_fifo.len() + self.rss_fifo.len()),
             || {
                 if last_rec_flush.elapsed() >= std::time::Duration::from_millis(500) {
                     if let Some(rec) = self.mem_rec.lock().clone() {
@@ -254,80 +250,48 @@ impl Mgras {
                 }
             },
             |out, need| {
-                let start = std::time::Instant::now();
-                // Both queues: the HQ3's usually drains at once, and the backlog
-                // waits in front of the raster engines.
-                let stats = self.status.snapshot(start, self.hq_fifo.len() + self.rss_fifo.len());
                 let dirty = self.dirty.swap(false, Ordering::AcqRel);
                 // Someone reads the words (monitor screenshots, VNC): with
                 // the GPU scan-out, only then is a frame read back.
                 let want = need.words;
-                idle_frames += 1;
                 // The window shares the GPU unit's device: compose there and
                 // present from there, every frame (cheap; the cursor and the
                 // last batches show without a dirty mark).
                 #[cfg(feature = "wgpu")]
-                let on_gpu = self.presents_on_gpu() && !want && need.gpu;
-                #[cfg(not(feature = "wgpu"))]
-                let on_gpu = false;
-                #[cfg(feature = "wgpu")]
-                if on_gpu {
-                    self.present_on_gpu(&mut shown, &mut overlay, &mut status_bar, &mut sbtex, &stats);
+                if self.presents_on_gpu() && !want && need.gpu && self.compose_on_gpu(out) {
                     screen.counts.count(true);
-                    return false;
+                    return true;
                 }
-                let _ = on_gpu;
-                if !(dirty || want || idle_frames >= 6) {
+                if !(dirty || want || !composed_once) {
                     screen.counts.count(false);
                     return false;
                 }
-                idle_frames = 0;
-                let mut canvas = self.screen.lock();
-                if dirty || want {
-                    let canvas = &mut *canvas;
-                    // The snapshot comes before this frame's retrace pulse:
-                    // the last retrace's updates (window-ID tables, swaps)
-                    // are in, and nothing draws into the front buffer now.
-                    // SAFETY: a read-only view of the framebuffer; tearing
-                    // tolerated.
-                    let rss = unsafe { &*self.rss.get() };
-                    crate::pf_begin!(crate::perfetto::events::MGRAS_CAPTURE, self.rss_fifo.len());
-                    let (w, h) = match self.compose_gpu_into(rss, &mut canvas.fb_rgb) {
-                        Some(size) => size,
-                        None => {
-                            snap.snapshot(rss, &self.front_view().dcb);
-                            snap.compose(&mut canvas.fb_rgb);
-                            (snap.width, snap.height)
-                        }
-                    };
-                    crate::pf_end!(crate::perfetto::events::MGRAS_CAPTURE);
-                    // The frame is already final RGB, so a consumer's copy
-                    // needs no renderer readback, as GR2 does. This also makes
-                    // screenshots work headless.
-                    out.width = w as u32;
-                    out.height = h as u32;
-                    out.words.clear();
-                    for y in 0..h {
-                        let row = y * frame::OUT_STRIDE;
-                        out.words.extend_from_slice(&canvas.fb_rgb[row..row + w]);
+                composed_once = true;
+                // The snapshot comes before this frame's retrace pulse:
+                // the last retrace's updates (window-ID tables, swaps)
+                // are in, and nothing draws into the front buffer now.
+                // SAFETY: a read-only view of the framebuffer; tearing
+                // tolerated.
+                let rss = unsafe { &*self.rss.get() };
+                crate::pf_begin!(crate::perfetto::events::MGRAS_CAPTURE, self.rss_fifo.len());
+                let (w, h) = match self.compose_gpu_into(rss, &mut scan) {
+                    Some(size) => size,
+                    None => {
+                        snap.snapshot(rss, &self.front_view().dcb);
+                        snap.compose(&mut scan);
+                        (snap.width, snap.height)
                     }
-                    canvas.width = w;
-                    canvas.height = h;
-                    canvas.status_bar_only = false;
-                } else {
-                    canvas.status_bar_only = true;
+                };
+                crate::pf_end!(crate::perfetto::events::MGRAS_CAPTURE);
+                out.width = w as u32;
+                out.height = h as u32;
+                out.words.clear();
+                for y in 0..h {
+                    let row = y * frame::OUT_STRIDE;
+                    out.words.extend_from_slice(&scan[row..row + w]);
                 }
-                if let Some(r) = screen.window.renderer.lock().as_mut() {
-                    if shown != (canvas.width, canvas.height) {
-                        shown = (canvas.width, canvas.height);
-                        r.resize(shown.0, shown.1);
-                    }
-                    crate::pf_begin!(crate::perfetto::events::MGRAS_PRESENT);
-                    r.present(&mut canvas, &mut overlay, &mut status_bar, &mut sbtex, &stats, false, None, None);
-                    crate::pf_end!(crate::perfetto::events::MGRAS_PRESENT);
-                }
-                screen.counts.count(dirty || want);
-                dirty || want
+                screen.counts.count(true);
+                true
             },
         );
     }
@@ -354,48 +318,29 @@ impl Mgras {
         None
     }
 
-    /// One frame composed on the GPU and presented from there by a renderer
-    /// on the same device: nothing is read back. `screen.rgba` keeps its
-    /// last frame.
+    /// One frame composed on the GPU into `out`, for a renderer on the same
+    /// device: nothing is read back. False if the scan-out fails.
     #[cfg(feature = "wgpu")]
-    fn present_on_gpu(
-        &self,
-        shown: &mut (usize, usize),
-        overlay: &mut crate::debug_overlay::DebugOverlay,
-        status_bar: &mut crate::disp::StatusBar,
-        sbtex: &mut crate::disp::StatusBarTexture,
-        stats: &crate::disp::BarStats,
-    ) {
+    fn compose_on_gpu(&self, out: &mut crate::gfx_display::Frame) -> bool {
         // SAFETY: the scan-out is the display thread's; the registers and
         // the DCB are read racily, as the CPU snapshot reads them.
-        let Some(sc) = (unsafe { &mut *self.gpu_scanout.get() }).as_mut() else { return };
+        let Some(sc) = (unsafe { &mut *self.gpu_scanout.get() }).as_mut() else { return false };
         let rss = unsafe { &*self.rss.get() };
         crate::pf_begin!(crate::perfetto::events::MGRAS_CAPTURE, self.rss_fifo.len());
         let composed = sc.compose(rss, &self.front_view().dcb);
         crate::pf_end!(crate::perfetto::events::MGRAS_CAPTURE);
-        let (buffer, w, h) = match composed {
-            Ok(f) => {
+        match composed {
+            Ok((buffer, w, h)) => {
                 self.gpu_frames[0].fetch_add(1, Ordering::Relaxed);
-                f
+                out.width = w;
+                out.height = h;
+                out.gpu = Some(buffer);
+                true
             }
             Err(e) => {
                 eprintln!("mgras: GPU scan-out: {e}");
-                return;
+                false
             }
-        };
-        let mut screen = self.screen.lock();
-        screen.width = w as usize;
-        screen.height = h as usize;
-        screen.prebuilt = true;
-        screen.status_bar_only = false;
-        if let Some(r) = self.screens[0].window.renderer.lock().as_mut() {
-            if *shown != (w as usize, h as usize) {
-                *shown = (w as usize, h as usize);
-                r.resize(shown.0, shown.1);
-            }
-            crate::pf_begin!(crate::perfetto::events::MGRAS_PRESENT);
-            r.present_gpu_frame(&buffer, w, h, &mut screen, overlay, status_bar, sbtex, stats);
-            crate::pf_end!(crate::perfetto::events::MGRAS_PRESENT);
         }
     }
 

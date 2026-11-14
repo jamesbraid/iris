@@ -52,10 +52,8 @@ use std::thread;
 
 use parking_lot::Mutex;
 
-use crate::disp::Rex3Screen;
 use crate::gfifo::GFifo;
 use crate::cpu::mips_core::CyclesPtr;
-use crate::dev::ng1::rex3::Renderer;
 use crate::snapshot::{get_field, hex_u32, load_u32_slice, load_u8_slice, toml_u32, u32_slice_to_toml, u8_slice_to_toml};
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, Device, Resettable, Saveable, BUS_BUSY, BUS_OK};
 
@@ -228,7 +226,6 @@ pub struct Gr2 {
     re3_cpu_writes: crossbeam_utils::CachePadded<AtomicU32>,
     re3_asleep: crossbeam_utils::CachePadded<AtomicBool>,
 
-    pub screen: Mutex<Rex3Screen>,
     screens: [Arc<crate::gfx_display::Screen>; 1],
     /// The scan-out on the GPU, when the machine opened one: the display
     /// thread's alone. Dropped there if it fails, and the CPU compose takes over.
@@ -287,7 +284,6 @@ impl Gr2 {
             addr_of_mut!((*p).threads).write(Mutex::new(Vec::new()));
             addr_of_mut!((*p).hq_thread).write(Mutex::new(None));
             addr_of_mut!((*p).re3_thread).write(Mutex::new(None));
-            addr_of_mut!((*p).screen).write(Mutex::new(Rex3Screen::new()));
             addr_of_mut!((*p).screens).write([Arc::new(crate::gfx_display::Screen::new(0, Arc::default()))]);
             #[cfg(feature = "wgpu")]
             addr_of_mut!((*p).scanout).write(UnsafeCell::new(scanout));

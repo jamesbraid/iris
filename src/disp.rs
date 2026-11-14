@@ -20,6 +20,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+/// Newport's planes and display state as the board's refresh left them, for
+/// the one presenter that composes them itself (the GL window's shader).
+/// Valid only while that presenter runs inside the call that was handed it:
+/// the board's next refresh rewrites them.
+#[derive(Clone)]
+pub struct Ng1Planes(pub Arc<Mutex<Rex3Screen>>);
+
 /// Cached device state for the display pipeline.
 /// The refresh loop copies hardware state into this struct once per frame,
 /// then builds a `CompositorSource` from it for the active compositor.
@@ -101,8 +108,8 @@ pub struct Rex3Screen {
     // Decoded DID buffer in display coordinates (2048×1024, stride 2048)
     pub did: Vec<u8>,
 
-    /// Last composited frame in CPU memory (stride 2048), filled after each present().
-    /// Available for screenshots and CI pixel reads.
+    /// The last frame the resident test path captured (stride 2048).
+    #[cfg(all(test, feature = "wgpu"))]
     pub rgba: Vec<u32>,
 
     // VC2 state
@@ -127,21 +134,8 @@ pub struct Rex3Screen {
     /// Cursor X correction from VT timing decode
     pub cursor_x_adjust: i32,
 
-    /// When true, renderers may skip full compositor work and refresh only the
-    /// status bar (heartbeat frames with no FB/palette change).
-    pub status_bar_only: bool,
-    /// When true, `fb_rgb`/`fb_aux` snapshots were not copied; use the live
-    /// slices supplied by the refresh loop.
-    #[cfg(not(feature = "rex-dirty-upload"))]
-    pub fb_borrowed: bool,
-    /// When true, `fb_rgb` already holds a finished frame (stride 2048,
-    /// `0xAABBGGRR` with R in the low byte, the same format `SwCompositor`
-    /// produces) built by a
-    /// board's own compositor (GR2's `gr2comp`). The renderer's compositor
-    /// then presents it as-is instead of decoding Newport state.
-    pub prebuilt: bool,
-    /// Bumped each time `rgba` is rewritten with a composed frame, so frame
-    /// consumers (VNC) can skip unchanged ones without comparing pixels.
+    /// Bumped each time the resident test path captures a frame.
+    #[cfg(all(test, feature = "wgpu"))]
     pub frame_seq: u64,
     #[cfg(all(test, feature = "wgpu"))]
     display_generations: Ng1DisplayGenerations,
@@ -167,6 +161,7 @@ impl Rex3Screen {
             #[cfg(feature = "rex-dirty-upload")]
             fb_aux_tiles: 0,
             did:              vec![0u8; FB_STRIDE * FB_MAX_H],
+            #[cfg(all(test, feature = "wgpu"))]
             rgba:             vec![0u32; FB_STRIDE * FB_MAX_H],
             vc2_ram:          vec![0u16; 32768],
             vc2_regs:         [0u16; 32],
@@ -178,10 +173,7 @@ impl Rex3Screen {
             xmap_popup_cmap:  0,
             topscan:          0,
             cursor_x_adjust:  0,
-            status_bar_only:  false,
-            #[cfg(not(feature = "rex-dirty-upload"))]
-            fb_borrowed:      false,
-            prebuilt:         false,
+            #[cfg(all(test, feature = "wgpu"))]
             frame_seq:        0,
             #[cfg(all(test, feature = "wgpu"))]
             display_generations: Ng1DisplayGenerations::new(),
@@ -354,10 +346,7 @@ impl Rex3Screen {
             diag.fetch_or(Rex3::DIAG_LOOP_FB_COPY, Ordering::Relaxed);
             self.fb_rgb[..fb_rgb.len()].copy_from_slice(fb_rgb);
             self.fb_aux[..fb_aux.len()].copy_from_slice(fb_aux);
-            self.fb_borrowed = false;
             diag.fetch_and(!Rex3::DIAG_LOOP_FB_COPY, Ordering::Relaxed);
-        } else {
-            self.fb_borrowed = true;
         }
 
         self.refresh_display_state(vc2, xmap, cmap, bt445, diag)
@@ -535,30 +524,11 @@ impl Rex3Screen {
         }
     }
 
-    pub fn compositor_source_from<'a>(
-        &'a self,
-        live_rgb: Option<&'a [u32]>,
-        live_aux: Option<&'a [u32]>,
-    ) -> CompositorSource<'a> {
-        #[cfg(feature = "rex-dirty-upload")]
-        let _ = (live_rgb, live_aux);
+    /// The source `SwCompositor` and the GL compositor compose from.
+    pub fn compositor_source(&self) -> CompositorSource<'_> {
         CompositorSource {
-            #[cfg(feature = "rex-dirty-upload")]
             fb_rgb: &self.fb_rgb,
-            #[cfg(not(feature = "rex-dirty-upload"))]
-            fb_rgb: if self.fb_borrowed {
-                live_rgb.unwrap_or(&self.fb_rgb)
-            } else {
-                &self.fb_rgb
-            },
-            #[cfg(feature = "rex-dirty-upload")]
             fb_aux: &self.fb_aux,
-            #[cfg(not(feature = "rex-dirty-upload"))]
-            fb_aux: if self.fb_borrowed {
-                live_aux.unwrap_or(&self.fb_aux)
-            } else {
-                &self.fb_aux
-            },
             #[cfg(feature = "rex-dirty-upload")]
             fb_rgb_damage: &self.fb_rgb_damage,
             #[cfg(not(feature = "rex-dirty-upload"))]
@@ -580,17 +550,8 @@ impl Rex3Screen {
             cursor_x_adjust:  self.cursor_x_adjust,
             width:            self.width,
             height:           self.height,
-            status_bar_only:  self.status_bar_only,
-            prebuilt: if self.prebuilt {
-                Some(&self.fb_rgb)
-            } else {
-                None
-            },
+            status_bar_only:  false,
         }
-    }
-
-    pub fn compositor_source(&self) -> CompositorSource<'_> {
-        self.compositor_source_from(None, None)
     }
 
     /// Build an `OverlaySource` borrowing from this struct's caches.

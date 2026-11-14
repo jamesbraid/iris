@@ -32,76 +32,19 @@ pub use plane::CpuPlane;
 #[cfg(not(all(test, feature = "wgpu")))]
 pub type CpuPlane = Box<[u32]>;
 
-pub trait Renderer: Send {
-    /// Composite and present one display frame.
-    ///
-    /// The renderer owns its compositor, debug overlay, and status bar texture.
-    /// It drives the full pipeline: compose → overlay → status bar → swap.
-    /// When `need_readback` is true the renderer must populate `screen.rgba`
-    /// with the composited pixels (for screenshots) before returning.
-    fn present(
-        &mut self,
-        screen:        &mut crate::disp::Rex3Screen,
-        overlay:       &mut crate::debug_overlay::DebugOverlay,
-        status:        &mut crate::disp::StatusBar,
-        sbtex:         &mut crate::disp::StatusBarTexture,
-        stats:         &crate::disp::BarStats,
-        need_readback: bool,
-        live_fb_rgb:   Option<&[u32]>,
-        live_fb_aux:   Option<&[u32]>,
-    );
-
-    fn resize(&mut self, _width: usize, _height: usize) {}
-    fn stop(&mut self) {}
-    /// Switch to GL or SW compositor at runtime. Returns the active compositor name.
-    fn switch_compositor(&mut self, _use_gl: bool) -> &'static str { "sw" }
-    /// Return a short status string: "compositor=gl shader=integer" etc.
-    fn compositor_status(&self) -> String { "compositor=sw shader=n/a".to_string() }
-    /// Whether the GL compositor is in use, or is about to be.
-    fn gl_compositor(&self) -> bool { false }
-
-    /// Whether `present_gpu_frame` presents frames that are already on the
-    /// board's GPU (the wgpu renderer, on the board's own device). A board
-    /// that composes on the GPU then skips its readback.
-    #[cfg(feature = "wgpu")]
-    fn takes_gpu_frames(&self) -> bool { false }
-
-    /// Present a frame of 0x00RRGGBB words (rows of `width`) that is on the
-    /// board's GPU, with `screen` giving the overlay's sources; the status
-    /// bar and overlay as `present` draws them. `screen.rgba` is not updated.
-    #[cfg(feature = "wgpu")]
-    #[allow(clippy::too_many_arguments)]
-    fn present_gpu_frame(
-        &mut self,
-        _frame:   &wgpu::Buffer,
-        _width:   u32,
-        _height:  u32,
-        _screen:  &mut crate::disp::Rex3Screen,
-        _overlay: &mut crate::debug_overlay::DebugOverlay,
-        _status:  &mut crate::disp::StatusBar,
-        _sbtex:   &mut crate::disp::StatusBarTexture,
-        _stats:   &crate::disp::BarStats,
-    ) {}
-
-    /// The test-only resident path must verify the presenter's actual device,
-    /// rather than relying on a renderer's claim that it takes GPU frames.
-    #[cfg(all(test, feature = "wgpu"))]
-    fn resident_gpu_device(&self) -> Option<&Arc<crate::wgpu::Gpu>> { None }
-
-    #[cfg(all(test, feature = "wgpu"))]
-    #[allow(clippy::too_many_arguments)]
-    fn present_resident_gpu_frame(
-        &mut self,
-        _frame: &wgpu::Buffer,
-        _width: u32,
-        _height: u32,
-        _screen: &mut Rex3Screen,
-        _overlay: &mut crate::debug_overlay::DebugOverlay,
-        _status: &mut crate::disp::StatusBar,
-        _sbtex: &mut crate::disp::StatusBarTexture,
-        _stats: &crate::disp::BarStats,
-    ) -> Result<(), String> {
-        Err("renderer does not support resident GPU frames".into())
+/// A frame Newport's scan-out composed on the window's device, or None after
+/// reporting the failure to the device, which stops the machine. An empty
+/// message is a failure already reported.
+#[cfg(feature = "wgpu")]
+pub(crate) fn gpu_frame_or_fail(gpu: &crate::wgpu::Gpu, frame: Result<::wgpu::Buffer, String>) -> Option<::wgpu::Buffer> {
+    match frame {
+        Ok(buffer) => Some(buffer),
+        Err(e) => {
+            if !e.is_empty() {
+                gpu.fail(&format!("newport scan-out: {e}"));
+            }
+            None
+        }
     }
 }
 
@@ -3713,25 +3656,23 @@ impl Rex3 {
     }
 
     fn refresh_loop(&self) {
-        let mut status_bar  = crate::disp::StatusBar::new();
         let mut overlay     = crate::debug_overlay::DebugOverlay::new();
-        let mut sbtex       = crate::disp::StatusBarTexture::new();
         // Idle-skip bookkeeping (see the should_render gate below).
         let mut last_topscan: usize = usize::MAX;
-        let mut frames_since_render: u32 = u32::MAX;
-        let mut full_presents: u32 = 0;
-        // Composes `screen.rgba` when a frame is wanted and no front-end
-        // renderer is installed (`--ci`); made on first use.
-        let mut capture_compositor: Option<crate::compositor::SwCompositor> = None;
-        // While capture forces the renderer onto the software compositor:
-        // whether it used GL before, to switch back when capture ends.
-        let mut restore_gl: Option<bool> = None;
+        // What the last frame was composed as: words, device frame, planes.
+        let mut last_kind: Option<(bool, bool, bool)> = None;
+        // Newport's own compose: on the CPU for a consumer of words, and on
+        // the window's device when it presents there.
+        let mut compositor: Option<crate::compositor::SwCompositor> = None;
+        #[cfg(feature = "wgpu")]
+        let mut scanout: Option<Result<crate::dev::ng1::wgpu::Ng1Scanout, String>> = None;
         let screen_out = &self.screens[0];
 
         crate::gfx_display::run_display(
             screen_out,
             &self.running,
             &self.display_stop,
+            || self.status.snapshot(std::time::Instant::now(), self.gfifo.len()),
             // The hardware VBLANK ticks every frame and latches cursor-Y,
             // whether or not the host rendered: the guest's vsync timing must
             // not depend on it. VBLANK stays asserted until the CPU reads
@@ -3759,10 +3700,6 @@ impl Rex3 {
                 }
             },
             |out, need| {
-            let start = std::time::Instant::now();
-            // Poll and clear activity bits; preserve persistent LED bits.
-            let bar_stats = self.status.snapshot(start, self.gfifo.len());
-
             // Fence-based sync: wait until the GFIFO consumer has processed every
             // GFIFO_DISP_SYNC pushed since the last frame.  Each XMAP mode table
             // write increments xmap_fence and enqueues GFIFO_DISP_SYNC; the consumer
@@ -3794,18 +3731,27 @@ impl Rex3 {
             let fb_aux = unsafe { &*self.fb_aux.get() };
             let topscan = unsafe { (*self.context.get()).topscan as usize };
 
+            // What this frame is composed as. A renderer that wants neither
+            // device frames nor planes gets words, as a consumer does.
+            let installed = self.renderer().lock().is_some();
+            let kind = (
+                need.words || (installed && !need.gpu && !need.planes),
+                need.gpu,
+                need.planes,
+            );
+
             // Idle skip: only run the presentation pipeline when something
             // visible changed. `fb_damage` covers REX3 drawing; the
             // palette/cursor/mode mutexes carry
             // their own dirty flags (peeked here, not cleared — refresh() clears
-            // them when it runs). A periodic heartbeat keeps the live status bar
-            // moving and bounds any missed-dirty staleness. VBLANK is still ticked
-            // every frame (the retrace duty), independent of host rendering.
+            // them when it runs). The screen shows the unchanged frame to its
+            // renderer at the idle rate, so the status bar keeps moving.
+            // VBLANK is still ticked every frame (the retrace duty),
+            // independent of host rendering.
             //
             // The dirty mutexes are locked one at a time (separate `let`s) so we
             // never hold two of them at once — avoids any lock-ordering hazard
             // against the consumer/CPU threads.
-            const IDLE_HEARTBEAT_FRAMES: u32 = 6; // ≥10 Hz refresh floor when idle
             let palette_dirty = {
                 let v = self.vc2.lock().dirty;
                 let c = self.cmap0.lock().dirty;
@@ -3827,15 +3773,12 @@ impl Rex3 {
                 || dbg_overlay
                 || topscan != last_topscan
                 || requested
-                || frames_since_render >= IDLE_HEARTBEAT_FRAMES;
+                || last_kind != Some(kind);
 
             if !should_render {
-                // Nothing visible changed — skip the full refresh + GL upload and
-                // leave the already-presented front buffer on screen.
-                frames_since_render = frames_since_render.saturating_add(1);
+                // Nothing visible changed: the renderer keeps the frame it has.
                 return false;
             }
-            frames_since_render = 0;
             last_topscan = topscan;
             self.diag.fetch_or(Self::DIAG_LOCK_SCREEN, Ordering::Relaxed);
             let mut screen = self.screen.lock();
@@ -3844,11 +3787,6 @@ impl Rex3 {
             #[cfg(feature = "rex-dirty-upload")]
             let fb_was_dirty = !fb_damage.is_empty();
             screen.topscan = topscan;
-            screen.status_bar_only = full_presents > 0
-                && !fb_was_dirty
-                && !palette_dirty
-                && !dbg_overlay
-                && !requested;
 
             // Push debug state into overlay
             overlay.show_cmap       = self.show_cmap.load(Ordering::Relaxed);
@@ -3861,11 +3799,9 @@ impl Rex3 {
                 overlay.draw_snapshot.clear();
                 overlay.draw_snapshot.extend(ring.iter_newest_first().copied());
             }
-            self.diag.fetch_or(Self::DIAG_LOCK_RENDERER, Ordering::Relaxed);
-            let mut renderer = self.renderer().lock();
 
             #[cfg(feature = "rex-dirty-upload")]
-            let resized = screen.refresh(
+            screen.refresh(
                 &**fb_rgb,
                 &**fb_aux,
                 &fb_damage,
@@ -3876,7 +3812,7 @@ impl Rex3 {
                 &self.diag,
             );
             #[cfg(not(feature = "rex-dirty-upload"))]
-            let resized = screen.refresh(
+            screen.refresh(
                 &**fb_rgb,
                 &**fb_aux,
                 fb_was_dirty,
@@ -3886,77 +3822,78 @@ impl Rex3 {
                 &self.bt445,
                 &self.diag,
             );
-            if resized {
-                if let Some(ref mut r) = *renderer {
-                    r.resize(screen.width, screen.height);
+
+            let (w, h) = (screen.width, screen.height);
+            if w == 0 || h == 0 || kind == (false, false, false) {
+                // No mode yet, or nobody to compose for: the state above is
+                // what a later frame starts from.
+                self.diag.fetch_and(!Self::DIAG_LOCK_SCREEN, Ordering::Relaxed);
+                return false;
+            }
+            last_kind = Some(kind);
+            out.width = w as u32;
+            out.height = h as u32;
+
+            if overlay.active() {
+                let px = overlay.render_pixels(&screen.overlay_source());
+                let mut rows = Vec::with_capacity(w * h);
+                for y in 0..h {
+                    rows.extend_from_slice(&px[y * crate::disp::FB_STRIDE..][..w]);
                 }
+                out.overlay = Some(rows);
             }
 
-            // Frame consumers: a one-shot request, or capture (VNC) on
-            // every full frame. Heartbeats change nothing in the picture.
-            let capture = screen_out.requests.capturing();
-            let need_readback = requested || (capture && !screen.status_bar_only);
-            let _ = need;
-
-            // Present: compositor → overlay → status bar → swap
-            if screen.width > 0 && screen.height > 0 {
-                if let Some(ref mut r) = *renderer {
-                    crate::pf_scope!(crate::perfetto::events::REX3_PRESENT);
-                    self.diag.fetch_or(Self::DIAG_LOOP_GL_RENDER, Ordering::Relaxed);
-                    // Capture reads every frame back: keep it a slice copy
-                    // out of the software compositor, never a GL readback.
-                    if capture {
-                        restore_gl.get_or_insert_with(|| r.gl_compositor());
-                        r.switch_compositor(false);
-                    } else if let Some(gl) = restore_gl.take() {
-                        if gl {
-                            r.switch_compositor(true);
+            let mut composed = false;
+            // On the window's device: the compose a wgpu window used to run
+            // itself. A GPU that fails has stopped the machine; no frame is
+            // made on the CPU in its place.
+            #[cfg(feature = "wgpu")]
+            if kind.1 {
+                if let Some(gpu) = screen_out.adopt_window_gpu() {
+                    if scanout.is_none() {
+                        scanout = Some(crate::dev::ng1::wgpu::Ng1Scanout::new(gpu));
+                    }
+                    let frame = match scanout.as_mut() {
+                        Some(Ok(sc)) => {
+                            crate::pf_scope!(crate::perfetto::events::REX3_COMPOSE);
+                            sc.compose(&screen.compositor_source())
+                        }
+                        Some(Err(e)) => Err(e.clone()),
+                        None => unreachable!("made above"),
+                    };
+                    match gpu_frame_or_fail(gpu, frame) {
+                        Some(buffer) => out.gpu = Some(buffer),
+                        None => {
+                            // Reported once; later frames stop here quietly.
+                            scanout = Some(Err(String::new()));
+                            self.diag.fetch_and(!Self::DIAG_LOCK_SCREEN, Ordering::Relaxed);
+                            return false;
                         }
                     }
-                    r.present(
-                        &mut *screen,
-                        &mut overlay,
-                        &mut status_bar,
-                        &mut sbtex,
-                        &bar_stats,
-                        need_readback,
-                        None,
-                        None,
-                    );
-                    self.diag.fetch_and(!Self::DIAG_LOOP_GL_RENDER, Ordering::Relaxed);
-                } else if need_readback {
-                    // No front-end (`--ci`): compose the guest screen here.
-                    // No status bar or overlay: this is the guest's screen.
-                    let comp = capture_compositor.get_or_insert_with(crate::compositor::SwCompositor::new);
-                    {
-                        crate::pf_scope!(crate::perfetto::events::REX3_COMPOSE);
-                        comp.compose_pixels(&screen.compositor_source());
-                    }
-                    let (w, h) = (screen.width, screen.height);
-                    let px = comp.pixels();
-                    for y in 0..h {
-                        let row = y * crate::disp::FB_STRIDE;
-                        screen.rgba[row..row + w].copy_from_slice(&px[row..row + w]);
-                    }
-                }
-                if need_readback {
-                    let (w, h) = (screen.width, screen.height);
-                    out.width = w as u32;
-                    out.height = h as u32;
-                    out.words.clear();
-                    for y in 0..h {
-                        let row = y * crate::disp::FB_STRIDE;
-                        out.words.extend_from_slice(&screen.rgba[row..row + w]);
-                    }
-                }
-
-                if !screen.status_bar_only {
-                    full_presents = full_presents.saturating_add(1);
+                    composed = true;
                 }
             }
-            screen_out.counts.count(!screen.status_bar_only);
-            self.diag.fetch_and(!(Self::DIAG_LOCK_SCREEN | Self::DIAG_LOCK_RENDERER), Ordering::Relaxed);
-            need_readback && screen.width > 0 && screen.height > 0
+            // For the one presenter that composes the planes itself.
+            if kind.2 && !composed {
+                out.planes = Some(crate::disp::Ng1Planes(self.screen.clone()));
+                composed = true;
+            }
+            if !composed {
+                let comp = compositor.get_or_insert_with(crate::compositor::SwCompositor::new);
+                {
+                    crate::pf_scope!(crate::perfetto::events::REX3_COMPOSE);
+                    comp.compose_pixels(&screen.compositor_source());
+                }
+                let px = comp.pixels();
+                out.words.clear();
+                out.words.reserve(w * h);
+                for y in 0..h {
+                    out.words.extend_from_slice(&px[y * crate::disp::FB_STRIDE..][..w]);
+                }
+            }
+            screen_out.counts.count(true);
+            self.diag.fetch_and(!Self::DIAG_LOCK_SCREEN, Ordering::Relaxed);
+            true
             },
         );
     }
@@ -4884,30 +4821,8 @@ impl Device for Rex3 {
             writeln!(writer, "  resolution: {}x{}", screen.width, screen.height).unwrap();
             writeln!(writer, "  topscan: {:03x}  (fb row {} maps to display row 0)", screen.topscan, (screen.topscan + 1) & 0x3FF).unwrap();
             writeln!(writer, "  show_disp_debug: {}", self.show_disp_debug.load(Ordering::Relaxed)).unwrap();
-            let status = if let Some(r) = self.renderer().lock().as_ref() {
-                r.compositor_status()
-            } else {
-                "no renderer".to_string()
-            };
+            let status = if self.renderer().lock().is_some() { "renderer installed" } else { "no renderer" };
             writeln!(writer, "  {}", status).unwrap();
-            return Ok(());
-        }
-
-        if cmd == "disp" && args[0] == "compositor" {
-            let use_gl = match args.get(1).map(|s| *s) {
-                Some("gl") => true,
-                Some("sw") => false,
-                _ => return Err("Usage: disp compositor <gl|sw>".to_string()),
-            };
-            if use_gl && self.screens[0].requests.capturing() {
-                return Err("the VNC server needs the software compositor while it runs".to_string());
-            }
-            let active = if let Some(renderer) = self.renderer().lock().as_mut() {
-                renderer.switch_compositor(use_gl)
-            } else {
-                "no renderer"
-            };
-            writeln!(writer, "Compositor: {}", active).unwrap();
             return Ok(());
         }
 
@@ -5797,7 +5712,7 @@ impl BusDevice for Rex3 {
 
 impl Rex3 {
     /// The renderer slot the front-end installs into.
-    pub(crate) fn renderer(&self) -> &Mutex<Option<Box<dyn Renderer>>> {
+    pub(crate) fn renderer(&self) -> &Mutex<Option<Box<dyn crate::gfx_display::Renderer>>> {
         &self.screens[0].window.renderer
     }
 

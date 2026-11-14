@@ -23,6 +23,15 @@ hashes are given where a change is easiest to understand by reading the commit.
   checked, and refused on a single-screen machine; the window does not use it
   yet.
 
+- Window renderers take a finished frame and the status figures and draw the
+  status bar themselves; none reads the picture back. A screenshot, VNC or the
+  monitor gets words from the board, which composes them when asked. Newport
+  composes its own scan-out: the GL window still has its planes composed in
+  the shader (`GlCompositor`), other windows get words, or a frame composed on
+  the window's wgpu device (a GPU failure there stops the machine, as on the
+  other boards, instead of falling back to the CPU). `disp compositor <gl|sw>` is gone, and the boards
+  other than Newport no longer allocate Newport's plane, window-id and readback
+  buffers (about 26 MiB each).
 - The O2's display scans out and presents a frame only when the screen may have
   changed: the rendering engine wrote memory, a GBE register changed (IRIX's
   per-frame rewrites of the same value do not count), a shadow register went live

@@ -1,6 +1,5 @@
 use crate::dev::ng1::rex3::Rex3;
 use crate::dev::ng1::rex3_dirty::DamageRect;
-use glow::HasContext;
 
 /// All source data needed to composite one display frame.
 /// Borrowed from Rex3Screen's cached copies — no allocations per frame.
@@ -36,60 +35,22 @@ pub struct CompositorSource<'a> {
     /// Visible display dimensions decoded from VC2 video timings
     pub width:            usize,
     pub height:           usize,
-    /// Heartbeat: only status-bar rows changed — skip full DID upload.
+    /// Nothing but the status bar moved: skip the plane and DID upload.
     pub status_bar_only:  bool,
-    /// A finished frame (stride 2048, `0xAABBGGRR`, R in the low byte) from a board that does its
-    /// own composition (GR2). When `Some`, compositors present it verbatim and
-    /// ignore every Newport field above except `width`/`height`.
-    pub prebuilt:         Option<&'a [u32]>,
-}
-
-/// Compositor: maps hardware source state to a composited GL texture.
-///
-/// The compositor owns its output texture.  On each call to `compose()` it
-/// either uploads a CPU buffer or renders into an FBO, then returns the
-/// `glow::Texture` handle.  The caller (Renderer) binds and draws it.
-///
-/// `compose()` is always called with `src.width > 0` and `src.height > 0`.
-pub trait Compositor: Send {
-    /// Produce the composited frame and return the GL texture containing it.
-    /// The returned texture is owned by the compositor and valid until the
-    /// next call to `compose()` or until `destroy()`.
-    fn compose(&mut self, src: &CompositorSource<'_>, gl: &glow::Context) -> glow::Texture;
-
-    /// Called when the display resolution changes so the compositor can resize
-    /// any internal GPU resources.  Default is a no-op.
-    fn resize(&mut self, _width: usize, _height: usize, _gl: &glow::Context) {}
-
-    /// Release all GL resources.  Called before the GL context is destroyed.
-    fn destroy(&mut self, _gl: &glow::Context) {}
-
-    /// Return a CPU copy of the last composited frame for screenshots.
-    /// Default: not supported (returns None).
-    fn read_pixels(&self) -> Option<&[u32]> { None }
-
-    /// Read the composited frame back to CPU memory, writing into `dst` (stride-2048,
-    /// layout matching `screen.rgba`).  Only called on screenshot requests.
-    /// Default no-op (SwCompositor uses `read_pixels()` instead).
-    fn readback_to_screen(&self, _dst: &mut [u32], _width: usize, _height: usize, _gl: &glow::Context) {}
 }
 
 // ── Software compositor ──────────────────────────────────────────────────────
 
-/// Pure-CPU compositor.  Runs the per-pixel loop into a `Vec<u32>`, uploads to
-/// a GL texture via `glTexSubImage2D`, and returns that texture.
+/// Pure-CPU compositor: Newport's planes into a `Vec<u32>`.
 pub struct SwCompositor {
     /// CPU pixel buffer: stride 2048, `FB_MAX_H` rows.
     buf:    Vec<u32>,
-    /// GL texture that holds the last uploaded frame.
-    tex:    Option<glow::Texture>,
 }
 
 impl SwCompositor {
     pub fn new() -> Self {
         Self {
             buf: vec![0u32; crate::disp::FB_STRIDE * crate::disp::FB_MAX_H],
-            tex: None,
         }
     }
 
@@ -97,27 +58,11 @@ impl SwCompositor {
     /// Valid after `compose_pixels()`. Note: the `r_*`/`b_*` names in
     /// `compose_pixels` follow Newport's CMAP layout, whose bits 23:16 are blue.
     pub fn pixels(&self) -> &[u32] { &self.buf }
-
-    fn ensure_tex(&mut self, gl: &glow::Context) -> glow::Texture {
-        if let Some(t) = self.tex { return t; }
-        let t = unsafe {
-            let t = gl.create_texture().unwrap();
-            gl.bind_texture(glow::TEXTURE_2D, Some(t));
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-            gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA as i32,
-                2048, crate::disp::FB_MAX_H as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
-            t
-        };
-        self.tex = Some(t);
-        t
-    }
 }
 
 impl SwCompositor {
     /// Run the per-pixel composition loop into `self.buf`. No GL calls.
-    /// After this, `self.buf` holds the composited frame; call `upload_gl` to
-    /// push it to the GPU, or read `self.buf` directly for CPU readback.
+    /// After this, `self.buf` holds the composited frame (`pixels()`).
     pub fn compose_pixels(&mut self, src: &CompositorSource<'_>) {
         use crate::dev::ng1::vc2::{
             VC2_REG_CURRENT_CURSOR_X, VC2_REG_WORKING_CURSOR_Y, VC2_REG_CURSOR_ENTRY_PTR,
@@ -127,14 +72,6 @@ impl SwCompositor {
 
         let width  = src.width;
         let height = src.height;
-
-        if let Some(frame) = src.prebuilt {
-            for y in 0..height {
-                let row = y * 2048;
-                self.buf[row..row + width].copy_from_slice(&frame[row..row + width]);
-            }
-            return;
-        }
 
         let cursor_x_reg   = src.vc2_regs[VC2_REG_CURRENT_CURSOR_X   as usize];
         let cursor_y_reg   = src.vc2_regs[VC2_REG_WORKING_CURSOR_Y   as usize];
@@ -256,49 +193,5 @@ impl SwCompositor {
                 buf[out_idx] = 0xFF000000 | (r_out << 16) | (g_out << 8) | b_out;
             }
         }
-    }
-}
-
-impl Compositor for SwCompositor {
-    fn compose(&mut self, src: &CompositorSource<'_>, gl: &glow::Context) -> glow::Texture {
-        let width  = src.width;
-        let height = src.height;
-        crate::pf_counter!(crate::perfetto::events::REX3_UPLOAD_RGB_BYTES, 0);
-        crate::pf_counter!(crate::perfetto::events::REX3_UPLOAD_AUX_BYTES, 0);
-        crate::pf_counter!(crate::perfetto::events::REX3_UPLOAD_RGB_RECTS, 0);
-        crate::pf_counter!(crate::perfetto::events::REX3_UPLOAD_AUX_RECTS, 0);
-        {
-            crate::pf_scope!(crate::perfetto::events::REX3_COMPOSE);
-        self.compose_pixels(src);
-        }
-
-        // Upload to GL texture
-        let tex = self.ensure_tex(gl);
-        unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 2048);
-            let u8_slice = std::slice::from_raw_parts(
-                self.buf.as_ptr() as *const u8,
-                self.buf.len() * 4,
-            );
-            gl.tex_sub_image_2d(
-                glow::TEXTURE_2D, 0,
-                0, 0, width as i32, height as i32,
-                glow::RGBA, glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(u8_slice)),
-            );
-            gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
-        }
-        tex
-    }
-
-    fn destroy(&mut self, gl: &glow::Context) {
-        if let Some(t) = self.tex.take() {
-            unsafe { gl.delete_texture(t); }
-        }
-    }
-
-    fn read_pixels(&self) -> Option<&[u32]> {
-        Some(&self.buf)
     }
 }

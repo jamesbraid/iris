@@ -406,7 +406,6 @@ in the `irix-gfx-loop` skill (`clanker/skills/irix-gfx-loop/SKILL.md`).
 | `bt445 status` / `bt445 identity` / `bt445 debug <on\|off>` | RAMDAC state / reset the palette to a linear ramp / trace **[DEV]** |
 | `dcb debug <on\|off>` | Display control bus trace **[DEV]** |
 | `disp status` / `disp debug <on\|off>` | Display timing and framebuffer state |
-| `disp compositor <gl\|sw>` | Switch between the GL and software compositor |
 | `block debug <on\|off>` | Block/span draw logging to `block.log` **[DEV]** |
 | `draw debug <on\|off>` | Draw a debug overlay on the framebuffer **[DEV]** |
 

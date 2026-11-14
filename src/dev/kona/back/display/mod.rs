@@ -307,9 +307,11 @@ impl Compositor {
             return Some(false);
         }
         if need.gpu && !need.words {
-            self.display.present_gpu(sc.output(), w, h);
+            out.width = w;
+            out.height = h;
+            out.gpu = Some(sc.output().clone());
             screen.counts.count(true);
-            return Some(false);
+            return Some(true);
         }
         out.width = w;
         out.height = h;
@@ -319,7 +321,6 @@ impl Compositor {
             screen.counts.count(false);
             return Some(false);
         }
-        self.display.present(&out.words, w as usize, h as usize);
         screen.counts.count(true);
         Some(true)
     }
@@ -330,7 +331,8 @@ impl Compositor {
     /// has changed.
     pub fn frame(&mut self) {
         let screen = self.display.out().clone();
-        screen.tick(|out, need| {
+        let display = self.display.clone();
+        screen.tick(|| display.stats(), |out, need| {
             // The flag is cleared before the pixels are read.
             let drawn = self.store.cpu().take_touched();
             if !drawn && !screen.requests.pending() {
@@ -355,7 +357,6 @@ impl Compositor {
             out.height = h;
             out.words.resize(w as usize * h as usize, 0);
             compose(self.store.cpu(), self.word, &map, &tables, &mut out.words, w as usize);
-            self.display.present(&out.words, w as usize, h as usize);
             screen.counts.count(true);
             true
         });
