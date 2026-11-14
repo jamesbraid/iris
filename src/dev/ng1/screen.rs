@@ -28,7 +28,6 @@ pub struct Ng1Screen(pub Arc<Mutex<Rex3Screen>>);
 /// Independent revisions of the cached Newport display state. The source
 /// identifies the screen that issued them, so replacing a screen cannot make
 /// an old compositor cache appear current.
-#[cfg(all(test, feature = "wgpu"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Ng1DisplayGenerations {
     pub(crate) source: u64,
@@ -37,18 +36,30 @@ pub(crate) struct Ng1DisplayGenerations {
     pub(crate) xmap: u64,
     pub(crate) cmap: u64,
     pub(crate) ramdac: u64,
+    /// Bumped when the CPU's decoded window-id map changes; only the tests
+    /// compare it, so production skips the comparison.
+    #[cfg(test)]
     pub(crate) did: u64,
     pub(crate) geometry: u64,
 }
 
-#[cfg(all(test, feature = "wgpu"))]
 impl Ng1DisplayGenerations {
     fn new() -> Self {
         static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
         let source = NEXT_SOURCE
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .expect("Newport display source identifiers exhausted");
-        Self { source, vc2_ram: 0, vc2_regs: 0, xmap: 0, cmap: 0, ramdac: 0, did: 0, geometry: 0 }
+        Self {
+            source,
+            vc2_ram: 0,
+            vc2_regs: 0,
+            xmap: 0,
+            cmap: 0,
+            ramdac: 0,
+            #[cfg(test)]
+            did: 0,
+            geometry: 0,
+        }
     }
 
     fn bump(generation: &mut u64) {
@@ -58,7 +69,7 @@ impl Ng1DisplayGenerations {
 
 /// A Newport display snapshot with no access to either CPU framebuffer.
 /// The generations change when the corresponding cached state changes.
-#[cfg(all(test, feature = "wgpu"))]
+#[cfg(feature = "wgpu")]
 pub(crate) struct Ng1DisplaySource<'a> {
     pub(crate) generations: Ng1DisplayGenerations,
     pub(crate) did: &'a [u8],
@@ -125,11 +136,11 @@ pub struct Rex3Screen {
     /// Bumped each time the resident test path captures a frame.
     #[cfg(all(test, feature = "wgpu"))]
     pub frame_seq: u64,
-    #[cfg(all(test, feature = "wgpu"))]
     display_generations: Ng1DisplayGenerations,
-    #[cfg(all(test, feature = "wgpu"))]
     display_geometry: (usize, usize, usize, i32),
-    #[cfg(all(test, feature = "wgpu"))]
+    /// The GPU's window-id map: display-owned history that outlives any one
+    /// scan-out.
+    #[cfg(feature = "wgpu")]
     resident_did: Mutex<Option<crate::dev::ng1::wgpu::direct::ResidentDid>>,
 }
 
@@ -163,11 +174,9 @@ impl Rex3Screen {
             cursor_x_adjust:  0,
             #[cfg(all(test, feature = "wgpu"))]
             frame_seq:        0,
-            #[cfg(all(test, feature = "wgpu"))]
             display_generations: Ng1DisplayGenerations::new(),
-            #[cfg(all(test, feature = "wgpu"))]
             display_geometry: (0, 0, 0, 0),
-            #[cfg(all(test, feature = "wgpu"))]
+            #[cfg(feature = "wgpu")]
             resident_did: Mutex::new(None),
         }
     }
@@ -180,9 +189,9 @@ impl Rex3Screen {
         did_buf: &mut [u8],
     ) -> bool {
         fn fill(dst: &mut [u8], value: u8) -> bool {
-            #[cfg(all(test, feature = "wgpu"))]
+            #[cfg(test)]
             let changed = dst.iter().any(|&old| old != value);
-            #[cfg(not(all(test, feature = "wgpu")))]
+            #[cfg(not(test))]
             let changed = false;
             dst.fill(value);
             changed
@@ -360,14 +369,11 @@ impl Rex3Screen {
         {
             let mut vc2 = vc2.lock();
             if vc2.dirty {
-                #[cfg(all(test, feature = "wgpu"))]
-                {
-                    if self.vc2_ram != vc2.ram {
-                        Ng1DisplayGenerations::bump(&mut self.display_generations.vc2_ram);
-                    }
-                    if self.vc2_regs != vc2.regs {
-                        Ng1DisplayGenerations::bump(&mut self.display_generations.vc2_regs);
-                    }
+                if self.vc2_ram != vc2.ram {
+                    Ng1DisplayGenerations::bump(&mut self.display_generations.vc2_ram);
+                }
+                if self.vc2_regs != vc2.regs {
+                    Ng1DisplayGenerations::bump(&mut self.display_generations.vc2_regs);
                 }
                 self.vc2_ram.copy_from_slice(&vc2.ram);
                 self.vc2_regs.copy_from_slice(&vc2.regs);
@@ -380,7 +386,6 @@ impl Rex3Screen {
         {
             let mut cmap = cmap.lock();
             if cmap.dirty {
-                #[cfg(all(test, feature = "wgpu"))]
                 if self.cmap != cmap.palette {
                     Ng1DisplayGenerations::bump(&mut self.display_generations.cmap);
                 }
@@ -394,7 +399,6 @@ impl Rex3Screen {
             let mut dac = bt445.lock();
             if dac.dirty {
                 let palette = dac.palette_as_rgb();
-                #[cfg(all(test, feature = "wgpu"))]
                 if self.ramdac_palette != palette {
                     Ng1DisplayGenerations::bump(&mut self.display_generations.ramdac);
                 }
@@ -407,7 +411,6 @@ impl Rex3Screen {
         {
             let mut xmap = xmap.lock();
             if xmap.dirty {
-                #[cfg(all(test, feature = "wgpu"))]
                 if self.xmap_mode != xmap.mode_table
                     || self.xmap_config != xmap.config
                     || self.xmap_cursor_cmap != xmap.cursor_cmap_msb
@@ -449,11 +452,11 @@ impl Rex3Screen {
         if decode_did {
             diag.fetch_or(Rex3::DIAG_LOOP_DECODE_DID, Ordering::Relaxed);
             let did_changed = self.decode_did();
-            #[cfg(all(test, feature = "wgpu"))]
+            #[cfg(test)]
             if did_changed {
                 Ng1DisplayGenerations::bump(&mut self.display_generations.did);
             }
-            #[cfg(not(all(test, feature = "wgpu")))]
+            #[cfg(not(test))]
             let _ = did_changed;
             diag.fetch_and(!Rex3::DIAG_LOOP_DECODE_DID, Ordering::Relaxed);
         }
@@ -472,8 +475,10 @@ impl Rex3Screen {
         self.refresh_display_state_inner(vc2, xmap, cmap, bt445, diag, true)
     }
 
-    #[cfg(all(test, feature = "wgpu"))]
-    pub(crate) fn refresh_resident_display_state(
+    /// As [`refresh_display_state`](Self::refresh_display_state), leaving the
+    /// window-id map to the GPU's expansion of the VC2 table.
+    #[cfg(feature = "wgpu")]
+    pub(crate) fn refresh_gpu_display_state(
         &mut self,
         vc2: &Mutex<Vc2>,
         xmap: &Mutex<Xmap9>,
@@ -486,7 +491,7 @@ impl Rex3Screen {
 
     /// Borrow only display state. Geometry includes externally supplied
     /// topscan as well as the decoded dimensions and cursor adjustment.
-    #[cfg(all(test, feature = "wgpu"))]
+    #[cfg(feature = "wgpu")]
     pub(crate) fn display_state(&mut self) -> Ng1DisplaySource<'_> {
         let geometry = (self.width, self.height, self.topscan, self.cursor_x_adjust);
         if self.display_geometry != geometry {

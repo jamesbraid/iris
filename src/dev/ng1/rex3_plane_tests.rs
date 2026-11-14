@@ -4,7 +4,7 @@ use crate::compositor::{CompositorSource, SwCompositor};
 use crate::dev::ng1::rex3_generic::{draw_with_fb, Framebuffers};
 use crate::dev::ng1::rex3_shape;
 use crate::dev::ng1::wgpu::resident::{ObservationCounters, ObservationReason, PlaneMask};
-use crate::dev::ng1::wgpu::Ng1Scanout;
+use crate::dev::ng1::wgpu::resident_scanout::Ng1ResidentScanout;
 use crate::traits::{BusDevice, Device};
 use crate::wgpu::{Gpu, GpuOptions};
 use std::io::Write;
@@ -385,7 +385,7 @@ fn resident_gpu_no_touch_gfifo_fence_and_direct_scanout() {
             assert_eq!(counts(&board.0), (AccessCounts::default(), AccessCounts::default()));
 
             let mut resident = &*board.0;
-            let mut scan = Ng1Scanout::new_resident(&gpu, &resident).expect("bind board planes");
+            let mut scan = Ng1ResidentScanout::new(&gpu, &resident).expect("bind board planes");
             let mut screen = board.0.screen.lock();
             screen.fb_rgb.clear();
             screen.fb_aux.clear();

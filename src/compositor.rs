@@ -2,7 +2,7 @@ use crate::dev::ng1::rex3::Rex3;
 use crate::dev::ng1::rex3_dirty::DamageRect;
 
 /// All source data needed to composite one display frame.
-/// Borrowed from Rex3Screen's cached copies — no allocations per frame.
+/// Borrowed from `Rex3Screen`'s cached copies — no allocations per frame.
 pub struct CompositorSource<'a> {
     /// REX3 colour framebuffer, 2048×1024, stride 2048 (host u32, no byte-swap)
     pub fb_rgb:           &'a [u32],
@@ -13,7 +13,7 @@ pub struct CompositorSource<'a> {
     /// Physical framebuffer rectangles refreshed in `fb_aux` for this frame.
     pub(crate) fb_aux_damage: &'a [DamageRect],
     /// Decoded DID buffer in *display* coordinates, 2048×1024, stride 2048.
-    /// Rex3Screen::decode_did() fills this before calling compose().
+    /// `Rex3Screen::decode_did` fills this before calling compose().
     pub did:              &'a [u8],
     /// XMAP9 mode table (32 entries × 24-bit word)
     pub xmap_mode:        &'a [u32; 32],

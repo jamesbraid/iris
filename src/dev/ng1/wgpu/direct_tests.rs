@@ -4,12 +4,12 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 
-use super::direct::{
+use super::resident_scanout::{
     validate_initial_did, CaptureFault, Ng1ResidentScanout, ResidentScanoutSource,
     ResidentScanoutTraffic,
 };
 use super::resident::{ObservationCounters, ResidentError, ResidentFaultInjection, ResidentGpu, ResidentRaster};
-use super::{Ng1Scanout, Ng1Slot, VC2_WORDS};
+use super::{Ng1Slot, VC2_WORDS};
 use crate::compositor::{CompositorSource, SwCompositor};
 use crate::dev::ng1::bt445::Bt445;
 use crate::dev::ng1::cmap::Cmap;
@@ -119,7 +119,7 @@ impl Display {
     }
 
     fn refresh_resident(&mut self) -> bool {
-        self.screen.refresh_resident_display_state(
+        self.screen.refresh_gpu_display_state(
             &self.vc2,
             &self.xmap,
             &self.cmap,
@@ -220,7 +220,6 @@ fn compare_frame(
     scan: &mut Ng1ResidentScanout,
     resident: &mut impl ResidentScanoutSource,
     display: &mut Display,
-    legacy: &mut Ng1Scanout,
     sw: &mut SwCompositor,
     rgb: &[u32],
     aux: &[u32],
@@ -229,18 +228,14 @@ fn compare_frame(
     let state = display.screen.display_state();
     let cpu = cpu_source(&state, rgb, aux);
     sw.compose_pixels(&cpu);
-    let mut old_gpu = vec![0u32; state.width * state.height];
-    legacy.run(&cpu, &mut old_gpu).expect("CPU-source GPU compose");
 
     let frame = scan.compose(&state, resident).expect("direct GPU compose");
-    assert!(Arc::ptr_eq(frame.gpu, legacy.gpu()), "output must use the resident device");
     assert_eq!(frame.position, status.submitted);
     assert_eq!((frame.width as usize, frame.height as usize), (state.width, state.height));
     // This is an explicit readback of the composed output, never a plane.
-    let bytes = frame.gpu.read_vec(frame.buffer, &[(0, old_gpu.len() as u64 * 4)])
+    let bytes = frame.gpu.read_vec(frame.buffer, &[(0, (state.width * state.height) as u64 * 4)])
         .expect("composed frame readback");
     let direct = bytemuck::cast_slice::<u8, u32>(&bytes).to_vec();
-    assert_pixels_eq("direct and CPU-source GPU compositors", &direct, &old_gpu);
     let did = scan.gpu().read_vec(scan.did_for_test(), &[(0, PLANE_WORDS as u64)])
         .expect("decoded DID readback");
     assert!(state.did.len() >= PLANE_WORDS, "CPU DID map is too small");
@@ -351,7 +346,7 @@ fn direct_ng1_scanout_initial_did_history_is_checked() {
     display.screen.did[WIDTH] = 4;
     assert_eq!(
         validate_initial_did(&display.screen.display_state()),
-        Err(ResidentError::Unsupported("initial resident DID history requires a seed")),
+        Err(ResidentError::Unsupported("initial DID history requires a seed")),
     );
     display.screen.did[WIDTH] = 0;
     display.screen.did[3 * FB_STRIDE] = 6;
@@ -365,7 +360,7 @@ fn direct_ng1_scanout_initial_did_history_is_checked() {
     display.refresh_resident();
     assert_eq!(
         validate_initial_did(&display.screen.display_state()),
-        Err(ResidentError::Unsupported("initial resident DID history requires a seed")),
+        Err(ResidentError::Unsupported("initial DID history requires a seed")),
     );
 
     {
@@ -386,13 +381,13 @@ fn direct_ng1_scanout_initial_did_history_is_checked() {
     display.refresh_resident();
     assert_eq!(
         validate_initial_did(&display.screen.display_state()),
-        Err(ResidentError::Unsupported("initial resident DID history requires a seed")),
+        Err(ResidentError::Unsupported("initial DID history requires a seed")),
     );
     let mut no_cpu_map = display.screen.display_state();
     no_cpu_map.did = &[];
     assert_eq!(
         validate_initial_did(&no_cpu_map),
-        Err(ResidentError::InvalidState("resident DID history is unavailable")),
+        Err(ResidentError::InvalidState("DID history is unavailable")),
     );
 }
 
@@ -409,12 +404,11 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
             let initial_status = resident.status().unwrap();
             assert_eq!(initial_status.initialization_uploads, 2);
             assert_eq!(initial_status.initialization_bytes, 2 * PLANE_WORDS as u64 * 4);
-            let mut scan = Ng1Scanout::new_resident(&gpu, &resident).expect("direct bindings");
-            let mut legacy = Ng1Scanout::new(&gpu).expect("CPU-source GPU compositor");
+            let mut scan = Ng1ResidentScanout::new(&gpu, &resident).expect("direct bindings");
             let mut display = Display::new();
             let mut sw = SwCompositor::new();
 
-            let first = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            let first = compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
             let traffic = scan.traffic();
             assert_eq!(traffic.frames_submitted, 1);
             assert_eq!(traffic.did_expansions.attempts, 1);
@@ -427,7 +421,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
             assert!(traffic.display.submitted_bytes < 128 * 1024, "initial display state is not small");
             assert_no_plane_traffic(traffic);
 
-            let again = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            let again = compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
             assert_eq!(again, first);
             assert_eq!(scan.traffic().display, traffic.display, "unchanged display state was uploaded");
             assert_eq!(scan.traffic().did, traffic.did);
@@ -447,7 +441,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
             let fb = Framebuffers { rgb: rgb.as_mut_ptr(), aux: aux.as_mut_ptr() };
             let mode = rex3_shape::unpack(cpu_context.drawmode0.0, cpu_context.drawmode1.0, cpu_context.clipmode);
             draw_with_fb(&mut cpu_context, &fb, &mode);
-            let drawn = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            let drawn = compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
             assert_ne!(drawn, first, "resident draw must become visible through the existing binding");
             assert_eq!(scan.traffic().display, traffic.display, "drawing must not re-upload display state");
             assert_ne!(resident.status().unwrap().submitted, initial_status.submitted);
@@ -458,7 +452,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 cmap.dirty = true;
             }
             display.refresh();
-            let palette = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            let palette = compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
             assert_ne!(palette, drawn, "palette change must affect the composed frame");
             assert_eq!(scan.traffic().did_expansions.submitted, 1);
 
@@ -468,7 +462,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 dac.dirty = true;
             }
             display.refresh();
-            let gamma = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            let gamma = compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
             assert_ne!(gamma, palette, "gamma change must affect the composed frame");
             assert_eq!(scan.traffic().did_expansions.submitted, 1);
 
@@ -480,12 +474,12 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 vc2.dirty = true;
             }
             display.refresh();
-            let cursor = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            let cursor = compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
             assert_ne!(cursor, gamma, "cursor changes must affect the composed frame");
             assert_eq!(scan.traffic().did_expansions.submitted, 2);
 
             display.screen.topscan = 1023;
-            let scroll = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            let scroll = compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
             assert_ne!(scroll, cursor, "topscan must wrap through the resident plane");
             assert_eq!(scan.traffic().did_expansions.submitted, 2);
 
@@ -495,7 +489,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 xmap.dirty = true;
             }
             display.refresh();
-            let xmap = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            let xmap = compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
             assert_ne!(xmap, scroll, "XMAP change must affect the composed frame");
             assert_eq!(scan.traffic().did_expansions.submitted, 2);
 
@@ -505,11 +499,11 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 vc2.dirty = true;
             }
             display.refresh();
-            let did = compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            let did = compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
             assert_ne!(did, xmap, "decoded DID change must affect the composed frame");
             assert_eq!(scan.traffic().did_expansions.submitted, 3);
             let after_did = scan.traffic();
-            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
             assert_eq!(scan.traffic().display, after_did.display);
             assert_eq!(scan.traffic().did, after_did.did);
 
@@ -523,7 +517,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 }
                 display.refresh();
                 assert_eq!(display.screen.height, height);
-                compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+                compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
             }
             assert_eq!(scan.traffic().did_expansions.submitted, 5);
             assert_no_plane_traffic(scan.traffic());
@@ -537,7 +531,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
 
             let mut other_display = Display::new();
             let before_other_source = scan.traffic();
-            compare_frame(&mut scan, &mut resident, &mut other_display, &mut legacy, &mut sw, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut other_display, &mut sw, &rgb, &aux);
             assert_eq!(
                 scan.traffic().did_expansions.submitted,
                 before_other_source.did_expansions.submitted + 1,
@@ -549,7 +543,7 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 vc2.dirty = true;
             }
             other_display.refresh();
-            compare_frame(&mut scan, &mut resident, &mut other_display, &mut legacy, &mut sw, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut other_display, &mut sw, &rgb, &aux);
             {
                 let mut vc2 = other_display.vc2.lock();
                 vc2.ram[DID_LINE] = 2;
@@ -557,11 +551,11 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 vc2.dirty = true;
             }
             other_display.refresh();
-            compare_frame(&mut scan, &mut resident, &mut other_display, &mut legacy, &mut sw, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut other_display, &mut sw, &rgb, &aux);
             assert_eq!(other_display.screen.did[3 * FB_STRIDE], 6);
-            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
-            compare_frame(&mut scan, &mut resident, &mut other_display, &mut legacy, &mut sw, &rgb, &aux);
-            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut other_display, &mut sw, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
             assert_eq!(
                 scan.traffic().did_expansions.submitted,
                 before_other_source.did_expansions.submitted + 6,
@@ -596,22 +590,22 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
             invalid.cursor_x_adjust = i32::MAX;
             assert!(matches!(
                 scan.compose(&invalid, &mut resident),
-                Err(ResidentError::InvalidState("resident scanout display state is incomplete"))
+                Err(ResidentError::InvalidState("scanout display state is incomplete"))
             ));
             let mut invalid = display.screen.display_state();
             invalid.width = FB_STRIDE + 1;
             assert!(matches!(
                 scan.compose(&invalid, &mut resident),
-                Err(ResidentError::InvalidState("resident scanout dimensions exceed the Newport planes"))
+                Err(ResidentError::InvalidState("scanout dimensions exceed the Newport planes"))
             ));
             assert_eq!(scan.traffic(), before_invalid);
 
             let other_gpu = required_gpu();
-            assert!(matches!(Ng1Scanout::new_resident(&other_gpu, &resident), Err(ResidentError::DeviceMismatch)));
+            assert!(matches!(Ng1ResidentScanout::new(&other_gpu, &resident), Err(ResidentError::DeviceMismatch)));
             let mut other_resident = ResidentRaster::new(
                 ResidentGpu::activate(Arc::clone(&other_gpu), &rgb, &aux).expect("activate other device"),
             );
-            let mut other_scan = Ng1Scanout::new_resident(&other_gpu, &other_resident)
+            let mut other_scan = Ng1ResidentScanout::new(&other_gpu, &other_resident)
                 .expect("bind other device");
             assert!(matches!(
                 other_scan.compose(&display.screen.display_state(), &mut other_resident),
@@ -629,8 +623,8 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 Err(ResidentError::InvalidState("resident scanout bindings belong to an old or different epoch"))
             ));
             assert_eq!(scan.traffic(), before);
-            let mut rebound = Ng1Scanout::new_resident(&gpu, &resident).expect("bind new epoch");
-            let reset_frame = compare_frame(&mut rebound, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            let mut rebound = Ng1ResidentScanout::new(&gpu, &resident).expect("bind new epoch");
+            let reset_frame = compare_frame(&mut rebound, &mut resident, &mut display, &mut sw, &rgb, &aux);
             assert_no_plane_traffic(rebound.traffic());
 
             let restored_prefix = vec![0x00a5_5ac3; WIDTH];
@@ -643,8 +637,8 @@ fn direct_ng1_scanout_gpu_reuses_planes_and_caches_display_state() {
                 Err(ResidentError::InvalidState("resident scanout bindings belong to an old or different epoch"))
             ));
             assert_eq!(rebound.traffic(), before_restore);
-            let mut restored = Ng1Scanout::new_resident(&gpu, &resident).expect("bind restored epoch");
-            let restored_frame = compare_frame(&mut restored, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            let mut restored = Ng1ResidentScanout::new(&gpu, &resident).expect("bind restored epoch");
+            let restored_frame = compare_frame(&mut restored, &mut resident, &mut display, &mut sw, &rgb, &aux);
             assert_ne!(restored_frame, reset_frame, "restore must be visible through freshly bound planes");
             let status = resident.status().unwrap();
             assert_eq!((status.restore_uploads, status.restore_bytes), (1, (WIDTH * 4) as u64));
@@ -675,8 +669,7 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
             let mut resident = ResidentRaster::new(
                 ResidentGpu::activate(Arc::clone(&gpu), &rgb, &aux).expect("activate resident planes"),
             );
-            let mut scan = Ng1Scanout::new_resident(&gpu, &resident).expect("direct bindings");
-            let mut legacy = Ng1Scanout::new(&gpu).expect("CPU-source GPU compositor");
+            let mut scan = Ng1ResidentScanout::new(&gpu, &resident).expect("direct bindings");
             let mut display = Display::new();
             let mut sw = SwCompositor::new();
 
@@ -688,11 +681,11 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 vc2.dirty = true;
             }
             stale_display.refresh_resident();
-            let mut stale_scan = Ng1Scanout::new_resident(&gpu, &resident).expect("stale bindings");
+            let mut stale_scan = Ng1ResidentScanout::new(&gpu, &resident).expect("stale bindings");
             let state = stale_display.screen.display_state();
             assert!(matches!(
                 stale_scan.compose(&state, &mut resident),
-                Err(ResidentError::Unsupported("initial resident DID history requires a seed"))
+                Err(ResidentError::Unsupported("initial DID history requires a seed"))
             ));
             assert_eq!(stale_scan.traffic(), ResidentScanoutTraffic::default());
             {
@@ -705,7 +698,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut stale_scan,
                 &mut resident,
                 &mut stale_display,
-                &mut legacy,
                 &mut sw,
                 &rgb,
                 &aux,
@@ -716,7 +708,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut scan,
                 &mut resident,
                 &mut display,
-                &mut legacy,
                 &mut sw,
                 &rgb,
                 &aux,
@@ -732,7 +723,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut scan,
                 &mut resident,
                 &mut display,
-                &mut legacy,
                 &mut sw,
                 &rgb,
                 &aux,
@@ -752,7 +742,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut scan,
                 &mut resident,
                 &mut display,
-                &mut legacy,
                 &mut sw,
                 &rgb,
                 &aux,
@@ -770,7 +759,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut scan,
                 &mut resident,
                 &mut display,
-                &mut legacy,
                 &mut sw,
                 &rgb,
                 &aux,
@@ -784,7 +772,7 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 .iter()
                 .all(|&did| did == 6));
 
-            let mut rebound = Ng1Scanout::new_resident(&gpu, &resident).expect("rebind scanout");
+            let mut rebound = Ng1ResidentScanout::new(&gpu, &resident).expect("rebind scanout");
             let mut state = display.screen.display_state();
             state.did = &[];
             let frame = rebound.compose(&state, &mut resident).expect("rebind without CPU DID");
@@ -795,7 +783,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut rebound,
                 &mut resident,
                 &mut display,
-                &mut legacy,
                 &mut sw,
                 &rgb,
                 &aux,
@@ -813,7 +800,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut scan,
                 &mut resident,
                 &mut display,
-                &mut legacy,
                 &mut sw,
                 &rgb,
                 &aux,
@@ -837,7 +823,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut scan,
                 &mut resident,
                 &mut display,
-                &mut legacy,
                 &mut sw,
                 &rgb,
                 &aux,
@@ -856,7 +841,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut scan,
                 &mut resident,
                 &mut display,
-                &mut legacy,
                 &mut sw,
                 &rgb,
                 &aux,
@@ -875,7 +859,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut scan,
                 &mut resident,
                 &mut display,
-                &mut legacy,
                 &mut sw,
                 &rgb,
                 &aux,
@@ -893,7 +876,6 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 &mut scan,
                 &mut resident,
                 &mut display,
-                &mut legacy,
                 &mut sw,
                 &rgb,
                 &aux,
@@ -911,7 +893,7 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 vc2.dirty = true;
             }
             display.refresh();
-            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
             {
                 let mut vc2 = display.vc2.lock();
                 vc2.ram[DID_LINE] = 2;
@@ -919,7 +901,7 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 vc2.dirty = true;
             }
             display.refresh();
-            compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
 
             for inactive_bit in [VC2_CTRL_BLACKOUT, VC2_CTRL_VIDEO_TIMING_EN] {
                 for did_enabled in [false, true] {
@@ -935,7 +917,7 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                         vc2.dirty = true;
                     }
                     display.refresh();
-                    compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+                    compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
                     assert_eq!(display.screen.did[0], previous_did);
                     assert_eq!(display.screen.did[3 * FB_STRIDE], 6);
                     {
@@ -944,7 +926,7 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                         vc2.dirty = true;
                     }
                     display.refresh();
-                    compare_frame(&mut scan, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+                    compare_frame(&mut scan, &mut resident, &mut display, &mut sw, &rgb, &aux);
                     assert_eq!(display.screen.did[0], next_did as u8);
                     assert_eq!(display.screen.did[3 * FB_STRIDE], 6);
                 }
@@ -957,9 +939,9 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 Err(ResidentError::InvalidState("resident scanout bindings belong to an old or different epoch"))
             ));
             assert_eq!(scan.traffic(), before_reset);
-            let mut reset = Ng1Scanout::new_resident(&gpu, &resident).expect("bind reset epoch");
+            let mut reset = Ng1ResidentScanout::new(&gpu, &resident).expect("bind reset epoch");
             let reset_frame = compare_frame(
-                &mut reset, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux,
+                &mut reset, &mut resident, &mut display, &mut sw, &rgb, &aux,
             );
             assert_eq!(display.screen.did[3 * FB_STRIDE], 6);
             assert!(reset.traffic().display.submitted_bytes < 128 * 1024);
@@ -970,9 +952,9 @@ fn direct_ng1_scanout_gpu_did_expansion_matches_cpu_edge_cases() {
                 reset.compose(&display.screen.display_state(), &mut resident),
                 Err(ResidentError::InvalidState("resident scanout bindings belong to an old or different epoch"))
             ));
-            let mut restored = Ng1Scanout::new_resident(&gpu, &resident).expect("bind restored epoch");
+            let mut restored = Ng1ResidentScanout::new(&gpu, &resident).expect("bind restored epoch");
             let restored_frame = compare_frame(
-                &mut restored, &mut resident, &mut display, &mut legacy, &mut sw, &rgb, &aux,
+                &mut restored, &mut resident, &mut display, &mut sw, &rgb, &aux,
             );
             assert_pixels_eq("restored frame", &restored_frame, &reset_frame);
             assert_no_plane_traffic(restored.traffic());
@@ -1019,11 +1001,10 @@ fn direct_ng1_scanout_gpu_uses_the_board_binding_seam() {
             let board = TestBoard(rex);
             let mut source = &*board.0;
             let initial_status = source.scanout_status().unwrap();
-            let mut scan = Ng1Scanout::new_resident(&gpu, &source).expect("board scanout binding");
-            let mut legacy = Ng1Scanout::new(&gpu).expect("CPU-source GPU compositor");
+            let mut scan = Ng1ResidentScanout::new(&gpu, &source).expect("board scanout binding");
             let mut display = Display::new();
             let mut sw = SwCompositor::new();
-            let first = compare_frame(&mut scan, &mut source, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            let first = compare_frame(&mut scan, &mut source, &mut display, &mut sw, &rgb, &aux);
 
             board.0.start();
             let mut expected = fill_context();
@@ -1042,7 +1023,7 @@ fn direct_ng1_scanout_gpu_uses_the_board_binding_seam() {
             let fb = Framebuffers { rgb: rgb.as_mut_ptr(), aux: aux.as_mut_ptr() };
             let mode = rex3_shape::unpack(expected.drawmode0.0, expected.drawmode1.0, expected.clipmode);
             draw_with_fb(&mut expected, &fb, &mode);
-            let drawn = compare_frame(&mut scan, &mut source, &mut display, &mut legacy, &mut sw, &rgb, &aux);
+            let drawn = compare_frame(&mut scan, &mut source, &mut display, &mut sw, &rgb, &aux);
             assert_ne!(drawn, first, "board draw must appear through the original bindings");
             let status = source.scanout_status().unwrap();
             assert_ne!(status.submitted, initial_status.submitted);

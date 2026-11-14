@@ -1,55 +1,133 @@
-//! Test-only scanout of the resident raster's authoritative planes.
+//! Newport's scan-out on the GPU: the one direct kernel over two plane
+//! buffers, whoever draws into them.
+//!
+//! The CPU raster uploads its planes (whole, or the row bands the damage
+//! tracker names) into an [`Ng1Planes`]; the test-only resident raster
+//! draws into its own. Either way the window-id map is expanded on the GPU
+//! from the VC2 table, the display state is rewritten only for what changed
+//! (a cursor move writes 16 bytes), and the frame lands in the scan-out
+//! driver's output buffer, 0xAABBGGRR, for a renderer on the same device.
 
 use std::sync::Arc;
 
-use super::resident::{Position, ResidentError, ResidentRaster, ResidentScanoutBindings, ResidentStatus};
-use super::{Ng1Scanout, Ng1Slot, RESIDENT_BINDINGS, SCANOUT, VC2_WORDS};
-use crate::dev::ng1::rex3::{Rex3, REX3_SCREEN_HEIGHT};
-use crate::dev::ng1::vc2::{
-    VC2_CTRL_BLACKOUT, VC2_CTRL_DID_EN, VC2_CTRL_VIDEO_TIMING_EN, VC2_REG_DID_ENTRY_PTR,
-    VC2_REG_DISPLAY_CONTROL, VC2_REG_SCANLINE_LEN,
-};
+use super::{Ng1Slot, SCANOUT, VC2_WORDS};
+use crate::dev::ng1::rex3_dirty::{DamagePlane, DamageRect};
 use crate::dev::ng1::screen::{Ng1DisplayGenerations, Ng1DisplaySource};
+use crate::dev::ng1::vc2::{
+    VC2_CTRL_BLACKOUT, VC2_CTRL_DID_EN, VC2_CTRL_VIDEO_TIMING_EN, VC2_REG_CURRENT_CURSOR_X,
+    VC2_REG_DID_ENTRY_PTR, VC2_REG_DISPLAY_CONTROL, VC2_REG_SCANLINE_LEN,
+};
 use crate::disp::FB_STRIDE;
 use crate::wgpu::{Fragment, Gpu, Scanout, ScanoutPipeline, ScanoutShaders, Source};
 
-const HEIGHT: usize = REX3_SCREEN_HEIGHT as usize;
+const HEIGHT: usize = 1024;
+/// A plane: 2048 x 1024 words.
+const PLANE_WORDS: usize = FB_STRIDE * HEIGHT;
 const DID_BYTES: usize = FB_STRIDE * HEIGHT;
 const MAX_PIXELS: u32 = (FB_STRIDE * HEIGHT) as u32;
-const DID_EXPAND: Fragment =
-    Fragment::new("ng1_did_expand.wgsl", include_str!("shaders/did_expand.wgsl"));
+const BINDINGS: Fragment = Fragment::new("ng1_bindings.wgsl", include_str!("shaders/scanout_bindings.wgsl"));
+const DID_EXPAND: Fragment = Fragment::new("ng1_did_expand.wgsl", include_str!("shaders/did_expand.wgsl"));
 
-fn scanout_error(error: String) -> ResidentError {
+/// Why a frame could not be composed. The kinds stay apart so a caller can
+/// tell a device that is gone from state it was handed wrongly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ScanoutError {
+    Unsupported(&'static str),
+    Invalid(&'static str),
+    DeviceMismatch,
+    DeviceLost(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for ScanoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported(reason) => write!(f, "unsupported: {reason}"),
+            Self::Invalid(reason) => write!(f, "invalid state: {reason}"),
+            Self::DeviceMismatch => write!(f, "state belongs to another device"),
+            Self::DeviceLost(e) | Self::Failed(e) => f.write_str(e),
+        }
+    }
+}
+
+pub(super) fn device_error(error: String) -> ScanoutError {
     if error.starts_with("wgpu device lost (") {
-        ResidentError::DeviceLost(error)
+        ScanoutError::DeviceLost(error)
     } else {
-        ResidentError::Failed(error)
+        ScanoutError::Failed(error)
     }
 }
 
-/// The narrow resident seam: no raw buffer handles or CPU planes are exposed.
-pub(crate) trait ResidentScanoutSource {
-    fn scanout_bindings(&self, gpu: &Arc<Gpu>) -> Result<ResidentScanoutBindings, ResidentError>;
-    fn scanout_status(&mut self) -> Result<ResidentStatus, ResidentError>;
+/// The two plane buffers the kernel reads, 2048 x 1024 words each. Whoever
+/// replaces them bumps `generation`, so the scan-out binds the new ones.
+/// They must be on the scan-out's device.
+#[derive(Clone)]
+pub struct Ng1Planes {
+    pub rgb: wgpu::Buffer,
+    pub aux: wgpu::Buffer,
+    pub generation: u64,
 }
 
-impl ResidentScanoutSource for ResidentRaster {
-    fn scanout_bindings(&self, gpu: &Arc<Gpu>) -> Result<ResidentScanoutBindings, ResidentError> {
-        ResidentRaster::scanout_bindings(self, gpu)
+impl Ng1Planes {
+    /// Empty planes for a CPU raster to upload into.
+    pub fn new(gpu: &Gpu) -> Ng1Planes {
+        let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        Ng1Planes {
+            rgb: gpu.buffer("ng1 rgb plane", 4 * PLANE_WORDS as u64, usage),
+            aux: gpu.buffer("ng1 aux plane", 4 * PLANE_WORDS as u64, usage),
+            generation: 0,
+        }
     }
 
-    fn scanout_status(&mut self) -> Result<ResidentStatus, ResidentError> {
-        self.status()
-    }
-}
-
-impl ResidentScanoutSource for &Rex3 {
-    fn scanout_bindings(&self, gpu: &Arc<Gpu>) -> Result<ResidentScanoutBindings, ResidentError> {
-        self.resident_scanout_bindings(gpu)
+    fn target(&self, plane: DamagePlane) -> &wgpu::Buffer {
+        match plane {
+            DamagePlane::Rgb => &self.rgb,
+            DamagePlane::Aux => &self.aux,
+        }
     }
 
-    fn scanout_status(&mut self) -> Result<ResidentStatus, ResidentError> {
-        self.resident_status()
+    /// Bring the planes up to the CPU's: the rows `damage` names (RGB's
+    /// rectangles, then the aux plane's), or both whole planes when there is
+    /// no damage report. Returns the bytes written.
+    pub(crate) fn sync(&self, gpu: &Gpu, rgb: &[u32], aux: &[u32], damage: Option<(&[DamageRect], &[DamageRect])>) -> u64 {
+        match damage {
+            None => self.write_all(gpu, DamagePlane::Rgb, rgb) + self.write_all(gpu, DamagePlane::Aux, aux),
+            Some((r, a)) => self.write_bands(gpu, DamagePlane::Rgb, rgb, r) + self.write_bands(gpu, DamagePlane::Aux, aux, a),
+        }
+    }
+
+    /// The whole of `words`, a CPU plane. Returns the bytes written.
+    pub(crate) fn write_all(&self, gpu: &Gpu, plane: DamagePlane, words: &[u32]) -> u64 {
+        let n = words.len().min(PLANE_WORDS) & !1;
+        gpu.write(self.target(plane), 0, bytemuck::cast_slice(&words[..n]));
+        4 * n as u64
+    }
+
+    /// The rows any of `rects` touches, whole rows, one write to a run of
+    /// touching ones: a write per rectangle row costs more than the bytes
+    /// it saves once there are a few hundred of them. Returns the bytes
+    /// written.
+    pub(crate) fn write_bands(&self, gpu: &Gpu, plane: DamagePlane, words: &[u32], rects: &[DamageRect]) -> u64 {
+        let mut bands: Vec<(usize, usize)> = rects.iter().map(|r| (r.y, r.y + r.height)).collect();
+        bands.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (a, b) in bands {
+            match merged.last_mut() {
+                Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                _ => merged.push((a, b)),
+            }
+        }
+        let rows = (words.len() / FB_STRIDE).min(HEIGHT);
+        let mut bytes = 0;
+        for (a, b) in merged {
+            let b = b.min(rows);
+            if a < b {
+                let band = &words[a * FB_STRIDE..b * FB_STRIDE];
+                gpu.write(self.target(plane), 4 * (a * FB_STRIDE) as u64, bytemuck::cast_slice(band));
+                bytes += 4 * band.len() as u64;
+            }
+        }
+        bytes
     }
 }
 
@@ -73,33 +151,21 @@ impl UploadCount {
     }
 }
 
-/// Traffic caused by this compositor, not by raster initialization or
-/// separately requested composed-frame capture. `did` counts decoded-map
-/// uploads and must remain zero; `did_expansions` counts GPU expansion passes.
-/// Submitted counts mean queued with scanout, not GPU completion.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ResidentScanoutTraffic {
-    pub(crate) display: UploadCount,
-    pub(crate) did: UploadCount,
-    pub(crate) did_expansions: DispatchCount,
-    pub(crate) raw_plane_uploads: UploadCount,
-    pub(crate) raw_plane_readbacks: UploadCount,
-    pub(crate) composed_readbacks: CaptureCount,
-    pub(crate) frames_submitted: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct CaptureCount {
-    pub(crate) attempts: u64,
-    pub(crate) attempted_bytes: u64,
-    pub(crate) successes: u64,
-    pub(crate) successful_bytes: u64,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DispatchCount {
     pub(crate) attempts: u64,
     pub(crate) submitted: u64,
+}
+
+/// Traffic of the display state, not the planes. `did` counts decoded-map
+/// uploads and must remain zero; `did_expansions` counts GPU expansion
+/// passes. Submitted counts mean queued with the frame, not GPU completion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScanoutTraffic {
+    pub(crate) display: UploadCount,
+    pub(crate) did: UploadCount,
+    pub(crate) did_expansions: DispatchCount,
+    pub(crate) frames_submitted: u64,
 }
 
 #[repr(C)]
@@ -114,23 +180,28 @@ struct DidParams {
     pad: [u32; 2],
 }
 
-/// Display-owned DID history survives scanout replacement and raster epochs.
+/// The display's window-id history, kept across scan-out replacement: rows
+/// the VC2 table stops covering keep what they last held, as the CPU's
+/// decoded map does.
 pub(crate) struct ResidentDid {
     gpu: Arc<Gpu>,
     buffer: wgpu::Buffer,
     initialized: bool,
 }
 
-pub(super) fn validate_initial_did(src: &Ng1DisplaySource<'_>) -> Result<(), ResidentError> {
+/// Why a fresh, zeroed GPU map cannot stand in for the history of `src`:
+/// the CPU's map must hold nothing outside what the table decodes.
+pub(super) fn did_history_error(src: &Ng1DisplaySource<'_>) -> Option<ScanoutError> {
     let control = src.vc2_regs[VC2_REG_DISPLAY_CONTROL as usize];
     let active = control & (VC2_CTRL_BLACKOUT | VC2_CTRL_VIDEO_TIMING_EN)
         == (VC2_CTRL_BLACKOUT | VC2_CTRL_VIDEO_TIMING_EN);
     if active && control & VC2_CTRL_DID_EN == 0 {
-        return Ok(());
+        return None;
     }
 
-    let did = src.did.get(..DID_BYTES)
-        .ok_or(ResidentError::InvalidState("resident DID history is unavailable"))?;
+    let Some(did) = src.did.get(..DID_BYTES) else {
+        return Some(ScanoutError::Invalid("DID history is unavailable"));
+    };
     // A zero-initialized GPU map can retain only zeroes outside this decode.
     let rows = if active {
         let table = src.vc2_regs[VC2_REG_DID_ENTRY_PTR as usize] as usize;
@@ -145,51 +216,23 @@ pub(super) fn validate_initial_did(src: &Ng1DisplaySource<'_>) -> Result<(), Res
     for y in 0..HEIGHT {
         let start = y * FB_STRIDE + if y < rows { written } else { 0 };
         if did[start..(y + 1) * FB_STRIDE].iter().any(|&value| value != 0) {
-            return Err(ResidentError::Unsupported("initial resident DID history requires a seed"));
+            return Some(ScanoutError::Unsupported("initial DID history requires a seed"));
         }
     }
-    Ok(())
+    None
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ResidentFrameStamp {
-    serial: u64,
-    pub(crate) position: Position,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-}
-
-/// A same-device output. Its contents remain valid until this scanout
-/// composes again; queue its consumer before releasing the borrow.
-pub(crate) struct Ng1ResidentFrame<'a> {
-    pub(crate) gpu: &'a Arc<Gpu>,
-    pub(crate) buffer: &'a wgpu::Buffer,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) position: Position,
-    stamp: ResidentFrameStamp,
-}
-
-impl Ng1ResidentFrame<'_> {
-    pub(crate) fn stamp(&self) -> ResidentFrameStamp {
-        self.stamp
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum CaptureFault {
-    BeforeCopy,
-    AfterMap,
-}
-
-/// The group retains the raster's plane buffers without exposing their
-/// handles. The display owns DID history; this scanout owns its bindings.
-pub(crate) struct Ng1ResidentScanout {
+/// Newport's display on the GPU. It owns the pipeline, the output buffer and
+/// the copies of the display state the kernel reads; the planes are the
+/// caller's.
+pub struct Ng1Scanout {
     pipeline: ScanoutPipeline,
     scanout: Scanout,
-    bindings: ResidentScanoutBindings,
+    planes_layout: wgpu::BindGroupLayout,
     display_layout: wgpu::BindGroupLayout,
     did_layout: wgpu::BindGroupLayout,
+    /// The planes' bind group and the generation of the planes it binds.
+    planes_group: Option<(u64, wgpu::BindGroup)>,
     did_source: Option<u64>,
     did: Option<wgpu::Buffer>,
     vc2: wgpu::Buffer,
@@ -199,87 +242,71 @@ pub(crate) struct Ng1ResidentScanout {
     display_group: Option<wgpu::BindGroup>,
     uploaded: Option<Ng1DisplayGenerations>,
     dimensions: Option<(u32, u32)>,
-    traffic: ResidentScanoutTraffic,
-    last_frame: Option<ResidentFrameStamp>,
-    capture_scratch: Vec<u32>,
-    capture_fault: Option<CaptureFault>,
+    traffic: ScanoutTraffic,
 }
 
 impl Ng1Scanout {
-    /// Create a direct compositor from the resident raster's same-device,
-    /// read-only binding seam. This does not submit raster work.
-    pub(crate) fn new_resident(
-        gpu: &Arc<Gpu>,
-        resident: &impl ResidentScanoutSource,
-    ) -> Result<Ng1ResidentScanout, ResidentError> {
-        let bindings = resident.scanout_bindings(gpu)?;
-        let entry = |binding| wgpu::BindGroupLayoutEntry {
+    pub fn new(gpu: &Arc<Gpu>) -> Result<Ng1Scanout, String> {
+        Self::build(gpu).map_err(|e| e.to_string())
+    }
+
+    pub(super) fn build(gpu: &Arc<Gpu>) -> Result<Ng1Scanout, ScanoutError> {
+        let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
+            ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
             count: None,
         };
-        let layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("resident ng1 display state"),
-            entries: &[entry(0), entry(1)],
+        let read = wgpu::BufferBindingType::Storage { read_only: true };
+        let planes_layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ng1 scanout planes"),
+            entries: &[entry(0, read), entry(1, read)],
+        });
+        let display_layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ng1 display state"),
+            entries: &[entry(0, read), entry(1, read)],
         });
         let pipeline = ScanoutPipeline::new(gpu, &ScanoutShaders {
-            label: "resident ng1",
+            label: "ng1",
             body: &[SCANOUT],
-            library: &[RESIDENT_BINDINGS],
+            library: &[BINDINGS],
             defines: &[],
-            layouts: &[&bindings.layout, &layout],
-        }).map_err(scanout_error)?;
+            layouts: &[&planes_layout, &display_layout],
+        }).map_err(device_error)?;
         let scanout = Scanout::new(gpu, &pipeline, MAX_PIXELS, size_of::<Ng1Slot>() as u64);
         let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
-        let vc2 = gpu.buffer("resident ng1 vc2 ram", (2 * VC2_WORDS) as u64, usage);
+        let vc2 = gpu.buffer("ng1 vc2 ram", (2 * VC2_WORDS) as u64, usage);
         let did_params = gpu.buffer(
-            "resident ng1 DID parameters",
+            "ng1 DID parameters",
             size_of::<DidParams>() as u64,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
-        let did_entry = |binding, ty| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
         let did_layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("resident ng1 DID expansion"),
+            label: Some("ng1 DID expansion"),
             entries: &[
-                did_entry(0, wgpu::BufferBindingType::Storage { read_only: true }),
-                did_entry(1, wgpu::BufferBindingType::Storage { read_only: false }),
-                did_entry(2, wgpu::BufferBindingType::Uniform),
+                entry(0, read),
+                entry(1, wgpu::BufferBindingType::Storage { read_only: false }),
+                entry(2, wgpu::BufferBindingType::Uniform),
             ],
         });
-        let did_pipeline = Source::new("resident ng1 DID expansion")
+        let did_pipeline = Source::new("ng1 DID expansion")
             .body(DID_EXPAND)
             .compute_pipeline(&gpu.device, "expand_did", &[&did_layout])
-            .map_err(scanout_error)?;
-        gpu.check().map_err(scanout_error)?;
-        Ok(Ng1ResidentScanout {
-            pipeline, scanout, bindings, display_layout: layout, did_layout, did_source: None,
-            did: None, vc2, did_params, did_pipeline, did_group: None, display_group: None,
-            uploaded: None, dimensions: None, traffic: ResidentScanoutTraffic::default(),
-            last_frame: None, capture_scratch: Vec::new(), capture_fault: None,
+            .map_err(device_error)?;
+        gpu.check().map_err(device_error)?;
+        Ok(Ng1Scanout {
+            pipeline, scanout, planes_layout, display_layout, did_layout, planes_group: None,
+            did_source: None, did: None, vc2, did_params, did_pipeline, did_group: None,
+            display_group: None, uploaded: None, dimensions: None, traffic: ScanoutTraffic::default(),
         })
     }
-}
 
-impl Ng1ResidentScanout {
-    pub(crate) fn gpu(&self) -> &Arc<Gpu> {
+    /// The device it runs on.
+    pub fn gpu(&self) -> &Arc<Gpu> {
         self.scanout.gpu()
     }
 
-    pub(crate) fn traffic(&self) -> ResidentScanoutTraffic {
+    pub(crate) fn traffic(&self) -> ScanoutTraffic {
         self.traffic
     }
 
@@ -288,21 +315,67 @@ impl Ng1ResidentScanout {
         self.did.as_ref().expect("DID buffer is bound after composition")
     }
 
-    pub(crate) fn fail_next_capture(&mut self, fault: CaptureFault) {
-        self.capture_fault = Some(fault);
+    /// The buffer the last frame was composed into: 0xAABBGGRR, rows of
+    /// that frame's width.
+    pub fn output(&self) -> &wgpu::Buffer {
+        self.scanout.output()
     }
 
-    fn expand_did(&self, params: &DidParams) -> Result<(), ResidentError> {
+    /// Frames composed so far.
+    pub fn frames(&self) -> u64 {
+        self.scanout.frames
+    }
+
+    /// Read the last composed frame back into `out` (0xAABBGGRR, rows of
+    /// `width`), for a consumer that wants words.
+    pub fn read(&mut self, width: u32, height: u32, out: &mut [u32]) -> Result<(), String> {
+        self.scanout.read_output(width, height, out)
+    }
+
+    /// Seed the GPU's window-id history from the CPU's decoded map, for a
+    /// board whose earlier frames were composed on the CPU. A no-op once the
+    /// history is the GPU's own.
+    pub(crate) fn seed_did(&self, src: &Ng1DisplaySource<'_>) -> Result<(), ScanoutError> {
+        let mut state = src.resident_did.lock();
+        if state.as_ref().is_some_and(|did| did.initialized) {
+            return Ok(());
+        }
+        let did = self.did_state(&mut state)?;
+        let map = src.did.get(..DID_BYTES).ok_or(ScanoutError::Invalid("DID history is unavailable"))?;
+        self.gpu().write(&did.buffer, 0, map);
+        did.initialized = true;
+        Ok(())
+    }
+
+    /// The display's window-id buffer, made on first use and kept on one device.
+    fn did_state<'a>(&self, state: &'a mut Option<ResidentDid>) -> Result<&'a mut ResidentDid, ScanoutError> {
         let gpu = self.scanout.gpu();
-        let group = self.did_group.as_ref()
-            .ok_or(ResidentError::InvalidState("resident DID bindings are missing"))?;
+        if let Some(did) = state.as_ref() {
+            if !Arc::ptr_eq(&did.gpu, gpu) {
+                return Err(ScanoutError::DeviceMismatch);
+            }
+        } else {
+            let buffer = gpu.buffer(
+                "ng1 decoded DID",
+                DID_BYTES as u64,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            );
+            gpu.check().map_err(device_error)?;
+            *state = Some(ResidentDid { gpu: Arc::clone(gpu), buffer, initialized: false });
+        }
+        state.as_mut().ok_or(ScanoutError::Invalid("DID state is missing"))
+    }
+
+    fn expand_did(&self, params: &DidParams) -> Result<(), ScanoutError> {
+        let gpu = self.scanout.gpu();
+        let group = self.did_group.as_ref().ok_or(ScanoutError::Invalid("DID bindings are missing"))?;
         gpu.write(&self.did_params, 0, bytemuck::bytes_of(params));
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("resident ng1 DID expansion"),
+            label: Some("ng1 DID expansion"),
         });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("resident ng1 DID expansion"),
+                label: Some("ng1 DID expansion"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.did_pipeline);
@@ -310,103 +383,43 @@ impl Ng1ResidentScanout {
             pass.dispatch_workgroups((HEIGHT as u32).div_ceil(64), 1, 1);
         }
         gpu.submit(encoder);
-        gpu.check().map_err(scanout_error)
+        gpu.check().map_err(device_error)
     }
 
-    /// Capture only the still-current composed output. An older frame token
-    /// cannot read a newer composition, even when its dimensions are equal.
-    pub(crate) fn capture(
-        &mut self,
-        stamp: ResidentFrameStamp,
-        resident: &mut impl ResidentScanoutSource,
-        out: &mut [u32],
-    ) -> Result<(), ResidentError> {
-        if self.last_frame != Some(stamp) {
-            return Err(ResidentError::InvalidState("resident composed frame is stale"));
-        }
-        let status = resident.scanout_status()?;
-        if status.submitted.epoch != stamp.position.epoch || status.submitted.sequence < stamp.position.sequence {
-            return Err(ResidentError::InvalidState("resident composed frame belongs to an old epoch"));
-        }
-        let pixels = stamp.width as usize * stamp.height as usize;
-        if out.len() < pixels {
-            return Err(ResidentError::InvalidState("resident capture output is too small"));
-        }
-        let bytes = pixels as u64 * 4;
-        self.traffic.composed_readbacks.attempts += 1;
-        self.traffic.composed_readbacks.attempted_bytes += bytes;
-        let fault = self.capture_fault.take();
-        if matches!(fault, Some(CaptureFault::BeforeCopy)) {
-            return Err(ResidentError::Failed("injected composed capture failure before copy".into()));
-        }
-        self.capture_scratch.resize(pixels, 0);
-        self.scanout.read_output(stamp.width, stamp.height, &mut self.capture_scratch)
-            .map_err(scanout_error)?;
-        if matches!(fault, Some(CaptureFault::AfterMap)) {
-            return Err(ResidentError::Failed("injected composed capture failure after map".into()));
-        }
-        self.scanout.gpu().check().map_err(scanout_error)?;
-        out[..pixels].copy_from_slice(&self.capture_scratch);
-        self.traffic.composed_readbacks.successes += 1;
-        self.traffic.composed_readbacks.successful_bytes += bytes;
-        Ok(())
-    }
-
-    /// Compose the submitted resident prefix; this method never submits
-    /// pending raster work. The caller must serialize its submission, this
-    /// compose and the frame consumer against later raster submissions.
-    /// Epoch changes require constructing a new scanout.
-    pub(crate) fn compose(
-        &mut self,
-        src: &Ng1DisplaySource<'_>,
-        resident: &mut impl ResidentScanoutSource,
-    ) -> Result<Ng1ResidentFrame<'_>, ResidentError> {
-        let status = resident.scanout_status()?;
-        if status.submitted.epoch != self.bindings.epoch {
-            return Err(ResidentError::InvalidState("resident scanout bindings belong to an old or different epoch"));
-        }
-        if status.accepted != status.submitted {
-            return Err(ResidentError::InvalidState("resident scanout requires all accepted work to be submitted"));
-        }
+    /// Compose the frame of `src` over `planes` and submit it, with no
+    /// readback; the buffer it is in, for a renderer on this device.
+    ///
+    /// Only what changed since the last frame goes up: the VC2 RAM, the
+    /// window-id expansion and the display tables each follow their own
+    /// revision.
+    pub(crate) fn compose(&mut self, src: &Ng1DisplaySource<'_>, planes: &Ng1Planes) -> Result<wgpu::Buffer, ScanoutError> {
         if src.width == 0 || src.width > FB_STRIDE || src.height == 0 || src.height > HEIGHT {
-            return Err(ResidentError::InvalidState("resident scanout dimensions exceed the Newport planes"));
+            return Err(ScanoutError::Invalid("scanout dimensions exceed the Newport planes"));
         }
-        let cursor_x = src.vc2_regs[crate::dev::ng1::vc2::VC2_REG_CURRENT_CURSOR_X as usize] as i64
+        let cursor_x = src.vc2_regs[VC2_REG_CURRENT_CURSOR_X as usize] as i64
             - 31 + src.cursor_x_adjust as i64;
         if src.vc2_ram.len() != VC2_WORDS || src.topscan.checked_add(1).is_none()
             || !(i32::MIN as i64..=i32::MAX as i64).contains(&cursor_x)
         {
-            return Err(ResidentError::InvalidState("resident scanout display state is incomplete"));
+            return Err(ScanoutError::Invalid("scanout display state is incomplete"));
         }
-        self.scanout.gpu().check().map_err(scanout_error)?;
+        self.scanout.gpu().check().map_err(device_error)?;
 
         let generation = src.generations;
         let mut did_state = src.resident_did.lock();
-        if let Some(did) = did_state.as_ref() {
-            if !Arc::ptr_eq(&did.gpu, self.scanout.gpu()) {
-                return Err(ResidentError::DeviceMismatch);
+        if did_state.as_ref().is_none_or(|did| !did.initialized) {
+            if let Some(error) = did_history_error(src) {
+                return Err(error);
             }
         }
-        if did_state.as_ref().is_none_or(|did| !did.initialized) {
-            validate_initial_did(src)?;
-        }
-        if did_state.is_none() {
-            let gpu = self.scanout.gpu();
-            let buffer = gpu.buffer(
-                "resident ng1 decoded DID",
-                DID_BYTES as u64,
-                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
-            );
-            gpu.check().map_err(scanout_error)?;
-            *did_state = Some(ResidentDid { gpu: Arc::clone(gpu), buffer, initialized: false });
-        }
+        self.did_state(&mut *did_state)?;
         if self.did_source != Some(generation.source) {
             let gpu = self.scanout.gpu();
             let did = did_state.as_ref()
-                .ok_or(ResidentError::InvalidState("resident DID state is missing"))?
+                .ok_or(ScanoutError::Invalid("DID state is missing"))?
                 .buffer.clone();
             let did_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("resident ng1 DID expansion"),
+                label: Some("ng1 DID expansion"),
                 layout: &self.did_layout,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: self.vc2.as_entire_binding() },
@@ -415,18 +428,31 @@ impl Ng1ResidentScanout {
                 ],
             });
             let display_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("resident ng1 display state"),
+                label: Some("ng1 display state"),
                 layout: &self.display_layout,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: did.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: self.vc2.as_entire_binding() },
                 ],
             });
-            gpu.check().map_err(scanout_error)?;
+            gpu.check().map_err(device_error)?;
             self.did = Some(did);
             self.did_group = Some(did_group);
             self.display_group = Some(display_group);
             self.did_source = Some(generation.source);
+        }
+        if self.planes_group.as_ref().is_none_or(|(g, _)| *g != planes.generation) {
+            let gpu = self.scanout.gpu();
+            let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ng1 scanout planes"),
+                layout: &self.planes_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: planes.rgb.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: planes.aux.as_entire_binding() },
+                ],
+            });
+            gpu.check().map_err(device_error)?;
+            self.planes_group = Some((planes.generation, group));
         }
         let previous = self.uploaded;
         let changed = |select: fn(Ng1DisplayGenerations) -> u64| {
@@ -475,43 +501,32 @@ impl Ng1ResidentScanout {
             self.traffic.did_expansions.attempts += 1;
             self.expand_did(&did_params)?;
             did_state.as_mut()
-                .ok_or(ResidentError::InvalidState("resident DID state is missing"))?
+                .ok_or(ScanoutError::Invalid("DID state is missing"))?
                 .initialized = true;
             self.traffic.display.submit(expansion_uploads, expansion_bytes);
             self.traffic.did_expansions.submitted += 1;
         }
         let before_submission = self.scanout.frames;
         let display_group = self.display_group.as_ref()
-            .ok_or(ResidentError::InvalidState("resident display bindings are missing"))?;
+            .ok_or(ScanoutError::Invalid("display bindings are missing"))?;
+        let planes_group = &self.planes_group.as_ref()
+            .ok_or(ScanoutError::Invalid("plane bindings are missing"))?.1;
+        let update: Option<&[u8]> = slot.as_ref().map(|slot| bytemuck::bytes_of(slot));
         let result = self.scanout.compose_cached(
             &self.pipeline,
             dimensions.0,
             dimensions.1,
-            slot.as_ref().map(|slot| bytemuck::bytes_of(slot).as_ref()),
-            &[&self.bindings.group, display_group],
+            update,
+            &[planes_group, display_group],
         );
         if self.scanout.frames != before_submission {
             self.traffic.display.submit(scanout_uploads, scanout_bytes);
             self.traffic.frames_submitted += 1;
         }
-        result.map_err(scanout_error)?;
+        result.map_err(device_error)?;
 
         self.uploaded = Some(generation);
         self.dimensions = Some(dimensions);
-        let stamp = ResidentFrameStamp {
-            serial: self.scanout.frames,
-            position: status.submitted,
-            width: dimensions.0,
-            height: dimensions.1,
-        };
-        self.last_frame = Some(stamp);
-        Ok(Ng1ResidentFrame {
-            gpu: self.scanout.gpu(),
-            buffer: self.scanout.output(),
-            width: dimensions.0,
-            height: dimensions.1,
-            position: status.submitted,
-            stamp,
-        })
+        Ok(self.scanout.output().clone())
     }
 }
