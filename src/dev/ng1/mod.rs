@@ -16,6 +16,7 @@
 
 pub mod rex3;
 pub(crate) mod rex3_dirty;
+pub mod screen;
 #[cfg(feature = "wgpu")]
 pub(crate) mod rex3_flat_fill;
 pub mod rex3_generic;

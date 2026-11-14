@@ -75,7 +75,7 @@ impl Ng1Slot {
     }
 
     #[cfg(test)]
-    fn of_display(src: &crate::disp::Ng1DisplaySource<'_>) -> Ng1Slot {
+    fn of_display(src: &crate::dev::ng1::screen::Ng1DisplaySource<'_>) -> Ng1Slot {
         Self::new(src.vc2_regs, src.xmap_mode, src.ramdac, src.cmap, Ng1HeadState {
             cursor_x_adjust: src.cursor_x_adjust,
             cursor_cmap: src.xmap_cursor_cmap,

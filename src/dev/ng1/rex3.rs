@@ -18,7 +18,7 @@ use crate::dev::ng1::rex3_dirty::DamageTracker;
 #[cfg(feature = "rex-gpu")]
 use crate::dev::ng1::rex3_gpu::FlushReason;
 use bitfield::bitfield;
-use crate::disp::Rex3Screen;
+use crate::dev::ng1::screen::Rex3Screen;
 use std::io::Write;
 
 #[cfg(all(test, feature = "wgpu"))]
@@ -1589,7 +1589,7 @@ impl Rex3 {
         let fb_rgb: CpuPlane = (0..(2048 * 1024)).map(|_| next_rand()).collect::<Vec<u32>>().into_boxed_slice().into();
         let fb_aux: CpuPlane = (0..(2048 * 1024)).map(|_| next_rand()).collect::<Vec<u32>>().into_boxed_slice().into();
         
-        let screen = Arc::new(Mutex::new(crate::disp::Rex3Screen::new()));
+        let screen = Arc::new(Mutex::new(Rex3Screen::new()));
 
         Self {
             config,
@@ -3875,7 +3875,7 @@ impl Rex3 {
             }
             // For the one presenter that composes the planes itself.
             if kind.2 && !composed {
-                out.planes = Some(crate::disp::Ng1Planes(self.screen.clone()));
+                out.planes = Some(crate::dev::ng1::screen::Ng1Screen(self.screen.clone()));
                 composed = true;
             }
             if !composed {

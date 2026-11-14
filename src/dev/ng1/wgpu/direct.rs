@@ -9,7 +9,8 @@ use crate::dev::ng1::vc2::{
     VC2_CTRL_BLACKOUT, VC2_CTRL_DID_EN, VC2_CTRL_VIDEO_TIMING_EN, VC2_REG_DID_ENTRY_PTR,
     VC2_REG_DISPLAY_CONTROL, VC2_REG_SCANLINE_LEN,
 };
-use crate::disp::{Ng1DisplayGenerations, Ng1DisplaySource, FB_STRIDE};
+use crate::dev::ng1::screen::{Ng1DisplayGenerations, Ng1DisplaySource};
+use crate::disp::FB_STRIDE;
 use crate::wgpu::{Fragment, Gpu, Scanout, ScanoutPipeline, ScanoutShaders, Source};
 
 const HEIGHT: usize = REX3_SCREEN_HEIGHT as usize;

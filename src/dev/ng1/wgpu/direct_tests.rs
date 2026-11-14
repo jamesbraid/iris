@@ -32,7 +32,8 @@ use crate::dev::ng1::vc2::{
     VC2_REG_VIDEO_ENTRY_PTR, VC2_REG_WORKING_CURSOR_Y, VT_CBLANK_XMAP_N,
 };
 use crate::dev::ng1::xmap9::Xmap9;
-use crate::disp::{Ng1DisplaySource, Rex3Screen, FB_STRIDE};
+use crate::dev::ng1::screen::{Ng1DisplaySource, Rex3Screen};
+use crate::disp::FB_STRIDE;
 use crate::gfx_display::GfxDisplay;
 use crate::traits::{BusDevice, Device, BUS_BUSY, BUS_OK};
 use crate::wgpu::{Gpu, GpuOptions};
