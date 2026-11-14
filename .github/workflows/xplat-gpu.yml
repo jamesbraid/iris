@@ -1,0 +1,127 @@
+name: xplat-gpu
+
+# Throwaway spike: the wgpu tests on macOS (Metal) and Windows (lavapipe and
+# D3D12/WARP), with a Linux lavapipe run as the control. Dispatch only.
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  LIBCHDMAN_PREBUILT_FALLBACK: "1"
+  VPRO_GPU: "1"
+
+jobs:
+  linux-lavapipe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      WGPU_BACKEND: vulkan
+    steps:
+    - uses: actions/checkout@v5
+    - run: rustup show
+    - run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev mesa-vulkan-drivers libvulkan1 vulkan-tools
+    - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
+      with:
+        tool: nextest
+    - name: Tests
+      run: |
+        mkdir -p out
+        vulkaninfo --summary > out/adapter.txt 2>&1 || true
+        cargo nextest run -p iris --lib --bins --features wgpu --profile xplat --success-output immediate --failure-output immediate 2>&1 | tee out/xplat.log
+        cargo nextest run -p iris --lib --features wgpu --profile xplat -E 'test(/^dev::odyssey::golden::scenes/)' --success-output immediate --failure-output immediate 2>&1 | tee out/golden.log || true
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: linux-lavapipe
+        path: |
+          out
+          target/nextest/xplat/junit.xml
+
+  windows-lavapipe:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      WGPU_BACKEND: vulkan
+      MESA_VERSION: "26.2.6"
+      MESA_SHA256: b2e00615feaba45942343c265cc8c5f576142ca682c1ac6661922d4b72492877
+    steps:
+    - uses: actions/checkout@v5
+    - run: rustup show
+    - name: Install lavapipe
+      shell: pwsh
+      run: |
+        $archive = "$env:RUNNER_TEMP\mesa.7z"
+        Invoke-WebRequest "https://github.com/pal1000/mesa-dist-win/releases/download/$env:MESA_VERSION/mesa3d-$env:MESA_VERSION-release-msvc.7z" -OutFile $archive
+        $got = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+        if ($got -ne $env:MESA_SHA256) { throw "mesa archive sha256 is $got, expected $env:MESA_SHA256" }
+        $dir = "$env:RUNNER_TEMP\mesa"
+        7z x $archive "-o$dir" x64\lvp_icd.x86_64.json x64\vulkan_lvp.dll -y
+        if ($LASTEXITCODE -ne 0) { throw "7z failed: $LASTEXITCODE" }
+        reg add HKLM\SOFTWARE\Khronos\Vulkan\Drivers /v "$dir\x64\lvp_icd.x86_64.json" /t REG_DWORD /d 0 /f
+        if ($LASTEXITCODE -ne 0) { throw "reg failed: $LASTEXITCODE" }
+    - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
+      with:
+        tool: nextest
+    - name: Tests
+      shell: bash
+      run: |
+        mkdir -p out
+        cargo nextest run -p iris --lib --bins --features wgpu --profile xplat --success-output immediate --failure-output immediate 2>&1 | tee out/xplat.log
+        cargo nextest run -p iris --lib --features wgpu --profile xplat -E 'test(/^dev::odyssey::golden::scenes/)' --success-output immediate --failure-output immediate 2>&1 | tee out/golden.log || true
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: windows-lavapipe
+        path: |
+          out
+          target/nextest/xplat/junit.xml
+
+  windows-d3d12:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      WGPU_BACKEND: dx12
+    steps:
+    - uses: actions/checkout@v5
+    - run: rustup show
+    - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
+      with:
+        tool: nextest
+    - name: Tests
+      shell: bash
+      run: |
+        mkdir -p out
+        cargo nextest run -p iris --lib --bins --features wgpu --profile xplat --success-output immediate --failure-output immediate 2>&1 | tee out/xplat.log
+        cargo nextest run -p iris --lib --features wgpu --profile xplat -E 'test(/^dev::odyssey::golden::scenes/)' --success-output immediate --failure-output immediate 2>&1 | tee out/golden.log || true
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: windows-d3d12
+        path: |
+          out
+          target/nextest/xplat/junit.xml
+
+  macos-metal:
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      WGPU_BACKEND: metal
+    steps:
+    - uses: actions/checkout@v5
+    - run: rustup show
+    - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
+      with:
+        tool: nextest
+    - name: Tests
+      run: |
+        mkdir -p out
+        system_profiler SPDisplaysDataType > out/adapter.txt 2>&1 || true
+        cargo nextest run -p iris --lib --bins --features wgpu --profile xplat --success-output immediate --failure-output immediate 2>&1 | tee out/xplat.log
+        cargo nextest run -p iris --lib --features wgpu --profile xplat -E 'test(/^dev::odyssey::golden::scenes/)' --success-output immediate --failure-output immediate 2>&1 | tee out/golden.log || true
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: macos-metal
+        path: |
+          out
+          target/nextest/xplat/junit.xml

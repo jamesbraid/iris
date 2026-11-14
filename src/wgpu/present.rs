@@ -569,6 +569,99 @@ mod tests {
         assert_eq!(texel(2, 4), [0x44, 0x55, 0x66, 0xff], "the status bar");
     }
 
+    /// Spike: a 1280 x 1024 frame with structure and noise, presented
+    /// offscreen at 1x, centred in a wider window and at 2x, from the CPU
+    /// and from a device buffer, compared texel by texel with what the
+    /// presenter should draw. Prints each case's difference count.
+    #[test]
+    fn xplat_offscreen_presenter_pixels_match_the_cpu_frame() {
+        let gpu = match Gpu::new(&GpuOptions::default()) {
+            Ok(g) => g,
+            Err(e) => return eprintln!("xplat: skipped: {e}"),
+        };
+        eprintln!("xplat: adapter {}", gpu.caps);
+        let (fw, fh) = (1280u32, 1024u32);
+        let mut x = 0x1234_5678u32;
+        let mut noise = move || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x
+        };
+        // R, G, B per pixel: a gradient with a checker and noise on top.
+        let rgb: Vec<[u8; 3]> = (0..fw * fh)
+            .map(|i| {
+                let (px, py) = (i % fw, i / fw);
+                let n = noise();
+                let check = if (px / 16 + py / 16) % 2 == 0 { 0x40 } else { 0 };
+                [(px * 255 / fw) as u8 ^ (n as u8 & 7), (py * 255 / fh) as u8 ^ ((n >> 8) as u8 & 7), check | ((n >> 16) as u8 & 0x3f)]
+            })
+            .collect();
+        let cpu: Vec<u32> = rgb.iter().map(|c| 0xff00_0000 | (c[2] as u32) << 16 | (c[1] as u32) << 8 | c[0] as u32).collect();
+        let devw: Vec<u32> = rgb.iter().map(|c| (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32).collect();
+        let dev = gpu.buffer("xplat frame", (devw.len() * 4) as u64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+        gpu.write(&dev, 0, bytemuck::cast_slice(&devw));
+        let status_rows = 16u32;
+        let status = vec![0xff66_5544u32; (fw * status_rows) as usize];
+        let mut total = 0usize;
+        for (label, ww, wh) in [("1x", 1280u32, 1040u32), ("1x centred", 1536, 1040), ("2x", 2560, 2080)] {
+            for from_gpu in [false, true] {
+                let mut p = Presenter::offscreen(&gpu, (ww, wh), (fw, fh), (fw, status_rows)).expect("an offscreen presenter");
+                let frame = if from_gpu {
+                    Frame::Gpu { buffer: &dev, width: fw, height: fh }
+                } else {
+                    Frame::Cpu { rgba: &cpu, stride: fw as usize, width: fw, height: fh }
+                };
+                let t = std::time::Instant::now();
+                for _ in 0..2 {
+                    let f = match &frame {
+                        Frame::Cpu { rgba, stride, width, height } => Frame::Cpu { rgba, stride: *stride, width: *width, height: *height },
+                        Frame::Gpu { buffer, width, height } => Frame::Gpu { buffer, width: *width, height: *height },
+                    };
+                    p.present(f, None, &status, fw as usize).expect("present");
+                }
+                let ms = t.elapsed().as_secs_f64() * 500.0;
+                let Target::Offscreen { texture, .. } = &p.target else { unreachable!() };
+                let pitch = ww as u64 * 4;
+                assert_eq!(pitch % 256, 0);
+                let out = gpu.buffer("xplat readback", pitch * wh as u64, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+                let mut enc = gpu.encoder("xplat readback");
+                enc.copy_texture_to_buffer(
+                    texture.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo { buffer: &out, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(pitch as u32), rows_per_image: Some(wh) } },
+                    wgpu::Extent3d { width: ww, height: wh, depth_or_array_layers: 1 },
+                );
+                gpu.submit(enc);
+                out.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+                gpu.wait(None).expect("readback");
+                let bytes = out.slice(..).get_mapped_range().expect("mapped").to_vec();
+                let pl = Placement::letterbox(fw as f32, fh as f32, status_rows as f32, ww as f32, wh as f32);
+                let (x0, y0, scale) = (pl.frame[0] as u32, pl.frame[1] as u32, pl.scale as u32);
+                let mut diffs = 0usize;
+                let mut worst = 0i32;
+                for y in 0..fh * scale {
+                    for xx in 0..fw * scale {
+                        let want = rgb[((y / scale) * fw + xx / scale) as usize];
+                        let at = (((y0 + y) * ww + x0 + xx) * 4) as usize;
+                        let got = &bytes[at..at + 3];
+                        let d = (0..3).map(|k| (got[k] as i32 - want[k] as i32).abs()).max().unwrap();
+                        if d != 0 {
+                            diffs += 1;
+                            worst = worst.max(d);
+                        }
+                    }
+                }
+                eprintln!(
+                    "xplat: present {label} from {}: {diffs} of {} texels differ, worst channel delta {worst}, {ms:.1} ms per present",
+                    if from_gpu { "device buffer" } else { "cpu words" },
+                    fw * scale * fh * scale
+                );
+                total += diffs;
+            }
+        }
+        assert_eq!(total, 0, "texels differ from the CPU frame");
+    }
+
     /// The GL renderer's letterbox: a 1280 x 1024 frame with a 16-row bar in
     /// a window of exactly that size is drawn at 1x from the top left, and in
     /// a wider window it is centred at the height's scale.

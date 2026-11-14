@@ -45,6 +45,20 @@ test-group = 'mgras-raster'
 [profile.ci-gpu.junit]
 path = "junit.xml"
 
+# Spike: every wgpu test on a hosted runner (.github/workflows/xplat-gpu.yml).
+[profile.xplat]
+default-filter = 'test(/^wgpu::|^dev::odyssey::wgpu::|^dev::odyssey::tests::display::|^dev::mgras::wgpu::|^dev::ng1::wgpu::|^dev::kona::back::gpu_spike::|resident_gpu/)'
+test-threads = 2
+fail-fast = false
+slow-timeout = { period = "120s", terminate-after = 15 }
+
+[[profile.xplat.overrides]]
+filter = 'test(/^dev::mgras::wgpu::|^dev::kona::back::gpu_spike::/)'
+test-group = 'mgras-raster'
+
+[profile.xplat.junit]
+path = "junit.xml"
+
 # The threaded device tests that the nightly ThreadSanitizer run covers
 # (.github/workflows/tsan.yml). Add a test to a device module with one of these
 # names and it joins the run; the workflow lists nothing.
