@@ -37,6 +37,7 @@ pub struct TexMem {
     pool: wgpu::Buffer,
     payload: wgpu::Buffer,
     pay_used: u32,
+    pay_cap: u32,
     planes: u32,
     per_plane: u32,
     /// The table as the GPU has it.
@@ -83,6 +84,7 @@ impl TexMem {
             pool: gpu.buffer("kona texture pool", cap as u64 * PAGE_BYTES, USAGE),
             payload: gpu.buffer("kona payload", PAYLOAD_WORDS as u64 * 4, USAGE),
             pay_used: 0,
+            pay_cap: PAYLOAD_WORDS,
             planes,
             per_plane,
             entries: vec![ABSENT; n],
@@ -208,7 +210,18 @@ impl TexMem {
 
     /// Whether the ring has room for `n` words past what the open batch's records use.
     pub fn payload_room(&self, n: usize) -> bool {
-        self.pay_used as usize + n <= PAYLOAD_WORDS as usize
+        self.pay_used as usize + n <= self.pay_cap as usize
+    }
+
+    /// The most words one record can take from the ring.
+    pub fn payload_cap(&self) -> usize {
+        self.pay_cap as usize
+    }
+
+    /// Let the ring hold at most `words`, to exercise its wrap and a rectangle's bands.
+    #[cfg(test)]
+    pub fn limit_payload(&mut self, words: u32) {
+        self.pay_cap = words;
     }
 
     /// Put `words` in the ring (the caller has made room) and say where. The write lands before the

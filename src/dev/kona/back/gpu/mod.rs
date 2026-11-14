@@ -11,7 +11,6 @@
 //! - an edge step that does not fit 32 bits; a multisampled layout whose runs of words are longer
 //!   than the kernel holds (more than six words of colour or depth, or two of stencil a pixel);
 //!   textures when the store holds more pages than the GPU's pool can (one storage binding);
-//! - GL pixel writes (glDrawPixels and CopyPixels);
 //! - X fills and copies with more than four clip rectangles, bitmaps of more than 1792 bits, X image
 //!   writes whose box holds more than 2 M pixels (the payload ring).
 //!
@@ -66,6 +65,7 @@ use super::x::pixel::LoweredCopy;
 use super::gpu_lib::{pack_desc, FRAGMENT, LOD_MATH, TEXTURE, TEXTURE_MEM};
 use super::raster::ops::ownership_plane;
 use super::raster::texel::TexDesc;
+use super::gl::pixels::{FRAG_COLOUR, FRAG_STENCIL};
 use crate::dev::kona::defs::pixel::ACCUM_RETURN;
 use super::store::texture::PLANES as TEX_PLANES;
 use crate::wgpu::{library, ArchShaders, Batch, BatchPipelines, Fragment, Full, Gpu, Source, TileGrid};
@@ -86,7 +86,7 @@ const K_BITMAP: u32 = 3;
 const K_CLEAR: u32 = 4;
 const K_ACCUM: u32 = 5;
 const K_CLEARACC: u32 = 6;
-const K_STENCILW: u32 = 7;
+const K_FRAGS: u32 = 9;
 const K_IMAGE: u32 = 8;
 /// Where a record's box lives, for every kind but the X fill.
 const R_RECT: usize = 33;
@@ -158,6 +158,8 @@ const S_LSTIP: usize = 72;
 /// The multisampling block of a slot (`kona.wgsl`): the sample count, coverage word and options,
 /// the words in each run, the sample offsets and the references of the runs' planes.
 const S_ACC: usize = 112;
+/// The payload offset, width and origin of a rectangle of fragments.
+const S_FRAG: usize = 108;
 const S_MS: usize = 80;
 const S_MS_AT: usize = 86;
 const S_MS_COL: usize = 94;
@@ -440,14 +442,12 @@ impl GpuStore {
                 // A copy the kernel cannot take reads and writes the plan's bounds.
                 Some(c) => return Route::Cpu(vec![c.word], plan.bounds_rect()),
             },
-            StoreOp::StencilWrite { word, index, value, mask } => {
-                let (x, y) = ((*index as i64 % w) as i32, (*index as i64 / w) as i32);
-                let r = Rect { x0: x, y0: y, x1: x + 1, y1: y + 1 };
-                if resident(*word) {
-                    s.stencil_write(m, *word, r, *value, *mask)
-                } else {
-                    return Route::Cpu(vec![*word], r);
+            StoreOp::Frags { ds, x0, y0, w: fw, h: fh, kind, data } => {
+                if ms_on_gpu(ds) {
+                    let n = s.frags(m, ds, (*x0, *y0, *fw, *fh), *kind, data);
+                    return Route::Counted(n);
                 }
+                return Route::Cpu(ds_planes(ds), ds.clip);
             }
             StoreOp::Accumulate { ds, accumulation, colour, passes } => {
                 // The words the CPU would find (`accumulate_cpu` skips an unallocated one).
@@ -550,6 +550,14 @@ impl Drop for Bracket<'_> {
             self.store.mirror.touch();
         }
     }
+}
+
+/// Whether the window of `ds` owns pixel (`x`, `y`) by the mirror's display-ID plane, which the caller made current.
+fn owned_at(m: &PixelStore, ds: &DrawState, x: i32, y: i32) -> bool {
+    let Some(o) = &ds.ownership else { return true };
+    // SAFETY: the pixel is inside the managed area, which the array covers.
+    let word = m.array(DID_PLANE).map_or(0, |d| unsafe { d.load(y as usize * m.width() as usize + x as usize) });
+    o.owns(ownership_plane(word))
 }
 
 /// The planes a draw state reads or writes, on the GPU or not.
@@ -1103,37 +1111,90 @@ impl State {
         if r.is_empty() {
             return 0;
         }
-        let Some(o) = &ds.ownership else { return (r.x1 - r.x0) as u64 * (r.y1 - r.y0) as u64 };
-        self.observe(m, DID_PLANE, r);
-        let Some(did) = m.array(DID_PLANE) else { return 0 };
-        let mut n = 0;
-        for y in r.y0..r.y1 {
-            for x in r.x0..r.x1 {
-                // SAFETY: inside the managed area, which the array covers.
-                let word = unsafe { did.load(y as usize * self.w as usize + x as usize) };
-                n += o.owns(ownership_plane(word)) as u64;
-            }
+        if ds.ownership.is_none() {
+            return (r.x1 - r.x0) as u64 * (r.y1 - r.y0) as u64;
         }
-        n
+        self.observe(m, DID_PLANE, r);
+        (r.y0..r.y1).flat_map(|y| (r.x0..r.x1).map(move |x| (x, y))).filter(|&(x, y)| owned_at(m, ds, x, y)).count() as u64
     }
 
-    /// One pixel of a stencil plane: the bits `mask` take `value`'s.
-    fn stencil_write(&mut self, m: &PixelStore, word: usize, r: Rect, value: u8, mask: u8) -> bool {
-        let Some(plane) = self.plane(m, word) else { return false };
-        self.gen += 1;
-        self.stats.records += 1;
-        let mut slot = GSlot { w: [0; SLOT_W] };
-        slot.w[0] = plane;
-        let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
-        rec.w[0] = value as u32;
-        rec.w[1] = mask as u32;
-        rec.w[R_RECT] = r.x0 as u32;
-        rec.w[R_RECT + 1] = r.y0 as u32;
-        rec.w[R_RECT + 2] = r.x1 as u32;
-        rec.w[R_RECT + 3] = r.y1 as u32;
-        rec.w[R_KIND] = K_STENCILW;
-        self.mark(word, r, 0);
-        self.push(&slot, move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1))
+    /// The fragments of a GL pixel write in bands that fit the payload ring, one record each; the count of those
+    /// that landed is made on the CPU from the data, the clip and the display-ID plane.
+    fn frags(&mut self, m: &PixelStore, ds: &DrawState, (x0, y0, w, h): (i64, i64, usize, usize), kind: u8, data: &[u32]) -> u64 {
+        let (px0, py0) = (ds.origin[0] as i64 + x0, ds.origin[1] as i64 + y0);
+        let screen = Rect { x0: 0, y0: 0, x1: self.w as i32, y1: self.h as i32 };
+        let full = Rect { x0: px0.max(i32::MIN as i64) as i32, y0: py0 as i32, x1: (px0 + w as i64) as i32, y1: (py0 + h as i64) as i32 };
+        let b = full.intersect(&ds.clip).intersect(&screen);
+        if b.is_empty() || w == 0 {
+            return 0;
+        }
+        // Fragments that land: a fragment there, inside the box, on a pixel the window owns.
+        if ds.ownership.is_some() {
+            self.observe(m, DID_PLANE, b);
+        }
+        let mut landed = 0;
+        if kind == FRAG_COLOUR {
+            for y in b.y0..b.y1 {
+                for x in b.x0..b.x1 {
+                    let k = 3 * ((y as i64 - py0) as usize * w + (x as i64 - px0) as usize);
+                    landed += (data[k] >> 31 != 0 && owned_at(m, ds, x, y)) as u64;
+                }
+            }
+        }
+        // Rows of the box in bands of at most the ring's room.
+        let band = (self.tex.payload_cap() / (3 * w)).max(1);
+        let mut j = (b.y0 as i64 - py0) as usize;
+        let end = (b.y1 as i64 - py0) as usize;
+        while j < end {
+            let jb = (j + band).min(end);
+            let rows = &data[3 * j * w..3 * jb * w];
+            if !self.tex.payload_room(rows.len()) {
+                if !self.flush_batch() {
+                    return landed;
+                }
+                self.tex.payload_reset();
+            }
+            let at = self.tex.payload_put(rows);
+            let Some(mut slot) = self.ds_slot(m, ds, MODE_CLEAR) else { return landed };
+            self.gen += 1;
+            self.stats.records += 1;
+            slot.w[S_FRAG] = at;
+            slot.w[S_FRAG + 1] = w as u32;
+            slot.w[S_FRAG + 2] = px0 as i32 as u32;
+            slot.w[S_FRAG + 3] = (py0 + j as i64) as i32 as u32;
+            let r = Rect { x0: b.x0, y0: (py0 + j as i64) as i32, x1: b.x1, y1: (py0 + jb as i64) as i32 };
+            let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
+            rec.w[0] = kind as u32;
+            rec.w[1] = (ds.stencil_bits != 0) as u32;
+            rec.w[R_RECT] = r.x0 as u32;
+            rec.w[R_RECT + 1] = r.y0 as u32;
+            rec.w[R_RECT + 2] = r.x1 as u32;
+            rec.w[R_RECT + 3] = r.y1 as u32;
+            rec.w[R_KIND] = K_FRAGS;
+            if kind == FRAG_STENCIL {
+                let word = ds.stencil_word as usize;
+                if ds.stencil_bits != 0 && ds.samples.is_none() {
+                    self.plane(m, word);
+                    self.mark(word, r, 0);
+                }
+                if let Some(ms) = &ds.samples {
+                    for w in ms.stencil.0..ms.stencil.0 + ms.stencil.1 {
+                        self.plane(m, w as usize);
+                        self.mark(w as usize, r, 3);
+                    }
+                }
+            } else {
+                for (word, class) in ds_written(ds) {
+                    self.plane(m, word);
+                    self.mark(word, r, class);
+                }
+            }
+            if !self.push(&slot, move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1)) {
+                return landed;
+            }
+            j = jb;
+        }
+        landed
     }
 
     /// An accumulation operation over `r`, as its passes (`accumulate_cpu`).
@@ -1215,7 +1276,7 @@ impl State {
             (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
         }
         let (bw, bh) = (x1 - x0, y1 - y0);
-        if 2 * bw * bh > texmem::PAYLOAD_WORDS as usize {
+        if 2 * bw * bh > self.tex.payload_cap() {
             return None;
         }
         let plane = self.plane(m, img.word)?;

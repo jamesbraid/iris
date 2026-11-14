@@ -58,7 +58,6 @@ use crate::dev::gl::math;
 use crate::dev::kona::back::raster::ops::ownership_plane;
 use crate::dev::kona::back::raster::pixel::Planes;
 use crate::dev::kona::back::raster::DrawState;
-use crate::dev::kona::back::store::seam::Bracket;
 use crate::dev::kona::back::store::{Store, StoreOp, WordArray, DID_PLANE};
 use crate::dev::kona::defs::pixel::*;
 use crate::dev::kona::defs::*;
@@ -893,9 +892,6 @@ struct Canvas<'a> {
     planes: Planes<'a>,
     did: Option<WordArray<'a>>,
     pitch: usize,
-    /// The planes held current while fragments go straight to the CPU store; those the fragments
-    /// wrote go back to a store that keeps them elsewhere when the canvas drops.
-    bracket: Bracket<'a>,
 }
 
 impl<'a> Canvas<'a> {
@@ -903,10 +899,13 @@ impl<'a> Canvas<'a> {
         // A pixel rectangle is not textured, and the model does not stipple it (see the module doc).
         ds.texture = None;
         ds.polygon_stipple = None;
-        let bracket = store.bracket_draw(&ds);
+        // Ownership reads the display-ID words; the planes a reader takes it makes current itself.
+        if ds.ownership.is_some() {
+            store.observe(DID_PLANE, ds.clip);
+        }
         let cpu = store.cpu();
         let did = ds.ownership.is_some().then(|| cpu.array(DID_PLANE)).flatten();
-        Canvas { store, planes: Planes::new(cpu, &ds), ds, did, pitch: cpu.width() as usize, bracket }
+        Canvas { store, planes: Planes::new(cpu, &ds), ds, did, pitch: cpu.width() as usize }
     }
 
     /// The plane index of window pixel (`x`, `y`), when it is inside the clip rectangle and owned.
@@ -924,17 +923,109 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    fn frag(&self, c: &mut Counts, x: i64, y: i64, colour: [f32; 4], z: u32) {
-        if let Some(index) = self.at(x, y) {
-            c.fragments += 1;
-            self.bracket.wrote();
-            let src = colour.map(|v| colour13(v) as u32);
-            match &self.ds.samples {
-                None => self.planes.shade(&self.ds, index, src, z),
-                // A pixel rectangle covers every sample of its pixel, at one depth.
-                Some(ms) => self.planes.shade_samples(&self.ds, index, src, |_| z, (1u32 << ms.count) - 1),
+    /// A fragment of 13-bit colour `src` and depth `z` at window pixel (`x`, `y`), through the
+    /// operations after ownership. Whether it landed in the clip rectangle on a pixel the window owns.
+    fn frag(&self, x: i64, y: i64, src: [u32; 4], z: u32) -> bool {
+        let Some(index) = self.at(x, y) else { return false };
+        match &self.ds.samples {
+            None => self.planes.shade(&self.ds, index, src, z),
+            // A pixel rectangle covers every sample of its pixel, at one depth.
+            Some(ms) => self.planes.shade_samples(&self.ds, index, src, |_| z, (1u32 << ms.count) - 1),
+        }
+        true
+    }
+
+    /// A stencil image's pixel at window pixel (`x`, `y`): the value under the write mask, into the
+    /// plane or every sample of the pixel.
+    fn stencil(&self, x: i64, y: i64, value: u8) {
+        let Some(index) = self.at(x, y) else { return };
+        if self.ds.stencil_bits == 0 {
+            return;
+        }
+        let mask = self.ds.stencil.write_mask;
+        if self.ds.samples.is_some() {
+            self.planes.set_stencil(&self.ds, index, value, mask);
+        } else if let Some(a) = self.store.cpu().array(self.ds.stencil_word as usize) {
+            // SAFETY: `at` found the index inside the clip rectangle, inside the screen.
+            unsafe { a.store(index, ((a.load(index) as u8 & !mask) | (value & mask)) as u32) };
+        }
+    }
+}
+
+/// The kinds of fragment a `StoreOp::Frags` rectangle carries.
+pub const FRAG_COLOUR: u8 = 0;
+pub const FRAG_STENCIL: u8 = 1;
+
+/// `StoreOp::Frags` on the CPU store: the pixel (`x0 + i`, `y0 + j`) of the window takes the three
+/// words at `3 * (j * w + i)` of `data`: bit 31 of the first says a fragment is there; for colour,
+/// red and green in 13 bits each (red low) then blue and alpha likewise, then the depth; for a
+/// stencil value, the first word's low byte. Returns the fragments that landed (a stencil value is not
+/// counted).
+pub(in crate::dev::kona::back) fn frags_cpu(store: &Store, ds: &DrawState, x0: i64, y0: i64, w: usize, h: usize, kind: u8, data: &[u32]) -> u64 {
+    let canvas = Canvas::new(store, *ds);
+    let mut fragments = 0;
+    for j in 0..h {
+        for i in 0..w {
+            let d = &data[3 * (j * w + i)..3 * (j * w + i) + 3];
+            if d[0] >> 31 == 0 {
+                continue;
+            }
+            let (x, y) = (x0 + i as i64, y0 + j as i64);
+            if kind == FRAG_STENCIL {
+                canvas.stencil(x, y, d[0] as u8);
+            } else {
+                let src = [d[0] & 0x1fff, d[0] >> 13 & 0x1fff, d[1] & 0x1fff, d[1] >> 13 & 0x1fff];
+                fragments += canvas.frag(x, y, src, d[2]) as u64;
             }
         }
+    }
+    fragments
+}
+
+/// Fragments being gathered into the one rectangle `StoreOp::Frags` takes.
+struct Frags {
+    x0: i64,
+    y0: i64,
+    w: usize,
+    h: usize,
+    kind: u8,
+    data: Vec<u32>,
+}
+
+impl Frags {
+    /// A rectangle of window pixels from (`x0`, `y0`), cut to what the clip rectangle can reach, or
+    /// None when nothing of it can land.
+    fn new(canvas: &Canvas<'_>, kind: u8, (xa, xb): (i64, i64), (ya, yb): (i64, i64)) -> Option<Frags> {
+        let (c, o) = (&canvas.ds.clip, canvas.ds.origin);
+        let (x0, x1) = (xa.max(c.x0 as i64 - o[0] as i64), xb.min(c.x1 as i64 - o[0] as i64));
+        let (y0, y1) = (ya.max(c.y0 as i64 - o[1] as i64), yb.min(c.y1 as i64 - o[1] as i64));
+        (x0 < x1 && y0 < y1).then(|| {
+            let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+            Frags { x0, y0, w, h, kind, data: vec![0; 3 * w * h] }
+        })
+    }
+
+    fn put(&mut self, x: i64, y: i64, words: [u32; 3]) {
+        if x < self.x0 || y < self.y0 || x >= self.x0 + self.w as i64 || y >= self.y0 + self.h as i64 {
+            return;
+        }
+        let k = 3 * ((y - self.y0) as usize * self.w + (x - self.x0) as usize);
+        self.data[k..k + 3].copy_from_slice(&words);
+    }
+
+    /// A colour fragment: `colour` in 0 to 1 and the depth.
+    fn colour(&mut self, x: i64, y: i64, colour: [f32; 4], z: u32) {
+        let s = colour.map(|v| colour13(v) as u32);
+        self.put(x, y, [1 << 31 | s[0] | s[1] << 13, s[2] | s[3] << 13, z]);
+    }
+
+    fn stencil(&mut self, x: i64, y: i64, value: u8) {
+        self.put(x, y, [1 << 31 | value as u32, 0, 0]);
+    }
+
+    /// Hand them to the store; the fragments that landed.
+    fn apply(self, canvas: &Canvas<'_>) -> u64 {
+        canvas.store.apply(StoreOp::Frags { ds: &canvas.ds, x0: self.x0, y0: self.y0, w: self.w, h: self.h, kind: self.kind, data: &self.data }).fragments
     }
 }
 
@@ -1013,36 +1104,37 @@ fn emit(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, img: &Image) {
     };
     let (rc, rz) = (pos.colour, pos.z);
     let index_window = gl.ci.is_some();
-    for j in 0..img.h {
-        let (y0, y1) = span(ry, j, zy);
-        for i in 0..img.w {
-            let (x0, x1) = span(rx, i, zx);
-            let k = j * img.w + i;
-            for y in y0..y1.max(y0) {
-                for x in x0..x1.max(x0) {
-                    match &img.plane {
-                        Plane::Colour(col) => canvas.frag(c, x, y, p.colour(col[k]), rz),
-                        Plane::Index(v) => {
-                            let i = p.integer(v[k], MAP_INDEX_TO_INDEX, p.map_colour);
-                            // A colour-index window keeps the index in its colour word, as the
-                            // index draws do.
-                            let col = if index_window { Gl::word_colour(gl.index_word_of(i)) } else { p.index_colour(i, c) };
-                            canvas.frag(c, x, y, col, rz)
-                        }
-                        Plane::Depth(d) => canvas.frag(c, x, y, rc, depth32(p.depth(d[k]))),
-                        Plane::Stencil(v) => {
-                            let value = p.integer(v[k], MAP_STENCIL_TO_STENCIL, p.map_stencil) as u32 as u8;
-                            if let (Some(index), true, true) = (canvas.at(x, y), canvas.ds.stencil_bits != 0, canvas.ds.samples.is_some()) {
-                                canvas.bracket.wrote();
-                                canvas.planes.set_stencil(&canvas.ds, index, value, canvas.ds.stencil.write_mask);
-                            } else if let (Some(index), true) = (canvas.at(x, y), canvas.ds.stencil_bits != 0) {
-                                canvas.store.apply(StoreOp::StencilWrite { word: canvas.ds.stencil_word as usize, index, value, mask: canvas.ds.stencil.write_mask });
+    // The destination: the union of the zoomed pixels' spans, cut to the clip rectangle.
+    let extent = |origin: i64, n: usize, z: f32| {
+        let ends = (0..n).map(|i| span(origin, i, z));
+        (ends.clone().map(|e| e.0).min().unwrap_or(0), ends.map(|e| e.1).max().unwrap_or(0))
+    };
+    let kind = if matches!(img.plane, Plane::Stencil(_)) { FRAG_STENCIL } else { FRAG_COLOUR };
+    if let Some(mut frags) = Frags::new(canvas, kind, extent(rx, img.w, zx), extent(ry, img.h, zy)) {
+        for j in 0..img.h {
+            let (y0, y1) = span(ry, j, zy);
+            for i in 0..img.w {
+                let (x0, x1) = span(rx, i, zx);
+                let k = j * img.w + i;
+                for y in y0..y1.max(y0) {
+                    for x in x0..x1.max(x0) {
+                        match &img.plane {
+                            Plane::Colour(col) => frags.colour(x, y, p.colour(col[k]), rz),
+                            Plane::Index(v) => {
+                                let i = p.integer(v[k], MAP_INDEX_TO_INDEX, p.map_colour);
+                                // A colour-index window keeps the index in its colour word, as the
+                                // index draws do.
+                                let col = if index_window { Gl::word_colour(gl.index_word_of(i)) } else { p.index_colour(i, c) };
+                                frags.colour(x, y, col, rz)
                             }
+                            Plane::Depth(d) => frags.colour(x, y, rc, depth32(p.depth(d[k]))),
+                            Plane::Stencil(v) => frags.stencil(x, y, p.integer(v[k], MAP_STENCIL_TO_STENCIL, p.map_stencil) as u32 as u8),
                         }
                     }
                 }
             }
         }
+        c.fragments += frags.apply(canvas);
     }
     if p.post[..4] != [1.0; 4] || p.post[4..8] != [0.0; 4] || p.post[8..12] != [1.0; 4] || p.post[12..] != [0.0; 4] {
         c.post_stages_ignored += 1;
@@ -1052,6 +1144,12 @@ fn emit(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, img: &Image) {
 /// The rectangle of the read buffer, as an image of `kind`. Pixels outside the window read zero.
 fn capture(gl: &Gl, canvas: &Canvas<'_>, x: i32, y: i32, w: usize, h: usize, kind: u32) -> Option<Image> {
     let ds = &canvas.ds;
+    // A multisampled window's depth and stencil are in its samples; a read takes the first.
+    if let Some(ms) = &ds.samples {
+        for (first, n) in [ms.depth, ms.stencil] {
+            (first..first + n).for_each(|w| canvas.store.observe(w as usize, ds.clip));
+        }
+    }
     // Whatever is read lies inside the window's clip rectangle (`Canvas::at`).
     let words = |word: usize| {
         canvas.store.observe(word, ds.clip);
@@ -1253,7 +1351,7 @@ pub fn plane_command(gl: &mut Gl, c: &mut Counts, env: &Env<'_>, selector: u32, 
         }
         (ACCUMULATION_BUFFER_OPERATION, &[op, value]) => {
             c.accumulations += 1;
-            accumulate(gl, c, &canvas, op, f(value));
+            accumulate(gl, c, env.store, &canvas.ds, op, f(value));
             Out::Nothing
         }
         (ASK_WHETHER_COPY_SOURCE_OVERLAPS_ITS_DESTINATION | ASK_WHETHER_CONVOLUTION_COPY_OVERLAPS, &[x, y, w, h]) => {
@@ -1313,8 +1411,12 @@ pub fn bitmap(gl: &mut Gl, c: &mut Counts, env: &Env<'_>, h: &Header, rec: &Reco
     let canvas = Canvas::new(env.store, env.ds);
     let pos = gl.pix.pos;
     let (x0, y0) = ((pos.x - orig[0]).floor() as i64, (pos.y - orig[1]).floor() as i64);
-    for (k, _) in bits.iter().enumerate().filter(|(_, &b)| b != 0) {
-        canvas.frag(c, x0 + (k % w) as i64, y0 + (k / w) as i64, pos.colour, pos.z);
+    let h = bits.len() / w.max(1);
+    if let Some(mut frags) = Frags::new(&canvas, FRAG_COLOUR, (x0, x0 + w as i64), (y0, y0 + h as i64)) {
+        for (k, _) in bits.iter().enumerate().filter(|(_, &b)| b != 0) {
+            frags.colour(x0 + (k % w) as i64, y0 + (k / w) as i64, pos.colour, pos.z);
+        }
+        c.fragments += frags.apply(&canvas);
     }
     gl.pix.pos.x += mv[0];
     gl.pix.pos.y += mv[1];
@@ -1333,14 +1435,14 @@ fn accumulation_passes(op: u32, v: f32) -> Vec<(u32, f32)> {
 }
 
 /// One accumulation operation over the window (the draw state's clip rectangle).
-fn accumulate(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, op: u32, v: f32) {
+fn accumulate(gl: &Gl, c: &mut Counts, store: &Store, ds: &DrawState, op: u32, v: f32) {
     let Some(l) = &gl.layout else { return };
     if l.accumulation.is_empty() || !matches!(op, ACCUM | ACCUM_LOAD | ACCUM_RETURN | ACCUM_MULT | ACCUM_ADD) {
         return;
     }
     let passes = accumulation_passes(op, v);
-    let colour = read_word(gl, &canvas.ds);
-    c.fragments += canvas.store.apply(StoreOp::Accumulate { ds: &canvas.ds, accumulation: l.accumulation.clone(), colour, passes: &passes }).fragments;
+    let colour = read_word(gl, ds);
+    c.fragments += store.apply(StoreOp::Accumulate { ds, accumulation: l.accumulation.clone(), colour, passes: &passes }).fragments;
 }
 
 /// `accumulate` on the CPU store: `passes` over the window `ds` names, to the accumulation words.

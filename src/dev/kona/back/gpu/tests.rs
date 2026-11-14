@@ -330,7 +330,7 @@ enum StoreOpOwned {
     Fill { word: usize, x1: i64, y1: i64, x2: i64, y2: i64, value: u32 },
     Plot { word: usize, x: i64, y: i64, value: u32 },
     Bitmap { word: usize, x0: i64, y0: i64, width: u32, height: u32, bits: Vec<u32>, value: u32 },
-    Stencil { word: usize, index: usize, value: u8, mask: u8 },
+    Frags { ds: DrawState, x0: i64, y0: i64, w: usize, h: usize, kind: u8, data: Vec<u32> },
     Accumulate { ds: DrawState, words: std::ops::Range<u32>, colour: Option<usize>, passes: Vec<(u32, f32)> },
     ClearAccumulation { ds: DrawState, first: u32, values: Vec<u32> },
 }
@@ -343,7 +343,7 @@ impl StoreOpOwned {
             StoreOpOwned::Fill { word, x1, y1, x2, y2, value } => StoreOp::FillBox { word: *word, x1: *x1, y1: *y1, x2: *x2, y2: *y2, value: *value },
             StoreOpOwned::Plot { word, x, y, value } => StoreOp::Plot { word: *word, x: *x, y: *y, value: *value },
             StoreOpOwned::Bitmap { word, x0, y0, width, height, bits, value } => StoreOp::Bitmap { word: *word, x0: *x0, y0: *y0, width: *width, height: *height, bits, value: *value },
-            StoreOpOwned::Stencil { word, index, value, mask } => StoreOp::StencilWrite { word: *word, index: *index, value: *value, mask: *mask },
+            StoreOpOwned::Frags { ds, x0, y0, w, h, kind, data } => StoreOp::Frags { ds, x0: *x0, y0: *y0, w: *w, h: *h, kind: *kind, data },
             StoreOpOwned::Accumulate { ds, words, colour, passes } => StoreOp::Accumulate { ds, accumulation: words.clone(), colour: *colour, passes },
             StoreOpOwned::ClearAccumulation { ds, first, values } => StoreOp::ClearAccumulation { ds, first: *first, values },
         };
@@ -890,7 +890,12 @@ fn state_samples(w: u32, h: u32, r: &mut Lcg) -> DrawState {
     m.mask_invert = r.coin(4);
     let (cn, dn, sn) = (count as u32 * 24 / 32, if r.coin(4) { count as u32 * 16 / 32 } else { count as u32 * 24 / 32 }, count as u32 / 4);
     let (c0, d0, s0) = (6, 6 + cn, 6 + cn + dn);
-    d.samples = m.draw((c0, cn), (d0, if r.coin(6) { 0 } else { dn }), (s0, if r.coin(6) { 0 } else { sn }));
+    let stencil_run = if r.coin(6) { 0 } else { sn };
+    d.samples = m.draw((c0, cn), (d0, if r.coin(6) { 0 } else { dn }), (s0, stencil_run));
+    // A window with stencil bits has the samples' stencil words, as the layouts the model builds do.
+    if stencil_run == 0 {
+        d.stencil_bits = 0;
+    }
     d
 }
 
@@ -967,9 +972,14 @@ fn accumulation_and_stencil_writes_match_the_cpu_arm() {
                 p.both(StoreOpOwned::ClearAccumulation { ds, first, values });
             }
             2 => {
-                let (x, y) = (r.range(0, w as i32) as usize, r.range(0, h as i32) as usize);
+                // A stencil pixel.
+                let (x, y) = (r.range(0, w as i32) as i64, r.range(0, h as i32) as i64);
                 stencils += 1;
-                p.both(StoreOpOwned::Stencil { word: 4, index: y * w as usize + x, value: r.next() as u8, mask: r.next() as u8 });
+                let mut ds = ds;
+                ds.stencil_bits = 8;
+                ds.stencil_word = 4;
+                ds.stencil.write_mask = r.next() as u8;
+                p.both(StoreOpOwned::Frags { ds, x0: x, y0: y, w: 1, h: 1, kind: 1, data: vec![1 << 31 | r.next() & 0xff, 0, 0] });
             }
             _ => {
                 let op = ops[r.next() as usize % ops.len()];
@@ -1087,4 +1097,55 @@ fn x_image_writes_match_the_cpu_arm() {
     assert!(writes > 50);
     assert_eq!(p.g().stats().cpu_ops, 0, "every write ran on the GPU");
     p.finish("X image writes");
+}
+
+/// glDrawPixels, glCopyPixels and glBitmap fragments (rectangles of colour and depth fragments, and of
+/// stencil values) through the whole chain: alpha, stencil, depth, blend, logic operation and mask,
+/// ownership and the clip rectangle, single-sample and multisampled, in bands of a ring that is small
+/// enough to wrap.
+#[test]
+fn gl_pixel_fragments_match_the_cpu_arm() {
+    let _serial = serial();
+    let Some(dev) = gpu() else { return };
+    let (w, h) = (96u32, 64u32);
+    let mut r = Lcg(141);
+    let mut words = WORDS.to_vec();
+    words.extend(6..6 + 6 + 6 + 2);
+    words.sort();
+    let p = Pair::build(dev, w, h, &mut r, 100, None, &TextureStore::default, words);
+    // Room for a few rows of the widest rectangle: every rectangle comes in bands and the ring wraps.
+    p.g().state.lock().tex.limit_payload(3 * 40 * 5);
+    let mut states: Vec<DrawState> = (0..5).map(|_| state_full(w, h, &mut r)).collect();
+    states.extend((0..5).map(|_| state_samples(w, h, &mut r)));
+    for ds in &mut states {
+        let (x0, y0) = (r.range(0, 30), r.range(0, 20));
+        ds.clip = Rect { x0, y0, x1: x0 + 25 + r.range(0, 60), y1: y0 + 20 + r.range(0, 40) }.intersect(&Rect { x0: 0, y0: 0, x1: w as i32, y1: h as i32 });
+        if ds.stencil_bits != 0 && r.coin(2) {
+            ds.stencil.write_mask = r.next() as u8;
+        }
+    }
+    let (mut colour, mut stencil) = (0, 0);
+    for _ in 0..260 {
+        let ds = states[r.next() as usize % states.len()];
+        let (fw, fh) = (1 + r.next() as usize % 40, 1 + r.next() as usize % 30);
+        let kind = r.coin(4) as u8;
+        let data: Vec<u32> = (0..fw * fh)
+            .flat_map(|_| {
+                let on = if r.coin(5) { 0 } else { 1u32 << 31 };
+                if kind == 1 {
+                    [on | r.next() & 0xff, 0, 0]
+                } else {
+                    let c = |r: &mut Lcg| r.next() % 8192;
+                    let (cr, cg, cb, ca) = (c(&mut r), c(&mut r), c(&mut r), c(&mut r));
+                    [on | cr | cg << 13, cb | ca << 13, r.next() & 0xffff_ff00]
+                }
+            })
+            .collect();
+        colour += (kind == 0) as u32;
+        stencil += kind as u32;
+        p.both(StoreOpOwned::Frags { ds, x0: r.range(-10, w as i32) as i64, y0: r.range(-10, h as i32) as i64, w: fw, h: fh, kind, data });
+    }
+    eprintln!("{colour} colour and {stencil} stencil rectangles; {:?}", p.g().stats());
+    assert_eq!(p.g().stats().cpu_ops, 0, "every rectangle ran on the GPU");
+    p.finish("GL pixel fragments");
 }

@@ -58,15 +58,17 @@ pub enum StoreOp<'a> {
     /// The writing half of an X server copy area (the plan's word to itself), after the caller has
     /// checked that the words fit. `rect` is source and destination corners (sx, sy, dx, dy).
     XCopy { plan: &'a Plan<'a>, setup: &'a Setup, rect: [i64; 4], spans: &'a mut Vec<(i64, i64)>, row: &'a mut Vec<u32> },
-    /// glDrawPixels of stencil: the bits `mask` of the stencil word at plane index `index` take
-    /// `value`'s.
-    StencilWrite { word: usize, index: usize, value: u8, mask: u8 },
     /// One accumulation operation over the window the draw state names, as `passes` (an operation
     /// and its value each). `colour` is the word the operation reads its source from.
     Accumulate { ds: &'a DrawState, accumulation: Range<u32>, colour: Option<usize>, passes: &'a [(u32, f32)] },
     /// glClear of the accumulation words: word `first + k` goes to `values[k]` (float bits), under
     /// ownership and the clip rectangle.
     ClearAccumulation { ds: &'a DrawState, first: u32, values: &'a [u32] },
+    /// Fragments of glDrawPixels, glCopyPixels or glBitmap: the window pixel (`x0 + i`, `y0 + j`) of a
+    /// rectangle `w` by `h` takes the three words at `3 * (j * w + i)` of `data` through the
+    /// operations after ownership (`gl::pixels::frags_cpu` says what the words hold). `kind` is
+    /// `FRAG_COLOUR` or `FRAG_STENCIL`.
+    Frags { ds: &'a DrawState, x0: i64, y0: i64, w: usize, h: usize, kind: u8, data: &'a [u32] },
     /// Zero every array.
     Reset(Drained),
     /// Fill the whole array of `word` from `words` (a saved store).
@@ -243,16 +245,6 @@ impl Store {
         }
     }
 
-    /// `bracket` over the planes the draw state `ds` reads and writes, inside its clip rectangle.
-    pub fn bracket_draw(&self, ds: &DrawState) -> Bracket<'_> {
-        #[cfg(feature = "wgpu")]
-        if self.is_gpu() {
-            return self.bracket(&super::super::gpu::ds_planes(ds), ds.clip);
-        }
-        let _ = ds;
-        self.bracket(&[], Rect::default())
-    }
-
     /// Do `op`. Whoever hands in an op has made every queued raster job finish first (`raster::fence`).
     pub fn apply(&self, op: StoreOp<'_>) -> Applied {
         match self {
@@ -296,14 +288,9 @@ impl Store {
             StoreOp::XFill { plan, b, spans } => x_fill::draw(plan, b, spans),
             StoreOp::XImage { plan, kind, conv, geo, words, spans, pad } => x_pixel::draw_by_op(plan, kind, conv, geo, words, spans, pad),
             StoreOp::XCopy { plan, setup, rect, spans, row } => x_pixel::copy_write(plan, setup, rect, spans, row),
-            StoreOp::StencilWrite { word, index, value, mask } => {
-                if let Some(a) = s.array(word) {
-                    // SAFETY: the caller found `index` inside the clip rectangle, inside the screen.
-                    unsafe { a.store(index, ((a.load(index) as u8 & !mask) | (value & mask)) as u32) };
-                }
-            }
             StoreOp::Accumulate { ds, accumulation, colour, passes } => done.fragments = gl_pixels::accumulate_cpu(self, ds, accumulation, colour, passes),
             StoreOp::ClearAccumulation { ds, first, values } => done.fragments = gl_pixels::clear_accumulation_cpu(self, ds, first, values),
+            StoreOp::Frags { ds, x0, y0, w, h, kind, data } => done.fragments = gl_pixels::frags_cpu(self, ds, x0, y0, w, h, kind, data),
             StoreOp::Reset(_) => {
                 // SAFETY: the op's token says no tile worker runs.
                 unsafe { s.reset() }

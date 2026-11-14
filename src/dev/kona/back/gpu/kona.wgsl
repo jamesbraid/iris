@@ -70,7 +70,7 @@ const K_BITMAP: u32 = 3u;
 const K_CLEAR: u32 = 4u;
 const K_ACCUM: u32 = 5u;
 const K_CLEARACC: u32 = 6u;
-const K_STENCILW: u32 = 7u;
+const K_FRAGS: u32 = 9u;
 const K_IMAGE: u32 = 8u;
 const R_KIND: u32 = 37u;
 
@@ -574,7 +574,7 @@ fn ms_store(si: u32, base: u32, n: u32, index: u32, run: ptr<function, array<u32
 // One fragment of a multisampled window, for each sample of `covered`: the stencil and depth tests
 // and the colour operations run against that sample's own values. The pixel's colour word is the mean
 // of its samples, with the fragment's alpha. `oi`, `oj` are the pixel's offsets from the job's origin.
-fn shade_samples(pi: u32, si: u32, index: u32, src: vec4<u32>, oi: i32, oj: i32, covered: u32) {
+fn shade_samples(pi: u32, si: u32, index: u32, src: vec4<u32>, oi: i32, oj: i32, covered: u32, zc: u32, zfix: bool) {
     let fl = slots[si].w[S_FLAGS];
     if (fl & F_ALPHA) != 0u && !cmp(slots[si].w[S_AFUNC], src.w, slots[si].w[S_AREF]) {
         return;
@@ -608,7 +608,11 @@ fn shade_samples(pi: u32, si: u32, index: u32, src: vec4<u32>, oi: i32, oj: i32,
             }
         }
         let at = slots[si].w[S_MS_AT + k];
-        let z = depth_at_sample(pi, oi, oj, i32(at & 0xffu), i32(at >> 8u)) >> (32u - clamp(dwidth, 1u, 32u));
+        var zf = zc;
+        if !zfix {
+            zf = depth_at_sample(pi, oi, oj, i32(at & 0xffu), i32(at >> 8u));
+        }
+        let z = zf >> (32u - clamp(dwidth, 1u, 32u));
         var zpass = true;
         if test {
             zpass = cmp(slots[si].w[S_DFUNC], z, ms_sample_get(&drun, k, dwidth, dwidth));
@@ -807,11 +811,10 @@ fn clear_px(pi: u32, px: i32, py: i32) {
     }
 }
 
-// ---- Accumulation (kind 5), its clear (kind 6) and a stencil pixel (kind 7) ------------------------
+// ---- Accumulation (kind 5) and its clear (kind 6) -------------------------------------------------
 //   rec:  accumulate: 0 pass count, 1 op, 2 value, 3 op, 4 value, 5 accumulation words, 6 colour
-//         mask (bit 0 red .. 3 alpha: set writes); clear: 0 words; stencil: 0 value, 1 mask
-//   slot: a draw state's (colour references, ownership), then S_ACC.. as above; a stencil pixel's
-//         slot word 0 is the plane
+//         mask (bit 0 red .. 3 alpha: set writes); clear: 0 words
+//   slot: a draw state's (colour references, ownership), then S_ACC.. as above
 fn accum_px(pi: u32, px: i32, py: i32) {
     let si = recs[pi].slot;
     let index = u32(py) * WIDTH + u32(px);
@@ -879,6 +882,61 @@ fn image_px(pi: u32, px: i32, py: i32) {
     st(r, idx, ((logic(slots[si].w[1], payload[base + 1u], old) & m) | (old & ~m)) & slots[si].w[3]);
 }
 
+// ---- GL pixel fragments (kind 9) ---------------------------------------------------------------
+// A rectangle of glDrawPixels, glCopyPixels or glBitmap fragments from the payload ring, three words
+// a pixel (bit 31 of the first: a fragment is there; colour: red | green << 13, blue | alpha << 13,
+// depth; stencil: the value in the first word's low byte), each through the operations after
+// ownership as `Canvas::frag` does on the CPU.
+//   rec:  0 kind (0 colour, 1 stencil), 1 the window has a stencil plane
+//   slot: a draw state's, then S_FRAG: payload offset, box width, box x0 and y0 (i32)
+const S_FRAG: u32 = 108u;
+
+fn frag_px(pi: u32, px: i32, py: i32) {
+    let si = recs[pi].slot;
+    let k = u32(py - bitcast<i32>(slots[si].w[S_FRAG + 3u])) * slots[si].w[S_FRAG + 1u] + u32(px - bitcast<i32>(slots[si].w[S_FRAG + 2u]));
+    let base = slots[si].w[S_FRAG] + 3u * k;
+    let w0 = payload[base];
+    if (w0 >> 31u) == 0u {
+        return;
+    }
+    let index = u32(py) * WIDTH + u32(px);
+    if (slots[si].w[S_FLAGS] & F_OWN) != 0u && !owned(si, index) {
+        return;
+    }
+    let count = slots[si].w[S_MS];
+    if rw(pi, 0u) == 1u {
+        // A stencil image's value under the write mask, into the plane or every sample.
+        if rw(pi, 1u) == 0u {
+            return;
+        }
+        let value = w0 & 0xffu;
+        let mask = slots[si].w[S_SWMASK];
+        if count != 0u {
+            let sn = slots[si].w[S_MS + 5u];
+            if sn == 0u {
+                return;
+            }
+            var srun = ms_load(si, S_MS_STEN, sn, index);
+            for (var s = 0u; s < count; s++) {
+                let old = ms_sample_get(&srun, s, 8u, 8u);
+                ms_sample_set(&srun, s, 8u, 8u, (old & ~mask) | (value & mask));
+            }
+            ms_store(si, S_MS_STEN, sn, index, &srun);
+        } else {
+            let r = slots[si].w[S_STENCIL];
+            st(r, index, ((ld(r, index) & 0xffu & ~mask) | (value & mask)) & 0xffu);
+        }
+        return;
+    }
+    let w1 = payload[base + 1u];
+    let src = vec4<u32>(w0 & 0x1fffu, (w0 >> 13u) & 0x1fffu, w1 & 0x1fffu, (w1 >> 13u) & 0x1fffu);
+    if count != 0u {
+        shade_samples(pi, si, index, src, 0, 0, (1u << count) - 1u, payload[base + 2u], true);
+    } else {
+        shade(si, index, src, payload[base + 2u]);
+    }
+}
+
 fn arch_prim(pi: u32, px: i32, py: i32, lane: u32) {
     let kind = rw(pi, R_KIND);
     if kind == K_XFILL {
@@ -922,11 +980,8 @@ fn arch_prim(pi: u32, px: i32, py: i32, lane: u32) {
         clear_acc_px(pi, px, py);
         return;
     }
-    if kind == K_STENCILW {
-        let r = slots[recs[pi].slot].w[0];
-        let index = u32(py) * WIDTH + u32(px);
-        let m = rw(pi, 1u);
-        st(r, index, ((ld(r, index) & 0xffu & ~m) | (rw(pi, 0u) & m)) & 0xffu);
+    if kind == K_FRAGS {
+        frag_px(pi, px, py);
         return;
     }
     fnz = recs[pi].one ^ 0x3f800000u;
@@ -997,7 +1052,7 @@ fn arch_prim(pi: u32, px: i32, py: i32, lane: u32) {
             src.w = FULL;
         }
         if m != 0u {
-            shade_samples(pi, si, index, src, oi, oj, m);
+            shade_samples(pi, si, index, src, oi, oj, m, 0u, false);
         }
         return;
     }
