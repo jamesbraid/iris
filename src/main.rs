@@ -165,10 +165,10 @@ fn main() {
     // The monitor's `screen`, `ptr` and `key` commands, and the VNC server's
     // hands on the guest.
     let host_input = iris::hostinput::HostInput::attach(&*machine);
-    let _vnc_server = vnc.listen.as_deref().map(|listen| {
+    let _vnc_servers = vnc.listen.as_deref().map(|listen| {
         iris::vnc::auth::load_password(vnc.password_file.as_deref())
             .and_then(|password| {
-                iris::vnc::VncServer::start_with_password(host_input.clone(), listen, vnc.max_fps, "IRIS", password)
+                iris::vnc::VncServer::start_screens(&host_input, listen, vnc.max_fps, "IRIS", password)
             })
             .unwrap_or_else(|e| {
                 eprintln!("iris: {e}");

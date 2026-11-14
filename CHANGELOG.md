@@ -15,6 +15,14 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ### Display
 
+- A machine with several screens (a dual-head Newport) numbers them in one
+  fixed list, and the monitor's `screen` verbs take the index first, as
+  `cpu N` does: `screen 1 shot a.png`, `screen list`. With one screen nothing
+  changes. The built-in VNC server serves screen N on the listen port plus N.
+  `[graphics] windows` (`cycle`, `side-by-side`, `per-screen`) is read and
+  checked, and refused on a single-screen machine; the window does not use it
+  yet.
+
 - The O2's display scans out and presents a frame only when the screen may have
   changed: the rendering engine wrote memory, a GBE register changed (IRIX's
   per-frame rewrites of the same value do not count), a shadow register went live

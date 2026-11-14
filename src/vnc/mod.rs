@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
 
-use crate::gfx_display::GfxDisplay;
+use crate::gfx_display::Screen;
 use crate::hostinput::{HostInput, MoveResult};
 
 /// Tile side for damage tracking.
@@ -51,7 +51,8 @@ pub struct Frame {
 
 pub(crate) struct Shared {
     pub input: Arc<HostInput>,
-    display: Arc<dyn GfxDisplay>,
+    /// The screen this server shows: the one `input` steers the pointer on.
+    screen: Arc<Screen>,
     pub frame: Mutex<Frame>,
     /// Signalled on a new frame, and by viewers' readers when they want
     /// their sender to look again.
@@ -81,7 +82,7 @@ impl VncServer {
     pub fn start_with_password(
         input: Arc<HostInput>, listen: &str, max_fps: Option<u32>, name: &str, password: Option<auth::Password>,
     ) -> Result<VncServer, String> {
-        let display = input.display().cloned()
+        let screen = input.screen_at(input.pointer_screen()).cloned()
             .ok_or("VNC needs a display: this machine runs without one (--headless, or no graphics board)")?;
         let listen = if listen.parse::<u16>().is_ok() { format!("127.0.0.1:{listen}") } else { listen.to_string() };
         let listener = TcpListener::bind(&listen).map_err(|e| format!("VNC: bind {listen}: {e}"))?;
@@ -91,7 +92,7 @@ impl VncServer {
         }
         let shared = Arc::new(Shared {
             input: input.clone(),
-            display,
+            screen,
             frame: Mutex::new(Frame {
                 w: 0, h: 0, px: Arc::new(Vec::new()), tile_gen: Arc::new(Vec::new()),
                 tiles_x: 0, gen: 0, size_gen: 0,
@@ -142,6 +143,27 @@ impl VncServer {
         Ok(VncServer { shared, addr })
     }
 
+    /// One server per screen of `input`'s machine, the first on `listen` and
+    /// screen N on the next port up by N (`:5900`, `:5901`, ...). Each
+    /// steers the pointer with its own screen's cursor. With port 0 every
+    /// server takes any free port. A machine with no screen gets the error
+    /// [`start`](Self::start) gives.
+    pub fn start_screens(
+        input: &Arc<HostInput>, listen: &str, max_fps: Option<u32>, name: &str, password: Option<auth::Password>,
+    ) -> Result<Vec<VncServer>, String> {
+        let count = input.screen_count();
+        if count == 0 {
+            // Nothing to show: say why, as a single server would.
+            return Self::start_with_password(input.clone(), listen, max_fps, name, password).map(|s| vec![s]);
+        }
+        let mut servers = Vec::with_capacity(count);
+        for n in 0..count {
+            let input = Arc::new(input.for_screen(n)?);
+            servers.push(Self::start_with_password(input, &listen_for_screen(listen, n)?, max_fps, name, password.clone())?);
+        }
+        Ok(servers)
+    }
+
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
@@ -149,6 +171,25 @@ impl VncServer {
     pub fn clients(&self) -> usize {
         self.shared.clients.load(Ordering::Relaxed)
     }
+}
+
+/// The address screen `n` listens on: `listen` (a port, or `host:port`) with
+/// `n` added to its port. Port 0 stays 0.
+fn listen_for_screen(listen: &str, n: usize) -> Result<String, String> {
+    let (host, port) = match listen.rsplit_once(':') {
+        Some((h, p)) => (Some(h), p),
+        None => (None, listen),
+    };
+    let base: u16 = port.parse().map_err(|_| format!("VNC: bad port in '{listen}'"))?;
+    let port = match base {
+        0 => 0,
+        b => u16::try_from(n).ok().and_then(|n| b.checked_add(n))
+            .ok_or_else(|| format!("VNC: port {b} + screen {n} is past 65535"))?,
+    };
+    Ok(match host {
+        Some(h) => format!("{h}:{port}"),
+        None => port.to_string(),
+    })
 }
 
 impl Drop for VncServer {
@@ -168,7 +209,7 @@ fn grab_loop(s: &Shared) {
     while !s.stop.load(Ordering::Relaxed) {
         let start = Instant::now();
         let watching = s.clients.load(Ordering::Relaxed) > 0;
-        let screen = &s.display.screens()[0];
+        let screen = &s.screen;
         if watching != capturing {
             screen.requests.capture(watching);
             if watching {
@@ -199,7 +240,7 @@ fn grab_loop(s: &Shared) {
         }
     }
     if capturing {
-        s.display.screens()[0].requests.capture(false);
+        s.screen.requests.capture(false);
     }
 }
 
@@ -333,5 +374,21 @@ impl PointerDriver {
                 input.set_buttons(buttons);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::listen_for_screen;
+
+    #[test]
+    fn screen_n_listens_n_ports_above_the_base() {
+        assert_eq!(listen_for_screen("127.0.0.1:5900", 0).unwrap(), "127.0.0.1:5900");
+        assert_eq!(listen_for_screen("127.0.0.1:5900", 1).unwrap(), "127.0.0.1:5901");
+        assert_eq!(listen_for_screen("5900", 1).unwrap(), "5901");
+        assert_eq!(listen_for_screen("[::1]:5900", 1).unwrap(), "[::1]:5901");
+        assert_eq!(listen_for_screen("127.0.0.1:0", 1).unwrap(), "127.0.0.1:0", "port 0 takes any free port");
+        assert!(listen_for_screen("127.0.0.1:65535", 1).is_err());
+        assert!(listen_for_screen("localhost", 0).is_err());
     }
 }

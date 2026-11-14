@@ -232,6 +232,11 @@ pub trait Workstation: Send {
     fn get_display_head1(&self) -> Option<Arc<dyn GfxDisplay>> {
         None
     }
+    /// Every display with a screen for the host, in topology order (slot or
+    /// brick, then channel): the order `screen N` indexes. Empty when headless.
+    fn displays(&self) -> Vec<Arc<dyn GfxDisplay>> {
+        self.get_display().into_iter().chain(self.get_display_head1()).collect()
+    }
     /// The keyboard and mouse the host window types into.
     fn get_ps2(&self) -> Arc<Ps2Controller>;
     /// Add a host-side command set (the screen, pointer and key commands)
