@@ -225,6 +225,13 @@ pub mod jit;
 pub mod gfifo;
 #[cfg(feature = "wgpu")]
 pub mod wgpu;
+
+/// A board's handle on the machine's GPU (`wgpu::Gpu::share`). Without the
+/// wgpu feature there is none, and a board never holds one.
+#[cfg(feature = "wgpu")]
+pub type SharedGpu = std::sync::Arc<wgpu::Gpu>;
+#[cfg(not(feature = "wgpu"))]
+pub type SharedGpu = std::convert::Infallible;
 pub mod trace_writer;
 pub mod gfx_display;
 pub mod hostinput;

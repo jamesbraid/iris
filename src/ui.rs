@@ -1167,7 +1167,7 @@ impl Ui {
     ) -> Result<(Arc<Window>, Arc<Mutex<Option<(u32, u32)>>>, Arc<Mutex<Option<ResizeRequest>>>, Arc<Mutex<(u32, u32)>>), String> {
         let gpu = match display.gpu() {
             Some(g) => g,
-            None => crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default())?,
+            None => crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default(), Box::new(|e| eprintln!("iris: the window's GPU failed: {e}")))?,
         };
         #[allow(deprecated)]
         let window = Arc::new(event_loop.create_window(attrs).map_err(|e| format!("create the window: {e}"))?);

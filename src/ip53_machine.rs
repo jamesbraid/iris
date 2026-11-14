@@ -133,7 +133,7 @@ use crate::net::{GatewayConfig, Link, NatControl};
 use crate::perf_monitor::PerfMonitor;
 use crate::pci::{DevFn, PciToPciBridge};
 use crate::scsi::{attach_from_config, ScsiBus};
-use crate::traits::{BusDevice, Device, MachineEvent, Resettable, BUS_OK};
+use crate::traits::{BusDevice, Device, MachineEvent, MachineFatal, Resettable, BUS_OK};
 use crate::workstation::{register_system_controller, DiscChanger, MachineRef, MachineSlot, Workstation};
 use parking_lot::Mutex;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -523,6 +523,10 @@ pub struct TezroMachine {
     frames: Option<Arc<AtomicU64>>,
     nat: Option<(Arc<NatControl>, (Ipv4Addr, Ipv4Addr, Ipv4Addr))>,
     events: Option<Receiver<MachineEvent>>,
+    /// A graphics GPU failure, until the controller takes the receiver, and
+    /// the first one it latched.
+    fatal_rx: Option<Receiver<MachineFatal>>,
+    fatal_fault: Option<MachineFatal>,
     slot: Option<MachineSlot>,
     lifecycle: GuestState,
     /// virtio-serial and virtio-9p, those the config enables.
@@ -539,6 +543,8 @@ impl TezroMachine {
         clock.set_nvram_file(Path::new(&cfg.nvram))?;
         let memory = cfg.tezro_memory()?;
         let chip = chip(cfg.cpu());
+        let (fatal_tx, fatal_rx) = std::sync::mpsc::channel();
+        let graphics_gpu = if cfg.graphics_board() == GraphicsBoard::V12 { crate::workstation::open_gpu(cfg, &fatal_tx)? } else { None };
         let board = Arc::new(TezroBoard::with_config(TezroBoardConfig {
             payload: &prom,
             clock: host_clock(),
@@ -551,7 +557,7 @@ impl TezroMachine {
             chip,
             v12: cfg.graphics_board() == GraphicsBoard::V12,
             graphics_pool: (cfg.graphics.threads, cfg.graphics.tile),
-            graphics_raster: (cfg.graphics.raster, cfg.graphics.gpu_backend.as_str()),
+            graphics_gpu,
             audio: match (cfg.tezro.audio, cfg.no_audio) {
                 (false, _) => TezroAudio::Absent,
                 (true, true) => TezroAudio::Silent,
@@ -675,6 +681,8 @@ impl TezroMachine {
             nat,
             frames,
             events: Some(rx),
+            fatal_rx: Some(fatal_rx),
+            fatal_fault: None,
             slot: None,
             virtio,
             lifecycle: GuestState::Idle,
@@ -785,7 +793,14 @@ impl Workstation for TezroMachine {
     fn register_system_controller(&mut self) {
         let slot = self.machine_slot();
         let events = self.events.take().expect("Tezro system controller registered twice");
-        register_system_controller(&self.monitor, slot, Some(events));
+        register_system_controller(&self.monitor, slot.clone(), Some(events));
+        crate::workstation::register_fatal_controller(slot, self.fatal_rx.take());
+    }
+    fn fatal_fault(&self) -> Option<MachineFatal> {
+        self.fatal_fault.clone()
+    }
+    fn latch_fatal_fault(&mut self, fault: MachineFatal) -> bool {
+        self.fatal_fault.is_none() && self.fatal_fault.replace(fault).is_none()
     }
     fn monitor_addr(&self) -> Option<SocketAddr> {
         self.monitor.bound_addr()
@@ -997,8 +1012,9 @@ pub(crate) struct TezroBoardConfig<'a> {
     pub v12: bool,
     /// Rendering threads and tile size for the V12.
     pub graphics_pool: (usize, u32),
-    /// Which unit draws and, for the GPU, the wgpu backend (`[graphics]`).
-    pub graphics_raster: (crate::config::RasterUnit, &'a str),
+    /// The GPU the board draws on, when `[graphics] raster` says so: a handle
+    /// from `Gpu::share`.
+    pub graphics_gpu: Option<crate::SharedGpu>,
     /// The audio controller behind the TI bridge.
     pub audio: TezroAudio,
 }
@@ -1108,13 +1124,13 @@ impl TezroBoard {
             chip: &CHIPS[0],
             v12: false,
             graphics_pool: (2, 32),
-            graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+            graphics_gpu: None,
             audio: TezroAudio::Absent,
         })
     }
 
     pub fn with_config(config: TezroBoardConfig<'_>) -> Result<Self, String> {
-        let TezroBoardConfig { payload, clock, flash_path, station_mac, system_serial, timekeeper, memory, cpus, chip, v12, graphics_pool, graphics_raster, audio } = config;
+        let TezroBoardConfig { payload, clock, flash_path, station_mac, system_serial, timekeeper, memory, cpus, chip, v12, graphics_pool, graphics_gpu, audio } = config;
         if ![1, 2, 4].contains(&cpus) {
             return Err(format!("{cpus} processors; a Tezro board fits 1, 2 or 4"));
         }
@@ -1165,7 +1181,7 @@ impl TezroBoard {
         let heartbeat = Arc::new(AtomicU64::new(0));
         let fasttick = Arc::new(AtomicU64::new(0));
         let status = crate::disp::StatusSource::new(heartbeat.clone(), fasttick.clone());
-        let v12 = v12.then(|| fit_v12(&bedrock, &pxbow, &status, graphics_pool, graphics_raster)).transpose()?;
+        let v12 = v12.then(|| fit_v12(&bedrock, &pxbow, &status, graphics_pool, graphics_gpu)).transpose()?;
         let pics = if cpus == 1 {
             vec![io9.clone()]
         } else {
@@ -1336,7 +1352,7 @@ fn fit_v12(
     pxbow: &Arc<Pxbow>,
     status: &Arc<crate::disp::StatusSource>,
     graphics_pool: (usize, u32),
-    graphics_raster: (crate::config::RasterUnit, &str),
+    graphics_gpu: Option<crate::SharedGpu>,
 ) -> Result<Arc<Odyssey>, String> {
     let io = Arc::downgrade(bedrock);
     let packets: PacketSender = Arc::new(move |widget, address, vector, set| {
@@ -1356,7 +1372,7 @@ fn fit_v12(
         dma,
         status.clone(),
         graphics_pool,
-        graphics_raster,
+        graphics_gpu,
     )?;
     pxbow
         .attach_endpoint(V12_WIDGET, v12.clone() as Arc<dyn BusDevice>)

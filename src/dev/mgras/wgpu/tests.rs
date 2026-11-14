@@ -21,7 +21,7 @@ use super::{xline_step, GpuLink, GpuRaster};
 use crate::wgpu::{Gpu, GpuOptions};
 
 fn gpu() -> Option<Arc<Gpu>> {
-    match Gpu::new(&GpuOptions::default()) {
+    match Gpu::new(&GpuOptions::default(), Box::new(|_| {})) {
         Ok(g) => Some(g),
         Err(e) => {
             eprintln!("skipped: {e}");

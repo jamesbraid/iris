@@ -65,7 +65,7 @@ use crate::monitor::{Monitor, DEFAULT_PORT as DEFAULT_MONITOR_PORT};
 use crate::net::{GatewayConfig, Link, NatControl};
 use crate::node_windows::{Windows, SN1_NODE_SHIFT};
 use crate::perf_monitor::PerfMonitor;
-use crate::traits::{BusDevice, Device, MachineEvent, Resettable};
+use crate::traits::{BusDevice, Device, MachineEvent, MachineFatal, Resettable};
 use crate::workstation::{register_system_controller, DiscChanger, MachineRef, MachineSlot, Workstation};
 use parking_lot::Mutex;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -160,8 +160,9 @@ pub(crate) trait Ip35Board: 'static {
     const NAME: &'static str;
     /// The C-bricks the product carries, in slot order.
     fn specs(cfg: &MachineConfig) -> Result<Vec<NodeSpec>, String>;
-    /// Wire the board's I/O to the first C-brick.
-    fn wire(nodes: &[&Node], cfg: &MachineConfig) -> Result<BoardIo, String>;
+    /// Wire the board's I/O to the first C-brick. A graphics board that
+    /// draws on the GPU reports its failure on `faults`.
+    fn wire(nodes: &[&Node], cfg: &MachineConfig, faults: &std::sync::mpsc::Sender<MachineFatal>) -> Result<BoardIo, String>;
 }
 
 /// The nodes of a machine, cabled, with the board's I/O wired to them and
@@ -176,6 +177,8 @@ pub(crate) struct Chassis<B: Ip35Board> {
     pub windows: Option<Arc<Windows>>,
     /// Every node's resets and power events.
     pub events: Receiver<MachineEvent>,
+    /// A graphics GPU failure.
+    pub faults: Receiver<MachineFatal>,
     _board: std::marker::PhantomData<fn() -> B>,
 }
 
@@ -233,8 +236,9 @@ impl<B: Ip35Board> Chassis<B> {
         } else {
             None
         };
-        let io = B::wire(&nodes.iter().collect::<Vec<_>>(), cfg)?;
-        Ok(Self { nodes, processors, specs, io, windows, events: merged_rx, _board: std::marker::PhantomData })
+        let (fault_tx, faults) = channel();
+        let io = B::wire(&nodes.iter().collect::<Vec<_>>(), cfg, &fault_tx)?;
+        Ok(Self { nodes, processors, specs, io, windows, events: merged_rx, faults, _board: std::marker::PhantomData })
     }
 }
 
@@ -298,6 +302,10 @@ pub(crate) struct Ip35Machine<B: Ip35Board> {
     frames: Option<Arc<AtomicU64>>,
     nat: Option<(Arc<NatControl>, (Ipv4Addr, Ipv4Addr, Ipv4Addr))>,
     events: Option<Receiver<MachineEvent>>,
+    /// A graphics GPU failure, until the controller takes the receiver, and
+    /// the first one it latched.
+    fatal_rx: Option<Receiver<MachineFatal>>,
+    fatal_fault: Option<MachineFatal>,
     slot: Option<MachineSlot>,
     lifecycle: GuestState,
     _board: std::marker::PhantomData<fn() -> B>,
@@ -309,7 +317,7 @@ impl<B: Ip35Board> Ip35Machine<B> {
         let prom = prom_image::resolve(cfg.machine.profile, &cfg.prom, 8 * 1024 * 1024)
             .map_err(|e| format!("{} {e}", B::NAME))?
             .bytes;
-        let Chassis { nodes, processors, specs, io, windows, events, .. } = Chassis::<B>::build(cfg, &prom, host_clock())?;
+        let Chassis { nodes, processors, specs, io, windows, events, faults, .. } = Chassis::<B>::build(cfg, &prom, host_clock())?;
         let count = nodes.len();
         let timers = Arc::new(TimerManager::new());
         let board_poll = io.poll.clone();
@@ -427,6 +435,8 @@ impl<B: Ip35Board> Ip35Machine<B> {
             nat,
             frames,
             events: Some(events),
+            fatal_rx: Some(faults),
+            fatal_fault: None,
             slot: None,
             lifecycle: GuestState::Idle,
             _board: std::marker::PhantomData,
@@ -561,7 +571,14 @@ impl<B: Ip35Board> Workstation for Ip35Machine<B> {
     fn register_system_controller(&mut self) {
         let slot = self.machine_slot();
         let events = self.events.take().expect("the system controller is registered once");
-        register_system_controller(&self.monitor, slot, Some(events));
+        register_system_controller(&self.monitor, slot.clone(), Some(events));
+        crate::workstation::register_fatal_controller(slot, self.fatal_rx.take());
+    }
+    fn fatal_fault(&self) -> Option<MachineFatal> {
+        self.fatal_fault.clone()
+    }
+    fn latch_fatal_fault(&mut self, fault: MachineFatal) -> bool {
+        self.fatal_fault.is_none() && self.fatal_fault.replace(fault).is_none()
     }
     fn monitor_addr(&self) -> Option<SocketAddr> {
         self.monitor.bound_addr()

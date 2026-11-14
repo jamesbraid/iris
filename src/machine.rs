@@ -605,6 +605,16 @@ impl Machine {
             _ => None,
         };
 
+        // The GPU for the IMPACT board when it draws on one.
+        let gpu = if cfg.graphics_board().is_impact() {
+            crate::workstation::open_gpu(&cfg, &fatal_tx).unwrap_or_else(|e| {
+                eprintln!("mgras: {e}");
+                std::process::exit(1)
+            })
+        } else {
+            None
+        };
+
         // IMPACT graphics in the GIO graphics slot.
         let mgras: Option<Arc<crate::dev::mgras::Mgras>> = match cfg.graphics_board() {
             crate::config::GraphicsBoard::SolidImpact
@@ -613,7 +623,7 @@ impl Machine {
                 Some(crate::dev::mgras::Mgras::with_raster(cfg.graphics_board(), {
                     use crate::dev::ioc::IocInterrupt::{GioSgFifo, GioSgGraphics, GioSgRetrace};
                     [ioc.irq_line(GioSgFifo), ioc.irq_line(GioSgGraphics), ioc.irq_line(GioSgRetrace)]
-                }, status.clone(), cfg.graphics.raster, &cfg.graphics.gpu_backend).unwrap_or_else(|e| {
+                }, status.clone(), crate::workstation::share_gpu(&gpu)).unwrap_or_else(|e| {
                     eprintln!("mgras: {e}");
                     std::process::exit(1)
                 }))

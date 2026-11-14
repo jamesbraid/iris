@@ -58,7 +58,7 @@ use crate::monitor::{Monitor, DEFAULT_PORT as DEFAULT_MONITOR_PORT};
 use crate::net::{GatewayConfig, Link, NatControl};
 use crate::perf_monitor::PerfMonitor;
 use crate::scsi::{attach_from_config, ScsiBus};
-use crate::traits::{BusDevice, Device, MachineEvent, Resettable, BUS_OK};
+use crate::traits::{BusDevice, Device, MachineEvent, MachineFatal, Resettable, BUS_OK};
 use crate::workstation::{register_system_controller, DiscChanger, MachineRef, MachineSlot, Workstation};
 use parking_lot::Mutex;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -84,6 +84,10 @@ pub struct FuelMachine {
         (Ipv4Addr, Ipv4Addr, Ipv4Addr),
     )>,
     events: Option<Receiver<MachineEvent>>,
+    /// A graphics GPU failure, until the controller takes the receiver, and
+    /// the first one it latched.
+    fatal_rx: Option<Receiver<MachineFatal>>,
+    fatal_fault: Option<MachineFatal>,
     slot: Option<MachineSlot>,
     lifecycle: GuestState,
 }
@@ -97,6 +101,8 @@ impl FuelMachine {
         let timekeeper = Arc::new(Timekeeper::with_nvram_file(
             Path::new(&cfg.nvram),
         )?);
+        let (fatal_tx, fatal_rx) = std::sync::mpsc::channel();
+        let graphics_gpu = if cfg.graphics_board().is_vpro() { crate::workstation::open_gpu(cfg, &fatal_tx)? } else { None };
         let board = Arc::new(FuelBoard::with_config(FuelBoardConfig {
             payload: &prom,
             clock: host_clock(),
@@ -111,7 +117,7 @@ impl FuelMachine {
             },
             graphics: cfg.graphics_board(),
             graphics_pool: (cfg.graphics.threads, cfg.graphics.tile),
-            graphics_raster: (cfg.graphics.raster, cfg.graphics.gpu_backend.as_str()),
+            graphics_gpu,
         })?);
         let timers = Arc::new(TimerManager::new());
         let part = cfg.cpu();
@@ -212,6 +218,8 @@ impl FuelMachine {
             nat,
             frames,
             events,
+            fatal_rx: Some(fatal_rx),
+            fatal_fault: None,
             slot: None,
             lifecycle: GuestState::Idle,
         })
@@ -308,8 +316,16 @@ impl Workstation for FuelMachine {
             .events
             .take()
             .expect("Fuel system controller registered twice");
-        register_system_controller(&self.monitor, slot, Some(events));
+        register_system_controller(&self.monitor, slot.clone(), Some(events));
+        crate::workstation::register_fatal_controller(slot, self.fatal_rx.take());
     }
+    fn fatal_fault(&self) -> Option<MachineFatal> {
+        self.fatal_fault.clone()
+    }
+    fn latch_fatal_fault(&mut self, fault: MachineFatal) -> bool {
+        self.fatal_fault.is_none() && self.fatal_fault.replace(fault).is_none()
+    }
+
     fn monitor_addr(&self) -> Option<SocketAddr> {
         self.monitor.bound_addr()
     }
@@ -535,8 +551,9 @@ pub(crate) struct FuelBoardConfig<'a> {
     pub graphics: GraphicsBoard,
     /// The VPro's fragment pipeline: worker count and tile size (`[graphics]`).
     pub graphics_pool: (usize, u32),
-    /// Which unit draws and, for the GPU, the wgpu backend (`[graphics]`).
-    pub graphics_raster: (crate::config::RasterUnit, &'a str),
+    /// The GPU the board draws on, when `[graphics] raster` says so: a handle
+    /// from `Gpu::share`.
+    pub graphics_gpu: Option<crate::SharedGpu>,
 }
 
 /// What a Fuel config may replace in the L1's identity replies.
@@ -563,12 +580,12 @@ impl FuelBoard {
             l1: L1Identity::default(),
             graphics: GraphicsBoard::None,
             graphics_pool: (2, 32),
-            graphics_raster: (crate::config::RasterUnit::Cpu, "auto"),
+            graphics_gpu: None,
         })
     }
 
     pub fn with_config(config: FuelBoardConfig<'_>) -> Result<Self, String> {
-        let FuelBoardConfig { payload, clock, flash_path, station_mac, timekeeper, ps2_input, usb_input, l1: l1_identity, graphics, graphics_pool, graphics_raster } = config;
+        let FuelBoardConfig { payload, clock, flash_path, station_mac, timekeeper, ps2_input, usb_input, l1: l1_identity, graphics, graphics_pool, graphics_gpu } = config;
         let mut l1_config = L1Config { mac: station_mac, ..Default::default() };
         if let Some(revision) = l1_identity.revision {
             l1_config.revision = Some(revision);
@@ -639,7 +656,7 @@ impl FuelBoard {
             });
             let dma = bedrock.widget_dma(WIDGET_VPRO);
             let board = Odyssey::new_widget_relative(
-                WIDGET_VPRO, graphics.as_str(), packets, dma, status.clone(), graphics_pool, graphics_raster,
+                WIDGET_VPRO, graphics.as_str(), packets, dma, status.clone(), graphics_pool, graphics_gpu,
             )?;
             bedrock.connect_widget(WIDGET_VPRO, xbridge.attach_widget(WIDGET_VPRO, board.clone()));
             Some(board)

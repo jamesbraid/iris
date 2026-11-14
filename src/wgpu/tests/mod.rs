@@ -65,7 +65,7 @@ struct Board {
 }
 
 fn gpu() -> Option<Arc<Gpu>> {
-    match Gpu::new(&GpuOptions::default()) {
+    match Gpu::new(&GpuOptions::default(), Box::new(|_| {})) {
         Ok(g) => Some(g),
         Err(e) => {
             eprintln!("skipped: {e}");
@@ -312,7 +312,7 @@ fn bounded_transactional_batches_keep_order() {
         backend: std::env::var("WGPU_TEST_BACKEND").unwrap_or_else(|_| "auto".into()),
         ..GpuOptions::default()
     };
-    let gpu = Gpu::new(&options).expect("initialize GPU for bounded batches");
+    let gpu = Gpu::new(&options, Box::new(|_| {})).expect("initialize GPU for bounded batches");
     let mut board = Board::new(Arc::clone(&gpu), 32, 32);
     board.batch = Batch::new_bounded(
         &gpu,
@@ -406,4 +406,79 @@ fn a_refused_submission_reports_why() {
     let index = gpu.submit(encoder);
     let err = gpu.wait(Some(index)).unwrap_err();
     assert!(err.starts_with("wgpu error"), "{err}");
+}
+
+/// A device whose fatal callback counts its calls.
+fn counted() -> Option<(Arc<Gpu>, Arc<std::sync::atomic::AtomicUsize>)> {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = Arc::clone(&calls);
+    match Gpu::new(&GpuOptions::default(), Box::new(move |_| { seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst); })) {
+        Ok(g) => Some((g, calls)),
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            None
+        }
+    }
+}
+
+fn storage(gpu: &Gpu, label: &str) -> wgpu::Buffer {
+    gpu.buffer(label, 64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC)
+}
+
+/// Two boards on one device and queue, each with an upload ring of its own:
+/// a board's writes reach the GPU ahead of its own next submission, in the
+/// order it made them, whichever board submits first.
+#[test]
+fn boards_on_one_shared_device_keep_their_own_order() {
+    let Some((a, _)) = counted() else { return };
+    let b = a.share();
+    assert!(a.device == b.device, "one device");
+    let (ba, bb) = (storage(&a, "a"), storage(&b, "b"));
+    // B writes twice to the same words, A once; B submits first, so A's
+    // writes ride its own submission and B's later write wins on B's buffer.
+    b.write(&bb, 0, &[1u8; 16]);
+    a.write(&ba, 0, &[7u8; 16]);
+    b.write(&bb, 0, &[2u8; 16]);
+    b.submit(b.encoder("b"));
+    a.submit(a.encoder("a"));
+    let mut staging = super::memory::Staging::default();
+    assert_eq!(staging.read(&a, &ba, &[(0, 16)]).unwrap(), vec![7u8; 16]);
+    assert_eq!(staging.read(&b, &bb, &[(0, 16)]).unwrap(), vec![2u8; 16]);
+}
+
+/// A loss is every board's, once: the callback runs one time for two boards,
+/// and each board's calls report the same error from then on.
+#[test]
+fn device_loss_is_sticky_and_fatal_for_every_board() {
+    let Some((a, calls)) = counted() else { return };
+    let b = a.share();
+    let buffer = storage(&b, "b");
+    assert!(a.check().is_ok() && b.check().is_ok());
+    a.device.destroy();
+    // The loss callback runs from a poll.
+    let first = a.wait(None).unwrap_err();
+    assert!(first.contains("lost"), "{first}");
+    assert_eq!(b.check().unwrap_err(), first, "the other board sees the same error");
+    assert_eq!(b.wait(None).unwrap_err(), first, "and it stays");
+    // A write on a lost device is dropped, not a panic, and reports nothing
+    // new: the error is the one already recorded.
+    b.write(&buffer, 0, &[0u8; 16]);
+    b.submit(b.encoder("after loss"));
+    assert_eq!(a.share().check().unwrap_err(), first, "a board opened later shares it");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// A failure the device did not report itself is the same kind of failure:
+/// `fail` records it, runs the callback once and later errors do not
+/// replace it.
+#[test]
+fn a_refused_readback_is_fatal_once_and_not_replaced() {
+    let Some((a, calls)) = counted() else { return };
+    let b = a.share();
+    b.fail("readback refused");
+    a.fail("a second failure");
+    assert_eq!(a.check().unwrap_err(), "readback refused");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // The boards' calls now report it rather than carry on.
+    assert_eq!(a.wait(None).unwrap_err(), "readback refused");
 }

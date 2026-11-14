@@ -275,6 +275,10 @@ pub struct OctaneMachine {
     scratch_path: Option<std::path::PathBuf>,
     nvram_path: String,
     event_rx: Option<std::sync::mpsc::Receiver<MachineEvent>>,
+    /// A graphics GPU failure, until the controller takes the receiver, and
+    /// the first one it latched.
+    fatal_rx: Option<std::sync::mpsc::Receiver<crate::traits::MachineFatal>>,
+    fatal_fault: Option<crate::traits::MachineFatal>,
     controller_slot: Option<MachineSlot>,
     lifecycle: crate::machine_state::GuestState,
     /// The disks as a snapshot records them, to refuse one taken on others.
@@ -324,6 +328,7 @@ impl OctaneMachine {
         let octane2 = matches!(kind, crate::config::GraphicsBoard::V10 | crate::config::GraphicsBoard::V12);
         let xbow_revision = if octane2 { XBOW_REVISION_OCTANE2 } else { XBOW_REVISION };
         let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4);
+        let (fatal_tx, fatal_rx) = std::sync::mpsc::channel();
         let timer_manager = Arc::new(TimerManager::new());
 
         // Memory, and HEART, whose descriptors place it.
@@ -456,11 +461,12 @@ impl OctaneMachine {
         // shared with the graphics board before the CPU exists.
         let fasttick = Arc::new(AtomicU64::new(0));
         let status = crate::disp::StatusSource::new(heartbeat.clone(), fasttick.clone());
+        let gpu = if board.is_some() || has_vpro { crate::workstation::open_gpu(cfg, &fatal_tx)? } else { None };
         let gfx = board
-            .map(|b| ImpactXio::with_raster(WIDGET_GFX, b, heart.clone(), mem.clone(), status.clone(), (cfg.graphics.raster, cfg.graphics.gpu_backend.as_str())))
+            .map(|b| ImpactXio::with_raster(WIDGET_GFX, b, heart.clone(), mem.clone(), status.clone(), crate::workstation::share_gpu(&gpu)))
             .transpose()?;
         let vpro = if has_vpro {
-            Some(Odyssey::new(WIDGET_GFX, kind.as_str(), heart.clone(), mem.clone(), status.clone(), (cfg.graphics.threads, cfg.graphics.tile), (cfg.graphics.raster, cfg.graphics.gpu_backend.as_str()))?)
+            Some(Odyssey::new(WIDGET_GFX, kind.as_str(), heart.clone(), mem.clone(), status.clone(), (cfg.graphics.threads, cfg.graphics.tile), crate::workstation::share_gpu(&gpu))?)
         } else {
             None
         };
@@ -726,6 +732,8 @@ impl OctaneMachine {
             scratch_path,
             nvram_path: cfg.nvram.clone(),
             event_rx: Some(event_rx),
+            fatal_rx: Some(fatal_rx),
+            fatal_fault: None,
             controller_slot: None,
             lifecycle: crate::machine_state::GuestState::Idle,
             disks,
@@ -1316,8 +1324,16 @@ impl Workstation for OctaneMachine {
         let slot = self.machine_slot();
         let events = self.event_rx.take();
         assert!(events.is_some(), "register_system_controller called twice");
-        crate::workstation::register_system_controller(&self.monitor, slot, events);
+        crate::workstation::register_system_controller(&self.monitor, slot.clone(), events);
+        crate::workstation::register_fatal_controller(slot, self.fatal_rx.take());
     }
+    fn fatal_fault(&self) -> Option<crate::traits::MachineFatal> {
+        self.fatal_fault.clone()
+    }
+    fn latch_fatal_fault(&mut self, fault: crate::traits::MachineFatal) -> bool {
+        self.fatal_fault.is_none() && self.fatal_fault.replace(fault).is_none()
+    }
+
     fn monitor_addr(&self) -> Option<std::net::SocketAddr> {
         self.monitor.bound_addr()
     }

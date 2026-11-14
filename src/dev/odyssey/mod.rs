@@ -161,10 +161,10 @@ impl Odyssey {
         mem: Arc<dyn BusDevice>,
         status: Arc<crate::disp::StatusSource>,
         pool: (usize, u32),
-        raster: (crate::config::RasterUnit, &str),
+        gpu: Option<crate::SharedGpu>,
     ) -> Result<Arc<Self>, String> {
         let aperture = Aperture::Ip30Windows { small: widget_small_base(widget), large: widget_large_base(widget) };
-        Self::build(widget, product, interface::heart_sender(irq), aperture, mem, status, pool, raster)
+        Self::build(widget, product, interface::heart_sender(irq), aperture, mem, status, pool, gpu)
     }
 
     /// A board of `product` at `widget` on a machine that hands the board
@@ -178,9 +178,9 @@ impl Odyssey {
         mem: Arc<dyn BusDevice>,
         status: Arc<crate::disp::StatusSource>,
         pool: (usize, u32),
-        raster: (crate::config::RasterUnit, &str),
+        gpu: Option<crate::SharedGpu>,
     ) -> Result<Arc<Self>, String> {
-        Self::build(widget, product, packets, Aperture::Offsets, mem, status, pool, raster)
+        Self::build(widget, product, packets, Aperture::Offsets, mem, status, pool, gpu)
     }
 
     #[allow(clippy::too_many_arguments, reason = "the board's wiring")]
@@ -192,16 +192,14 @@ impl Odyssey {
         mem: Arc<dyn BusDevice>,
         status: Arc<crate::disp::StatusSource>,
         pool: (usize, u32),
-        raster: (crate::config::RasterUnit, &str),
+        gpu: Option<crate::SharedGpu>,
     ) -> Result<Arc<Self>, String> {
         let mut s = Board::new(product, widget as u32)?;
         // The fragment pipeline's workers and tile size (`[graphics]`).
         s.raster.set_pool(pool.0, pool.1);
-        if raster.0 == crate::config::RasterUnit::Wgpu {
-            #[cfg(feature = "wgpu")]
-            s.enable_gpu(&crate::wgpu::GpuOptions { backend: raster.1.to_string(), ..Default::default() })?;
-            #[cfg(not(feature = "wgpu"))]
-            return Err("graphics.raster = \"wgpu\" needs a build with the wgpu feature".into());
+        #[cfg(feature = "wgpu")]
+        if let Some(gpu) = &gpu {
+            s.enable_gpu(gpu)?;
         }
         // The recorder's slot is there whether or not a recording runs, so
         // the monitor can start one (`vpro rec`); the DMA path records
