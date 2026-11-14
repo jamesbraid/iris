@@ -661,29 +661,10 @@ fn cmd_screenshot(server: &CiServer, args: &Value) -> Response {
         return Response::err("screenshot: the display has no video mode yet");
     };
 
-    let mut rgb = Vec::with_capacity(width * height * 3);
-    // `rgba` is 0xAABBGGRR (R in the low byte), the compositors' format;
-    // see disp::save_screenshot.
-    for px in &rgba_copy {
-        rgb.push((px & 0xff) as u8);
-        rgb.push(((px >> 8) & 0xff) as u8);
-        rgb.push(((px >> 16) & 0xff) as u8);
-    }
-
-    let file = match std::fs::File::create(path) {
-        Ok(f) => f,
-        Err(e) => return Response::err(format!("screenshot: create {}: {}", path, e)),
-    };
-    let bw = std::io::BufWriter::new(file);
-    let mut enc = png::Encoder::new(bw, width as u32, height as u32);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut writer = match enc.write_header() {
-        Ok(w) => w,
-        Err(e) => return Response::err(format!("screenshot: png header: {}", e)),
-    };
-    if let Err(e) = writer.write_image_data(&rgb) {
-        return Response::err(format!("screenshot: png write: {}", e));
+    // `rgba` is 0xAABBGGRR (R in the low byte), the compositors' format, and
+    // copy_frame hands it over tight: rows `width` words apart.
+    if let Err(e) = crate::disp::write_png_words(path, &rgba_copy, width, width, height) {
+        return Response::err(format!("screenshot: {}: {}", path, e));
     }
 
     Response::data(serde_json::json!({
@@ -692,7 +673,7 @@ fn cmd_screenshot(server: &CiServer, args: &Value) -> Response {
         "width": width,
         "height": height,
         "fresh": fresh,
-        "bytes": rgb.len() + 100,  // rough
+        "bytes": width * height * 3 + 100,  // rough
     }))
 }
 

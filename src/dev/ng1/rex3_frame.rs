@@ -443,7 +443,7 @@ impl ResidentDisplay {
                 let n = rex.screenshot_counter.fetch_add(1, Ordering::Relaxed);
                 let path = format!("screenshot_{n:04}.png");
                 std::thread::spawn(move || {
-                    match crate::disp::save_screenshot(&path, &pixels, width, height) {
+                    match crate::disp::write_png_words(&path, &pixels, crate::disp::FB_STRIDE, width, height) {
                         Ok(()) => println!("iris: screenshot saved to {path}"),
                         Err(error) => println!("iris: screenshot failed: {error}"),
                     }

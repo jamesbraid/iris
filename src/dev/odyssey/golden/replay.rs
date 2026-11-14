@@ -466,11 +466,7 @@ fn save_screen(b: &Board, path: &str) {
     for p in px {
         rgb.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
     }
-    let file = std::fs::File::create(path).unwrap();
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    enc.write_header().unwrap().write_image_data(&rgb).unwrap();
+    crate::disp::write_png(path, w, h, png::ColorType::Rgb, &rgb).unwrap();
 }
 
 fn recordings() -> Vec<PathBuf> {
