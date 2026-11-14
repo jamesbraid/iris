@@ -1315,8 +1315,9 @@ pub struct GraphicsSection {
     pub tile: u32,
     /// VPro and IMPACT: where the raster unit runs: `cpu` (the threads
     /// above; IMPACT's raster engine threads) or `wgpu` (the host GPU
-    /// through wgpu compute; needs the `wgpu` feature). GR2: where the
-    /// scan-out runs (its raster stays on the CPU).
+    /// through wgpu compute; needs the `wgpu` feature). GR2 and the O2: where
+    /// the display scans out (GR2's raster and CRIME's rendering engine stay
+    /// on the CPU).
     #[serde(default)]
     pub raster: RasterUnit,
     /// The wgpu backend for `raster = "wgpu"`: `auto`, `vulkan`, `metal`,
@@ -4083,7 +4084,7 @@ pub struct Cli {
     #[arg(long = "graphics", visible_alias = "board", visible_alias = "graphics-board", value_name = "BOARD")]
     pub graphics: Option<GraphicsBoard>,
 
-    /// VPro and IMPACT: where the raster unit runs: `cpu` (default) or `wgpu` (the host GPU through wgpu compute; needs a build with the `wgpu` feature). GR2: where the scan-out runs.
+    /// VPro and IMPACT: where the raster unit runs: `cpu` (default) or `wgpu` (the host GPU through wgpu compute; needs a build with the `wgpu` feature). GR2 and the O2: where the display scans out.
     #[arg(long = "raster", value_name = "UNIT")]
     pub raster: Option<RasterUnit>,
 
