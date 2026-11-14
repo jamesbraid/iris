@@ -798,6 +798,8 @@ pub struct BarStats {
     pub hb:             u64,
     pub count_hz:       u64,
     pub gfifo_pending:  usize,
+    /// "Screen n of m", set when the window shows several screens in turn.
+    pub screen:         Option<(usize, usize)>,
 }
 
 /// The machine-level inputs of the status bar, shared by every graphics board
@@ -911,6 +913,7 @@ impl StatusSource {
             hb: self.heartbeat.fetch_and(Self::PERSISTENT, Ordering::Relaxed),
             count_hz,
             gfifo_pending,
+            screen: None,
         }
     }
 }
@@ -1075,10 +1078,11 @@ impl StatusBar {
         let rx_color = if self.enet_rx_fade > 0 { BAR_ACTIVE } else { BAR_DIM };
 
         let (mips, hz) = rate_figures(self.mips, self.fasthz, &self.more_rates);
+        let screen = stats.screen.map_or(String::new(), |(n, of)| format!(" SCREEN {n}/{of}"));
         #[cfg(feature = "developer")]
-        let line = format!(" {mips} MIPS D:{:3.0}% I$:{:3.0}% UC:{:3.0}% {hz}Hz cnt:{:5.1}MHz g{:04X} NET:", self.decode_pct, self.l1i_hit_pct, self.uncached_pct, stats.count_hz as f64 / 1e6, stats.gfifo_pending);
+        let line = format!("{screen} {mips} MIPS D:{:3.0}% I$:{:3.0}% UC:{:3.0}% {hz}Hz cnt:{:5.1}MHz g{:04X} NET:", self.decode_pct, self.l1i_hit_pct, self.uncached_pct, stats.count_hz as f64 / 1e6, stats.gfifo_pending);
         #[cfg(not(feature = "developer"))]
-        let line = format!(" {mips} MIPS {hz}Hz NET:");
+        let line = format!("{screen} {mips} MIPS {hz}Hz NET:");
 
         let row_stride = 2048;
         for row in 0..STATUS_BAR_HEIGHT {
@@ -1389,7 +1393,7 @@ mod rate_figure_tests {
         let stats = |now, cycles: u64| super::BarStats {
             now, cycles, fasttick: 0,
             more_cpus: std::array::from_fn(|i| (i == 0).then_some((cycles, 0))),
-            decoded_delta: 0, l1i_hits: 0, l1i_fetches: 0, uncached: 0, hb: 0, count_hz: 0, gfifo_pending: 0,
+            decoded_delta: 0, l1i_hits: 0, l1i_fetches: 0, uncached: 0, hb: 0, count_hz: 0, gfifo_pending: 0, screen: None,
         };
         let mut rgba = vec![0u32; 2048 * super::STATUS_BAR_HEIGHT];
         bar.render(&mut rgba, 640, 0, &stats(t0 + std::time::Duration::from_secs(1), 900_000_000));

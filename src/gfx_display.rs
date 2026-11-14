@@ -421,10 +421,106 @@ impl Need {
 
 /// The front-end's half of a screen: the renderer it installs, and which of
 /// the machine's screens that renderer is showing.
+///
+/// A window that shows several screens in turn keeps one renderer, in the
+/// slot of the screen it shows now. A GL renderer is bound to the thread that
+/// presents with it, so a move between screens is done by the thread that is
+/// giving the renderer up ([`pass_to`](Self::pass_to), [`hand_over`](Self::hand_over)).
 #[derive(Default)]
 pub struct Window {
     pub renderer: Mutex<Option<Box<dyn Renderer>>>,
+    /// The screen this slot belongs to, as its place in the machine's list.
     pub shown: AtomicUsize,
+    /// How many screens the machine has, when the status bar should name the
+    /// one shown (`screen 2/2`); 0 for no name.
+    pub of: AtomicUsize,
+    /// Where the renderer goes when this screen's thread next ticks.
+    next: Mutex<Option<Arc<Window>>>,
+    /// Another screen drew into the picture this slot's renderer shows: show
+    /// the newest frame again at the next tick (see `side_by_side`).
+    poked: AtomicBool,
+}
+
+impl Window {
+    /// Ask this screen's display thread to give the renderer to `next`.
+    pub fn pass_to(&self, next: Arc<Window>) {
+        *self.next.lock() = Some(next);
+    }
+
+    /// A [`pass_to`](Self::pass_to) is waiting for the display thread.
+    pub fn passing(&self) -> bool {
+        self.next.lock().is_some()
+    }
+
+    /// Done on the display thread of the screen that holds the renderer, at
+    /// the top of its tick: release what only this thread may and move the
+    /// renderer to the slot it was passed to. A request that arrives while
+    /// the renderer is elsewhere stays until it is here.
+    pub fn hand_over(&self) {
+        let mut mine = self.renderer.lock();
+        if mine.is_none() {
+            return;
+        }
+        let Some(next) = self.next.lock().take() else { return };
+        let mut r = mine.take().expect("checked above");
+        r.stop();
+        *next.renderer.lock() = Some(r);
+    }
+
+    /// Show the newest frame again at the next tick.
+    pub fn poke(&self) {
+        self.poked.store(true, Ordering::Release);
+    }
+
+    /// The status bar's "screen n of m", when this slot names its screen.
+    pub fn label(&self) -> Option<(usize, usize)> {
+        let of = self.of.load(Ordering::Relaxed);
+        (of > 1).then(|| (self.shown.load(Ordering::Relaxed) + 1, of))
+    }
+}
+
+/// The hotkey's order through a machine's screens when one window shows one
+/// screen at a time. Lives on the event thread.
+pub struct Cycle {
+    screens: Vec<Arc<Screen>>,
+    cur: usize,
+}
+
+impl Cycle {
+    /// `None` for a machine with one screen: nothing to cycle.
+    pub fn new(screens: &[Arc<Screen>]) -> Option<Cycle> {
+        (screens.len() > 1).then(|| Cycle { screens: screens.to_vec(), cur: 0 })
+    }
+
+    /// How many screens it steps through.
+    pub fn screen_count(&self) -> usize {
+        self.screens.len()
+    }
+
+    /// The screen after `cur` of `n`, wrapping.
+    pub fn after(cur: usize, n: usize) -> usize {
+        (cur + 1) % n
+    }
+
+    /// The screen the window shows (or is about to).
+    pub fn current(&self) -> &Arc<Screen> {
+        &self.screens[self.cur]
+    }
+
+    /// Move the window to the next screen. A press while the last move is
+    /// still waiting for its display thread is ignored, so the renderer never
+    /// has two pending moves. Returns the new screen's index when it moved.
+    pub fn step(&mut self) -> Option<usize> {
+        if self.screens.iter().any(|s| s.window.passing()) {
+            return None;
+        }
+        let to = Self::after(self.cur, self.screens.len());
+        self.screens[self.cur].window.pass_to(self.screens[to].window.clone());
+        // The thread gives it up at its next tick; do not wait for a parked one.
+        self.screens[self.cur].changed.wake();
+        self.cur = to;
+        Some(to)
+    }
 }
 
 /// One head's output, shared by the board's display thread and every consumer.
@@ -532,12 +628,13 @@ impl Screen {
     /// `compose` filled (see [`run_display`]). Returns what was needed. `stats`
     /// is the status bar's input, taken only for a frame a renderer is shown.
     pub fn tick(&self, mut stats: impl FnMut() -> BarStats, compose: impl FnOnce(&mut Frame, Need) -> bool) -> Need {
+        self.window.hand_over();
         let need = self.need();
         if need.any() {
             let mut frame = self.frame(0, 0);
             if compose(&mut frame, need) {
                 // A tick with nobody shown has no use for the bar's figures.
-                let stats = if need.redraw { stats() } else { self.idle_stats() };
+                let stats = if need.redraw { self.bar(&mut stats) } else { self.idle_stats() };
                 self.publish(frame, &stats);
             } else {
                 // The picture stands; what was asked for is answered by it,
@@ -557,6 +654,14 @@ impl Screen {
         need
     }
 
+    /// The board's figures for the status bar, with this screen's name when
+    /// the window shows several.
+    fn bar(&self, stats: &mut impl FnMut() -> BarStats) -> BarStats {
+        let mut s = stats();
+        s.screen = self.window.label();
+        s
+    }
+
     fn idle_stats(&self) -> BarStats {
         crate::disp::StatusSource::detached().snapshot(Instant::now(), 0)
     }
@@ -569,10 +674,12 @@ impl Screen {
         let mut renderer = self.window.renderer.lock();
         let Some(renderer) = renderer.as_mut() else { return };
         let idle = self.idle.fetch_add(1, Ordering::Relaxed) + 1;
-        if idle < IDLE_REFRESH && self.shown.load(Ordering::Relaxed) == renderer_id(&**renderer) {
+        let poked = self.window.poked.swap(false, Ordering::AcqRel);
+        if !poked && idle < IDLE_REFRESH && self.shown.load(Ordering::Relaxed) == renderer_id(&**renderer) {
             return;
         }
-        self.show(renderer, &frame, &stats());
+        let bar = self.bar(stats);
+        self.show(renderer, &frame, &bar);
     }
 
     /// Hand `frame` to `renderer`, telling it first when the size changed.
@@ -933,6 +1040,96 @@ mod tests {
         // A new size is told before its frame.
         s.tick(stats, |f, _| { f.width = 2; f.height = 2; f.words.resize(4, 2); true });
         assert_eq!(*second.sizes.lock(), [(4, 2), (2, 2)]);
+    }
+
+    /// A renderer that says where it was shown and where it was stopped.
+    #[derive(Clone, Default)]
+    struct Where {
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Renderer for Where {
+        fn present(&mut self, f: &Frame, stats: &BarStats) {
+            self.log.lock().push(format!("present {}x{} {:?}", f.width, f.height, stats.screen));
+        }
+        fn stop(&mut self) {
+            self.log.lock().push("stop".into());
+        }
+    }
+
+    fn three() -> Vec<Arc<Screen>> {
+        (0..3)
+            .map(|i| {
+                let s = Arc::new(Screen::new(i, Arc::default()));
+                s.window.shown.store(i, Ordering::Relaxed);
+                s.window.of.store(3, Ordering::Relaxed);
+                s
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_hotkey_walks_the_screens_in_order_and_wraps() {
+        assert_eq!((0..5).scan(0, |c, _| { *c = Cycle::after(*c, 3); Some(*c) }).collect::<Vec<_>>(), [1, 2, 0, 1, 2]);
+        assert!(Cycle::new(&three()[..1]).is_none(), "one screen has nothing to cycle");
+    }
+
+    /// The renderer leaves a screen from that screen's own thread, is stopped
+    /// there, and the status bar names the screen it arrives at.
+    #[test]
+    fn the_window_follows_the_hotkey_one_hand_over_at_a_time() {
+        let screens = three();
+        let r = Where::default();
+        *screens[0].window.renderer.lock() = Some(Box::new(r.clone()));
+        let mut cycle = Cycle::new(&screens).unwrap();
+        let show = |s: &Screen, w: u32| s.tick(stats, |f, _| { f.width = w; f.height = 1; f.words.resize(w as usize, 0); true });
+        show(&screens[0], 4);
+        assert_eq!(r.log.lock().as_slice(), ["present 4x1 Some((1, 3))"]);
+        // A press asks; nothing moves until the holder's thread ticks.
+        assert_eq!(cycle.step(), Some(1));
+        assert!(screens[0].window.renderer.lock().is_some());
+        assert_eq!(cycle.step(), None, "a press during a pending move is ignored");
+        // A screen that does not hold the renderer shows nothing.
+        show(&screens[1], 8);
+        assert_eq!(r.log.lock().len(), 1);
+        show(&screens[0], 4);
+        assert!(screens[0].window.renderer.lock().is_none());
+        assert_eq!(r.log.lock().as_slice(), ["present 4x1 Some((1, 3))", "stop"]);
+        show(&screens[1], 8);
+        assert_eq!(r.log.lock().last().unwrap(), "present 8x1 Some((2, 3))");
+        assert!(Arc::ptr_eq(cycle.current(), &screens[1]));
+        // Around the ring: 1 -> 2 -> 0.
+        for (from, to) in [(1, 2), (2, 0)] {
+            assert_eq!(cycle.step(), Some(to));
+            show(&screens[from], 2);
+        }
+        assert!(screens[0].window.renderer.lock().is_some());
+        assert!(screens[1].window.renderer.lock().is_none() && screens[2].window.renderer.lock().is_none());
+    }
+
+    /// A move asked of a screen that does not hold the renderer yet waits for
+    /// it, so two quick presses end where they were headed.
+    #[test]
+    fn a_move_queued_before_the_renderer_arrives_waits_for_it() {
+        let screens = three();
+        *screens[0].window.renderer.lock() = Some(Box::new(Where::default()));
+        screens[0].window.pass_to(screens[1].window.clone());
+        screens[1].window.pass_to(screens[2].window.clone());
+        screens[1].window.hand_over();
+        assert!(screens[1].window.passing(), "nothing to move yet");
+        screens[0].window.hand_over();
+        screens[1].window.hand_over();
+        assert!(screens[2].window.renderer.lock().is_some());
+        assert!(!screens.iter().any(|s| s.window.passing()));
+    }
+
+    #[test]
+    fn a_window_names_its_screen_only_when_there_are_several() {
+        let w = Window::default();
+        assert_eq!(w.label(), None);
+        w.shown.store(1, Ordering::Relaxed);
+        w.of.store(2, Ordering::Relaxed);
+        assert_eq!(w.label(), Some((2, 2)));
     }
 
     #[test]
