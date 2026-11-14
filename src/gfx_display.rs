@@ -830,15 +830,21 @@ mod tests {
         assert!(start.elapsed() >= Duration::from_millis(80), "four periods, not four frames' work");
     }
 
+    /// Asserts on the deadline the wait computed, not on how long the next
+    /// wait takes: a thread descheduled after the resync would otherwise find
+    /// the next slot nearer than a period and fail.
     #[test]
     fn a_late_frame_resyncs_instead_of_running_the_missed_ones_back_to_back() {
         let c = ScreenChanged::default();
-        let mut w = FrameWait::new(&c, Duration::from_millis(20));
+        let period = Duration::from_millis(20);
+        let mut w = FrameWait::new(&c, period);
+        let first_slot = w.next + period;
         std::thread::sleep(Duration::from_millis(70));
+        let before = Instant::now();
         w.wait();
-        let t = Instant::now();
-        w.wait();
-        assert!(t.elapsed() >= Duration::from_millis(19), "the next slot is a period away, not the missed ones");
+        let after = Instant::now();
+        assert!(w.next >= before && w.next <= after, "the slot restarts from the moment of the resync");
+        assert!(w.next > first_slot + period, "not from one of the slots it missed");
     }
 
     /// Run `f` on a thread with a wait, and return once it is parked (or done).
