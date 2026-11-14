@@ -10,7 +10,9 @@ use winit::{
 };
 use glow::HasContext;
 use crate::dev::ps2::Ps2Controller;
-use crate::gfx_display::{Frame, GfxDisplay, Renderer};
+use crate::config::ScreenWindows;
+use crate::gfx_display::{Cycle, Frame, Renderer, Screen};
+use crate::side_by_side::SideBySide;
 use crate::disp::{StatusBar, StatusBarTexture, BarStats, STATUS_BAR_HEIGHT};
 use crate::gl_compositor::GlCompositor;
 use crate::hptimer::{TimerManager, TimerReturn};
@@ -144,6 +146,9 @@ struct GlRenderer {
     current_h:     usize,
     current_win_w: usize,
     current_win_h: usize,
+    // Width of the words texture: a frame wider than the usual stride (the
+    // side-by-side window) needs a wider one.
+    tex_w:         usize,
 }
 
 // Safety: GlRenderer is sent to the refresh thread where it owns and uses the GL context.
@@ -516,6 +521,7 @@ impl Renderer for GlRenderer {
 
         let state = self.state.as_mut().unwrap();
         let gl    = &state.gl;
+        let bar_w = width.min(crate::disp::FB_STRIDE);
 
         // Handle window resize — take the latest queued size. Taken out of the
         // lock first: written as `if let Some(..) = self.window_size.lock().take()`
@@ -564,8 +570,8 @@ impl Renderer for GlRenderer {
             self.current_win_h = win_h;
             // Publish the display resolution for the event thread's aspect lock.
             *self.display_res.lock() = (width as u32, height as u32);
-            // UV coords into the 2048×FB_MAX_H output texture
-            let max_u      = width  as f32 / 2048.0;
+            // UV coords into the words texture (2048×FB_MAX_H unless wider)
+            let max_u      = width  as f32 / self.tex_w as f32;
             let max_v_main = height as f32 / crate::disp::FB_MAX_H as f32;
             unsafe {
                 // Main display quad (letterboxed).
@@ -573,10 +579,16 @@ impl Renderer for GlRenderer {
                     qx0, qy0, qx1, qy1,
                     0.0, 0.0, max_u, max_v_main);
                 // Status bar: same x extent as letterboxed display, scaled height, bottom of window.
-                // Texture is 2048×STATUS_BAR_HEIGHT, so v goes 0..1.
+                // Texture is 2048×STATUS_BAR_HEIGHT, so v goes 0..1. A frame
+                // wider than the texture gets a bar over its left 2048 pixels.
+                let (qxb, max_ub) = if bar_w == width {
+                    (qx1, width as f32 / 2048.0)
+                } else {
+                    (qx0 + (qx1 - qx0) * bar_w as f32 / width as f32, bar_w as f32 / 2048.0)
+                };
                 Self::upload_quad(gl, state.status_vbo,
-                    qx0, qy1, qx1, qy1 + sb_h_px,
-                    0.0, 0.0, max_u, 1.0);
+                    qx0, qy1, qxb, qy1 + sb_h_px,
+                    0.0, 0.0, max_ub, 1.0);
             }
         }
 
@@ -594,7 +606,7 @@ impl Renderer for GlRenderer {
                         Some(compositor.compose(&planes.compositor_source(), gl))
                     }
                     _ if !frame.words.is_empty() => {
-                        Some(upload_words(gl, &mut self.words_tex, &frame.words, width, height))
+                        Some(upload_words(gl, &mut self.words_tex, &frame.words, width, height, self.tex_w))
                     }
                     _ => None,
                 };
@@ -624,7 +636,7 @@ impl Renderer for GlRenderer {
             if let Some(overlay) = frame.overlay.as_deref() {
                 gl.enable(glow::BLEND);
                 gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-                let ov_tex = upload_words(gl, &mut self.overlay_tex, overlay, width, height);
+                let ov_tex = upload_words(gl, &mut self.overlay_tex, overlay, width, height, self.tex_w);
                 if use_integer {
                     Self::draw_tex_integer(gl, state, state.main_vbo, ov_tex,
                         width as i32, height as i32, main_quad_y_bottom, scale_i,
@@ -638,7 +650,7 @@ impl Renderer for GlRenderer {
 
             // ── Pass 3: status bar ───────────────────────────────────────────
             gl.scissor(0, 0, win_w_i, win_h_i);
-            let sb_tex = self.sbtex.render_and_upload(&mut self.status, stats, width, gl);
+            let sb_tex = self.sbtex.render_and_upload(&mut self.status, stats, bar_w, gl);
             Self::draw_tex_fallback(gl, state, state.status_vbo, sb_tex, win_w_f, win_h_f);
 
             gl.disable(glow::SCISSOR_TEST);
@@ -705,11 +717,11 @@ impl Renderer for GlRenderer {
     }
 }
 
-/// Words of a `width` by `height` picture, rows `width` apart, in a 2048 by
-/// `FB_MAX_H` texture made on first use; the texture holds the picture at
-/// its top left.
-fn upload_words(gl: &glow::Context, tex: &mut Option<glow::Texture>, words: &[u32], width: usize, height: usize) -> glow::Texture {
-    let (w, h) = (width.min(crate::disp::FB_STRIDE), height.min(crate::disp::FB_MAX_H));
+/// Words of a `width` by `height` picture, rows `width` apart, in a `tex_w`
+/// (2048, or wider for the side-by-side window) by `FB_MAX_H` texture made on
+/// first use; the texture holds the picture at its top left.
+fn upload_words(gl: &glow::Context, tex: &mut Option<glow::Texture>, words: &[u32], width: usize, height: usize, tex_w: usize) -> glow::Texture {
+    let (w, h) = (width.min(tex_w), height.min(crate::disp::FB_MAX_H));
     unsafe {
         let t = *tex.get_or_insert_with(|| {
             let t = gl.create_texture().unwrap();
@@ -717,7 +729,7 @@ fn upload_words(gl: &glow::Context, tex: &mut Option<glow::Texture>, words: &[u3
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
             gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA as i32,
-                crate::disp::FB_STRIDE as i32, crate::disp::FB_MAX_H as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+                tex_w as i32, crate::disp::FB_MAX_H as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
             t
         });
         gl.bind_texture(glow::TEXTURE_2D, Some(t));
@@ -771,11 +783,16 @@ impl WgpuRenderer {
             self.presenter.resize(w, h);
         }
         *self.display_res.lock() = (width as u32, height as u32);
-        // The presenter reads the bar at the frame's row length.
-        let rows = self.sbtex.render_pixels(&mut self.status, stats, width);
+        // The presenter reads the bar at the frame's row length. The bar is
+        // drawn at most FB_STRIDE wide; a wider frame (side by side) gets its
+        // last column repeated.
+        let bar_w = width.min(crate::disp::FB_STRIDE);
+        let rows = self.sbtex.render_pixels(&mut self.status, stats, bar_w);
         self.bar.clear();
         for y in 0..STATUS_BAR_HEIGHT {
-            self.bar.extend_from_slice(&rows[y * crate::disp::FB_STRIDE..][..width]);
+            let row = &rows[y * crate::disp::FB_STRIDE..][..bar_w];
+            self.bar.extend_from_slice(row);
+            self.bar.resize((y + 1) * width, row[bar_w - 1]);
         }
     }
 }
@@ -838,15 +855,37 @@ struct MouseDelta {
     buttons: u8,
 }
 
-/// UI Manager handling Window, OpenGL context, and Input
-pub struct Ui {
-    ps2: Arc<Ps2Controller>,
-    display: Arc<dyn GfxDisplay>,
-    discs: Option<Arc<dyn DiscChanger>>,
+/// One host window: the winit window and what passes between its event thread
+/// and its renderer.
+struct Pane {
     window: Arc<Window>,
     window_size: Arc<Mutex<Option<(u32, u32)>>>,
     resize_request: Arc<Mutex<Option<ResizeRequest>>>,
     display_res: Arc<Mutex<(u32, u32)>>,
+    /// Last accepted window size: tells which edge is being dragged when locking the aspect ratio.
+    last_win_size: (u32, u32),
+    /// The machine screen this window shows; with `cycle` or side by side
+    /// the pane is not tied to one, and this is the first.
+    screen: usize,
+}
+
+impl Pane {
+    fn new(window: Arc<Window>, window_size: Arc<Mutex<Option<(u32, u32)>>>, resize_request: Arc<Mutex<Option<ResizeRequest>>>, display_res: Arc<Mutex<(u32, u32)>>, screen: usize) -> Self {
+        let s = window.inner_size();
+        Self { window, window_size, resize_request, display_res, last_win_size: (s.width, s.height), screen }
+    }
+}
+
+/// UI Manager handling Window, OpenGL context, and Input
+pub struct Ui {
+    ps2: Arc<Ps2Controller>,
+    /// Every screen of the machine, in `screen N` order.
+    screens: Vec<Arc<Screen>>,
+    discs: Option<Arc<dyn DiscChanger>>,
+    /// One window, except per-screen windows: one each.
+    panes: Vec<Pane>,
+    /// The hotkey's walk through the screens, for `cycle` on several.
+    cycle: Option<Cycle>,
     timer_manager: Arc<TimerManager>,
     initial_scale: u32,
     scroll_pixels_per_line: f64,
@@ -854,22 +893,67 @@ pub struct Ui {
 }
 
 impl Ui {
-    pub fn new(ps2: Arc<Ps2Controller>, display: Arc<dyn GfxDisplay>, discs: Option<Arc<dyn DiscChanger>>, timer_manager: Arc<TimerManager>, event_loop: &EventLoop<()>, scale: u32, scroll_pixels_per_line: f64, lock_aspect_ratio: bool, renderer: crate::config::UiRenderer) -> Self {
+    /// The window(s) for a machine's `screens`, shown as `windows` says: one
+    /// window with a screen at a time (`cycle`), all of them in one window, or
+    /// a window each. A machine with one screen has one window whatever
+    /// `windows` says.
+    pub fn new(ps2: Arc<Ps2Controller>, screens: Vec<Arc<Screen>>, discs: Option<Arc<dyn DiscChanger>>, timer_manager: Arc<TimerManager>, event_loop: &EventLoop<()>, scale: u32, scroll_pixels_per_line: f64, lock_aspect_ratio: bool, renderer: crate::config::UiRenderer, windows: ScreenWindows) -> Self {
+        assert!(!screens.is_empty(), "a window needs a screen");
+        let n = screens.len();
+        let mode = if n > 1 { windows } else { ScreenWindows::Cycle };
+        let named = n > 1 && mode != ScreenWindows::SideBySide;
+        for (i, s) in screens.iter().enumerate() {
+            s.window.shown.store(i, std::sync::atomic::Ordering::Relaxed);
+            s.window.of.store(if named { n } else { 0 }, std::sync::atomic::Ordering::Relaxed);
+        }
+        let windows = if mode == ScreenWindows::PerScreen { n } else { 1 };
+        let mut panes = Vec::with_capacity(windows);
+        let mut renderers = Vec::with_capacity(windows);
+        for i in 0..windows {
+            let title = if named { format!("{} - screen {}/{n}", crate::machine::emulator_name(), i + 1) } else { crate::machine::emulator_name() };
+            let (pane, r) = Self::open_window(&screens[i], i, &title, event_loop, scale, renderer, mode == ScreenWindows::SideBySide);
+            panes.push(pane);
+            renderers.push(r);
+        }
+        match mode {
+            ScreenWindows::Cycle => *screens[0].window.renderer.lock() = renderers.pop(),
+            ScreenWindows::PerScreen => {
+                for (s, r) in screens.iter().zip(renderers) {
+                    *s.window.renderer.lock() = Some(r);
+                }
+            }
+            ScreenWindows::SideBySide => {
+                let first = renderers.pop().expect("one window");
+                for (s, r) in screens.iter().zip(SideBySide::for_screens(&screens, first)) {
+                    *s.window.renderer.lock() = Some(r);
+                }
+            }
+        }
+        let cycle = if mode == ScreenWindows::Cycle { Cycle::new(&screens) } else { None };
+        Self { ps2, screens, discs, panes, cycle, timer_manager, initial_scale: scale, scroll_pixels_per_line, lock_aspect_ratio }
+    }
+
+    /// One window on the host for screen `index`, with the renderer that draws
+    /// it (not yet installed): wgpu when asked and able, else GL. `wide`
+    /// makes room for a picture wider than one screen's.
+    #[allow(clippy::too_many_arguments)]
+    fn open_window(screen: &Screen, index: usize, title: &str, event_loop: &EventLoop<()>, scale: u32, renderer: crate::config::UiRenderer, wide: bool) -> (Pane, Box<dyn Renderer>) {
+        let tex_w = if wide { 2 * crate::disp::FB_STRIDE } else { crate::disp::FB_STRIDE };
         // The Indy's default video mode is 1280×1024; open the window at that
         // size (plus the status bar). The renderer snaps to the real resolution
         // via resize() once the PROM/IRIX programs its actual mode, keeping `scale`.
         let w = 1280 * scale;
         let h = (1024 + STATUS_BAR_HEIGHT as u32) * scale;
         let window_builder = WindowAttributes::default()
-            .with_title(crate::machine::emulator_name())
+            .with_title(title)
             .with_resizable(true)
             .with_inner_size(winit::dpi::PhysicalSize::new(w, h));
 
         #[cfg(feature = "wgpu")]
         if renderer == crate::config::UiRenderer::Wgpu {
-            match Self::new_wgpu(&display, event_loop, window_builder.clone(), scale) {
-                Ok((window, window_size, resize_request, display_res)) => {
-                    return Self { ps2, display, discs, window, window_size, resize_request, display_res, timer_manager, initial_scale: scale, scroll_pixels_per_line, lock_aspect_ratio };
+            match Self::new_wgpu(screen, event_loop, window_builder.clone(), scale, tex_w) {
+                Ok((window, window_size, resize_request, display_res, renderer)) => {
+                    return (Pane::new(window, window_size, resize_request, display_res, index), renderer);
                 }
                 Err(e) => eprintln!("iris: the wgpu renderer is unavailable ({e}); drawing with GL"),
             }
@@ -903,7 +987,7 @@ impl Ui {
         // preference is ignored (CGL on macOS) or there is no shared dispatch
         // layer (WGL on Windows).
         #[cfg(all(feature = "wgpu", target_os = "linux"))]
-        if display.screens()[0].gpu.get().is_some() {
+        if screen.gpu.get().is_some() {
             display_builder = display_builder.with_preference(ApiPreference::PreferEgl);
         }
 
@@ -1022,11 +1106,10 @@ impl Ui {
             current_h:     0,
             current_win_w: 0,
             current_win_h: 0,
+            tex_w,
         };
 
-        *display.screens()[0].window.renderer.lock() = Some(Box::new(renderer));
-
-        Self { ps2, display, discs, window, window_size, resize_request, display_res, timer_manager, initial_scale: scale, scroll_pixels_per_line, lock_aspect_ratio }
+        (Pane::new(window, window_size, resize_request, display_res, index), Box::new(renderer))
     }
 
     /// The window and its wgpu renderer, installed in the board's renderer
@@ -1036,12 +1119,13 @@ impl Ui {
     #[cfg(feature = "wgpu")]
     #[allow(clippy::type_complexity)]
     fn new_wgpu(
-        display: &Arc<dyn GfxDisplay>,
+        screen: &Screen,
         event_loop: &EventLoop<()>,
         attrs: WindowAttributes,
         scale: u32,
-    ) -> Result<(Arc<Window>, Arc<Mutex<Option<(u32, u32)>>>, Arc<Mutex<Option<ResizeRequest>>>, Arc<Mutex<(u32, u32)>>), String> {
-        let gpu = match display.screens()[0].gpu.get().cloned() {
+        tex_w: usize,
+    ) -> Result<(Arc<Window>, Arc<Mutex<Option<(u32, u32)>>>, Arc<Mutex<Option<ResizeRequest>>>, Arc<Mutex<(u32, u32)>>, Box<dyn Renderer>), String> {
+        let gpu = match screen.gpu.get().cloned() {
             Some(g) => g,
             None => crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default(), Box::new(|e| eprintln!("iris: the window's GPU failed: {e}")))?,
         };
@@ -1052,8 +1136,8 @@ impl Ui {
             &gpu,
             window.clone(),
             (size.width, size.height),
-            (crate::disp::FB_STRIDE as u32, crate::disp::FB_MAX_H as u32),
-            (crate::disp::FB_STRIDE as u32, STATUS_BAR_HEIGHT as u32),
+            (tex_w as u32, crate::disp::FB_MAX_H as u32),
+            (tex_w as u32, STATUS_BAR_HEIGHT as u32),
         )?;
         eprintln!("iris: drawing the window with wgpu on {}", gpu.caps.adapter);
         let window_size = Arc::new(Mutex::new(None));
@@ -1071,19 +1155,13 @@ impl Ui {
             bar: Vec::new(),
             failed: false,
         };
-        *display.screens()[0].window.renderer.lock() = Some(Box::new(renderer));
-        Ok((window, window_size, resize_request, display_res))
+        Ok((window, window_size, resize_request, display_res, Box::new(renderer)))
     }
 
     /// Run the UI event loop (blocks the current thread)
     pub fn run(self, event_loop: EventLoop<()>) {
-        let Ui { ps2, display, discs, window, window_size, resize_request, display_res, timer_manager, initial_scale, scroll_pixels_per_line, lock_aspect_ratio } = self;
+        let Ui { ps2, screens, discs, panes, cycle, timer_manager, initial_scale, scroll_pixels_per_line, lock_aspect_ratio } = self;
         let scale = initial_scale;
-
-        let last_win_size = {
-            let s = window.inner_size();
-            (s.width, s.height)
-        };
         let mouse_delta = Arc::new(Mutex::new(MouseDelta { accum: (0.0, 0.0), wheel: 0.0, buttons: 0 }));
 
         {
@@ -1102,9 +1180,9 @@ impl Ui {
 
         event_loop.set_control_flow(ControlFlow::Wait);
         let mut app = UiApp {
-            ps2, display, discs, window, window_size, resize_request, display_res, mouse_delta,
+            ps2, screens, discs, panes, cycle, mouse_delta,
             scale, scroll_pixels_per_line, lock_aspect_ratio,
-            mouse_grabbed: false, rctrl_held: false, held_keys: Vec::new(), last_win_size,
+            mouse_grabbed: false, rctrl_held: false, held_keys: Vec::new(),
         };
         event_loop.run_app(&mut app).unwrap();
     }
@@ -1150,10 +1228,14 @@ impl Ui {
         }
     }
 
-    fn handle_keyboard(ps2: &Ps2Controller, display: &dyn GfxDisplay, discs: &Option<Arc<dyn DiscChanger>>,
+    /// `shot` is the screen the window shows, for the screenshot hotkey;
+    /// `cycle` is the next-screen hotkey's state, when the window has several
+    /// screens to step through.
+    #[allow(clippy::too_many_arguments)]
+    fn handle_keyboard(ps2: &Ps2Controller, shot: &Arc<Screen>, discs: &Option<Arc<dyn DiscChanger>>,
         resize_request: &Mutex<Option<ResizeRequest>>,
         input: KeyEvent, grabbed: &mut bool, rctrl_held: &mut bool, held_keys: &mut Vec<KeyCode>,
-        window: &Window)
+        window: &Window, cycle: &mut Option<Cycle>)
     {
         use std::sync::atomic::Ordering;
         if let PhysicalKey::Code(keycode) = input.physical_key {
@@ -1183,7 +1265,7 @@ impl Ui {
             }
 
             if keycode == KeyCode::PrintScreen && pressed && !input.repeat && *rctrl_held {
-                crate::gfx_display::save_screenshot(&display.screens()[0]);
+                crate::gfx_display::save_screenshot(shot);
                 return;
             }
 
@@ -1246,6 +1328,18 @@ impl Ui {
                 return;
             }
 
+            // RCtrl+Tab: show the next screen of a machine with several, in
+            // the one window. With one screen the key goes to the guest as
+            // before.
+            if keycode == KeyCode::Tab && pressed && !input.repeat && *rctrl_held {
+                if let Some(cycle) = cycle {
+                    if let Some(to) = cycle.step() {
+                        window.set_title(&format!("{} - screen {}/{}", crate::machine::emulator_name(), to + 1, cycle.screen_count()));
+                    }
+                    return;
+                }
+            }
+
             // RCtrl+1 / RCtrl+2: snap window to 1x or 2x scale.
             if pressed && !input.repeat && *rctrl_held {
                 let snap = match keycode {
@@ -1297,12 +1391,10 @@ impl Ui {
 /// `Ui::run`'s event-loop state: `run_app` takes the old closure's captures as a struct.
 struct UiApp {
     ps2:         Arc<Ps2Controller>,
-    display:     Arc<dyn GfxDisplay>,
+    screens:     Vec<Arc<Screen>>,
     discs:       Option<Arc<dyn DiscChanger>>,
-    window:      Arc<Window>,
-    window_size: Arc<Mutex<Option<(u32, u32)>>>,
-    resize_request: Arc<Mutex<Option<ResizeRequest>>>,
-    display_res: Arc<Mutex<(u32, u32)>>,
+    panes:       Vec<Pane>,
+    cycle:       Option<Cycle>,
     mouse_delta: Arc<Mutex<MouseDelta>>,
     scale: u32,
     scroll_pixels_per_line: f64,
@@ -1311,18 +1403,29 @@ struct UiApp {
     rctrl_held: bool,
     // Keys sent to the guest as pressed and not yet released.
     held_keys: Vec<KeyCode>,
-    // Last accepted window size: tells which edge is being dragged when locking the aspect ratio.
-    last_win_size: (u32, u32),
+}
+
+impl UiApp {
+    /// The screen window `pane` shows now: the stepped-to one with `cycle`,
+    /// the pane's own otherwise.
+    fn shown(&self, pane: usize) -> &Arc<Screen> {
+        match &self.cycle {
+            Some(c) => c.current(),
+            None => &self.screens[self.panes[pane].screen],
+        }
+    }
 }
 
 impl ApplicationHandler for UiApp {
-    // Window and GL context are created up front in Ui::new — nothing to (re)create here.
+    // Windows and GL contexts are created up front in Ui::new — nothing to (re)create here.
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let Some(p) = self.panes.iter().position(|p| p.window.id() == id) else { return };
         match event {
             WindowEvent::CloseRequested => { event_loop.exit() },
             WindowEvent::Resized(size) => {
+                let pane = &mut self.panes[p];
                 if size.width != 0 && size.height != 0 {
                     // Lock the window to the display's aspect ratio so the
                     // picture fills it without letterbox bars. Skipped when
@@ -1335,27 +1438,30 @@ impl ApplicationHandler for UiApp {
                     // moment later, which also coalesces a burst of Resized
                     // events (a mouse drag) into a single correction.
                     if self.lock_aspect_ratio
-                        && self.window.fullscreen().is_none()
-                        && !self.window.is_maximized()
+                        && pane.window.fullscreen().is_none()
+                        && !pane.window.is_maximized()
                     {
-                        let (dw, dh) = *self.display_res.lock();
+                        let (dw, dh) = *pane.display_res.lock();
                         if let Some((w, h)) = Ui::aspect_fit(
-                            size.width, size.height, self.last_win_size, dw, dh)
+                            size.width, size.height, pane.last_win_size, dw, dh)
                         {
-                            *self.resize_request.lock() =
+                            *pane.resize_request.lock() =
                                 Some(ResizeRequest::Fit { w, h });
                         }
                     }
                     let new_size = (size.width, size.height);
-                    self.last_win_size = new_size;
-                    *self.window_size.lock() = Some(new_size);
+                    pane.last_win_size = new_size;
+                    *pane.window_size.lock() = Some(new_size);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                Ui::handle_keyboard(&self.ps2, &*self.display, &self.discs, &self.resize_request, event,
-                    &mut self.mouse_grabbed, &mut self.rctrl_held, &mut self.held_keys, &self.window);
+                let shot = self.shown(p).clone();
+                let pane = &self.panes[p];
+                Ui::handle_keyboard(&self.ps2, &shot, &self.discs, &pane.resize_request, event,
+                    &mut self.mouse_grabbed, &mut self.rctrl_held, &mut self.held_keys, &pane.window, &mut self.cycle);
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                let window = &self.panes[p].window;
                 if self.mouse_grabbed {
                     let pressed = state == ElementState::Pressed;
                     let mask = match button {
@@ -1372,10 +1478,10 @@ impl ApplicationHandler for UiApp {
                     }
                 } else if state == ElementState::Pressed && button == MouseButton::Left {
                     self.mouse_grabbed = true;
-                    if self.window.set_cursor_grab(winit::window::CursorGrabMode::Locked).is_err() {
-                        let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::Confined);
+                    if window.set_cursor_grab(winit::window::CursorGrabMode::Locked).is_err() {
+                        let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Confined);
                     }
-                    self.window.set_cursor_visible(false);
+                    window.set_cursor_visible(false);
                     self.mouse_delta.lock().accum = (0.0, 0.0);
                 }
             }
@@ -1393,12 +1499,13 @@ impl ApplicationHandler for UiApp {
                 self.rctrl_held = false;
                 if self.mouse_grabbed {
                     self.mouse_grabbed = false;
-                    let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::None);
-                    self.window.set_cursor_visible(true);
+                    let window = &self.panes[p].window;
+                    let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                    window.set_cursor_visible(true);
                 }
             }
             WindowEvent::RedrawRequested => {
-                // Rendering is driven by the Rex3 refresh thread
+                // Rendering is driven by the board's display thread
             }
             _ => (),
         }
@@ -1418,49 +1525,8 @@ impl ApplicationHandler for UiApp {
     // off-thread at all (see `ResizeRequest`), that removes both halves of the
     // re-entrancy hazard.
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        let Some(req) = self.resize_request.lock().take() else { return };
-
-        // Fullscreen is a mode change, not a resize, so it is handled before
-        // the "don't resize while fullscreen" guard below — that guard would
-        // otherwise swallow every request to *leave* fullscreen. The window
-        // manager sends a Resized event of its own afterwards, which
-        // re-establishes window_size/last_win_size, so nothing to publish here.
-        if req == ResizeRequest::ToggleFullscreen {
-            let new_mode = if self.window.fullscreen().is_some() {
-                None
-            } else {
-                Some(winit::window::Fullscreen::Borderless(None))
-            };
-            self.window.set_fullscreen(new_mode);
-            return;
-        }
-
-        // A resize is meaningless while fullscreen or maximized — the window
-        // manager owns the size — and applying one would fight it.
-        if self.window.fullscreen().is_some() || self.window.is_maximized() {
-            return;
-        }
-
-        let (w, h) = match req {
-            ResizeRequest::Fit { w, h } => (w, h),
-            ResizeRequest::Scale(s) => {
-                let (dw, dh) = *self.display_res.lock();
-                if dw == 0 || dh == 0 { return; }
-                (dw * s, (dh + STATUS_BAR_HEIGHT as u32) * s)
-            }
-            // Handled above; listed so a new variant is a compile error here.
-            ResizeRequest::ToggleFullscreen => return,
-        };
-        if w == 0 || h == 0 { return; }
-
-        let size = winit::dpi::PhysicalSize::new(w, h);
-        if let Some(actual) = self.window.request_inner_size(size) {
-            // Applied synchronously: no Resized event will follow, so publish
-            // the new size ourselves or the renderer keeps the stale one.
-            if actual.width != 0 && actual.height != 0 {
-                self.last_win_size = (actual.width, actual.height);
-                *self.window_size.lock() = Some((actual.width, actual.height));
-            }
+        for pane in &mut self.panes {
+            Self::apply_resize(pane);
         }
     }
 
@@ -1470,6 +1536,56 @@ impl ApplicationHandler for UiApp {
                 let mut md = self.mouse_delta.lock();
                 md.accum.0 += delta.0 / self.scale as f64;
                 md.accum.1 += delta.1 / self.scale as f64;
+            }
+        }
+    }
+}
+
+impl UiApp {
+    /// Apply the resize `pane`'s renderer or hotkeys asked for, if any.
+    fn apply_resize(pane: &mut Pane) {
+        let Some(req) = pane.resize_request.lock().take() else { return };
+
+        // Fullscreen is a mode change, not a resize, so it is handled before
+        // the "don't resize while fullscreen" guard below — that guard would
+        // otherwise swallow every request to *leave* fullscreen. The window
+        // manager sends a Resized event of its own afterwards, which
+        // re-establishes window_size/last_win_size, so nothing to publish here.
+        if req == ResizeRequest::ToggleFullscreen {
+            let new_mode = if pane.window.fullscreen().is_some() {
+                None
+            } else {
+                Some(winit::window::Fullscreen::Borderless(None))
+            };
+            pane.window.set_fullscreen(new_mode);
+            return;
+        }
+
+        // A resize is meaningless while fullscreen or maximized — the window
+        // manager owns the size — and applying one would fight it.
+        if pane.window.fullscreen().is_some() || pane.window.is_maximized() {
+            return;
+        }
+
+        let (w, h) = match req {
+            ResizeRequest::Fit { w, h } => (w, h),
+            ResizeRequest::Scale(s) => {
+                let (dw, dh) = *pane.display_res.lock();
+                if dw == 0 || dh == 0 { return; }
+                (dw * s, (dh + STATUS_BAR_HEIGHT as u32) * s)
+            }
+            // Handled above; listed so a new variant is a compile error here.
+            ResizeRequest::ToggleFullscreen => return,
+        };
+        if w == 0 || h == 0 { return; }
+
+        let size = winit::dpi::PhysicalSize::new(w, h);
+        if let Some(actual) = pane.window.request_inner_size(size) {
+            // Applied synchronously: no Resized event will follow, so publish
+            // the new size ourselves or the renderer keeps the stale one.
+            if actual.width != 0 && actual.height != 0 {
+                pane.last_win_size = (actual.width, actual.height);
+                *pane.window_size.lock() = Some((actual.width, actual.height));
             }
         }
     }

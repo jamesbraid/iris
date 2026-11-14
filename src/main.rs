@@ -39,6 +39,7 @@ fn main() {
     let scroll_pixels_per_line = cfg.mouse_scroll_pixels_per_line;
     let lock_aspect_ratio = cfg.lock_aspect_ratio;
     let ui_renderer = cfg.renderer;
+    let screen_windows = cfg.graphics.windows;
     let headless = cfg.headless;
     let gdb_port = cfg.gdb_port;
     let ci_enabled = cfg.ci;
@@ -212,8 +213,11 @@ fn main() {
         // device) is opened on the window's display too.
         #[cfg(feature = "wgpu")]
         iris::wgpu::set_display(event_loop.owned_display_handle());
-        let display = machine.get_display().expect("a graphics board must be present in non-headless mode");
-        let ui = Ui::new(machine.get_ps2(), display, machine.disc_changer(), machine.get_timer_manager(), &event_loop, scale, scroll_pixels_per_line, lock_aspect_ratio, ui_renderer);
+        // Every board's screens, in `screen N` order. Asking a board for its
+        // screens is also what tells them which device it draws on.
+        let screens: Vec<_> = machine.displays().iter().flat_map(|d| d.screens().to_vec()).collect();
+        assert!(!screens.is_empty(), "a graphics board must be present in non-headless mode");
+        let ui = Ui::new(machine.get_ps2(), screens, machine.disc_changer(), machine.get_timer_manager(), &event_loop, scale, scroll_pixels_per_line, lock_aspect_ratio, ui_renderer, screen_windows);
         ui.run(event_loop);
     }
 

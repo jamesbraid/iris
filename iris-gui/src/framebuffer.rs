@@ -487,6 +487,7 @@ mod tests {
             hb:             0,
             count_hz:       0,
             gfifo_pending:  0,
+            screen:         None,
         }
     }
 
