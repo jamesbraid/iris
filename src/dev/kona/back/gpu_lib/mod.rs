@@ -13,6 +13,14 @@
 //! - `texture.wgsl`: `tex_sample`, `tex_sample3`, `tex_sample_enhanced` and
 //!   `tex_environment`, ports of the functions of the same names in
 //!   `raster::texel`, over a bound texture packed by `pack_desc`.
+//! - `fragment.wgsl`: the per-fragment features of the raster path: fog,
+//!   smoothed coverage, multisample sample bits, the accumulation buffer and
+//!   the line and polygon stipples. Each function is the same single-precision
+//!   arithmetic as its CPU counterpart in `raster` and `gl::pixels`. A kernel
+//!   adds `library::FLOAT` (the exact divide) next to it and sets the file's
+//!   `fnz` to 0 from a run-time value before calling anything. What stays for
+//!   the kernel: the integer edge-function tests, the sample-position
+//!   arithmetic of `sample_mask`, and the stencil and depth tests.
 
 // Not wired into a kernel yet.
 #![allow(dead_code)]
@@ -24,6 +32,7 @@ use crate::wgpu::{library, Fragment, Source};
 pub const LOD_MATH: Fragment = Fragment::new("kona_lodmath.wgsl", include_str!("lodmath.wgsl"));
 pub const TEXTURE_MEM: Fragment = Fragment::new("kona_texture_mem.wgsl", include_str!("texture_mem.wgsl"));
 pub const TEXTURE: Fragment = Fragment::new("kona_texture.wgsl", include_str!("texture.wgsl"));
+pub const FRAGMENT: Fragment = Fragment::new("fragment.wgsl", include_str!("fragment.wgsl"));
 
 /// Words of a packed descriptor (`TD_WORDS` in texture.wgsl).
 pub const TD_WORDS: usize = 166;
@@ -135,5 +144,7 @@ impl TexMemory {
     }
 }
 
+#[cfg(test)]
+mod fragment_tests;
 #[cfg(test)]
 mod tests;

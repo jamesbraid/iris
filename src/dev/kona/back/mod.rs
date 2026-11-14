@@ -19,8 +19,6 @@
 #[cfg(test)]
 mod bench;
 pub mod display;
-#[cfg(feature = "wgpu")]
-pub mod fragment_wgsl;
 pub mod raster;
 pub mod tiles;
 pub mod snapshot;
