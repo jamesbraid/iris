@@ -11,7 +11,9 @@
 //! - an edge step that does not fit 32 bits; a multisampled layout whose runs of words are longer
 //!   than the kernel holds (more than six words of colour or depth, or two of stencil a pixel);
 //!   textures when the store holds more pages than the GPU's pool can (one storage binding);
-//! - X fills and copies with more than four clip rectangles, bitmaps of more than 1792 bits.
+//! - GL pixel writes (glDrawPixels and CopyPixels);
+//! - X fills and copies with more than four clip rectangles, bitmaps of more than 1792 bits, X image
+//!   writes whose box holds more than 2 M pixels (the payload ring).
 //!
 //! # The mirror
 //!
@@ -85,6 +87,7 @@ const K_CLEAR: u32 = 4;
 const K_ACCUM: u32 = 5;
 const K_CLEARACC: u32 = 6;
 const K_STENCILW: u32 = 7;
+const K_IMAGE: u32 = 8;
 /// Where a record's box lives, for every kind but the X fill.
 const R_RECT: usize = 33;
 const R_KIND: usize = 37;
@@ -108,8 +111,8 @@ const MAX_CHUNKS: usize = 4;
 const CHUNK_BYTES: u64 = 128 << 20;
 /// Storage buffers the batch kernels bind besides the planes.
 const BATCH_STORAGE: u32 = 6;
-/// Storage buffers of the texture memory (descriptors, page table, page pool).
-const TEX_BINDINGS: u32 = 3;
+/// Storage buffers of group 3: the texture memory (descriptors, page table, page pool) and the payload ring.
+const TEX_BINDINGS: u32 = 4;
 /// Dirty-tracking granularity, in pixels (the readback unit).
 const TILE: u32 = 32;
 /// Verdict words for copies; used up, they are summed and zeroed.
@@ -420,7 +423,17 @@ impl GpuStore {
                     return Route::Cpu(vec![plan.word()], r);
                 }
             }
-            StoreOp::XImage { plan, .. } => return Route::Cpu(vec![plan.word()], plan.bounds_rect()),
+            StoreOp::XImage { plan, kind, conv, geo, words, .. } => {
+                if !resident(plan.word()) {
+                    return Route::Cpu(vec![plan.word()], plan.bounds_rect());
+                }
+                let img = super::x::pixel::lower_image(plan, *kind, conv, geo, words);
+                match s.image(m, &img) {
+                    Some(done) => done,
+                    // More pixels than the payload ring holds.
+                    None => return Route::Cpu(vec![plan.word()], plan.bounds_rect()),
+                }
+            }
             StoreOp::XCopy { plan, setup, rect, .. } => match super::x::pixel::lower_copy(plan, setup, *rect) {
                 None => true,
                 Some(c) if takes_copy(c.word, c.clips.len()) => s.copy(m, &c),
@@ -1187,6 +1200,60 @@ impl State {
         rec.w[R_RECT + 3] = r.y1 as u32;
         rec.w[R_KIND] = K_CLEARACC;
         self.push(&slot, move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1))
+    }
+
+    /// An X image write: the pixels the walk found, as one record over their box. None when the box
+    /// holds more pixels than the payload ring.
+    fn image(&mut self, m: &PixelStore, img: &super::x::pixel::LoweredImage) -> Option<bool> {
+        if img.pixels.is_empty() {
+            return Some(true);
+        }
+        let pitch = img.pitch;
+        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+        for &(i, _) in &img.pixels {
+            let (x, y) = (i % pitch, i / pitch);
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+        }
+        let (bw, bh) = (x1 - x0, y1 - y0);
+        if 2 * bw * bh > texmem::PAYLOAD_WORDS as usize {
+            return None;
+        }
+        let plane = self.plane(m, img.word)?;
+        let mut dense = vec![0u32; 2 * bw * bh];
+        for &(i, src) in &img.pixels {
+            let k = ((i / pitch - y0) * bw + (i % pitch - x0)) * 2;
+            dense[k] = 1;
+            dense[k + 1] = src;
+        }
+        if !self.tex.payload_room(dense.len()) {
+            // Everything open reads the ring: submit it, then start over.
+            if !self.flush_batch() {
+                return Some(false);
+            }
+            self.tex.payload_reset();
+        }
+        let at = self.tex.payload_put(&dense);
+        self.gen += 1;
+        self.stats.records += 1;
+        let r = Rect { x0: x0 as i32, y0: y0 as i32, x1: x1 as i32, y1: y1 as i32 };
+        let mut slot = GSlot { w: [0; SLOT_W] };
+        slot.w[0] = plane;
+        slot.w[1] = img.gx;
+        slot.w[2] = img.mask;
+        slot.w[3] = img.width_mask;
+        slot.w[4] = img.needs as u32;
+        slot.w[5] = at;
+        slot.w[6] = bw as u32;
+        slot.w[7] = x0 as u32;
+        slot.w[8] = y0 as u32;
+        let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
+        rec.w[R_RECT] = r.x0 as u32;
+        rec.w[R_RECT + 1] = r.y0 as u32;
+        rec.w[R_RECT + 2] = r.x1 as u32;
+        rec.w[R_RECT + 3] = r.y1 as u32;
+        rec.w[R_KIND] = K_IMAGE;
+        self.mark(img.word, r, class_of(img.width_mask));
+        Some(self.push(&slot, move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1)))
     }
 
     /// An X fill: one clipped box of a request.

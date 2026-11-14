@@ -35,6 +35,8 @@ pub struct TexMem {
     descs: wgpu::Buffer,
     table: wgpu::Buffer,
     pool: wgpu::Buffer,
+    payload: wgpu::Buffer,
+    pay_used: u32,
     planes: u32,
     per_plane: u32,
     /// The table as the GPU has it.
@@ -60,12 +62,15 @@ fn entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+/// Words of the payload ring: what the records that carry host data (an image) read.
+pub const PAYLOAD_WORDS: u32 = 1 << 22;
+
 const USAGE: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_SRC).union(wgpu::BufferUsages::COPY_DST);
 
 impl TexMem {
     /// Texture memory for `planes` planes of `per_plane` pages, holding at most `max_pages` pages at once.
     pub fn new(gpu: Arc<Gpu>, planes: u32, per_plane: u32, max_pages: u32) -> TexMem {
-        let layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("kona texture"), entries: &[entry(0), entry(1), entry(2)] });
+        let layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("kona texture"), entries: &[entry(0), entry(1), entry(2), entry(3)] });
         let n = (planes * per_plane) as usize;
         let table = gpu.buffer("kona texture table", n as u64 * 4, USAGE);
         gpu.write(&table, 0, bytemuck::cast_slice(&vec![ABSENT; n]));
@@ -76,6 +81,8 @@ impl TexMem {
             descs: gpu.buffer("kona texture descriptors", DESCS as u64 * TD_WORDS as u64 * 4, USAGE),
             table,
             pool: gpu.buffer("kona texture pool", cap as u64 * PAGE_BYTES, USAGE),
+            payload: gpu.buffer("kona payload", PAYLOAD_WORDS as u64 * 4, USAGE),
+            pay_used: 0,
             planes,
             per_plane,
             entries: vec![ABSENT; n],
@@ -100,7 +107,7 @@ impl TexMem {
             self.group = Some(self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("kona texture"),
                 layout: &self.layout,
-                entries: &[e(0, &self.descs), e(1, &self.table), e(2, &self.pool)],
+                entries: &[e(0, &self.descs), e(1, &self.table), e(2, &self.pool), e(3, &self.payload)],
             }));
         }
         self.group.as_ref().expect("made above")
@@ -197,6 +204,25 @@ impl TexMem {
         self.gpu.write(&self.descs, at as u64 * 4, bytemuck::cast_slice(words));
         self.desc_map.insert(*words, at);
         Some(at)
+    }
+
+    /// Whether the ring has room for `n` words past what the open batch's records use.
+    pub fn payload_room(&self, n: usize) -> bool {
+        self.pay_used as usize + n <= PAYLOAD_WORDS as usize
+    }
+
+    /// Put `words` in the ring (the caller has made room) and say where. The write lands before the
+    /// next submission and after the earlier ones, so a batch already submitted reads what it did.
+    pub fn payload_put(&mut self, words: &[u32]) -> u32 {
+        let at = self.pay_used;
+        self.gpu.write(&self.payload, at as u64 * 4, bytemuck::cast_slice(words));
+        self.pay_used += words.len() as u32;
+        at
+    }
+
+    /// Start the ring over: for after a submission, which has every record that read it.
+    pub fn payload_reset(&mut self) {
+        self.pay_used = 0;
     }
 
     /// Forget the descriptors: for after a submission, which has them all.

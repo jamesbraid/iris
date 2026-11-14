@@ -1035,3 +1035,56 @@ fn overlay_and_popup_planes_match_the_cpu_arm() {
     assert_eq!(p.g().stats().cpu_ops, 0, "every op ran on the GPU");
     p.finish("overlay and popup planes");
 }
+
+/// X image writes (a pixel write with a host payload) under every logic operation, mask, clip list and
+/// stipple the fills test uses, among fills and triangles, as the CPU arm draws them.
+#[test]
+fn x_image_writes_match_the_cpu_arm() {
+    use crate::dev::kona::back::x::pixel::{X_PIXEL_SETUP, X_PIXEL_WRITE};
+    let _serial = serial();
+    let Some(dev) = gpu() else { return };
+    let (w, h) = (96u32, 64u32);
+    let mut r = Lcg(131);
+    let p = Pair::new(dev, w, h, &mut r, 3000, None);
+    let states: Vec<DrawState> = (0..4).map(|_| state_full(w, h, &mut r)).collect();
+    let (mut writes, mut refused) = (0u64, 0u64);
+    for step in 0..260 {
+        match r.next() % 10 {
+            0..=5 => {
+                let rq = request(&mut r, w as i64, h as i64, 4);
+                let (iw, ih) = (1 + r.next() % 50, 1 + r.next() % 36);
+                let pad = if r.coin(4) { r.next() % 24 } else { 0 };
+                let setup = [0, 0, 1, 8, iw, ih, pad];
+                let stride = (pad + 8 * iw).div_ceil(32);
+                let rows: Vec<u32> = (0..stride * ih).map(|_| r.next() | r.next() << 7).collect();
+                let at = [(r.range(-8, w as i32) as u32) & 0xffff, (r.range(-8, h as i32) as u32) & 0xffff];
+                let (mut xc, mut xg) = (XState::default(), XState::default());
+                load(&mut xc, &rq.steps);
+                load(&mut xg, &rq.steps);
+                for (x, s) in [(&mut xc, &p.cpu), (&mut xg, &p.gpu)] {
+                    let sf = Surface::new(s, 1);
+                    x.pixel_command(&sf, X_PIXEL_SETUP, &setup, true);
+                    x.pixel_command(&sf, X_PIXEL_WRITE, &at, true);
+                    x.pixel_rows(&sf, &rows);
+                }
+                let (a, b) = (xc.pixel_counts(), xg.pixel_counts());
+                assert_eq!((a.writes, a.bad_destination, a.bad_context), (b.writes, b.bad_destination, b.bad_context), "step {step}: the write's outcome differs");
+                writes += a.writes;
+                refused += a.bad_destination;
+            }
+            6 | 7 => {
+                let ds = &states[r.next() as usize % states.len()];
+                let tri = rand_tri(&mut r, w, h, 24);
+                if let Ok(job) = setup::shaped(&tri, ds, 0, Shape::Plain) {
+                    p.both(StoreOpOwned::Tri(*ds, job));
+                }
+            }
+            8 => p.both(rand_fill(&mut r, w, h)),
+            _ => assert_eq!(p.mirror_differs(1, Rect { x0: 5, y0: 5, x1: 80, y1: 50 }), 0, "step {step}"),
+        }
+    }
+    eprintln!("{writes} image writes ({refused} refused); {:?}", p.g().stats());
+    assert!(writes > 50);
+    assert_eq!(p.g().stats().cpu_ops, 0, "every write ran on the GPU");
+    p.finish("X image writes");
+}

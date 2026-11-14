@@ -40,6 +40,8 @@ struct Slot {
 @group(2) @binding(1) var<storage, read_write> pl1: array<u32>;
 @group(2) @binding(2) var<storage, read_write> pl2: array<u32>;
 @group(2) @binding(3) var<storage, read_write> pl3: array<u32>;
+// Host data records carry (group 3 also holds the texture memory).
+@group(3) @binding(3) var<storage, read> payload: array<u32>;
 
 fn ld(r: u32, i: u32) -> u32 {
     let o = (r & 0x0fffffffu) + i;
@@ -69,6 +71,7 @@ const K_CLEAR: u32 = 4u;
 const K_ACCUM: u32 = 5u;
 const K_CLEARACC: u32 = 6u;
 const K_STENCILW: u32 = 7u;
+const K_IMAGE: u32 = 8u;
 const R_KIND: u32 = 37u;
 
 // Triangle record words.
@@ -854,6 +857,28 @@ fn clear_acc_px(pi: u32, px: i32, py: i32) {
     }
 }
 
+// ---- An X image (kind 8) ---------------------------------------------------------------------
+// The CPU walk's pixels, dense over the record's box in the payload ring: two words a pixel, a flag
+// (1: the walk lands there) and the word the pixel converts to. The write is x/fill.rs `apply`.
+//   slot: 0 plane reference, 1 logic operation, 2 mask, 3 width mask, 4 reads destination,
+//         5 payload offset, 6 box width, 7 box x0, 8 box y0 (i32)
+fn image_px(pi: u32, px: i32, py: i32) {
+    let si = recs[pi].slot;
+    let k = u32(py - bitcast<i32>(slots[si].w[8])) * slots[si].w[6] + u32(px - bitcast<i32>(slots[si].w[7]));
+    let base = slots[si].w[5] + 2u * k;
+    if payload[base] == 0u {
+        return;
+    }
+    let r = slots[si].w[0];
+    let idx = u32(py) * WIDTH + u32(px);
+    var old = 0u;
+    if slots[si].w[4] != 0u {
+        old = ld(r, idx);
+    }
+    let m = slots[si].w[2];
+    st(r, idx, ((logic(slots[si].w[1], payload[base + 1u], old) & m) | (old & ~m)) & slots[si].w[3]);
+}
+
 fn arch_prim(pi: u32, px: i32, py: i32, lane: u32) {
     let kind = rw(pi, R_KIND);
     if kind == K_XFILL {
@@ -883,6 +908,10 @@ fn arch_prim(pi: u32, px: i32, py: i32, lane: u32) {
     }
     if kind == K_CLEAR {
         clear_px(pi, px, py);
+        return;
+    }
+    if kind == K_IMAGE {
+        image_px(pi, px, py);
         return;
     }
     if kind == K_ACCUM {
