@@ -8,8 +8,8 @@
 //! CPU mirror (`observe`), runs the CPU code on the mirror, and puts what the op wrote back
 //! (`Bracket`). Which ops stay on the CPU, by what the GPU kernels do not do yet:
 //!
-//! - multisampled triangles and clears of a multisampled window; an edge step that does not fit 32
-//!   bits; textures when the store holds more pages than
+//! - an edge step that does not fit 32 bits; a multisampled layout whose runs of words are longer
+//!   than the kernel holds (more than six words of colour or depth, or two of stencil a pixel); textures when the store holds more pages than
 //!   the GPU's pool can (one storage binding);
 //! - X pixel writes with a host payload, GL pixel writes, accumulation and the stencil write
 //!   of glDrawPixels;
@@ -150,6 +150,18 @@ const F_LSTIP: u32 = 2048;
 /// The fog and line stipple parameters in a slot.
 const S_FOG: usize = 66;
 const S_LSTIP: usize = 72;
+/// The multisampling block of a slot (`kona.wgsl`): the sample count, coverage word and options,
+/// the words in each run, the sample offsets and the references of the runs' planes.
+const S_MS: usize = 80;
+const S_MS_AT: usize = 86;
+const S_MS_COL: usize = 94;
+const S_MS_DEPTH: usize = 100;
+const S_MS_STEN: usize = 106;
+/// The longest runs the kernel holds in registers: eight samples of 24 bits of colour or depth, and
+/// of 8 of stencil.
+const RUN_COLOUR: u32 = 6;
+const RUN_DEPTH: u32 = 6;
+const RUN_STENCIL: u32 = 2;
 
 /// What the store did, for tests and the monitor.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -390,7 +402,7 @@ impl GpuStore {
                 let r = req.rect.intersect(&screen);
                 if r.is_empty() {
                     true
-                } else if ds.samples.is_none() {
+                } else if ms_on_gpu(ds) {
                     s.clear(m, ds, req, r)
                 } else {
                     return Route::Cpu(ds_planes(ds), r);
@@ -526,11 +538,21 @@ pub fn takes_copy(word: usize, clips: usize) -> bool {
     resident(word) && clips <= CLIPS
 }
 
+/// Whether the kernel takes a draw's multisampling: none, or four or eight samples whose runs of
+/// words fit its registers. A layout with longer runs is the CPU's.
+fn ms_on_gpu(ds: &DrawState) -> bool {
+    let Some(ms) = &ds.samples else { return true };
+    matches!(ms.count, 4 | 8)
+        && (1..=RUN_COLOUR).contains(&ms.colour.1)
+        && ms.depth.1 <= RUN_DEPTH
+        && ms.stencil.1 <= RUN_STENCIL
+}
+
 /// Whether the kernels draw this triangle, texture memory aside (the pool must hold the store's
-/// pages: `TexMem::fits`): one that is not multisampled.
+/// pages: `TexMem::fits`): one whose edge steps fit 32 bits and whose multisampling the kernel holds.
 fn tri_on_gpu(ds: &DrawState, job: &TriJob) -> bool {
     let t = &job.tri;
-    ds.samples.is_none()
+    ms_on_gpu(ds)
         && (0..3).all(|k| i32::try_from(t.a[k]).is_ok() && i32::try_from(t.b[k]).is_ok())
         && ds_planes(ds).iter().all(|&w| resident(w))
 }
@@ -897,6 +919,22 @@ impl State {
         }
         s.w[28] = ds.origin[0] as u32;
         s.w[29] = ds.origin[1] as u32;
+        if let Some(ms) = &ds.samples {
+            s.w[S_MS] = ms.count as u32;
+            s.w[S_MS + 1] = ms.cover;
+            s.w[S_MS + 2] = ms.alpha_to_mask as u32 | (ms.alpha_to_one as u32) << 1;
+            s.w[S_MS + 3] = ms.colour.1;
+            s.w[S_MS + 4] = ms.depth.1;
+            s.w[S_MS + 5] = ms.stencil.1;
+            for (k, a) in ms.at.iter().enumerate() {
+                s.w[S_MS_AT + k] = a[0] as u32 | (a[1] as u32) << 8;
+            }
+            for (base, (first, n)) in [(S_MS_COL, ms.colour), (S_MS_DEPTH, ms.depth), (S_MS_STEN, ms.stencil)] {
+                for k in 0..n {
+                    s.w[base + k as usize] = self.plane(m, (first + k) as usize)?;
+                }
+            }
+        }
         if let Some(d) = &ds.texture {
             s.w[0] |= F_TEX;
             s.w[S_TEXD] = self.desc_offset(d)?;
@@ -973,17 +1011,22 @@ impl State {
         self.stats.records += 1;
         // What the CPU path writes: each only if the window has the plane (`pixel::run`).
         let colour = q.colour.filter(|_| ds.colours != 0);
-        let depth = q.depth.filter(|_| ds.depth_bits != 0 && q.depth_mask);
-        let stencil = q.stencil.filter(|_| ds.stencil_bits != 0);
+        let depth = q.depth.filter(|_| ds.depth_bits != 0 && q.depth_mask && ds.samples.is_none());
+        let stencil = q.stencil.filter(|_| ds.stencil_bits != 0 && ds.samples.is_none());
         let m_ = q.colour_mask;
         let keep = (!m_[0] as u32 * 0xff) << 16 | (!m_[1] as u32 * 0xff) << 8 | (!m_[2] as u32 * 0xff) | (!m_[3] as u32 * 0xff) << 24;
         let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
-        rec.w[0] = colour.unwrap_or(0);
-        rec.w[1] = depth.unwrap_or(0);
-        rec.w[2] = stencil.unwrap_or(0) as u32;
+        // A multisampled window clears its samples as well (`pixel::run`): bits 8 to 64 of the word
+        // say which, from the request and the layout's runs.
+        let samples = ds.samples.as_ref().map_or(0, |ms| {
+            8 | (q.colour.is_some() as u32) << 4 | ((q.depth.is_some() && q.depth_mask && ms.depth.1 != 0) as u32) << 5 | ((q.stencil.is_some() && ms.stencil.1 != 0) as u32) << 6
+        });
+        rec.w[0] = q.colour.unwrap_or(0);
+        rec.w[1] = q.depth.unwrap_or(0);
+        rec.w[2] = q.stencil.unwrap_or(0) as u32;
         rec.w[3] = q.stencil_mask as u32;
         rec.w[4] = keep;
-        rec.w[5] = colour.is_some() as u32 | (depth.is_some() as u32) << 1 | (stencil.is_some() as u32) << 2;
+        rec.w[5] = colour.is_some() as u32 | (depth.is_some() as u32) << 1 | (stencil.is_some() as u32) << 2 | samples;
         rec.w[R_RECT] = r.x0 as u32;
         rec.w[R_RECT + 1] = r.y0 as u32;
         rec.w[R_RECT + 2] = r.x1 as u32;
@@ -1002,6 +1045,14 @@ impl State {
         if stencil.is_some() {
             self.plane(m, ds.stencil_word as usize);
             self.mark(ds.stencil_word as usize, r, 0);
+        }
+        if let Some(ms) = &ds.samples {
+            for (first, n) in [ms.colour, ms.depth, ms.stencil] {
+                for w in first..first + n {
+                    self.plane(m, w as usize);
+                    self.mark(w as usize, r, 3);
+                }
+            }
         }
         let ds_ = *ds;
         self.push_ds((*ds, MODE_CLEAR), move |s| s.ds_slot(m, &ds_, MODE_CLEAR), move |i| GRec { slot: i, ..rec }, (r.x0, r.y0, r.x1 - 1, r.y1 - 1))
@@ -1319,6 +1370,13 @@ impl State {
 /// full colour words and depths, and stencil is 8 bits.
 fn ds_written(ds: &DrawState) -> Vec<(usize, u8)> {
     let mut v: Vec<(usize, u8)> = ds.colour[..ds.colours as usize].iter().map(|&c| (c as usize, 3)).collect();
+    if let Some(ms) = &ds.samples {
+        // A multisampled draw writes the sample runs in place of the depth and stencil planes.
+        for (first, n) in [ms.colour, ms.depth, ms.stencil] {
+            v.extend((first..first + n).map(|w| (w as usize, 3)));
+        }
+        return v;
+    }
     if ds.depth_bits != 0 {
         v.push((ds.depth_word as usize, 3));
     }

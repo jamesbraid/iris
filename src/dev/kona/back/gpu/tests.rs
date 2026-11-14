@@ -201,8 +201,8 @@ fn rand_tri(r: &mut Lcg, w: u32, h: u32, size: i32) -> [WVertex; 3] {
 const WORDS: [usize; 6] = [1, 2, 3, 4, 5, DID_PLANE];
 
 /// Planes of random words, with a few too wide for an index target in word 1.
-fn fill_random(store: &PixelStore, w: u32, h: u32, r: &mut Lcg, wide_one_in: u32) {
-    for pos in WORDS {
+fn fill_random(store: &PixelStore, w: u32, h: u32, r: &mut Lcg, wide_one_in: u32, words: &[usize]) {
+    for &pos in words {
         for y in 0..h {
             for x in 0..w {
                 let v = match pos {
@@ -230,6 +230,8 @@ struct Pair {
     gpu: Store,
     w: u32,
     h: u32,
+    /// The word positions the test draws in and compares.
+    words: Vec<usize>,
 }
 
 impl Pair {
@@ -239,15 +241,20 @@ impl Pair {
 
     /// As `new`, with texture memory `tex` makes (called once for each arm, so it must make the same words).
     fn with_textures(dev: Arc<Gpu>, w: u32, h: u32, r: &mut Lcg, wide_one_in: u32, chunk_planes: Option<u32>, tex: &dyn Fn() -> TextureStore) -> Pair {
+        Pair::build(dev, w, h, r, wide_one_in, chunk_planes, tex, WORDS.to_vec())
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "a pair is its device, size, random planes, chunking, texture memory and words")]
+    fn build(dev: Arc<Gpu>, w: u32, h: u32, r: &mut Lcg, wide_one_in: u32, chunk_planes: Option<u32>, tex: &dyn Fn() -> TextureStore, words: Vec<usize>) -> Pair {
         let init = PixelStore::with_texture(w, h, tex());
-        fill_random(&init, w, h, r, wide_one_in);
+        fill_random(&init, w, h, r, wide_one_in, &words);
         let gpu = match chunk_planes {
             Some(n) => Store::Gpu(GpuStore::chunked(dev, w, h, tex(), n).expect("store")),
             None => Store::with_gpu(dev, w, h, tex()).expect("store"),
         };
         let Store::Gpu(g) = &gpu else { unreachable!() };
         g.load(&init);
-        Pair { cpu: Store::Cpu(init), gpu, w, h }
+        Pair { cpu: Store::Cpu(init), gpu, w, h, words }
     }
 
     fn g(&self) -> &GpuStore {
@@ -270,7 +277,7 @@ impl Pair {
     /// Words the GPU's planes hold that differ from the CPU arm's, straight from the planes.
     fn planes_differ(&self) -> usize {
         let mut bad = 0;
-        for word in WORDS {
+        for &word in &self.words {
             let got = self.g().download(word);
             for y in 0..self.h {
                 for x in 0..self.w {
@@ -302,7 +309,7 @@ impl Pair {
 
     fn finish(&self, what: &str) {
         assert_eq!(self.planes_differ(), 0, "{what}: words of the GPU planes differ from the CPU arm's");
-        for word in WORDS {
+        for &word in &self.words {
             assert_eq!(self.mirror_differs(word, self.screen()), 0, "{what}: word {word} of the mirror differs after observe");
         }
         assert_eq!(self.cpu.cpu().checksum(), self.gpu.cpu().checksum(), "{what}: the checksum of the observed mirror");
@@ -854,4 +861,66 @@ fn fog_smoothing_and_line_stipple_match_the_cpu_arm() {
     assert_eq!(p.g().stats().cpu_ops, 0, "every triangle ran on the GPU");
     assert!(smooth > 20 && disc > 20 && fogged > 50 && stippled > 20);
     p.finish("fog, smoothing and line stipple");
+}
+
+/// A multisampled draw state: 4 or 8 samples at a pattern, colour samples in words 6.., depth after
+/// them and stencil after those, with the mask and alpha options at random.
+fn state_samples(w: u32, h: u32, r: &mut Lcg) -> DrawState {
+    use crate::dev::kona::back::raster::multisample::Multisample;
+    let mut d = state_features(w, h, r);
+    let count = if r.coin(2) { 4 } else { 8 };
+    let mut m = Multisample::default();
+    m.configure(count);
+    m.set_pattern(0x80a1 + r.next() % 7);
+    m.alpha_to_mask = r.coin(3);
+    m.alpha_to_one = r.coin(4);
+    m.mask_on = r.coin(2);
+    m.mask_value = r.f(0.0, 1.0);
+    m.mask_invert = r.coin(4);
+    let (cn, dn, sn) = (count as u32 * 24 / 32, if r.coin(4) { count as u32 * 16 / 32 } else { count as u32 * 24 / 32 }, count as u32 / 4);
+    let (c0, d0, s0) = (6, 6 + cn, 6 + cn + dn);
+    d.samples = m.draw((c0, cn), (d0, if r.coin(6) { 0 } else { dn }), (s0, if r.coin(6) { 0 } else { sn }));
+    d
+}
+
+/// Triangles and clears in multisampled windows: the samples' tests and writes, the mean written
+/// back to the pixel, the mask and alpha options, with every blend, logic operation and mask.
+#[test]
+fn multisampled_draws_match_the_cpu_arm() {
+    use crate::dev::kona::back::raster::setup::Outline;
+    let _serial = serial();
+    let Some(dev) = gpu() else { return };
+    let (w, h) = (96u32, 64u32);
+    let mut r = Lcg(101);
+    let mut words = WORDS.to_vec();
+    words.extend(6..6 + 6 + 6 + 2);
+    words.sort();
+    let p = Pair::build(dev, w, h, &mut r, 100, None, &TextureStore::default, words);
+    let states: Vec<DrawState> = (0..10).map(|_| state_samples(w, h, &mut r)).collect();
+    let (mut tris, mut clears, mut smoothed) = (0, 0, 0);
+    for _ in 0..450 {
+        let ds = &states[r.next() as usize % states.len()];
+        if r.coin(8) {
+            p.both(StoreOpOwned::Clear(*ds, rand_clear(&mut r, w, h)));
+            clears += 1;
+            continue;
+        }
+        let tri = rand_fog_tri(&mut r, w, h, 28);
+        let shaped = match r.next() % 5 {
+            0 => {
+                let Some(o) = Outline::new(&tri, ds) else { continue };
+                smoothed += 1;
+                setup::shaped(&tri, ds, 0, Shape::Smooth { inner: [r.coin(3), r.coin(3), r.coin(3)], outline: &o })
+            }
+            _ => setup::shaped(&tri, ds, 0, Shape::Plain),
+        };
+        let Ok(mut job) = shaped else { continue };
+        job.line = r.coin(4);
+        p.both(StoreOpOwned::Tri(*ds, job));
+        tris += 1;
+    }
+    eprintln!("{tris} multisampled triangles ({smoothed} smoothed), {clears} clears; {:?}", p.g().stats());
+    assert_eq!(p.g().stats().cpu_ops, 0, "every op ran on the GPU");
+    assert!(tris > 300 && clears > 20);
+    p.finish("multisampled draws");
 }
