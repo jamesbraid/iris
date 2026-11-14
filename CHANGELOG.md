@@ -13,6 +13,12 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Configuration
+
+- `iris.toml` takes a `format` key (1 today) that iris will use to migrate older
+  files. Files without it are format 1 and load as before; one that names a
+  newer format is refused with a message instead of being read wrongly.
+
 ### Bench rig
 
 - The bare-metal bench rig (`[testdev]`) takes `cpu = "r14000_500"`, the

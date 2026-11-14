@@ -2404,6 +2404,13 @@ impl TezroSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineConfig {
+    /// The layout of this file, so a later iris can migrate an older one.
+    /// Absent means 1, every file written before the key existed. A file
+    /// naming a newer format than [`CONFIG_FORMAT`] is refused, since this
+    /// iris cannot know what its keys mean. See [`MachineConfig::migrate`].
+    #[serde(default = "config_format")]
+    pub format: u32,
+
     /// Path to the PROM ROM image.
     #[serde(default = "default_prom")]
     pub prom: String,
@@ -2785,6 +2792,15 @@ fn default_lock_aspect_ratio() -> bool { true }
 /// file name (`MachineProfile::release_prom_file`) if one is in the working directory,
 /// else its built-in PROM.
 pub const DEFAULT_PROM: &str = "prom.bin";
+
+/// The config layout this iris reads and writes. Bump it when a key changes
+/// meaning in a way [`MachineConfig::migrate`] has to translate.
+pub const CONFIG_FORMAT: u32 = 1;
+
+fn config_format() -> u32 {
+    CONFIG_FORMAT
+}
+
 /// `nvram` when a config does not set it: the DS1386's file on the Indy, the
 /// PROM's flash on the O2, the DS1685's RAM on the Octane.
 pub const DEFAULT_NVRAM: &str = "nvram.bin";
@@ -2872,6 +2888,7 @@ impl Default for MachineConfig {
             nvram: default_nvram(),
             nveeprom: default_nveeprom(),
             banks: default_banks(),
+            format: CONFIG_FORMAT,
             banks_set: false,
             jitv2_threads_set: false,
             scsi: default_scsi(),
@@ -3191,9 +3208,25 @@ impl MachineConfig {
         let table = toml::from_str::<toml::Table>(text)?;
         cfg.banks_set = table.contains_key("banks");
         cfg.jitv2_threads_set = table.get("jitv2").and_then(|j| j.get("threads")).is_some();
+        cfg.migrate().map_err(serde::de::Error::custom)?;
         cfg.fold_deprecated();
         cfg.settle_jitv2_threads();
         Ok(cfg)
+    }
+
+    /// Bring a file's `format` up to [`CONFIG_FORMAT`]. There is no step yet:
+    /// format 1 is the layout every file had before the key existed. A later
+    /// change that cannot be read as it stands adds its step here and bumps
+    /// the constant. A format of 0 or one this iris does not know is an
+    /// error, not a guess.
+    pub fn migrate(&mut self) -> Result<(), String> {
+        match self.format {
+            0 => Err("format = 0 is not a config format; the first is 1".into()),
+            f if f > CONFIG_FORMAT => Err(format!(
+                "format = {f} was written by a newer iris; this one reads formats up to {CONFIG_FORMAT}"
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// Give an unset `[jitv2] threads` one compile thread per guest CPU, at
@@ -5703,6 +5736,24 @@ mod fuel_input_tests {
         assert_eq!(back.machine.emu_id, 7);
         let plain = toml::to_string_pretty(&MachineConfig::default()).unwrap();
         assert!(!plain.contains("emu_id"), "{plain}");
+    }
+
+    /// A file without `format` is format 1, a file with the current one
+    /// loads, and one from the future or from nowhere is refused with a
+    /// message that says why. A written config carries the format.
+    #[test]
+    fn the_config_format_defaults_round_trips_and_refuses_unknown_ones() {
+        let plain = MachineConfig::parse_toml("").unwrap();
+        assert_eq!(plain.format, CONFIG_FORMAT);
+        assert_eq!(CONFIG_FORMAT, 1);
+        let named = MachineConfig::parse_toml("format = 1\n").unwrap();
+        assert_eq!(named.format, 1);
+        let back = MachineConfig::parse_toml(&toml::to_string_pretty(&plain).unwrap()).unwrap();
+        assert_eq!(back.format, CONFIG_FORMAT);
+        let newer = MachineConfig::parse_toml(&format!("format = {}\n", CONFIG_FORMAT + 1)).unwrap_err().to_string();
+        assert!(newer.contains("newer iris"), "{newer}");
+        let zero = MachineConfig::parse_toml("format = 0\n").unwrap_err().to_string();
+        assert!(zero.contains("not a config format"), "{zero}");
     }
 
     /// The L1 identity keys parse, validate and round trip; unset they are

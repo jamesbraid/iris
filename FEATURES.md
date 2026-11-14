@@ -146,6 +146,7 @@ the first `[section]`, because TOML tables continue until the next header.
 
 | Key | Default | Values and behavior |
 |---|---|---|
+| `format` | `1` | The config layout, which iris uses to migrate older files. Absent means 1, the layout every file had before the key. A file naming a newer format than this iris reads is refused. Files iris writes carry it. |
 | `prom` | `"prom.bin"` | PROM path, an override: every machine has its own PROM built in (the Indy and Indigo2 chip images; the IRIX 6.5.30 media images for the O2, Octane, Origin 200/2000/Onyx2 and Fuel/Tezro), which runs when this is left at the default. `(embedded)` selects it outright. A file named here must load. At the default, a machine uses the file name its releases shipped under if it is in the working directory: `070-1367-012.bin` (IP22), `070-1477-002.bin` (IP28), `ip32prom.rev4.18.bin` (O2), `IP30prom.bin` (Octane), `ip27prom.img` (Origin 200/2000, Onyx2). |
 | `nvram` | `"nvram.bin"` | DS1386 backing file on the Indy and Indigo2, its clock in `<nvram>.clock`; the PROM's environment on the O2 (its flash) and the Octane. GUI defaults to an absolute user-config path. |
 | `nveeprom` | `"nveeprom.bin"` | Motherboard EEPROM file; GUI anchors it in its user-config directory. |
