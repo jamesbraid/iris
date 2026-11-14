@@ -18,8 +18,9 @@
 // below.
 
 #include "wide.wgsl"
+#include "kona_texture.wgsl"
 
-const REC_W: u32 = 38u;
+const REC_W: u32 = 50u;
 
 struct Rec {
     slot: u32,
@@ -29,7 +30,7 @@ struct Rec {
 }
 
 struct Slot {
-    w: array<u32, 64>,
+    w: array<u32, 128>,
 }
 
 @group(1) @binding(0) var<storage, read> recs: array<Rec>;
@@ -77,6 +78,7 @@ const T_DX: u32 = 19u;   // 4 x f32
 const T_DY: u32 = 23u;   // 4 x f32
 const T_Z: u32 = 27u;    // at, dx, dy: 3 x I64 (32.16)
 const T_RECT: u32 = 33u; // x0, y0, x1, y1 (far corner exclusive); the box of every kind but X fill
+const T_TEX: u32 = 38u;  // 4 x (at, dx, dy) f32: s/w, t/w, r/w, q/w
 
 // Draw-state slot words (triangles and clears).
 const S_FLAGS: u32 = 0u;
@@ -90,6 +92,7 @@ const F_LOGIC: u32 = 64u;
 const F_OWN: u32 = 128u;
 const F_STIPPLE: u32 = 256u;
 const F_CMASK: u32 = 512u;
+const F_TEX: u32 = 1024u;
 const S_NCOL: u32 = 1u;
 const S_COL0: u32 = 2u;   // plane references
 const S_COL1: u32 = 3u;
@@ -116,6 +119,7 @@ const S_OWN_MASK: u32 = 26u;
 const S_DID: u32 = 27u;
 const S_WORG: u32 = 28u;  // window origin x, y (stipple)
 const S_STIP: u32 = 32u;  // 32 rows
+const S_TEXD: u32 = 64u;  // the texture descriptor's word offset in tex_descs
 
 const FULL: u32 = 8191u;
 const DEPTH_MAX: u32 = 4294967040u;
@@ -303,6 +307,82 @@ fn covered(pi: u32, px: i32, py: i32) -> bool {
         }
     }
     return true;
+}
+
+// ---- texture (back/raster/pixel.rs `run_tri`, `texel.rs`) --------------------------------------
+// A plane of the texture words at pixel offset (i, j): at + dx * i + dy * j with each product
+// rounded before it joins its sum (the CPU never fuses).
+fn tex_at(pi: u32, k: u32, i: f32, j: f32) -> f32 {
+    let b = T_TEX + 3u * k;
+    return (bitcast<f32>(rw(pi, b)) + tex_p(bitcast<f32>(rw(pi, b + 1u)) * i)) + tex_p(bitcast<f32>(rw(pi, b + 2u)) * j);
+}
+
+// The coordinates s, t, r at pixel (x, y): the planes over q, or the planes themselves when q is
+// nearly zero. r is taken only for a volume.
+fn tex_coord(pi: u32, x: i32, y: i32, volume: bool) -> vec3<f32> {
+    let i = f32(x - bitcast<i32>(rw(pi, T_ORG)));
+    let j = f32(y - bitcast<i32>(rw(pi, T_ORG + 1u)));
+    let q = tex_at(pi, 3u, i, j);
+    let s = tex_at(pi, 0u, i, j);
+    let t = tex_at(pi, 1u, i, j);
+    var r = 0.0;
+    if volume {
+        r = tex_at(pi, 2u, i, j);
+    }
+    let nan = (bitcast<u32>(q) & 0x7fffffffu) > 0x7f800000u;
+    if !nan && abs(q) > 1e-30 {
+        var rq = 0.0;
+        if volume {
+            rq = div_exact(r, q);
+        }
+        return vec3<f32>(div_exact(s, q), div_exact(t, q), rq);
+    }
+    return vec3<f32>(s, t, r);
+}
+
+// The level of detail of the 2 x 2 quad (aligned to even coordinates) that holds pixel (px, py):
+// log2 of the largest step of s and t in texels of level 0, times the scale over 16.
+fn tex_lod(pi: u32, d: u32, px: i32, py: i32, volume: bool) -> f32 {
+    let qx = px & -2;
+    let qy = py & -2;
+    let c0 = tex_coord(pi, qx, qy, volume);
+    let cx = tex_coord(pi, qx + 1, qy, volume);
+    let cy = tex_coord(pi, qx, qy + 1, volume);
+    let l0 = tex_level_at(d, 0u);
+    let fw = f32(tex_lw(l0));
+    let fh = f32(tex_lh(l0));
+    var rho = max(max(abs((cx.x - c0.x) * fw), abs((cy.x - c0.x) * fw)), max(abs((cx.y - c0.y) * fh), abs((cy.y - c0.y) * fh)));
+    let ls = tex_descs[d + TD_LODSCALE];
+    var scale = f32(max(ls & 0xffu, 1u));
+    if volume {
+        let fd = f32(tex_ld(l0));
+        let rr = max(abs((cx.z - c0.z) * fd), abs((cy.z - c0.z) * fd));
+        let rs = f32(max((ls >> 16u) & 0xffu, 1u));
+        if rr * rs > rho * scale {
+            rho = rr;
+            scale = rs;
+        }
+    }
+    let v = max(rho * scale / 16.0, 1e-6);
+    return bitcast<f32>(lod_log2(bitcast<u32>(v)));
+}
+
+// The fragment colour `src` after the bound texture and its environment.
+fn textured(pi: u32, si: u32, px: i32, py: i32, src: vec4<u32>) -> vec4<u32> {
+    tex_nz = recs[pi].one ^ 0x3f800000u;
+    let d = slots[si].w[S_TEXD];
+    let volume = ((tex_descs[d + TD_FLAGS] >> 16u) & 1u) != 0u;
+    let lod = tex_lod(pi, d, px, py, volume);
+    let c = tex_coord(pi, px, py, volume);
+    var texel: vec4<u32>;
+    if volume {
+        texel = tex_sample3(d, c.x, c.y, c.z, lod);
+    } else if tex_descs[d + TD_COMBINE] != 0u {
+        texel = tex_sample_enhanced(d, c.x, c.y, lod);
+    } else {
+        texel = tex_sample(d, c.x, c.y, lod);
+    }
+    return tex_environment(d, src, texel);
 }
 
 fn shade(si: u32, index: u32, src: vec4<u32>, z: u32) {
@@ -518,7 +598,10 @@ fn arch_prim(pi: u32, px: i32, py: i32, lane: u32) {
     let oj = py - bitcast<i32>(rw(pi, T_ORG + 1u));
     let i = f32(oi);
     let j = f32(oj);
-    let src = vec4<u32>(attr(pi, 0u, i, j), attr(pi, 1u, i, j), attr(pi, 2u, i, j), attr(pi, 3u, i, j));
+    var src = vec4<u32>(attr(pi, 0u, i, j), attr(pi, 1u, i, j), attr(pi, 2u, i, j), attr(pi, 3u, i, j));
+    if (fl & F_TEX) != 0u {
+        src = textured(pi, si, px, py, src);
+    }
     shade(si, index, src, depth_at(pi, oi, oj));
 }
 

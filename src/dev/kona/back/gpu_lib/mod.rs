@@ -1,9 +1,8 @@
 //! WGSL libraries for the KONA raster kernel's texture stage, with the host
 //! side that feeds them.
 //!
-//! Nothing here is wired into a kernel yet: these are the pieces the raster
-//! kernel will include, each held to the CPU's arithmetic by a parity test
-//! (`tests`).
+//! The raster kernel (`gpu/kona.wgsl`) includes these, each held to the CPU's
+//! arithmetic by a parity test (`tests`, `fragment_tests`).
 //!
 //! - `lodmath.wgsl`: `lod_log2` and `lod_exp2`, correctly rounded f32 log2 and
 //!   exp2 on integer halves, for the level of detail and the detail and
@@ -21,9 +20,6 @@
 //!   `fnz` to 0 from a run-time value before calling anything. What stays for
 //!   the kernel: the integer edge-function tests, the sample-position
 //!   arithmetic of `sample_mask`, and the stencil and depth tests.
-
-// Not wired into a kernel yet.
-#![allow(dead_code)]
 
 use crate::dev::kona::back::raster::texel::{Combine, EnvMode, Filter, TexDesc, TexLevel, Wrap, CURVE_NODES, MAX_LEVELS};
 use crate::dev::kona::back::store::texture::{TextureStore, PAGE_WORDS};
@@ -147,4 +143,4 @@ impl TexMemory {
 #[cfg(test)]
 mod fragment_tests;
 #[cfg(test)]
-mod tests;
+pub(in crate::dev::kona::back) mod tests;

@@ -61,6 +61,11 @@ impl Lcg {
         (self.0 >> 33) as u32
     }
 
+    /// A float in [lo, hi).
+    fn f(&mut self, lo: f32, hi: f32) -> f32 {
+        lo + (hi - lo) * ((self.next() & 0xff_ffff) as f32 / 16_777_216.0)
+    }
+
     fn range(&mut self, lo: i32, hi: i32) -> i32 {
         lo + (self.next() % (hi - lo) as u32) as i32
     }
@@ -229,9 +234,13 @@ struct Pair {
 
 impl Pair {
     fn new(dev: Arc<Gpu>, w: u32, h: u32, r: &mut Lcg, wide_one_in: u32, chunk_planes: Option<u32>) -> Pair {
-        let init = PixelStore::new(w, h);
+        Pair::with_textures(dev, w, h, r, wide_one_in, chunk_planes, &TextureStore::default)
+    }
+
+    /// As `new`, with texture memory `tex` makes (called once for each arm, so it must make the same words).
+    fn with_textures(dev: Arc<Gpu>, w: u32, h: u32, r: &mut Lcg, wide_one_in: u32, chunk_planes: Option<u32>, tex: &dyn Fn() -> TextureStore) -> Pair {
+        let init = PixelStore::with_texture(w, h, tex());
         fill_random(&init, w, h, r, wide_one_in);
-        let tex = || TextureStore::default();
         let gpu = match chunk_planes {
             Some(n) => Store::Gpu(GpuStore::chunked(dev, w, h, tex(), n).expect("store")),
             None => Store::with_gpu(dev, w, h, tex()).expect("store"),
@@ -709,4 +718,67 @@ fn widths_and_clean_tiles_are_tracked_per_tile() {
     let w0 = g.stats().readback_words;
     g.observe(1, all);
     assert_eq!(g.stats().readback_words - w0, 2 * 32 * 32, "the tile of the 4x4 box and the wide one nothing has read yet");
+}
+
+/// A triangle whose vertices carry texture words s/w, t/w, r/w, 1/w.
+fn rand_tex_tri(r: &mut Lcg, w: u32, h: u32, size: i32) -> [WVertex; 3] {
+    let mut v = rand_tri(r, w, h, size);
+    for item in v.iter_mut() {
+        item.t[0] = [r.f(-1.5, 2.5), r.f(-1.5, 2.5), r.f(-1.5, 2.5), r.f(0.4, 2.5)];
+    }
+    v
+}
+
+/// Both arms' texture memory, to change the same way.
+fn tex_both(p: &Pair, change: impl Fn(&TextureStore)) {
+    change(p.cpu.cpu().texture());
+    change(p.gpu.cpu().texture());
+}
+
+/// Triangles under bound textures of every kind, with texture memory changing between them: the
+/// GPU arm must follow the changes by writing only the pages that changed.
+#[test]
+fn textured_triangles_match_the_cpu_arm() {
+    use super::super::gpu_lib::tests::{random_desc, random_store, Flavour, Rng};
+    use crate::dev::kona::back::store::texture::PAGE_WORDS;
+    let _serial = serial();
+    let Some(dev) = gpu() else { return };
+    let (w, h) = (128u32, 80u32);
+    let mut r = Lcg(81);
+    let mut rng = Rng(0x7E27_0456);
+    let p = Pair::with_textures(dev, w, h, &mut r, 100, None, &|| random_store(&mut Rng(0x5151)));
+    let states: Vec<DrawState> = (0..9)
+        .map(|k| {
+            let mut ds = state_full(w, h, &mut r);
+            let flavour = [Flavour::Plain, Flavour::Volume, Flavour::Enhanced][k % 3];
+            ds.texture = Some(random_desc(&mut rng, flavour));
+            ds
+        })
+        .collect();
+    let mut drawn = 0;
+    let mut pages_after_first = 0;
+    for step in 0..360 {
+        if step == 120 {
+            // Few words of held pages, a page that did not exist, a cleared stretch and a dropped plane.
+            pages_after_first = p.g().stats().tex_pages;
+            tex_both(&p, |t| {
+                assert!(t.ex().set(0, 5, 0x8040_2010));
+                assert!(t.ex().set(1, 4 * PAGE_WORDS as u32 + 7, 0xff10_2030));
+                t.ex().clear(2, PAGE_WORDS as u32 - 50, 200);
+                t.ex().drop_plane(3);
+            });
+        }
+        let ds = &states[r.next() as usize % states.len()];
+        let tri = rand_tex_tri(&mut r, w, h, 36);
+        let Ok(job) = setup::shaped(&tri, ds, 0, Shape::Plain) else { continue };
+        p.both(StoreOpOwned::Tri(*ds, job));
+        drawn += 1;
+    }
+    let st = p.g().stats();
+    eprintln!("{drawn} textured triangles; {st:?}");
+    assert_eq!(st.cpu_ops, 0, "every textured triangle ran on the GPU");
+    assert_eq!(pages_after_first, 20, "the first sync wrote the pages the store held");
+    let second = st.tex_pages - pages_after_first;
+    assert_eq!(second, 4, "the second sync wrote the four pages that changed, not the store");
+    p.finish("textured triangles");
 }

@@ -8,8 +8,9 @@
 //! CPU mirror (`observe`), runs the CPU code on the mirror, and puts what the op wrote back
 //! (`Bracket`). Which ops stay on the CPU, by what the GPU kernels do not do yet:
 //!
-//! - triangles with a texture, fog, smoothing, multisampling or a line stipple, and clears of a
-//!   multisampled window; an edge step that does not fit 32 bits;
+//! - triangles with fog, smoothing, multisampling or a line stipple, and clears of a multisampled
+//!   window; an edge step that does not fit 32 bits; textures when the store holds more pages than
+//!   the GPU's pool can (one storage binding);
 //! - X pixel writes with a host payload, GL pixel writes, accumulation and the stencil write
 //!   of glDrawPixels;
 //! - the overlay and popup planes (word positions past the display-ID plane, which never go to the
@@ -63,13 +64,19 @@ use super::store::texture::TextureStore;
 use super::store::{PixelStore, DID_PLANE};
 use super::x::fill::LoweredFill;
 use super::x::pixel::LoweredCopy;
+use super::gpu_lib::{pack_desc, FRAGMENT, LOD_MATH, TEXTURE, TEXTURE_MEM};
+use super::raster::texel::TexDesc;
+use super::store::texture::PLANES as TEX_PLANES;
 use crate::wgpu::{library, ArchShaders, Batch, BatchPipelines, Fragment, Full, Gpu, Source, TileGrid};
+use texmem::TexMem;
+
+mod texmem;
 
 const KONA: Fragment = Fragment::new("kona.wgsl", include_str!("kona.wgsl"));
 const COPY: Fragment = Fragment::new("copy.wgsl", include_str!("copy.wgsl"));
 
 /// Words in a record, past its slot index and the constant `one`.
-const REC_W: usize = 38;
+const REC_W: usize = 50;
 /// Record kinds, word 37 (`kona.wgsl`).
 const K_TRI: u32 = 0;
 const K_XFILL: u32 = 1;
@@ -79,6 +86,8 @@ const K_CLEAR: u32 = 4;
 /// Where a record's box lives, for every kind but the X fill.
 const R_RECT: usize = 33;
 const R_KIND: usize = 37;
+/// A triangle's texture coordinate planes: s/w, t/w, r/w, q/w, each at, dx, dy.
+const R_TEX: usize = 38;
 
 /// Bits a bitmap slot holds: 56 words after its five header words.
 const BITMAP_BITS: u64 = 56 * 32;
@@ -93,6 +102,8 @@ const MAX_CHUNKS: usize = 4;
 const CHUNK_BYTES: u64 = 128 << 20;
 /// Storage buffers the batch kernels bind besides the planes.
 const BATCH_STORAGE: u32 = 6;
+/// Storage buffers of the texture memory (descriptors, page table, page pool).
+const TEX_BINDINGS: u32 = 3;
 /// Dirty-tracking granularity, in pixels (the readback unit).
 const TILE: u32 = 32;
 /// Verdict words for copies; used up, they are summed and zeroed.
@@ -122,8 +133,15 @@ struct GRec {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct GSlot {
-    w: [u32; 64],
+    w: [u32; SLOT_W],
 }
+
+/// Words in a draw-state slot: the first 64 are the X fill's and the plain draw state's, the
+/// rest are the features past them (`kona.wgsl`).
+const SLOT_W: usize = 128;
+/// The texture descriptor's offset in the descriptor table, and the flag that says there is one.
+const S_TEXD: usize = 64;
+const F_TEX: u32 = 1024;
 
 /// What the store did, for tests and the monitor.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -146,6 +164,9 @@ pub struct Stats {
     /// Ops that ran on the CPU for want of a GPU kernel, and the words they wrote back.
     pub cpu_ops: u64,
     pub uploaded_words: u64,
+    /// Texture memory syncs, and the 64 KiB pages they wrote to the GPU.
+    pub tex_syncs: u64,
+    pub tex_pages: u64,
 }
 
 /// A plane on the GPU: where it is, which tiles records have written, and how wide their words can be.
@@ -199,7 +220,8 @@ struct State {
     submitted: u64,
     tiles_x: u32,
     tiles_y: u32,
-    slots: HashMap<[u32; 64], u32>,
+    slots: HashMap<[u32; SLOT_W], u32>,
+    tex: TexMem,
     /// The slot the last draw state got, while the batch it is in is open.
     last: Option<(DrawState, u8, u32)>,
     copy: CopyKernel,
@@ -234,8 +256,9 @@ impl GpuStore {
     /// A store of `width` x `height` pixels with `tex` as its texture memory (which stays in the
     /// mirror), drawing on `gpu`.
     pub fn new(gpu: Arc<Gpu>, width: u32, height: u32, tex: TextureStore) -> Result<GpuStore, String> {
+        let shape = (tex.plane_pages() as u32, tex.cap_pages());
         let mirror = PixelStore::with_texture(width, height, tex);
-        let state = State::new(gpu, width, height, u32::MAX)?;
+        let state = State::new(gpu, width, height, u32::MAX, shape)?;
         Ok(GpuStore { mirror, state: Mutex::new(state) })
     }
 
@@ -243,8 +266,9 @@ impl GpuStore {
     /// whose bindings would hold them all.
     #[cfg(test)]
     pub fn chunked(gpu: Arc<Gpu>, width: u32, height: u32, tex: TextureStore, planes: u32) -> Result<GpuStore, String> {
+        let shape = (tex.plane_pages() as u32, tex.cap_pages());
         let mirror = PixelStore::with_texture(width, height, tex);
-        let state = State::new(gpu, width, height, planes)?;
+        let state = State::new(gpu, width, height, planes, shape)?;
         Ok(GpuStore { mirror, state: Mutex::new(state) })
     }
 
@@ -254,7 +278,8 @@ impl GpuStore {
     }
 
     pub fn stats(&self) -> Stats {
-        self.state.lock().stats.clone()
+        let s = self.state.lock();
+        Stats { tex_syncs: s.tex.syncs, tex_pages: s.tex.pages_written, ..s.stats.clone() }
     }
 
     /// Make the words of `word` inside `r` (store pixels, far corner exclusive) current in the
@@ -347,7 +372,7 @@ impl GpuStore {
                 let r = job.rect.intersect(&screen);
                 if r.is_empty() {
                     true
-                } else if tri_on_gpu(ds, job) {
+                } else if tri_on_gpu(ds, job) && (ds.texture.is_none() || s.tex.fits(m.texture())) {
                     s.tri(m, ds, job)
                 } else {
                     return Route::Cpu(ds_planes(ds), r);
@@ -493,12 +518,11 @@ pub fn takes_copy(word: usize, clips: usize) -> bool {
     resident(word) && clips <= CLIPS
 }
 
-/// Whether the kernels draw this triangle: a plain one, with no texture, fog, smoothing or
-/// multisampling, and no line stipple.
+/// Whether the kernels draw this triangle, texture memory aside (the pool must hold the store's
+/// pages: `TexMem::fits`): one with no fog, smoothing or multisampling, and no line stipple.
 fn tri_on_gpu(ds: &DrawState, job: &TriJob) -> bool {
     let t = &job.tri;
-    ds.texture.is_none()
-        && ds.samples.is_none()
+    ds.samples.is_none()
         && curve_of(ds) == 0
         && t.cover == Cover::None
         && !(job.line && ds.line_stipple.is_some())
@@ -507,16 +531,19 @@ fn tri_on_gpu(ds: &DrawState, job: &TriJob) -> bool {
 }
 
 impl State {
-    fn new(gpu: Arc<Gpu>, w: u32, h: u32, chunk_planes: u32) -> Result<State, String> {
+    fn new(gpu: Arc<Gpu>, w: u32, h: u32, chunk_planes: u32, (tex_per_plane, tex_cap_pages): (u32, usize)) -> Result<State, String> {
         let plane_bytes = w as u64 * h as u64 * 4;
         let cap = gpu.caps.max_storage_binding.min(gpu.caps.max_buffer).min(CHUNK_BYTES);
         if plane_bytes == 0 || plane_bytes > cap {
             return Err(format!("kona: a {w} x {h} plane of {plane_bytes} bytes does not fit one storage binding of {cap} bytes"));
         }
         let bound = gpu.device.limits().max_storage_buffers_per_shader_stage;
-        if bound < BATCH_STORAGE + MAX_CHUNKS as u32 {
-            return Err(format!("kona: the GPU binds {bound} storage buffers to a shader; {} are needed", BATCH_STORAGE + MAX_CHUNKS as u32));
+        let needed = BATCH_STORAGE + MAX_CHUNKS as u32 + TEX_BINDINGS;
+        if bound < needed {
+            return Err(format!("kona: the GPU binds {bound} storage buffers to a shader; {needed} are needed"));
         }
+        let tex_pages = (cap / texmem::PAGE_BYTES).min(tex_cap_pages as u64) as u32;
+        let tex = TexMem::new(gpu.clone(), TEX_PLANES as u32, tex_per_plane, tex_pages);
         let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -534,9 +561,9 @@ impl State {
                 label: "kona",
                 raster: &[KONA],
                 bin_accept: None,
-                library: &[library::I64, library::WIDE],
-                defines: &[("WIDTH", w), ("HEIGHT", h), ("PLANE", w * h)],
-                layouts: &[&layout],
+                library: &[library::I64, library::WIDE, library::F64, library::FLOAT, LOD_MATH, TEXTURE_MEM, TEXTURE, FRAGMENT],
+                defines: &[("WIDTH", w), ("HEIGHT", h), ("PLANE", w * h), ("TEX_PLANES", TEX_PLANES as u32), ("TEX_PAGES_PER_PLANE", tex_per_plane)],
+                layouts: &[&layout, &tex.layout],
             },
         )?;
         let batch = Batch::new(&gpu, &pipelines, TileGrid::new(w, h), 256);
@@ -579,6 +606,7 @@ impl State {
             tiles_x: w.div_ceil(TILE),
             tiles_y: h.div_ceil(TILE),
             slots: HashMap::new(),
+            tex,
             last: None,
             copy,
             stats: Stats::default(),
@@ -631,7 +659,7 @@ impl State {
         }
         self.ensure_group();
         let group = self.group.as_ref().expect("made above");
-        match self.batch.try_flush(&self.pipelines, &[group]) {
+        match self.batch.try_flush(&self.pipelines, &[group, self.tex.group()]) {
             Ok(_) => {
                 self.slots.clear();
                 self.last = None;
@@ -756,7 +784,7 @@ impl State {
         let Some(plane) = self.plane(m, word) else { return false };
         self.gen += 1;
         self.stats.records += 1;
-        let mut slot = GSlot { w: [0; 64] };
+        let mut slot = GSlot { w: [0; SLOT_W] };
         slot.w[0] = plane;
         let mut rec = GRec { slot: 0, one: 1.0f32.to_bits(), w: [0; REC_W] };
         rec.w[0] = value;
@@ -774,7 +802,7 @@ impl State {
         let Some(plane) = self.plane(m, word) else { return false };
         self.gen += 1;
         self.stats.records += 1;
-        let mut slot = GSlot { w: [0; 64] };
+        let mut slot = GSlot { w: [0; SLOT_W] };
         slot.w[0] = plane;
         slot.w[1] = x0 as u32;
         slot.w[2] = y0 as u32;
@@ -796,7 +824,7 @@ impl State {
 
     /// The slot of a draw state. None with the device failed.
     fn ds_slot(&mut self, m: &PixelStore, ds: &DrawState, mode: u8) -> Option<GSlot> {
-        let mut s = GSlot { w: [0; 64] };
+        let mut s = GSlot { w: [0; SLOT_W] };
         let mut fl = 0u32;
         let stencil_on = ds.stencil_bits != 0 && ds.stencil.enabled;
         if ds.depth_bits != 0 {
@@ -864,6 +892,10 @@ impl State {
         }
         s.w[28] = ds.origin[0] as u32;
         s.w[29] = ds.origin[1] as u32;
+        if let Some(d) = &ds.texture {
+            s.w[0] |= F_TEX;
+            s.w[S_TEXD] = self.desc_offset(d)?;
+        }
         if mode == MODE_POLY {
             if let Some(rows) = &ds.polygon_stipple {
                 s.w[32..64].copy_from_slice(rows);
@@ -872,7 +904,38 @@ impl State {
         Some(s)
     }
 
+    /// Where the descriptor of `d` is in the table the kernel reads. None with the device failed.
+    fn desc_offset(&mut self, d: &TexDesc) -> Option<u32> {
+        let words = pack_desc(d);
+        loop {
+            if let Some(o) = self.tex.desc(&words) {
+                return Some(o);
+            }
+            // The table is full: the records that name its entries go out first.
+            if !self.flush_batch() {
+                return None;
+            }
+            self.tex.reset_descs();
+        }
+    }
+
+    /// Bring the GPU's texture memory up to the store's, for a draw that samples. The records still
+    /// open read the old words, so they are submitted first.
+    fn tex_sync(&mut self, m: &PixelStore) -> bool {
+        if !self.tex.stale(m.texture()) {
+            return true;
+        }
+        if !self.flush_batch() {
+            return false;
+        }
+        self.tex.sync(m.texture());
+        true
+    }
+
     fn tri(&mut self, m: &PixelStore, ds: &DrawState, job: &TriJob) -> bool {
+        if ds.texture.is_some() && !self.tex_sync(m) {
+            return false;
+        }
         self.gen += 1;
         self.stats.records += 1;
         let r = job.rect;
@@ -933,7 +996,7 @@ impl State {
         self.gen += 1;
         self.stats.records += 1;
         let (w, h) = (self.w as i64, self.h as i64);
-        let mut s = GSlot { w: [0; 64] };
+        let mut s = GSlot { w: [0; SLOT_W] };
         s.w[0] = plane;
         s.w[1] = f.fg;
         s.w[2] = f.bg;
@@ -1268,6 +1331,11 @@ fn tri_rec(job: &TriJob) -> GRec {
     for (n, v) in [t.z.at, t.z.dx, t.z.dy].into_iter().enumerate() {
         w[27 + 2 * n] = v as u64 as u32;
         w[28 + 2 * n] = (v as u64 >> 32) as u32;
+    }
+    for (k, plane) in t.tex.iter().enumerate() {
+        for (n, v) in plane.iter().enumerate() {
+            w[R_TEX + 3 * k + n] = v.to_bits();
+        }
     }
     w[R_RECT] = job.rect.x0 as u32;
     w[R_RECT + 1] = job.rect.y0 as u32;
