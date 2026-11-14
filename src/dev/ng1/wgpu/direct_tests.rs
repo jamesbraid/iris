@@ -148,7 +148,6 @@ fn cpu_source<'a>(state: &'a Ng1DisplaySource<'_>, rgb: &'a [u32], aux: &'a [u32
         cursor_x_adjust: state.cursor_x_adjust,
         width: state.width,
         height: state.height,
-        status_bar_only: false,
     }
 }
 

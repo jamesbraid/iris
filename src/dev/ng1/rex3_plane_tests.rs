@@ -453,7 +453,7 @@ fn resident_gpu_no_touch_gfifo_fence_and_direct_scanout() {
                 xmap_cursor_cmap: state.xmap_cursor_cmap, xmap_popup_cmap: state.xmap_popup_cmap,
                 cmap: state.cmap, ramdac: state.ramdac, vc2_ram: state.vc2_ram, vc2_regs: state.vc2_regs,
                 topscan: state.topscan, cursor_x_adjust: state.cursor_x_adjust,
-                width: state.width, height: state.height, status_bar_only: false,
+                width: state.width, height: state.height,
             };
             let mut software = SwCompositor::new();
             software.compose_pixels(&cpu_source);

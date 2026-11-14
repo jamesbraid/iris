@@ -538,7 +538,6 @@ impl Rex3Screen {
             cursor_x_adjust:  self.cursor_x_adjust,
             width:            self.width,
             height:           self.height,
-            status_bar_only:  false,
         }
     }
 

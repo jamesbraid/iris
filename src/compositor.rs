@@ -35,8 +35,6 @@ pub struct CompositorSource<'a> {
     /// Visible display dimensions decoded from VC2 video timings
     pub width:            usize,
     pub height:           usize,
-    /// Nothing but the status bar moved: skip the plane and DID upload.
-    pub status_bar_only:  bool,
 }
 
 // ── Software compositor ──────────────────────────────────────────────────────
