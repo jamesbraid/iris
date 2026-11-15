@@ -3930,7 +3930,7 @@ impl Rex3 {
             }
             // For the one presenter that composes the planes itself.
             if kind.2 && !composed {
-                out.planes = Some(crate::dev::ng1::screen::Ng1Screen(self.screen.clone()));
+                out.planes = Some(Box::new(crate::dev::ng1::screen::Ng1Screen(self.screen.clone())));
                 composed = true;
             }
             if !composed {

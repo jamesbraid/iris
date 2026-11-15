@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use crate::cpu::mips_core::CyclesPtr;
-use crate::dev::ng1::screen::Ng1Screen;
 use crate::disp::BarStats;
 
 /// What the front-end draws a screen's frames with: the GL window, the wgpu
@@ -384,9 +383,10 @@ pub struct Frame {
     /// The same pixels in the same order on the screen's device, `0xAABBGGRR`.
     #[cfg(feature = "wgpu")]
     pub gpu: Option<::wgpu::Buffer>,
-    /// Newport's planes and display state, for the one presenter that composes
-    /// them itself; `words` is then empty. Only [`Need::planes`] asks for it.
-    pub planes: Option<Ng1Screen>,
+    /// A board's planes for the one presenter that composes them itself
+    /// (Newport's `Ng1Screen`, for the GL window); `words` is then empty. Only
+    /// [`Need::planes`] asks for it.
+    pub planes: Option<Box<dyn std::any::Any + Send + Sync>>,
     /// Newport's debug overlay, `width` to a row in the same order as `words`
     /// (transparent where nothing is shown), only while it is on.
     pub overlay: Option<Vec<u32>>,

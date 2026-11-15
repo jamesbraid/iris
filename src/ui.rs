@@ -610,7 +610,8 @@ impl Renderer for GlRenderer {
             // ── The picture first: composing sets its own FBO/viewport ───────
             let new_frame = frame.seq != self.seen_seq || self.main_tex.is_none();
             if new_frame {
-                self.main_tex = match (&frame.planes, &mut self.compositor) {
+                let planes = frame.planes.as_ref().and_then(|p| p.downcast_ref::<crate::dev::ng1::screen::Ng1Screen>());
+                self.main_tex = match (planes, &mut self.compositor) {
                     // Newport's planes, composed here in the shader.
                     (Some(planes), Some(compositor)) => {
                         let planes = planes.0.lock();
