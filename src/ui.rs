@@ -99,6 +99,8 @@ struct GlRenderer {
     // that validate against the drawable/FBConfig being issued from a thread
     // other than the one that created the X11 connection/window.
     not_current_context: Option<NotCurrentContext>,
+    // What made that context, to make another when stop() could not give it back.
+    context_attributes: glutin::context::ContextAttributes,
     // The window surface, also built on the main thread in Ui::new() and bound
     // once there (make_current → make_not_current) before the event loop runs.
     // On Windows that first bind is what installs the GL ICD's window subclass
@@ -191,8 +193,17 @@ impl GlRenderer {
         // Ui::new() (see comment on not_current_context) — this is that
         // context's one and only real consumption, guarded by the
         // `self.state.is_none()` branch above never running a second time.
-        let not_current_gl_context = self.not_current_context.take()
-            .expect("GL context missing on the true first ensure_init() call — construction bug in Ui::new()");
+        let not_current_gl_context = match self.not_current_context.take() {
+            Some(c) => c,
+            // A stop() that could not release the context lost it.
+            None => match unsafe { gl_display.create_context(&self.gl_config, &self.context_attributes) } {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("iris: the GL context was lost and a new one failed: {e}");
+                    return false;
+                }
+            },
+        };
 
         // Normal boot: the surface was created and bound once on the main
         // thread in Ui::new() — reuse it. Only after a stop()/start() cycle
@@ -703,7 +714,7 @@ impl Renderer for GlRenderer {
             // only ever sees it once at shutdown).
             match state.context.make_not_current() {
                 Ok(not_current) => self.not_current_context = Some(not_current),
-                Err(e) => eprintln!("iris: failed to release GL context on stop(): {e}"),
+                Err(e) => eprintln!("iris: failed to release GL context on stop(), the next start makes a new one: {e}"),
             }
         }
         self.current_w     = 0;
@@ -822,6 +833,8 @@ impl Renderer for WgpuRenderer {
         let _ = self.event_proxy.send_event(());
     }
 
+    // No stop(): a wgpu device is not bound to a thread, so a hand-over moves
+    // the presenter as it is.
     fn gpu(&self) -> Option<&Arc<crate::wgpu::Gpu>> {
         Some(self.presenter.gpu())
     }
@@ -915,16 +928,16 @@ impl Ui {
             renderers.push(r);
         }
         match mode {
-            ScreenWindows::Cycle => *screens[0].window.renderer.lock() = renderers.pop(),
+            ScreenWindows::Cycle => screens[0].window.install(renderers.pop().expect("one window")),
             ScreenWindows::PerScreen => {
                 for (s, r) in screens.iter().zip(renderers) {
-                    *s.window.renderer.lock() = Some(r);
+                    s.window.install(r);
                 }
             }
             ScreenWindows::SideBySide => {
                 let first = renderers.pop().expect("one window");
                 for (s, r) in screens.iter().zip(SideBySide::for_screens(&screens, first)) {
-                    *s.window.renderer.lock() = Some(r);
+                    s.window.install(r);
                 }
             }
         }
@@ -1048,11 +1061,11 @@ impl Ui {
             }
             let context_attributes = builder.build(Some(raw_window_handle));
             match unsafe { gl_display.create_context(&gl_config, &context_attributes) } {
-                Ok(ctx) => { result = Some((*tier, ctx)); break; }
+                Ok(ctx) => { result = Some((*tier, ctx, context_attributes)); break; }
                 Err(e) => eprintln!("iris: GL context attempt {:?} failed: {e}", tier),
             }
         }
-        let (gl_tier, not_current_context) = result
+        let (gl_tier, not_current_context, context_attributes) = result
             .expect("failed to create a GL context under any requested version/profile");
         eprintln!("iris: using GL tier {:?}", gl_tier);
 
@@ -1103,6 +1116,7 @@ impl Ui {
             window:      window.clone(),
             gl_config,
             not_current_context: Some(not_current_context),
+            context_attributes,
             initial_surface: Some(initial_surface),
             raw_window_handle,
             gl_tier,

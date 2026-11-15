@@ -436,15 +436,24 @@ pub struct Window {
     /// one shown (`screen 2/2`); 0 for no name.
     pub of: AtomicUsize,
     /// Where the renderer goes when this screen's thread next ticks.
-    next: Mutex<Option<Arc<Window>>>,
+    next: Mutex<Option<Arc<Screen>>>,
     /// Another screen drew into the picture this slot's renderer shows: show
     /// the newest frame again at the next tick (see `side_by_side`).
     poked: AtomicBool,
+    /// Renderers installed here so far: a screen shows the newest frame at
+    /// once to one it has not shown, and tells it the size.
+    arrivals: AtomicU64,
 }
 
 impl Window {
+    /// Put `renderer` in the slot.
+    pub fn install(&self, renderer: Box<dyn Renderer>) {
+        *self.renderer.lock() = Some(renderer);
+        self.arrivals.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Ask this screen's display thread to give the renderer to `next`.
-    pub fn pass_to(&self, next: Arc<Window>) {
+    pub fn pass_to(&self, next: Arc<Screen>) {
         *self.next.lock() = Some(next);
     }
 
@@ -465,7 +474,8 @@ impl Window {
         let Some(next) = self.next.lock().take() else { return };
         let mut r = mine.take().expect("checked above");
         r.stop();
-        *next.renderer.lock() = Some(r);
+        next.window.install(r);
+        next.wake();
     }
 
     /// Show the newest frame again at the next tick.
@@ -516,7 +526,7 @@ impl Cycle {
             return None;
         }
         let to = Self::after(self.cur, self.screens.len());
-        self.screens[self.cur].window.pass_to(self.screens[to].window.clone());
+        self.screens[self.cur].window.pass_to(self.screens[to].clone());
         // The thread gives it up at its next tick; do not wait for a parked one.
         self.screens[self.cur].wake();
         self.cur = to;
@@ -549,9 +559,9 @@ pub struct Screen {
     size: AtomicU64,
     /// The size last given to the renderer, packed the same way.
     sized: AtomicU64,
-    /// Which renderer was last shown a frame (its address), so one installed
-    /// since gets the newest frame at once.
-    shown: AtomicUsize,
+    /// The window's arrivals when a renderer was last shown a frame, so one
+    /// installed since gets the newest frame at once.
+    shown: AtomicU64,
     /// Ticks since a renderer was last shown a frame.
     idle: AtomicU32,
     /// The requests the frame being composed will answer.
@@ -576,7 +586,7 @@ impl Screen {
             gpu: std::sync::OnceLock::new(),
             size: AtomicU64::new(0),
             sized: AtomicU64::new(0),
-            shown: AtomicUsize::new(0),
+            shown: AtomicU64::new(u64::MAX),
             idle: AtomicU32::new(0),
             noted: AtomicU64::new(0),
             latest: Mutex::new(None),
@@ -684,7 +694,7 @@ impl Screen {
         let Some(renderer) = renderer.as_mut() else { return };
         let idle = self.idle.fetch_add(1, Ordering::Relaxed) + 1;
         let poked = self.window.poked.swap(false, Ordering::AcqRel);
-        if !poked && idle < IDLE_REFRESH && self.shown.load(Ordering::Relaxed) == renderer_id(&**renderer) {
+        if !poked && idle < IDLE_REFRESH && self.shown.load(Ordering::Relaxed) == self.window.arrivals.load(Ordering::Relaxed) {
             return;
         }
         let bar = self.bar(stats);
@@ -694,7 +704,8 @@ impl Screen {
     /// Hand `frame` to `renderer`, telling it first when the size changed.
     fn show(&self, renderer: &mut Box<dyn Renderer>, frame: &Frame, stats: &BarStats) {
         self.idle.store(0, Ordering::Relaxed);
-        let arrived = self.shown.swap(renderer_id(&**renderer), Ordering::Relaxed) != renderer_id(&**renderer);
+        let arrivals = self.window.arrivals.load(Ordering::Relaxed);
+        let arrived = self.shown.swap(arrivals, Ordering::Relaxed) != arrivals;
         if frame.width == 0 || frame.height == 0 {
             return;
         }
@@ -775,11 +786,6 @@ impl Screen {
         self.requests.capture(false);
         frame
     }
-}
-
-/// A renderer's identity: its address.
-fn renderer_id(r: &dyn Renderer) -> usize {
-    r as *const dyn Renderer as *const () as usize
 }
 
 /// The hotkey's screenshot: the screen's next frame, written as
@@ -1137,7 +1143,7 @@ mod tests {
         assert_eq!(shown.sizes.lock().len(), 1, "the size is told once");
         // A second renderer has not seen the frame.
         let second = Shown::default();
-        *s.window.renderer.lock() = Some(Box::new(second.clone()));
+        s.window.install(Box::new(second.clone()));
         s.tick(stats, |_, _| false);
         assert_eq!(*second.presents.lock(), [(1, 4, 2)]);
         // A new size is told before its frame.
@@ -1216,14 +1222,46 @@ mod tests {
     fn a_move_queued_before_the_renderer_arrives_waits_for_it() {
         let screens = three();
         *screens[0].window.renderer.lock() = Some(Box::new(Where::default()));
-        screens[0].window.pass_to(screens[1].window.clone());
-        screens[1].window.pass_to(screens[2].window.clone());
+        screens[0].window.pass_to(screens[1].clone());
+        screens[1].window.pass_to(screens[2].clone());
         screens[1].window.hand_over();
         assert!(screens[1].window.passing(), "nothing to move yet");
         screens[0].window.hand_over();
         screens[1].window.hand_over();
         assert!(screens[2].window.renderer.lock().is_some());
         assert!(!screens.iter().any(|s| s.window.passing()));
+    }
+
+    /// A renderer that comes back to a screen it left is told the size again
+    /// and shown the newest frame, and the screen it arrives at is woken.
+    #[test]
+    fn a_renderer_returning_to_a_screen_is_resized_and_its_thread_woken() {
+        let screens: Vec<_> = (0..2)
+            .map(|i| {
+                let mut s = Screen::new(i, Arc::default());
+                s.parks = true;
+                Arc::new(s)
+            })
+            .collect();
+        let shown = Shown::default();
+        screens[0].window.install(Box::new(shown.clone()));
+        let mut cycle = Cycle::new(&screens).unwrap();
+        let frame = |s: &Screen| s.tick(stats, |f, _| { f.width = 4; f.height = 2; f.words.resize(8, 1); true });
+        frame(&screens[0]);
+        assert_eq!(shown.sizes.lock().len(), 1);
+        let mut wait = FrameWait::new(&screens[1].changed, Duration::from_millis(300));
+        let start = Instant::now();
+        cycle.step();
+        screens[0].tick(stats, |_, _| false);
+        wait.wait();
+        assert!(start.elapsed() < Duration::from_millis(150), "the receiving screen's thread is woken");
+        frame(&screens[1]);
+        assert_eq!(shown.sizes.lock().len(), 2);
+        cycle.step();
+        screens[1].tick(stats, |_, _| false);
+        screens[0].tick(stats, |_, _| false);
+        assert_eq!(shown.sizes.lock().len(), 3, "the screen it left tells it the size again");
+        assert_eq!(shown.presents.lock().len(), 3, "and shows it the newest frame at once");
     }
 
     #[test]
