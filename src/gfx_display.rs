@@ -208,11 +208,6 @@ impl FrameRequests {
         self.asked.load(Ordering::Acquire)
     }
 
-    /// Whether the frame that `noted` was taken for answers a request.
-    pub fn answers(&self, noted: u64) -> bool {
-        noted != self.done.load(Ordering::Acquire)
-    }
-
     /// The frame is in the screen: everything up to `noted` is answered.
     pub fn answer(&self, noted: u64) {
         self.done.store(noted, Ordering::Release);
@@ -503,16 +498,6 @@ impl Cycle {
         (screens.len() > 1).then(|| Cycle { screens: screens.to_vec(), cur: 0 })
     }
 
-    /// How many screens it steps through.
-    pub fn screen_count(&self) -> usize {
-        self.screens.len()
-    }
-
-    /// The screen after `cur` of `n`, wrapping.
-    pub fn after(cur: usize, n: usize) -> usize {
-        (cur + 1) % n
-    }
-
     /// The screen the window shows (or is about to).
     pub fn current(&self) -> &Arc<Screen> {
         &self.screens[self.cur]
@@ -525,7 +510,7 @@ impl Cycle {
         if self.screens.iter().any(|s| s.window.passing()) {
             return None;
         }
-        let to = Self::after(self.cur, self.screens.len());
+        let to = (self.cur + 1) % self.screens.len();
         self.screens[self.cur].window.pass_to(self.screens[to].clone());
         // The thread gives it up at its next tick; do not wait for a parked one.
         self.screens[self.cur].wake();
@@ -1177,12 +1162,6 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn the_hotkey_walks_the_screens_in_order_and_wraps() {
-        assert_eq!((0..5).scan(0, |c, _| { *c = Cycle::after(*c, 3); Some(*c) }).collect::<Vec<_>>(), [1, 2, 0, 1, 2]);
-        assert!(Cycle::new(&three()[..1]).is_none(), "one screen has nothing to cycle");
-    }
-
     /// The renderer leaves a screen from that screen's own thread, is stopped
     /// there, and the status bar names the screen it arrives at.
     #[test]
@@ -1190,6 +1169,7 @@ mod tests {
         let screens = three();
         let r = Where::default();
         *screens[0].window.renderer.lock() = Some(Box::new(r.clone()));
+        assert!(Cycle::new(&screens[..1]).is_none(), "one screen has nothing to cycle");
         let mut cycle = Cycle::new(&screens).unwrap();
         let show = |s: &Screen, w: u32| s.tick(stats, |f, _| { f.width = w; f.height = 1; f.words.resize(w as usize, 0); true });
         show(&screens[0], 4);
@@ -1291,12 +1271,11 @@ mod tests {
         assert!(!r.pending());
         r.request();
         let noted = r.note();
-        assert!(r.pending() && r.answers(noted));
+        assert!(r.pending());
         // Asked again while that frame is composed.
         r.request();
         r.answer(noted);
         assert!(r.pending(), "the second request needs a frame composed after it");
-        assert!(!r.answers(noted));
         r.answer(r.note());
         assert!(!r.pending());
     }

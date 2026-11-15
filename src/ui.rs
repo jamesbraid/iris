@@ -1367,8 +1367,10 @@ impl Ui {
             // before.
             if keycode == KeyCode::Tab && pressed && !input.repeat && *rctrl_held {
                 if let Some(cycle) = cycle {
-                    if let Some(to) = cycle.step() {
-                        window.set_title(&format!("{} - screen {}/{}", crate::machine::emulator_name(), to + 1, cycle.screen_count()));
+                    if cycle.step().is_some() {
+                        if let Some((n, of)) = cycle.current().window.label() {
+                            window.set_title(&format!("{} - screen {n}/{of}", crate::machine::emulator_name()));
+                        }
                     }
                     return;
                 }
