@@ -761,21 +761,19 @@ struct WgpuRenderer {
     sbtex: StatusBarTexture,
     /// The status bar's rows cut to the frame's width.
     bar: Vec<u32>,
-    /// The first presentation error, reported once.
-    failed: bool,
+}
+
+#[cfg(feature = "wgpu")]
+/// A failed present is a GPU failure: it stops the machine, like the boards'.
+#[cfg(feature = "wgpu")]
+fn report_present(gpu: &crate::wgpu::Gpu, r: Result<(), String>) {
+    if let Err(e) = r {
+        gpu.fail(&format!("present: {e}"));
+    }
 }
 
 #[cfg(feature = "wgpu")]
 impl WgpuRenderer {
-    fn report(&mut self, r: Result<(), String>) {
-        if let Err(e) = r {
-            if !self.failed {
-                self.failed = true;
-                eprintln!("iris: wgpu present: {e}");
-            }
-        }
-    }
-
     /// The window's size and the frame's, and the status bar for `width`:
     /// what every presentation needs first.
     fn prepare(&mut self, width: usize, height: usize, stats: &BarStats) {
@@ -813,7 +811,7 @@ impl Renderer for WgpuRenderer {
             None => return,
         };
         let r = self.presenter.present(shown, frame.overlay.as_deref(), &self.bar, width);
-        self.report(r);
+        report_present(self.presenter.gpu(), r);
     }
 
     fn resize(&mut self, width: usize, height: usize) {
@@ -897,8 +895,9 @@ impl Ui {
     /// window with a screen at a time (`cycle`), all of them in one window, or
     /// a window each. A machine with one screen has one window whatever
     /// `windows` says.
-    pub fn new(ps2: Arc<Ps2Controller>, screens: Vec<Arc<Screen>>, discs: Option<Arc<dyn DiscChanger>>, timer_manager: Arc<TimerManager>, event_loop: &EventLoop<()>, scale: u32, scroll_pixels_per_line: f64, lock_aspect_ratio: bool, renderer: crate::config::UiRenderer, windows: ScreenWindows) -> Self {
+    pub fn new(ps2: Arc<Ps2Controller>, screens: Vec<Arc<Screen>>, discs: Option<Arc<dyn DiscChanger>>, timer_manager: Arc<TimerManager>, event_loop: &EventLoop<()>, scale: u32, scroll_pixels_per_line: f64, lock_aspect_ratio: bool, renderer: crate::config::UiRenderer, windows: ScreenWindows, machine: crate::workstation::MachineSlot) -> Self {
         assert!(!screens.is_empty(), "a window needs a screen");
+        let fatal = Self::window_fatal(machine);
         let n = screens.len();
         let mode = if n > 1 { windows } else { ScreenWindows::Cycle };
         let named = n > 1 && mode != ScreenWindows::SideBySide;
@@ -911,7 +910,7 @@ impl Ui {
         let mut renderers = Vec::with_capacity(windows);
         for i in 0..windows {
             let title = if named { format!("{} - screen {}/{n}", crate::machine::emulator_name(), i + 1) } else { crate::machine::emulator_name() };
-            let (pane, r) = Self::open_window(&screens[i], i, &title, event_loop, scale, renderer, mode == ScreenWindows::SideBySide);
+            let (pane, r) = Self::open_window(&screens[i], i, &title, event_loop, scale, renderer, mode == ScreenWindows::SideBySide, &fatal);
             panes.push(pane);
             renderers.push(r);
         }
@@ -933,11 +932,27 @@ impl Ui {
         Self { ps2, screens, discs, panes, cycle, timer_manager, initial_scale: scale, scroll_pixels_per_line, lock_aspect_ratio }
     }
 
+    /// What the window's own GPU does when it fails: stop the machine, as a
+    /// board's device does.
+    #[cfg(feature = "wgpu")]
+    fn window_fatal(machine: crate::workstation::MachineSlot) -> Arc<dyn Fn(&str) + Send + Sync> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        crate::workstation::register_fatal_controller(machine, Some(rx));
+        Arc::new(move |why| {
+            let _ = tx.send(crate::traits::MachineFatal::new("window GPU", why));
+        })
+    }
+
+    #[cfg(not(feature = "wgpu"))]
+    fn window_fatal(_machine: crate::workstation::MachineSlot) -> Arc<dyn Fn(&str) + Send + Sync> {
+        Arc::new(|_| {})
+    }
+
     /// One window on the host for screen `index`, with the renderer that draws
     /// it (not yet installed): wgpu when asked and able, else GL. `wide`
     /// makes room for a picture wider than one screen's.
     #[allow(clippy::too_many_arguments)]
-    fn open_window(screen: &Screen, index: usize, title: &str, event_loop: &EventLoop<()>, scale: u32, renderer: crate::config::UiRenderer, wide: bool) -> (Pane, Box<dyn Renderer>) {
+    fn open_window(screen: &Screen, index: usize, title: &str, event_loop: &EventLoop<()>, scale: u32, renderer: crate::config::UiRenderer, wide: bool, fatal: &Arc<dyn Fn(&str) + Send + Sync>) -> (Pane, Box<dyn Renderer>) {
         let tex_w = if wide { 2 * crate::disp::FB_STRIDE } else { crate::disp::FB_STRIDE };
         // The Indy's default video mode is 1280×1024; open the window at that
         // size (plus the status bar). The renderer snaps to the real resolution
@@ -951,15 +966,17 @@ impl Ui {
 
         #[cfg(feature = "wgpu")]
         if renderer == crate::config::UiRenderer::Wgpu {
-            match Self::new_wgpu(screen, event_loop, window_builder.clone(), scale, tex_w) {
+            // Only a host that cannot run wgpu falls back, and says so; a device
+            // or present failure after this point stops the machine.
+            match Self::new_wgpu(screen, event_loop, window_builder.clone(), scale, tex_w, fatal) {
                 Ok((window, window_size, resize_request, display_res, renderer)) => {
                     return (Pane::new(window, window_size, resize_request, display_res, index), renderer);
                 }
-                Err(e) => eprintln!("iris: the wgpu renderer is unavailable ({e}); drawing with GL"),
+                Err(e) => eprintln!("iris: renderer = \"wgpu\" is not possible on this host ({e}); drawing with GL"),
             }
         }
         #[cfg(not(feature = "wgpu"))]
-        let _ = renderer;
+        let _ = (renderer, fatal);
 
         let template = ConfigTemplateBuilder::new()
             .with_alpha_size(8)
@@ -1124,13 +1141,17 @@ impl Ui {
         attrs: WindowAttributes,
         scale: u32,
         tex_w: usize,
+        fatal: &Arc<dyn Fn(&str) + Send + Sync>,
     ) -> Result<(Arc<Window>, Arc<Mutex<Option<(u32, u32)>>>, Arc<Mutex<Option<ResizeRequest>>>, Arc<Mutex<(u32, u32)>>, Box<dyn Renderer>), String> {
         let gpu = match screen.gpu.get().cloned() {
             Some(g) => g,
-            None => crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default(), Box::new(|e| eprintln!("iris: the window's GPU failed: {e}")))?,
+            None => {
+                let fatal = fatal.clone();
+                crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default(), Box::new(move |e| fatal(e)))?
+            }
         };
         #[allow(deprecated)]
-        let window = Arc::new(event_loop.create_window(attrs).map_err(|e| format!("create the window: {e}"))?);
+        let window = Arc::new(event_loop.create_window(attrs).expect("create the window"));
         let size = window.inner_size();
         let presenter = crate::wgpu::Presenter::new(
             &gpu,
@@ -1153,7 +1174,6 @@ impl Ui {
             status: StatusBar::new(),
             sbtex: StatusBarTexture::new(),
             bar: Vec::new(),
-            failed: false,
         };
         Ok((window, window_size, resize_request, display_res, Box::new(renderer)))
     }
@@ -1598,6 +1618,27 @@ mod tests {
     // Indy default mode. Content aspect = 1280 : (1024 + 16) = 1280 : 1040.
     const DW: u32 = 1280;
     const DH: u32 = 1024;
+
+    /// A present that fails is the device's failure: the machine is told.
+    #[cfg(feature = "wgpu")]
+    #[test]
+    fn a_failed_present_is_fatal_not_a_log_line() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let told = Arc::new(AtomicU32::new(0));
+        let n = told.clone();
+        let gpu = match crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default(), Box::new(move |_| { n.fetch_add(1, SeqCst); })) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        };
+        report_present(&gpu, Ok(()));
+        assert_eq!(told.load(SeqCst), 0);
+        report_present(&gpu, Err("surface lost".into()));
+        report_present(&gpu, Err("lost again".into()));
+        assert_eq!(told.load(SeqCst), 1, "the machine is told once, however many presents fail");
+    }
 
     #[test]
     fn dragging_width_derives_height() {
