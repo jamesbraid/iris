@@ -68,18 +68,9 @@ pub trait GfxDisplay: Send + Sync {
     fn cycles(&self) -> CyclesPtr;
 }
 
-/// Set when anything the scan-out reads may have changed; taken by the
-/// display before it reads anything. One store per processed command, job or
-/// display-register write, never one per pixel or per memory store.
-///
-/// The writer marks after its effect is visible and the display takes the flag
-/// before it reads, so a frame composed for a mark sees what the mark follows.
-/// Every mark stores, even with the flag already up: a frame that takes it
-/// between a writer's effect and its mark would otherwise lose the effect. The
-/// flag has a cache line to itself, away from the state the writers touch.
-///
-/// A display thread that has nothing to do until something changes can park on
-/// it ([`FrameWait::park_until_marked`]); a mark then wakes it.
+/// Set when anything the scan-out reads may have changed; taken by the display
+/// before it reads. Marks store even with the flag up, so a frame that takes it
+/// between a writer's effect and its mark does not lose the effect.
 #[repr(align(64))]
 #[derive(Default)]
 pub struct ScreenChanged {
@@ -100,9 +91,8 @@ impl ScreenChanged {
         c
     }
 
-    /// One release store, and a relaxed load of whether the display thread
-    /// sleeps, which a thread that is not parked leaves false: no call, lock or
-    /// read-modify-write on the writer's path.
+    /// One release store and a relaxed load of `parked`: no call, lock or
+    /// read-modify-write on the writer's path unless the thread sleeps.
     #[inline(always)]
     pub fn mark(&self) {
         self.flag.store(true, Ordering::Release);
@@ -117,29 +107,29 @@ impl ScreenChanged {
         self.flag.load(Ordering::Acquire)
     }
 
-    /// Whether a mark came since the last call, clearing it. The display calls
-    /// it before it reads anything the mark covers.
+    /// Whether a mark came since the last call, clearing it.
     #[inline]
     pub fn take(&self) -> bool {
         self.flag.swap(false, Ordering::AcqRel)
     }
 
-    /// End the display thread's current or next wait at once: a screenshot
-    /// request, or a stop.
+    /// End the display thread's current or next wait at once.
     pub fn wake(&self) {
         self.wake.store(true, Ordering::Release);
         self.parked.store(false, Ordering::Release);
-        if let Some(t) = self.thread.lock().as_ref() {
-            t.unpark();
-        }
+        self.unpark_thread();
     }
 
     fn unpark(&self) {
         // The swap makes one writer the waker.
         if self.parked.swap(false, Ordering::AcqRel) {
-            if let Some(t) = self.thread.lock().as_ref() {
-                t.unpark();
-            }
+            self.unpark_thread();
+        }
+    }
+
+    fn unpark_thread(&self) {
+        if let Some(t) = self.thread.lock().as_ref() {
+            t.unpark();
         }
     }
 }
@@ -233,27 +223,13 @@ pub const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
 /// 60 Hz: the status bar moves, and a window that missed a frame catches up.
 pub const IDLE_REFRESH: u32 = 6;
 
-/// The longest a parked display thread goes without looking for a mark. A
-/// writer that marks while the thread is on its way to sleep may not see that
-/// it sleeps, since the mark is a store with no barrier behind it. The thread's
-/// own look finds the flag, so the race costs this much latency, not a frame.
+/// The longest a parked thread goes without looking for a mark: a writer that
+/// marks as the thread falls asleep may not see that it sleeps.
 const PARK_RECHECK: Duration = Duration::from_millis(100);
 
-/// Why [`FrameWait::park_until_marked`] returned.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Woke {
-    /// The display was marked; the mark is still up for the frame to take.
-    Marked,
-    /// [`ScreenChanged::wake`] asked for the thread's attention.
-    Requested,
-    /// The board's timer came due.
-    Timer,
-}
-
-/// The display thread's wait between frames, for a loop that already has its
-/// frames. Frames are paced from a fixed start, so a slow one does not stretch
-/// the rate, and a stall resyncs to now rather than running the missed frames
-/// back to back. Call it last in the loop, after the frame.
+/// The display thread's wait between frames, paced from a fixed start so a slow
+/// frame does not stretch the rate and a stall resyncs to now. Call it last in
+/// the loop.
 pub struct FrameWait<'a> {
     changed: &'a ScreenChanged,
     period: Duration,
@@ -290,41 +266,30 @@ impl<'a> FrameWait<'a> {
         }
     }
 
-    /// With nothing marked, park until the display is marked,
-    /// [`ScreenChanged::wake`] is called, or `timer` comes due, instead of
-    /// waking every period to find nothing. A board whose retrace or other
-    /// hardware duty has a time of its own passes it as `timer`.
-    ///
-    /// A mark ends the wait at the next vsync, not at once, so marks between
-    /// two vsyncs make one frame; after a long park that vsync is long past and
-    /// the frame starts at once.
-    pub fn park_until_marked(&mut self, timer: Option<Instant>) -> Woke {
+    /// With nothing marked, park until a mark, a wake or `timer`, instead of
+    /// waking every period. A mark or wake then ends at the next vsync, so
+    /// marks between two vsyncs make one frame.
+    pub fn park_until_marked(&mut self, timer: Instant) {
         let c = self.changed;
         let end = self.next + self.period;
-        let woke = loop {
-            if c.is_marked() {
-                break Woke::Marked;
-            }
-            if c.wake.swap(false, Ordering::AcqRel) {
-                break Woke::Requested;
+        let timed_out = loop {
+            if c.is_marked() || c.wake.swap(false, Ordering::AcqRel) {
+                break false;
             }
             let now = Instant::now();
-            let wait = match timer {
-                Some(t) if t <= now => break Woke::Timer,
-                Some(t) => (t - now).min(PARK_RECHECK),
-                None => PARK_RECHECK,
-            };
-            // Say so, then look again: a writer that marked before it could
-            // see this is found by the look.
+            if timer <= now {
+                break true;
+            }
+            // Say so, then look again: a mark made before it could see this is found by the look.
             c.parked.store(true, Ordering::Relaxed);
             fence(Ordering::SeqCst);
             if !c.is_marked() && !c.wake.load(Ordering::Acquire) {
-                std::thread::park_timeout(wait);
+                std::thread::park_timeout((timer - now).min(PARK_RECHECK));
             }
             c.parked.store(false, Ordering::Relaxed);
         };
         let now = Instant::now();
-        if woke == Woke::Timer {
+        if timed_out {
             // The board's own time: leave the slot as it is unless it ran out.
             if now >= end {
                 self.next = now;
@@ -335,7 +300,6 @@ impl<'a> FrameWait<'a> {
         } else {
             self.next = now;
         }
-        woke
     }
 }
 
@@ -820,7 +784,7 @@ pub fn run_display(
         if need.any() || !screen.parks {
             wait.wait();
         } else {
-            wait.park_until_marked(Some(Instant::now() + Duration::from_millis(250)));
+            wait.park_until_marked(Instant::now() + Duration::from_millis(250));
         }
     }
     stop.finish(&screen.window.renderer);
@@ -1333,6 +1297,10 @@ mod tests {
         assert!(w.next > first_slot + period, "not from one of the slots it missed");
     }
 
+    fn far() -> Instant {
+        Instant::now() + Duration::from_secs(60)
+    }
+
     /// Run `f` on a thread with a wait, and return once it is parked (or done).
     fn parked_thread<T: Send + 'static>(
         c: &Arc<ScreenChanged>,
@@ -1367,20 +1335,20 @@ mod tests {
     #[test]
     fn a_parked_display_wakes_on_a_mark_and_not_before() {
         let c = Arc::new(ScreenChanged::default());
-        let t = parked_thread(&c, Duration::from_millis(1), |w| w.park_until_marked(None));
+        let t = parked_thread(&c, Duration::from_millis(1), |w| w.park_until_marked(far()));
         std::thread::sleep(Duration::from_millis(30));
         assert!(!t.is_finished(), "nothing marked, so it stays parked");
         c.mark();
-        assert_eq!(t.join().unwrap(), Woke::Marked);
+        t.join().unwrap();
         assert!(c.take(), "the mark is still up for the frame to take");
     }
 
     #[test]
     fn a_wake_ends_a_park() {
         let c = Arc::new(ScreenChanged::default());
-        let t = parked_thread(&c, Duration::from_millis(1), |w| w.park_until_marked(None));
+        let t = parked_thread(&c, Duration::from_millis(1), |w| w.park_until_marked(far()));
         c.wake();
-        assert_eq!(t.join().unwrap(), Woke::Requested);
+        t.join().unwrap();
     }
 
     #[test]
@@ -1392,11 +1360,11 @@ mod tests {
         for _ in 0..4 {
             c.mark();
         }
-        assert_eq!(w.park_until_marked(None), Woke::Marked);
+        w.park_until_marked(far());
         assert!(start.elapsed() >= Duration::from_millis(20), "the frame starts at the vsync, not at the mark");
         assert!(c.take());
         c.mark();
-        assert_eq!(w.park_until_marked(None), Woke::Marked);
+        w.park_until_marked(far());
         assert!(start.elapsed() >= Duration::from_millis(40), "and the next one a period after that");
     }
 
@@ -1409,7 +1377,7 @@ mod tests {
         w.next -= Duration::from_secs(1);
         c.mark();
         let t = Instant::now();
-        assert_eq!(w.park_until_marked(None), Woke::Marked);
+        w.park_until_marked(far());
         assert!(w.next >= t, "the slot starts from now");
     }
 
@@ -1418,7 +1386,7 @@ mod tests {
         let c = ScreenChanged::default();
         let mut w = FrameWait::new(&c, Duration::from_millis(20));
         let due = Instant::now() + Duration::from_millis(40);
-        assert_eq!(w.park_until_marked(Some(due)), Woke::Timer);
+        w.park_until_marked(due);
         assert!(Instant::now() >= due);
         assert!(!c.take());
     }
