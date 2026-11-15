@@ -20,8 +20,6 @@ pub mod screen;
 #[cfg(feature = "wgpu")]
 pub(crate) mod rex3_flat_fill;
 pub mod rex3_generic;
-#[cfg(feature = "rex-gpu")]
-pub mod rex3_gpu;
 pub mod rex3_shaders;
 pub mod rex3_shape;
 /// Draw-shape corpus persistence. Deliberately NOT behind `rex-jit`: the corpus

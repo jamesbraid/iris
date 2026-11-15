@@ -12,9 +12,7 @@
 //! `REX3_REPLAY=<file> cargo test -p iris --lib --features gputrace rex3_replay_file -- --ignored --nocapture`
 //! (`REX3_REPLAY_OUT=<dir>` saves the final framebuffers there,
 //! `REX3_REPLAY_TRACE=<file>` writes the annotated trace of the replay,
-//! `REX3_REPLAY_ENGINE=interp|jit|gpu` picks the draw path (`gpu` requires the
-//! opt-in `rex-gpu` feature and is replay-only),
-//! `REX3_GPU_BACKEND=auto|vulkan|metal|dx12|gl` selects its wgpu backend,
+//! `REX3_REPLAY_ENGINE=interp|jit` picks the draw path,
 //! `REX3_REPLAY_NOCHECK=1` skips the checkpoints, `REX3_REPLAY_LIMIT=<n>`
 //! replays only the first n records, `REX3_REPLAY_STATE=<file>` writes the
 //! final register state as TOML).
@@ -711,7 +709,6 @@ pub(crate) mod tests {
     enum ReplayEngine {
         Interp,
         Jit,
-        Gpu,
     }
 
     impl ReplayEngine {
@@ -719,7 +716,6 @@ pub(crate) mod tests {
             match self {
                 Self::Interp => "interpreter",
                 Self::Jit => "compiled shaders",
-                Self::Gpu => "GPU replay",
             }
         }
     }
@@ -931,31 +927,15 @@ pub(crate) mod tests {
         let engine = match std::env::var("REX3_REPLAY_ENGINE").as_deref() {
             Ok("interp") => ReplayEngine::Interp,
             Ok("jit") | Err(_) => ReplayEngine::Jit,
-            Ok("gpu") => {
-                #[cfg(feature = "rex-gpu")]
-                {
-                    ReplayEngine::Gpu
-                }
-                #[cfg(not(feature = "rex-gpu"))]
-                {
-                    return Err("REX3_REPLAY_ENGINE=gpu requires cargo --features rex-gpu".into());
-                }
-            }
             Ok(other) => {
                 return Err(format!(
-                    "REX3_REPLAY_ENGINE={other}: want interp, jit, or gpu"
+                    "REX3_REPLAY_ENGINE={other}: want interp or jit"
                 ))
             }
         };
         let mut board = make_board(start_state(&recs), engine == ReplayEngine::Jit)?;
         let result = (|| {
             let rex = board.rex();
-            #[cfg(feature = "rex-gpu")]
-            if engine == ReplayEngine::Gpu {
-                let backend = std::env::var("REX3_GPU_BACKEND").unwrap_or_else(|_| "auto".into());
-                let diagnostics = rex.enable_gpu_replay(&backend)?;
-                eprintln!("{path}: REX3 GPU replay {diagnostics}");
-            }
             if let Ok(t) = std::env::var("REX3_REPLAY_TRACE") {
                 rex.start_trace(&t, super::super::trace::TRACE_ALL).map_err(|e| format!("{t}: {e}"))?;
             }
@@ -987,12 +967,6 @@ pub(crate) mod tests {
         };
         let rex = board.rex();
         rex.stop();
-        #[cfg(feature = "rex-gpu")]
-        let gpu_report = if engine == ReplayEngine::Gpu {
-            rex.gpu_replay_report()
-        } else {
-            None
-        };
         board.stopped();
         eprintln!(
             "{path}: {} records in {:.3} s ({}), final state {}",
@@ -1007,35 +981,6 @@ pub(crate) mod tests {
         );
         if !rep.differ_at.is_empty() {
             eprintln!("  bus reads that differ, by offset: {:x?}", rep.differ_at);
-        }
-        #[cfg(feature = "rex-gpu")]
-        if let Some(report) = &gpu_report {
-            eprintln!(
-                "{path}: GPU handled={} fallback={} submissions={} fences={} \
-                 upload_bytes={} readback_bytes={} fallback_reasons={:?}",
-                report.handled_draws,
-                report.fallback_draws,
-                report.submissions,
-                report.fences,
-                report.bytes_uploaded,
-                report.bytes_read_back,
-                report.fallback_reasons,
-            );
-            if let Some(telemetry) = &report.telemetry {
-                eprintln!("{path}: GPU telemetry={telemetry:?}");
-            }
-            if let Some(error) = &report.error {
-                return Err(format!("GPU replay failed: {error}"));
-            }
-            if let Some(error) = &report.timestamp_error {
-                return Err(format!("GPU timestamp profiling failed: {error}"));
-            }
-            if report.handled_draws == 0 || report.submissions == 0 {
-                return Err(
-                    "GPU replay submitted no draws; the recording does not exercise the initial flat-fill subset"
-                        .into(),
-                );
-            }
         }
         if check && rep.checked == 0 {
             return Err("no checkpoints in recording".into());

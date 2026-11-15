@@ -3451,8 +3451,7 @@ impl MachineConfig {
         {
             return Err(
                 "graphics.raster = \"wgpu\" is not available for Newport yet; \
-                 the resident backend remains gated until M3. A rex-gpu build may use \
-                 IRIS_REX3_GPU for the legacy experimental prototype"
+                 the resident backend remains gated until M3"
                     .into(),
             );
         }
@@ -4521,9 +4520,7 @@ mod export_tests {
         cfg.graphics.raster = RasterUnit::Wgpu;
         let error = cfg.validate().unwrap_err();
         assert!(
-            error.contains("not available for Newport yet")
-                && error.contains("until M3")
-                && error.contains("IRIS_REX3_GPU"),
+            error.contains("not available for Newport yet") && error.contains("until M3"),
             "{error}"
         );
     }

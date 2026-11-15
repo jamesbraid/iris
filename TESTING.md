@@ -239,18 +239,6 @@ anchor is held, after guard release, and after anchor removal:
 REX3_CORPUS_IO_DIR=target cargo test -p iris --lib --features gputrace,rex-jit,rexdiag rex3_corpus_filesystem_security -- --ignored --nocapture
 ```
 
-The hardware GPU gate is explicitly ignored unless selected. It requires an
-integrated/discrete adapter, checks nonzero handled work and declared
-fallbacks, and reports unavailable hardware rather than passing it. The batch
-case compares framebuffer state and completed readback at the instant the
-display fence is published, before any subsequent idle flush. The second
-selected GPU test injects an early signal and requires this check to reject
-stale pixels even when the later final state matches:
-
-```sh
-REX3_GPU_BACKEND=vulkan cargo test -p iris --lib --features rex-gpu,rex-jit,rexdiag rex3_corpus_gpu_ -- --ignored --nocapture --test-threads=1
-```
-
 The separate **test-only resident Newport raster** has CPU-only limit,
 status and GFIFO gate tests, plus ignored hardware parity tests. The hardware
 tests require the named hardware adapter/backend rather than silently skipping;
@@ -395,7 +383,7 @@ six. A new push cancels the run it replaces on a pull request; each push to
 `main` gets its own run and none is cancelled.
 
 CI builds two feature sets: the default features, and the default plus `jitv2`,
-`rex-gpu` and `rex-jit`. `.cargo/config.toml` owns every test command and the
+`gputrace` and `rex-jit`. `.cargo/config.toml` owns every test command and the
 workflows only call its aliases: `cargo ci-test` (the second set, on the Linux
 jobs), `cargo ci-test-default`, and `cargo ci-clock` (the nightly clock tests).
 `jitv2` implies `tcache`, which compiles out the real-cache path, so the default
