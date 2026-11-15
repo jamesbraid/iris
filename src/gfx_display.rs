@@ -543,8 +543,7 @@ pub struct Screen {
     pub requests: FrameRequests,
     /// What the display thread did, for the monitor's `screen frames`.
     pub counts: FrameCounts,
-    pub window: Arc<Window>,
-    pub index: usize,
+    pub window: Window,
     /// Park the display thread while nobody looks, instead of ticking at the
     /// frame period. Only a board with no retrace duty may: its marks wake it.
     pub parks: bool,
@@ -572,14 +571,13 @@ pub struct Screen {
     spare: Mutex<Vec<u32>>,
 }
 
-impl Screen {
-    pub fn new(index: usize, window: Arc<Window>) -> Screen {
+impl Default for Screen {
+    fn default() -> Screen {
         Screen {
             changed: Arc::new(ScreenChanged::marked()),
             requests: FrameRequests::default(),
             counts: FrameCounts::default(),
-            window,
-            index,
+            window: Window::default(),
             parks: false,
             always: false,
             #[cfg(feature = "wgpu")]
@@ -593,7 +591,9 @@ impl Screen {
             spare: Mutex::new(Vec::new()),
         }
     }
+}
 
+impl Screen {
     /// What this tick has to compose: a request or a capturing client wants
     /// words; a renderer is shown (and takes device frames or Newport's
     /// planes, when it does and nobody wants words).
@@ -889,7 +889,7 @@ pub(crate) mod testing {
     impl FakeDisplay {
         /// A `w` by `h` screen; `stuck` never composes a requested frame.
         pub(crate) fn new(w: u32, h: u32, stuck: bool) -> Self {
-            let screens = [Arc::new(Screen::new(0, Arc::default()))];
+            let screens = [Arc::new(Screen::default())];
             // The picture a stuck board still has from before.
             let mut first = screens[0].frame(w, h);
             first.words.fill(0xff00_0000);
@@ -933,7 +933,7 @@ mod tests {
     use super::*;
 
     fn screen() -> Screen {
-        Screen::new(0, Arc::default())
+        Screen::default()
     }
 
     fn stats() -> BarStats {
@@ -1169,7 +1169,7 @@ mod tests {
     fn three() -> Vec<Arc<Screen>> {
         (0..3)
             .map(|i| {
-                let s = Arc::new(Screen::new(i, Arc::default()));
+                let s = Arc::new(Screen::default());
                 s.window.shown.store(i, Ordering::Relaxed);
                 s.window.of.store(3, Ordering::Relaxed);
                 s
@@ -1237,8 +1237,8 @@ mod tests {
     #[test]
     fn a_renderer_returning_to_a_screen_is_resized_and_its_thread_woken() {
         let screens: Vec<_> = (0..2)
-            .map(|i| {
-                let mut s = Screen::new(i, Arc::default());
+            .map(|_| {
+                let mut s = Screen::default();
                 s.parks = true;
                 Arc::new(s)
             })

@@ -1652,7 +1652,7 @@ impl Rex3 {
             debug_state: Mutex::new(DebugState::default()),
             diag: AtomicU64::new(0),
             screens: [Arc::new({
-                let mut screen = crate::gfx_display::Screen::new(0, Arc::default());
+                let mut screen = crate::gfx_display::Screen::default();
                 // Its compose also learns the mode and the cursor offset.
                 screen.always = true;
                 screen

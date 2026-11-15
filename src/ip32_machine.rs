@@ -951,7 +951,7 @@ const RESCAN: Duration = Duration::from_secs(1);
 
 impl O2Display {
     fn new(bus: Arc<Ip32Bus>, status: Arc<crate::disp::StatusSource>, running: Arc<AtomicBool>) -> Self {
-        let mut screen = crate::gfx_display::Screen::new(0, Arc::default());
+        let mut screen = crate::gfx_display::Screen::default();
         // The marks come from GBE and from memory, which share the flag.
         screen.changed = bus.gbe.changed.clone();
         screen.parks = true;

@@ -199,7 +199,7 @@ mod tests {
     /// screen's frames only ask for a redraw.
     #[test]
     fn the_first_screen_draws_every_screens_newest_frame_into_one_picture() {
-        let screens: Vec<_> = (0..2).map(|i| Arc::new(Screen::new(i, Arc::default()))).collect();
+        let screens: Vec<_> = (0..2).map(|_| Arc::new(Screen::default())).collect();
         let window = Window::default();
         for (s, r) in screens.iter().zip(SideBySide::for_screens(&screens, Box::new(window.clone()))) {
             *s.window.renderer.lock() = Some(r);
