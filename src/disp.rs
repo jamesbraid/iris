@@ -744,6 +744,9 @@ pub fn write_png(path: impl AsRef<Path>, w: u32, h: u32, color: png::ColorType, 
 /// Each word is `0xAABBGGRR` or `0xFFBBGGRR`: red is the low byte. The screen
 /// buffers use `FB_STRIDE` as their stride.
 pub fn write_png_words(path: impl AsRef<Path>, px: &[u32], stride: usize, w: usize, h: usize) -> io::Result<()> {
+    if h > 0 && px.len() < (h - 1) * stride + w {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{} words is too few for {w}x{h}", px.len())));
+    }
     let mut rgb = Vec::with_capacity(w * h * 3);
     for y in 0..h {
         for &p in &px[y * stride..y * stride + w] {
@@ -788,6 +791,14 @@ mod png_writer_tests {
             0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90,
             0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0xFF,
         ]);
+    }
+
+    /// A frame with no words (composed on a device only) is refused, not sliced.
+    #[test]
+    fn too_few_words_are_an_error_not_a_panic() {
+        let err = write_png_words(scratch("empty"), &[], 4, 4, 2).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(write_png_words(scratch("short"), &[0; 6], 4, 3, 2).is_err(), "the last row needs its 3 words");
     }
 
     /// RGBA keeps its alpha bytes, and a rewrite replaces the old file whole

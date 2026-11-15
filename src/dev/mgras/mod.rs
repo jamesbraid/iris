@@ -586,7 +586,7 @@ impl Mgras {
             addr_of_mut!((*p).rss_thread).write(std::array::from_fn(|_| SpinLock::new(None)));
             addr_of_mut!((*p).dirty).write(AtomicBool::new(true));
             addr_of_mut!((*p).refresh).write(SpinLock::new(None));
-            addr_of_mut!((*p).screens).write([Arc::new(crate::gfx_display::Screen::new(0, Arc::default()))]);
+            addr_of_mut!((*p).screens).write([Arc::new(crate::gfx_display::Screen::default())]);
             addr_of_mut!((*p).display_stop).write(Default::default());
             addr_of_mut!((*p).status).write(status);
             addr_of_mut!((*p).trace).write(SpinLock::new(debug::MgrasTrace::new()));

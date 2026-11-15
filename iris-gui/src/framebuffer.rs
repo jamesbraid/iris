@@ -300,7 +300,8 @@ impl Renderer for GlCaptureRenderer {
             return;
         }
 
-        let done = if let Some(planes) = &frame.planes {
+        let planes = frame.planes.as_ref().and_then(|p| p.downcast_ref::<iris::dev::ng1::screen::Ng1Screen>());
+        let done = if let Some(planes) = planes {
             // Newport's planes: composed on the GPU, read back for the sink.
             let needed = FB_STRIDE * FB_MAX_H;
             if self.rgba.len() < needed {

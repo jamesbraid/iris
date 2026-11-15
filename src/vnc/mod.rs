@@ -143,11 +143,8 @@ impl VncServer {
         Ok(VncServer { shared, addr })
     }
 
-    /// One server per screen of `input`'s machine, the first on `listen` and
-    /// screen N on the next port up by N (`:5900`, `:5901`, ...). Each
-    /// steers the pointer with its own screen's cursor. With port 0 every
-    /// server takes any free port. A machine with no screen gets the error
-    /// [`start`](Self::start) gives.
+    /// One server per screen, the first on `listen` and screen N on the port N
+    /// above it (any free port with port 0), each steering by its own cursor.
     pub fn start_screens(
         input: &Arc<HostInput>, listen: &str, max_fps: Option<u32>, name: &str, password: Option<auth::Password>,
     ) -> Result<Vec<VncServer>, String> {
@@ -215,7 +212,7 @@ fn grab_loop(s: &Shared) {
             if watching {
                 // A frame at once, so the new viewer is not left waiting for a change.
                 screen.requests.request();
-                screen.changed.wake();
+                screen.wake();
             }
             capturing = watching;
             last_seq = None;
@@ -226,7 +223,7 @@ fn grab_loop(s: &Shared) {
             s.changed.wait_for(&mut f, Duration::from_millis(200));
             continue;
         }
-        if let Some(frame) = screen.latest().filter(|f| f.width > 0 && f.height > 0) {
+        if let Some(frame) = screen.latest_words() {
             if last_seq != Some(frame.seq) {
                 last_seq = Some(frame.seq);
                 cur.clear();

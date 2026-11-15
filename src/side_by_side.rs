@@ -1,16 +1,5 @@
-//! One window showing all of a machine's screens next to each other
-//! (`[graphics] windows = "side-by-side"`).
-//!
-//! Each screen keeps its own display thread and its own frames. The window's
-//! real renderer is bound to one thread (a GL context is current on one), so
-//! it sits behind the first screen's slot and is only ever called from that
-//! screen's thread. Every screen's slot holds a [`SideBySide`]: the first
-//! screen's draws the newest frame of every screen into one picture and hands
-//! it to the real renderer; the others only tell the first one that there is
-//! something new to draw.
-//!
-//! Words only: the picture is built on the CPU from [`Screen::latest`], so no
-//! board composes on a device or hands over Newport's planes for this window.
+//! One window showing all screens in a row (`windows = "side-by-side"`): screen 0's
+//! slot holds the real renderer and joins the newest frames on the CPU; the others poke it.
 
 use std::sync::Arc;
 
@@ -27,9 +16,8 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Pictures of `sizes` (width, height) in a row, left to right with their
-    /// tops level and no gap. The row is as tall as the tallest; a screen with
-    /// no picture yet (0 by 0) takes no room.
+    /// Pictures of `sizes` (width, height) left to right, tops level; a screen
+    /// with no picture yet takes no room.
     pub fn row(sizes: &[(u32, u32)]) -> Layout {
         let mut x = 0;
         let mut origins = Vec::with_capacity(sizes.len());
@@ -79,7 +67,7 @@ impl SideBySide {
     /// Copy the newest frame of every screen into `out`, when any is new.
     /// Returns whether there is a picture to show.
     fn compose(&mut self) -> bool {
-        let frames: Vec<_> = self.screens.iter().map(|s| s.latest().filter(|f| f.width > 0 && f.height > 0 && !f.words.is_empty())).collect();
+        let frames: Vec<_> = self.screens.iter().map(|s| s.latest_words()).collect();
         let sizes: Vec<_> = frames.iter().map(|f| f.as_ref().map_or((0, 0), |f| (f.width, f.height))).collect();
         let seqs: Vec<_> = frames.iter().map(|f| f.as_ref().map_or(0, |f| f.seq)).collect();
         let layout = Layout::row(&sizes);
@@ -111,10 +99,9 @@ impl SideBySide {
 impl Renderer for SideBySide {
     fn present(&mut self, _frame: &Frame, stats: &BarStats) {
         if self.me != 0 {
-            // Another thread draws: ask it for a picture that includes this frame.
-            let first = &self.screens[0];
-            first.window.poke();
-            first.changed.wake();
+            // Screen 0's thread draws at its next tick; a wake would cut its
+            // frame short and add a retrace.
+            self.screens[0].window.poke();
             return;
         }
         if !self.compose() {
@@ -200,7 +187,7 @@ mod tests {
     /// screen's frames only ask for a redraw.
     #[test]
     fn the_first_screen_draws_every_screens_newest_frame_into_one_picture() {
-        let screens: Vec<_> = (0..2).map(|i| Arc::new(Screen::new(i, Arc::default()))).collect();
+        let screens: Vec<_> = (0..2).map(|_| Arc::new(Screen::default())).collect();
         let window = Window::default();
         for (s, r) in screens.iter().zip(SideBySide::for_screens(&screens, Box::new(window.clone()))) {
             *s.window.renderer.lock() = Some(r);
@@ -208,7 +195,11 @@ mod tests {
         publish(&screens[0], 2, 2, 1);
         // The second screen has no frame yet: its room is empty.
         assert_eq!(window.shown.lock().last().unwrap(), &(2, 2, vec![1; 4]));
+        let mut wait = crate::gfx_display::FrameWait::new(&screens[0].changed, std::time::Duration::from_millis(300));
+        let start = std::time::Instant::now();
         publish(&screens[1], 3, 1, 2);
+        wait.wait();
+        assert!(start.elapsed() >= std::time::Duration::from_millis(250), "the second screen's frame does not cut the first one's period short");
         assert_eq!(window.shown.lock().len(), 1, "the second screen's thread does not draw");
         assert!(screens[0].window.label().is_none());
         // The first screen's next tick shows the newest frames of both.

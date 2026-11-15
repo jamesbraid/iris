@@ -1622,7 +1622,7 @@ impl Rex3 {
             debug_state: Mutex::new(DebugState::default()),
             diag: AtomicU64::new(0),
             screens: [Arc::new({
-                let mut screen = crate::gfx_display::Screen::new(0, Arc::default());
+                let mut screen = crate::gfx_display::Screen::default();
                 // Its compose also learns the mode and the cursor offset.
                 screen.always = true;
                 screen
@@ -3747,7 +3747,7 @@ impl Rex3 {
             }
             // For the one presenter that composes the planes itself.
             if kind.2 && !composed {
-                out.planes = Some(crate::dev::ng1::screen::Ng1Screen(self.screen.clone()));
+                out.planes = Some(Box::new(crate::dev::ng1::screen::Ng1Screen(self.screen.clone())));
                 composed = true;
             }
             if !composed {

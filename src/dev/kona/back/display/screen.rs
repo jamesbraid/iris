@@ -26,7 +26,7 @@ pub struct Display {
 impl Display {
     pub fn new(status: Arc<StatusSource>) -> Display {
         Display {
-            screens: [Arc::new(Screen::new(0, Arc::default()))],
+            screens: [Arc::new(Screen::default())],
             display_stop: DisplayStop::default(),
             status: Mutex::new(status),
             tables: std::sync::OnceLock::new(),

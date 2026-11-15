@@ -284,7 +284,7 @@ impl Gr2 {
             addr_of_mut!((*p).threads).write(Mutex::new(Vec::new()));
             addr_of_mut!((*p).hq_thread).write(Mutex::new(None));
             addr_of_mut!((*p).re3_thread).write(Mutex::new(None));
-            addr_of_mut!((*p).screens).write([Arc::new(crate::gfx_display::Screen::new(0, Arc::default()))]);
+            addr_of_mut!((*p).screens).write([Arc::new(crate::gfx_display::Screen::default())]);
             #[cfg(feature = "wgpu")]
             addr_of_mut!((*p).scanout).write(UnsafeCell::new(scanout));
             addr_of_mut!((*p).display_stop).write(Default::default());

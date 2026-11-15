@@ -217,7 +217,7 @@ fn main() {
         // screens is also what tells them which device it draws on.
         let screens: Vec<_> = machine.displays().iter().flat_map(|d| d.screens().to_vec()).collect();
         assert!(!screens.is_empty(), "a graphics board must be present in non-headless mode");
-        let ui = Ui::new(machine.get_ps2(), screens, machine.disc_changer(), machine.get_timer_manager(), &event_loop, scale, scroll_pixels_per_line, lock_aspect_ratio, ui_renderer, screen_windows);
+        let ui = Ui::new(machine.get_ps2(), screens, machine.disc_changer(), machine.get_timer_manager(), &event_loop, scale, scroll_pixels_per_line, lock_aspect_ratio, ui_renderer, screen_windows, machine.machine_slot());
         ui.run(event_loop);
     }
 

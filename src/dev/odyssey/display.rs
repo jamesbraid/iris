@@ -39,7 +39,7 @@ pub(super) struct Display {
 impl Display {
     pub(super) fn new(status: Arc<crate::disp::StatusSource>) -> Self {
         Self {
-            screens: [Arc::new(Screen::new(0, Arc::default()))],
+            screens: [Arc::new(Screen::default())],
             display_stop: Default::default(),
             reader: Mutex::new(ScanoutReader::default()),
             words: AtomicBool::new(false),

@@ -1313,15 +1313,8 @@ pub struct GraphicsSection {
     /// two from 8 to 256.
     #[serde(default = "default_graphics_tile")]
     pub tile: u32,
-    /// VPro, IMPACT and InfiniteReality (KONA): where the raster unit runs:
-    /// `cpu` (the threads above; IMPACT's raster engine threads) or `wgpu`
-    /// (the host GPU through wgpu compute; needs the `wgpu` feature). On
-    /// InfiniteReality the pixel planes live on the GPU and the display
-    /// scans out from them, and the draws its kernels do not run yet
-    /// (texture, fog, smoothing, multisampling, pixel transfers) run on the
-    /// CPU against a copy. GR2 and the O2: where the display scans out (GR2's
-    /// raster and CRIME's rendering engine stay on
-    /// the CPU).
+    /// Where the raster unit runs, `cpu` or `wgpu` (needs the `wgpu` feature); for
+    /// GR2 and the O2 only where the display scans out.
     #[serde(default)]
     pub raster: RasterUnit,
     /// The wgpu backend for `raster = "wgpu"`: `auto`, `vulkan`, `metal`,
@@ -1333,10 +1326,8 @@ pub struct GraphicsSection {
     /// means volatile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flash: Option<String>,
-    /// How the host shows a machine's several screens (dual-head Newport):
-    /// `cycle` (default) one window with a hotkey to step through them,
-    /// `side-by-side` all in one window, `per-screen` a window each. Only
-    /// valid with more than one screen. See [`MachineConfig::screen_count`].
+    /// Several screens (dual-head Newport): `cycle` (default) one window with
+    /// a hotkey, `side-by-side` one window, `per-screen` a window each.
     #[serde(default, skip_serializing_if = "ScreenWindows::is_default")]
     pub windows: ScreenWindows,
 }
@@ -3513,9 +3504,7 @@ impl MachineConfig {
         Ok(())
     }
 
-    /// How many screens the machine presents to the host: the Newport heads;
-    /// every other board has one. A machine whose board drives several
-    /// channels counts them here.
+    /// How many screens the machine presents: the Newport heads, else one.
     pub fn screen_count(&self) -> usize {
         if self.graphics_board() == GraphicsBoard::Newport && !self.headless {
             self.graphics.heads as usize
