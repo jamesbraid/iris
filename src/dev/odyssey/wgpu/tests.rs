@@ -72,6 +72,7 @@ fn gpu() -> Option<Arc<Gpu>> {
     match Gpu::new(&GpuOptions::default(), Box::new(|_| {})) {
         Ok(g) => Some(g),
         Err(e) => {
+            if std::env::var_os("IRIS_REQUIRE_GPU").is_some_and(|v| v == "1") { panic!("no GPU: {e}") }
             eprintln!("skipped: {e}");
             None
         }
@@ -917,7 +918,10 @@ fn a_failed_gpu_stops_the_unit_and_does_not_fall_back() {
     let seen = Arc::clone(&calls);
     let gpu = match Gpu::new(&GpuOptions::default(), Box::new(move |_| { seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst); })) {
         Ok(g) => g,
-        Err(e) => return eprintln!("skipped: {e}"),
+        Err(e) => {
+            if std::env::var_os("IRIS_REQUIRE_GPU").is_some_and(|v| v == "1") { panic!("no GPU: {e}") }
+            return eprintln!("skipped: {e}");
+        }
     };
     let mut board = super::super::board::Board::new("v12", 0).expect("board");
     board.enable_gpu(&gpu.share()).expect("the GPU unit");

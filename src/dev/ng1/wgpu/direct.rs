@@ -222,6 +222,12 @@ pub(super) fn did_history_error(src: &Ng1DisplaySource<'_>) -> Option<ScanoutErr
     None
 }
 
+struct DidBindings {
+    did: wgpu::Buffer,
+    expand: wgpu::BindGroup,
+    display: wgpu::BindGroup,
+}
+
 /// Newport's display on the GPU. It owns the pipeline, the output buffer and
 /// the copies of the display state the kernel reads; the planes are the
 /// caller's.
@@ -233,13 +239,11 @@ pub struct Ng1Scanout {
     did_layout: wgpu::BindGroupLayout,
     /// The planes' bind group and the generation of the planes it binds.
     planes_group: Option<(u64, wgpu::BindGroup)>,
-    did_source: Option<u64>,
-    did: Option<wgpu::Buffer>,
+    /// The window-id buffer and its bindings, and the display source they are for.
+    bound: Option<(u64, DidBindings)>,
     vc2: wgpu::Buffer,
     did_params: wgpu::Buffer,
     did_pipeline: wgpu::ComputePipeline,
-    did_group: Option<wgpu::BindGroup>,
-    display_group: Option<wgpu::BindGroup>,
     uploaded: Option<Ng1DisplayGenerations>,
     dimensions: Option<(u32, u32)>,
     traffic: ScanoutTraffic,
@@ -296,8 +300,7 @@ impl Ng1Scanout {
         gpu.check().map_err(device_error)?;
         Ok(Ng1Scanout {
             pipeline, scanout, planes_layout, display_layout, did_layout, planes_group: None,
-            did_source: None, did: None, vc2, did_params, did_pipeline, did_group: None,
-            display_group: None, uploaded: None, dimensions: None, traffic: ScanoutTraffic::default(),
+            bound: None, vc2, did_params, did_pipeline, uploaded: None, dimensions: None, traffic: ScanoutTraffic::default(),
         })
     }
 
@@ -312,7 +315,7 @@ impl Ng1Scanout {
 
     #[cfg(test)]
     pub(super) fn did_for_test(&self) -> &wgpu::Buffer {
-        self.did.as_ref().expect("DID buffer is bound after composition")
+        &self.bound.as_ref().expect("DID buffer is bound after composition").1.did
     }
 
     /// The buffer the last frame was composed into: 0xAABBGGRR, rows of
@@ -366,9 +369,8 @@ impl Ng1Scanout {
         state.as_mut().ok_or(ScanoutError::Invalid("DID state is missing"))
     }
 
-    fn expand_did(&self, params: &DidParams) -> Result<(), ScanoutError> {
+    fn expand_did(&self, group: &wgpu::BindGroup, params: &DidParams) -> Result<(), ScanoutError> {
         let gpu = self.scanout.gpu();
-        let group = self.did_group.as_ref().ok_or(ScanoutError::Invalid("DID bindings are missing"))?;
         gpu.write(&self.did_params, 0, bytemuck::bytes_of(params));
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ng1 DID expansion"),
@@ -412,13 +414,11 @@ impl Ng1Scanout {
                 return Err(error);
             }
         }
-        self.did_state(&mut *did_state)?;
-        if self.did_source != Some(generation.source) {
+        let resident = self.did_state(&mut *did_state)?;
+        if self.bound.as_ref().is_none_or(|(source, _)| *source != generation.source) {
             let gpu = self.scanout.gpu();
-            let did = did_state.as_ref()
-                .ok_or(ScanoutError::Invalid("DID state is missing"))?
-                .buffer.clone();
-            let did_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let did = resident.buffer.clone();
+            let expand = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ng1 DID expansion"),
                 layout: &self.did_layout,
                 entries: &[
@@ -427,7 +427,7 @@ impl Ng1Scanout {
                     wgpu::BindGroupEntry { binding: 2, resource: self.did_params.as_entire_binding() },
                 ],
             });
-            let display_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let display = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ng1 display state"),
                 layout: &self.display_layout,
                 entries: &[
@@ -436,10 +436,7 @@ impl Ng1Scanout {
                 ],
             });
             gpu.check().map_err(device_error)?;
-            self.did = Some(did);
-            self.did_group = Some(did_group);
-            self.display_group = Some(display_group);
-            self.did_source = Some(generation.source);
+            self.bound = Some((generation.source, DidBindings { did, expand, display }));
         }
         if self.planes_group.as_ref().is_none_or(|(g, _)| *g != planes.generation) {
             let gpu = self.scanout.gpu();
@@ -502,18 +499,17 @@ impl Ng1Scanout {
         }
         if did_changed {
             self.traffic.did_expansions.attempts += 1;
-            self.expand_did(&did_params)?;
-            did_state.as_mut()
-                .ok_or(ScanoutError::Invalid("DID state is missing"))?
-                .initialized = true;
+            let Some((_, bound)) = &self.bound else { unreachable!("bound above") };
+            self.expand_did(&bound.expand, &did_params)?;
+            if let Some(state) = did_state.as_mut() {
+                state.initialized = true;
+            }
             self.traffic.display.submit(expansion_uploads, expansion_bytes);
             self.traffic.did_expansions.submitted += 1;
         }
         let before_submission = self.scanout.frames;
-        let display_group = self.display_group.as_ref()
-            .ok_or(ScanoutError::Invalid("display bindings are missing"))?;
-        let planes_group = &self.planes_group.as_ref()
-            .ok_or(ScanoutError::Invalid("plane bindings are missing"))?.1;
+        let (Some((_, bound)), Some((_, planes_group))) = (&self.bound, &self.planes_group) else { unreachable!("bound above") };
+        let display_group = &bound.display;
         let update: Option<&[u8]> = match (&slot, &cursor) {
             (Some(slot), _) => Some(bytemuck::bytes_of(slot)),
             (None, Some(cursor)) => Some(bytemuck::bytes_of(cursor)),

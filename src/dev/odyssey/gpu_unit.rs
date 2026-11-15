@@ -241,10 +241,6 @@ mod stub_scanout {
     pub(crate) enum GpuScanout {}
 
     impl GpuScanout {
-        pub fn fail(&self, _why: &str) {
-            match *self {}
-        }
-
         pub fn run(&mut self, _frame: &super::super::frame::Frame, _regs: &super::super::reader::DisplayRegs, _width: u32, _height: u32, _out: &mut [u32]) -> Result<(), String> {
             match *self {}
         }

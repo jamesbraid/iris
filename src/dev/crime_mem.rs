@@ -77,10 +77,6 @@ const BIG: u32 = 128 << 20;
 const CTRL_128M: u64 = 0x100;
 /// The page jitv2 tracks code by.
 const PAGE: usize = 4096;
-/// The unit a scan-out copy of memory follows writes by: GBE's tile.
-pub const TILE_SHIFT: u32 = 16;
-/// Tiles in the window, in 64-bit words of marks.
-const TILE_WORDS: usize = (RAM_WINDOW_SIZE as usize >> TILE_SHIFT) / 64;
 const CTRL_BASE: u64 = 0x1f;
 /// The window in 32 MB slots.
 const SLOTS: usize = (RAM_WINDOW_SIZE / SLOT) as usize;
@@ -450,29 +446,6 @@ impl O2Memory {
         &self.shared.changed
     }
 
-    /// Note the engine's writes by tile from now on ([`Self::take_tile`]).
-    pub fn track_tiles(&self) {
-        self.shared.track_tiles.store(true, Ordering::Release);
-    }
-
-    /// Whether the engine wrote the 64 KB tile at guest physical `p` (as
-    /// [`Self::dma_offset`] gives it) since the last call for it, clearing the
-    /// note. Take it before reading the tile, so a write during the read is
-    /// found next time.
-    pub fn take_tile(&self, p: usize) -> bool {
-        let t = p.wrapping_sub(RAM_BASE as usize) >> TILE_SHIFT;
-        if t >= TILE_WORDS * 64 {
-            return true;
-        }
-        let bit = 1u64 << (t % 64);
-        self.shared.tiles[t / 64].fetch_and(!bit, Ordering::AcqRel) & bit != 0
-    }
-
-    /// Changes when memory was put back wholesale: every copy of it is stale.
-    pub fn epoch(&self) -> u64 {
-        self.shared.epoch.load(Ordering::Acquire)
-    }
-
     /// Put back words [`Self::bank_words`] gave, concatenated, with every
     /// page's generation bumped so no compiled code outlives them.
     pub fn restore_words(&self, words: &[u32]) -> Result<(), String> {
@@ -490,7 +463,6 @@ impl O2Memory {
             b.bump_gen_all();
             at += n;
         }
-        self.shared.epoch.fetch_add(1, Ordering::Release);
         self.shared.changed.mark();
         Ok(())
     }
@@ -582,34 +554,13 @@ impl std::ops::IndexMut<usize> for O2Memory {
 /// Which 32 MB slots of the RAM window are mapped (bit n: `RAM_BASE + n *
 /// 32 MB`) and the decode generation, as [`O2Memory`] last laid the window
 /// out.
+#[derive(Default)]
 pub struct WindowState {
     mapped: std::sync::atomic::AtomicU32,
     decode_gen: std::sync::atomic::AtomicU64,
     /// Marked when the rendering engine has written memory, and when a snapshot
     /// puts memory back: the scan-out reads it.
     changed: std::sync::Arc<crate::gfx_display::ScreenChanged>,
-    /// Whether the engine's writes are also noted by 64 KB tile, for a
-    /// scan-out that keeps a copy of the tiles it reads.
-    track_tiles: std::sync::atomic::AtomicBool,
-    /// Bit `t`: the engine wrote tile `t` of the window since a scan-out last
-    /// took it (see [`O2Memory::take_tile`]).
-    tiles: [std::sync::atomic::AtomicU64; TILE_WORDS],
-    /// Counts up when memory is put back wholesale, which a copy of it cannot
-    /// follow tile by tile.
-    epoch: std::sync::atomic::AtomicU64,
-}
-
-impl Default for WindowState {
-    fn default() -> Self {
-        Self {
-            mapped: Default::default(),
-            decode_gen: Default::default(),
-            changed: Default::default(),
-            track_tiles: Default::default(),
-            tiles: std::array::from_fn(|_| Default::default()),
-            epoch: Default::default(),
-        }
-    }
 }
 
 /// Memory as a master on its own thread sees it: guest physical addresses
@@ -657,17 +608,6 @@ impl RamWindow {
         // drawn into a buffer that is not on screen: that costs a frame, and a
         // missed change would cost the picture.
         if !self.dirty.is_empty() {
-            // The tiles first: the display that sees the mark finds them.
-            if self.shared.track_tiles.load(std::sync::atomic::Ordering::Relaxed) {
-                let mut last = usize::MAX;
-                for &page in &self.dirty {
-                    let t = (page * PAGE).wrapping_sub(RAM_BASE as usize) >> TILE_SHIFT;
-                    if t != last && t < TILE_WORDS * 64 {
-                        self.shared.tiles[t / 64].fetch_or(1 << (t % 64), std::sync::atomic::Ordering::Release);
-                    }
-                    last = t;
-                }
-            }
             self.shared.changed.mark();
         }
         self.dirty.clear();

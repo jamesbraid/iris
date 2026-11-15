@@ -967,70 +967,13 @@ impl O2Display {
     }
 
     /// Scan out on `gpu` from now on: a wgpu window on the same device shows
-    /// the picture where it is made, and a read of the words comes back from
-    /// there. The CPU compose stays for what the kernel does not do.
+    /// the picture where it is made, and the words come back from there.
     #[cfg(feature = "wgpu")]
     fn use_gpu(&self, gpu: &crate::SharedGpu) -> Result<(), String> {
-        let scanout = crate::dev::o2gfx_wgpu::O2Scanout::new(gpu, &self.bus.ram)?;
+        let scanout = crate::dev::o2gfx_wgpu::O2Scanout::new(gpu)?;
         let _ = self.out().gpu.set(scanout.gpu());
         *self.gpu.lock() = Some(scanout);
         Ok(())
-    }
-
-    /// Whether a window takes this tick's frame from the GPU scan-out: it
-    /// shows frames on the device the scan-out runs on, and nobody pulls the
-    /// words. A `pixel X Y` probe describes a point as the CPU compose finds
-    /// it, so it keeps the frame there.
-    fn on_gpu(&self, need: crate::gfx_display::Need) -> bool {
-        #[cfg(feature = "wgpu")]
-        return need.gpu && self.gpu.lock().is_some() && self.bus.gbe.probe.lock().unwrap().0.is_none();
-        #[cfg(not(feature = "wgpu"))]
-        {
-            let _ = need;
-            false
-        }
-    }
-
-    /// GBE's picture into `out` (`0xAABBGGRR`), from the GPU when the board
-    /// has one and from the CPU when it has not, or when the kernel does not
-    /// take the picture (see [`Self::on_gpu`]); None while the display is off.
-    /// A failed GPU has stopped the machine and is not covered by the CPU.
-    fn scan(&self, out: &mut [u32]) -> Option<(u32, u32)> {
-        #[cfg(feature = "wgpu")]
-        if self.bus.gbe.probe.lock().unwrap().0.is_none() {
-            if let Some(sc) = self.gpu.lock().as_mut() {
-                // Whatever the CPU stored into the frame buffer since the
-                // last scan is wanted, as a scan of RAM finds it.
-                use crate::dev::o2gfx_wgpu::Composed;
-                match sc.compose(&self.bus.gbe, &self.bus.ram, true) {
-                    Ok(Composed::Frame(w, h)) => return sc.read(out).ok().map(|()| (w, h)),
-                    Ok(Composed::Off) | Err(_) => return None,
-                    Ok(Composed::Unsupported) => {}
-                }
-            }
-        }
-        self.bus.render_screen(out)
-    }
-
-    /// One frame composed on the GPU into `out.gpu`, for a window on the same
-    /// device; the size. None when the frame is left to the CPU compose: the
-    /// display is off, or the kernel does not take this picture. Err: the GPU
-    /// failed and the machine is stopping.
-    #[cfg(feature = "wgpu")]
-    fn compose_on_gpu(&self, full: bool, out: &mut crate::gfx_display::Frame) -> Result<Option<(usize, usize)>, ()> {
-        use crate::dev::o2gfx_wgpu::Composed;
-        let mut gpu = self.gpu.lock();
-        let Some(sc) = gpu.as_mut() else { return Ok(None) };
-        match sc.compose(&self.bus.gbe, &self.bus.ram, full) {
-            Ok(Composed::Frame(..)) => {}
-            Ok(Composed::Off | Composed::Unsupported) => return Ok(None),
-            Err(_) => return Err(()),
-        }
-        let Some((w, h)) = sc.shown else { return Ok(None) };
-        out.width = w;
-        out.height = h;
-        out.gpu = Some(sc.output().clone());
-        Ok(Some((w as usize, h as usize)))
     }
 
     /// The renderer slot and the requests the front-end makes.
@@ -1038,21 +981,34 @@ impl O2Display {
         &self.screens[0]
     }
 
+    /// GBE's picture for this tick's consumer: from the GPU scan-out when the
+    /// board has one, else composed on the CPU into `scan` and copied to
+    /// `out`. A `pixel X Y` probe describes a point as the CPU compose finds
+    /// it, so it keeps the frame there. Ok(None): the display is off. Err: the
+    /// GPU failed and the machine is stopping.
+    fn frame(&self, upload: bool, need: crate::gfx_display::Need, out: &mut crate::gfx_display::Frame, scan: &mut [u32]) -> Result<Option<(usize, usize)>, ()> {
+        #[cfg(feature = "wgpu")]
+        if self.bus.gbe.probe.lock().unwrap().0.is_none() {
+            if let Some(sc) = self.gpu.lock().as_mut() {
+                let Some(size) = sc.compose(&self.bus.gbe, &self.bus.ram, upload).map_err(drop)? else { return Ok(None) };
+                sc.show(size, need, out).map_err(drop)?;
+                return Ok(Some((size.0 as usize, size.1 as usize)));
+            }
+        }
+        let _ = (upload, need);
+        let Some((w, h)) = self.bus.render_screen(scan) else { return Ok(None) };
+        let (w, h) = (w as usize, h as usize);
+        out.width = w as u32;
+        out.height = h as u32;
+        out.words.clear();
+        out.words.extend_from_slice(&scan[..w * h]);
+        Ok(Some((w, h)))
+    }
+
     /// Scan GBE out of RAM when the screen may have changed, and show it.
     ///
-    /// The frame buffer is RAM. What marks the screen as changed: the
-    /// rendering engine finishing a primitive that wrote memory, a write to a
-    /// GBE register (the colour maps, the cursor, the tile lists, the timing),
-    /// a shadow register going live at vertical blanking, and a restored
-    /// snapshot. A bare store by the CPU into frame buffer memory marks
-    /// nothing, as it carries no command, so a guest that draws that way (a
-    /// Linux frame buffer console) shows only when something else marks. While
-    /// anything watches (a renderer, a capturing client) the screen is scanned
-    /// at least once a second whatever the marks say, which bounds that
-    /// staleness; with nothing watching the thread parks and scans nothing. A
-    /// screenshot or a frame request gets a fresh frame at once, a capturing
-    /// client one every frame, and a window has the unchanged frame shown again
-    /// every few frames so its status bar moves.
+    /// A bare store by the CPU into frame buffer memory marks nothing, so a
+    /// watched screen is scanned again every [`RESCAN`] whatever the marks say.
     fn display_loop(&self) {
         let screen = self.out();
         let changed = &screen.changed;
@@ -1061,10 +1017,7 @@ impl O2Display {
         let mut first = true;
         let mut had_renderer = false;
         let mut scanned = Instant::now();
-        // The GPU keeps copies of the frame's tiles. The engine's writes keep
-        // them current, and a store by the CPU, which marks nothing, reaches
-        // them at a full copy; this is when the last one was.
-        #[cfg(feature = "wgpu")]
+        // The GPU's copies of the frame's tiles are current as of this.
         let mut copied = Instant::now();
         let mut was_on_gpu = false;
         crate::gfx_display::run_display(
@@ -1080,44 +1033,28 @@ impl O2Display {
                 // runs is for the next frame.
                 let marked = changed.take() | self.bus.gbe.latch_pending();
                 let has_renderer = need.redraw;
-                let on_gpu = self.on_gpu(need);
                 // A renderer that has just arrived has nothing to show yet.
-                let compose = first || marked || need.words || (has_renderer && !had_renderer) || on_gpu != was_on_gpu || scanned.elapsed() >= RESCAN;
+                let compose = first || marked || need.words || (has_renderer && !had_renderer) || need.gpu != was_on_gpu || scanned.elapsed() >= RESCAN;
                 had_renderer = has_renderer;
-                was_on_gpu = on_gpu;
-                #[cfg(feature = "wgpu")]
-                if on_gpu && compose {
-                    let full = copied.elapsed() >= RESCAN;
-                    // A failed GPU has stopped the machine; no frame is made
-                    // on the CPU in its place.
-                    let Ok(composed) = self.compose_on_gpu(full, out) else {
+                was_on_gpu = need.gpu;
+                if compose {
+                    let upload = first || marked || copied.elapsed() >= RESCAN;
+                    let Ok(shown) = self.frame(upload, need, out, &mut scan) else {
                         screen.counts.count(false);
                         return false;
                     };
-                    if let Some(shown) = composed {
-                        first = false;
-                        scanned = Instant::now();
-                        if full {
-                            copied = Instant::now();
-                        }
-                        size = shown;
-                        screen.counts.count(true);
-                        return true;
-                    }
-                }
-                if compose {
                     first = false;
                     scanned = Instant::now();
-                    let shown = self.scan(&mut scan);
+                    if upload {
+                        copied = scanned;
+                    }
                     // Off: keep the last size, black.
-                    let (w, h) = shown.map(|(w, h)| (w as usize, h as usize)).unwrap_or(if size.0 == 0 { (1280, 1024) } else { size });
+                    let (w, h) = shown.unwrap_or(if size.0 == 0 { (1280, 1024) } else { size });
                     size = (w, h);
-                    out.width = w as u32;
-                    out.height = h as u32;
-                    out.words.clear();
-                    if shown.is_some() {
-                        out.words.extend_from_slice(&scan[..w * h]);
-                    } else {
+                    if shown.is_none() {
+                        out.width = w as u32;
+                        out.height = h as u32;
+                        out.words.clear();
                         out.words.resize(w * h, 0xff00_0000);
                     }
                 }

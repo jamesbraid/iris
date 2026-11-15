@@ -855,6 +855,10 @@ fn composes(s: &mut Board) -> usize {
 /// Nothing changed: the frame stays as it is, however often it is asked for.
 #[test]
 fn an_unchanged_frame_is_not_composed_again() {
+    // The GPU scan-out composes every frame, so frame counts say nothing.
+    if super::gpu_unit_tests() {
+        return;
+    }
     let mut s = composed_board();
     for _ in 0..3 {
         assert!(!s.scanout_update());
@@ -868,6 +872,10 @@ fn an_unchanged_frame_is_not_composed_again() {
 /// scan-out geometry, the mode, a buffer swap at the retrace, and a reset.
 #[test]
 fn every_change_to_what_the_scanout_reads_composes_a_new_frame() {
+    // The GPU scan-out composes every frame, so frame counts say nothing.
+    if super::gpu_unit_tests() {
+        return;
+    }
     type Change = fn(&mut Board);
     let changes: [(&str, Change); 11] = [
         ("a draw", |s| rgb_fill(s, 0xff, 0, 0, 100, 100, 110, 110)),
@@ -898,6 +906,10 @@ fn every_change_to_what_the_scanout_reads_composes_a_new_frame() {
 /// memory that is cloned or copied around.
 #[test]
 fn a_store_through_any_view_of_the_memory_composes_a_new_frame() {
+    // The GPU scan-out composes every frame, so frame counts say nothing.
+    if super::gpu_unit_tests() {
+        return;
+    }
     let mut s = composed_board();
     s.vram.ptr().untracked().store(0x4000, 4, 1);
     assert_eq!(composes(&mut s), 2);

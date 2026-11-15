@@ -1,6 +1,5 @@
 //! The GPU scan-out against the CPU compose it stands in for: random GBE
-//! states over random memory must give the same pixels, and only tiles the
-//! engine wrote are copied again.
+//! states over random memory must give the same pixels.
 
 use std::sync::Arc;
 
@@ -13,6 +12,7 @@ fn gpu() -> Option<Arc<Gpu>> {
     match Gpu::new(&GpuOptions::default(), Box::new(|_| {})) {
         Ok(g) => Some(g),
         Err(e) => {
+            if std::env::var_os("IRIS_REQUIRE_GPU").is_some_and(|v| v == "1") { panic!("no GPU: {e}") }
             eprintln!("skipped: {e}");
             None
         }
@@ -175,11 +175,11 @@ fn cpu(g: &Gbe, ram: &O2Memory) -> Option<(u32, u32, Vec<u32>)> {
     Some((w, h, out))
 }
 
-fn on_gpu(sc: &mut O2Scanout, g: &Gbe, ram: &O2Memory, full: bool) -> Option<(u32, u32, Vec<u32>)> {
-    let Composed::Frame(w, h) = sc.compose(g, ram, full).expect("compose") else { return None };
-    let mut out = vec![0u32; (w * h) as usize];
-    sc.read(&mut out).expect("read back");
-    Some((w, h, out))
+fn on_gpu(sc: &mut O2Scanout, g: &Gbe, ram: &O2Memory, upload: bool) -> Option<(u32, u32, Vec<u32>)> {
+    let (w, h) = sc.compose(g, ram, upload).expect("compose")?;
+    let mut frame = crate::gfx_display::Frame::default();
+    sc.show((w, h), Default::default(), &mut frame).expect("read back");
+    Some((w, h, frame.words))
 }
 
 fn assert_same(what: &str, a: &Option<(u32, u32, Vec<u32>)>, b: &Option<(u32, u32, Vec<u32>)>) {
@@ -202,7 +202,7 @@ fn random_gbe_states_come_out_as_the_cpu_compose_has_them() {
         let g = gbe();
         let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ seed.wrapping_mul(0x2545_f491_4f6c_dd1d));
         scene(&mut rng, &ram, &g);
-        let mut sc = O2Scanout::new(&gpu, &ram).expect("scan-out");
+        let mut sc = O2Scanout::new(&gpu).expect("scan-out");
         let want = cpu(&g, &ram);
         assert_same(&format!("seed {seed}"), &want, &on_gpu(&mut sc, &g, &ram, false));
         // The scenes must show something, or equal frames prove nothing.
@@ -218,16 +218,15 @@ fn the_display_off_composes_nothing() {
     let Some(gpu) = gpu() else { return };
     let ram = Arc::new(O2Memory::single(32 << 20));
     let g = gbe();
-    let mut sc = O2Scanout::new(&gpu, &ram).expect("scan-out");
-    assert_eq!(sc.compose(&g, &ram, true).expect("compose"), Composed::Off);
+    let mut sc = O2Scanout::new(&gpu).expect("scan-out");
+    assert_eq!(sc.compose(&g, &ram, true).expect("compose"), None);
     assert!(cpu(&g, &ram).is_none());
 }
 
-/// The first frame copies every tile of the picture; after that, only tiles
-/// the engine wrote. Registers are not memory, and a store by the CPU shows
-/// at the next full refresh, as it shows at the next scan on the CPU.
+/// Tiles are copied when asked for or when the list moves, not for a
+/// register: the engine's and the CPU's stores both show at the next copy.
 #[test]
-fn only_tiles_the_engine_wrote_are_copied_again() {
+fn tiles_are_copied_when_asked_or_when_the_list_moves() {
     let Some(gpu) = gpu() else { return };
     let ram = Arc::new(O2Memory::single(32 << 20));
     let g = gbe();
@@ -256,23 +255,20 @@ fn only_tiles_the_engine_wrote_are_copied_again() {
     for i in 0..256 {
         put(&g, GMAP + 4 * i, i * 0x0101_0100);
     }
-    let mut sc = O2Scanout::new(&gpu, &ram).expect("scan-out");
-    let check = |sc: &mut O2Scanout, what: &str, full: bool| {
-        assert_same(what, &cpu(&g, &ram), &on_gpu(sc, &g, &ram, full));
+    let mut sc = O2Scanout::new(&gpu).expect("scan-out");
+    let check = |sc: &mut O2Scanout, what: &str, upload: bool| {
+        assert_same(what, &cpu(&g, &ram), &on_gpu(sc, &g, &ram, upload));
     };
     check(&mut sc, "first frame", false);
-    assert_eq!(sc.tiles_uploaded, 4, "every tile of the picture comes over once");
 
-    check(&mut sc, "nothing changed", false);
-    assert_eq!(sc.tiles_uploaded, 4, "nothing marked, nothing copied");
-
-    // The engine writes one word of the third tile.
+    // A store to memory is not seen until the tiles are copied again.
     let mut win = ram.window();
     win.begin();
     win.put_be(RAM_BASE as usize + tile as usize + 2 * 0x10000 + 0x40, 4, 0xdead_beef);
     win.end();
-    check(&mut sc, "engine write", false);
-    assert_eq!(sc.tiles_uploaded, 5, "only the written tile");
+    let stale = on_gpu(&mut sc, &g, &ram, false);
+    assert_ne!(cpu(&g, &ram).map(|c| c.2), stale.map(|c| c.2), "the store is not seen without a copy");
+    check(&mut sc, "copied", true);
 
     // A register is not memory.
     put(&g, CRS_CTL, 1);
@@ -282,39 +278,10 @@ fn only_tiles_the_engine_wrote_are_copied_again() {
         put(&g, CRS_GLYPH + 4 * i, 0xffff_ffff);
     }
     check(&mut sc, "cursor", false);
-    assert_eq!(sc.tiles_uploaded, 5, "a register marks no tile");
 
-    // A store by the CPU marks nothing; the next full refresh finds it.
-    ram.write(tile as usize + 0x10000 + 0x80, &[0x12, 0x34, 0x56, 0x78]);
-    let stale = on_gpu(&mut sc, &g, &ram, false);
-    assert_ne!(cpu(&g, &ram).map(|c| c.2), stale.map(|c| c.2), "the CPU store is not seen without a mark");
-    check(&mut sc, "full refresh", true);
-    assert_eq!(sc.tiles_uploaded, 9, "a full refresh copies the four tiles of the picture");
-
-    // Memory put back wholesale invalidates every copy.
-    let words: Vec<u32> = ram.bank_words().into_iter().flatten().copied().collect();
-    ram.restore_words(&words).expect("restore");
-    check(&mut sc, "restored", false);
-    assert_eq!(sc.tiles_uploaded, 13, "a restore copies the picture again");
-}
-
-/// A picture past what the kernel holds is not a failure: it is left to the
-/// CPU compose and the device is not touched.
-#[test]
-fn a_picture_past_the_pool_is_left_to_the_cpu_without_failing_the_gpu() {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let seen = Arc::clone(&calls);
-    let Ok(gpu) = Gpu::new(&GpuOptions::default(), Box::new(move |_| { seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst); })) else { return };
-    let ram = Arc::new(O2Memory::single(32 << 20));
-    let g = gbe();
-    // 1000 x 300 pixels of 32 bits: 8 tiles a row, 3 rows; give the pool no room.
-    scene(&mut Rng(77), &ram, &g);
-    let mut sc = O2Scanout::new(&gpu, &ram).expect("scan-out");
-    sc.pool = Pool::new(0);
-    assert_eq!(sc.compose(&g, &ram, true).expect("not a failure"), Composed::Unsupported);
-    assert!(sc.shown.is_none());
-    assert!(gpu.check().is_ok());
-    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // A list that moved to other tiles is copied with no one asking.
+    ram.write(list as usize, &(((tile >> 16) + 2) as u16).to_be_bytes());
+    check(&mut sc, "list moved", false);
 }
 
 /// A GPU that fails reports to the machine once and the compose returns the
@@ -325,18 +292,20 @@ fn a_failed_gpu_stops_the_scanout_and_does_not_fall_back() {
     let seen = Arc::clone(&calls);
     let gpu = match Gpu::new(&GpuOptions::default(), Box::new(move |_| { seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst); })) {
         Ok(g) => g,
-        Err(e) => return eprintln!("skipped: {e}"),
+        Err(e) => {
+            if std::env::var_os("IRIS_REQUIRE_GPU").is_some_and(|v| v == "1") { panic!("no GPU: {e}") }
+            return eprintln!("skipped: {e}");
+        }
     };
     let ram = Arc::new(O2Memory::single(32 << 20));
     let g = gbe();
     scene(&mut Rng(5), &ram, &g);
-    let mut sc = O2Scanout::new(&gpu.share(), &ram).expect("scan-out");
+    let mut sc = O2Scanout::new(&gpu.share()).expect("scan-out");
     sc.compose(&g, &ram, true).expect("a healthy device composes");
-    gpu.device.destroy();
-    gpu.poll();
+    // Not `device.destroy()`: Vulkan and Metal report that late or not at all.
+    gpu.fail("wgpu device lost (test): injected");
     let e = sc.compose(&g, &ram, true).expect_err("a lost device cannot compose");
     assert!(e.contains("lost"), "{e}");
-    assert!(sc.shown.is_none());
     assert!(sc.compose(&g, &ram, true).is_err(), "and stays failed");
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "the machine hears it once");
 }

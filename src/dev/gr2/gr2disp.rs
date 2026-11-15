@@ -24,8 +24,6 @@ impl Gr2 {
         // The compositor's stride is 2048; the frame is cut from it row by row.
         let mut scan = vec![0u32; gr2comp::OUT_STRIDE * FB_H];
         let mut sized = false;
-        // `scan` lags the last frame shown from the GPU.
-        let mut scan_stale = false;
 
         crate::gfx_display::run_display(
             screen,
@@ -56,43 +54,27 @@ impl Gr2 {
                     return false;
                 }
                 let recompose = dirty || !sized;
-                // On the GPU the frame is composed there. A window on the
-                // same device shows it from there; anything else reads it
-                // back. A GPU that fails has stopped the machine: no frame
-                // comes from the CPU in its place.
-                let Ok(on_gpu) = self.gpu_compose(recompose) else {
-                    screen.counts.count(false);
-                    return false;
-                };
-                #[cfg(feature = "wgpu")]
-                if on_gpu && need.gpu && !need.words {
-                    // SAFETY: as `gpu_compose`.
-                    if let Some(sc) = (unsafe { &*self.scanout.get() }).as_ref() {
+                // A GPU that fails has stopped the machine: no frame comes
+                // from the CPU in its place.
+                match self.gpu_frame(recompose, need, out) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if recompose {
+                            let r = self.regs();
+                            gr2comp::compose(self.vram(), &r.vc1, &r.xmap, &r.dac, &mut scan);
+                        }
                         out.width = FB_W as u32;
                         out.height = FB_H as u32;
-                        out.gpu = Some(sc.output().clone());
-                        scan_stale = true;
-                        sized = true;
-                        screen.counts.count(true);
-                        return true;
+                        out.words.clear();
+                        for y in 0..FB_H {
+                            let row = y * gr2comp::OUT_STRIDE;
+                            out.words.extend_from_slice(&scan[row..row + FB_W]);
+                        }
                     }
-                }
-                if on_gpu {
-                    if (recompose || need.words || scan_stale) && !self.gpu_read(&mut scan) {
+                    Err(_) => {
                         screen.counts.count(false);
                         return false;
                     }
-                } else if recompose {
-                    let r = self.regs();
-                    gr2comp::compose(self.vram(), &r.vc1, &r.xmap, &r.dac, &mut scan);
-                }
-                scan_stale = false;
-                out.width = FB_W as u32;
-                out.height = FB_H as u32;
-                out.words.clear();
-                for y in 0..FB_H {
-                    let row = y * gr2comp::OUT_STRIDE;
-                    out.words.extend_from_slice(&scan[row..row + FB_W]);
                 }
                 sized = true;
                 screen.counts.count(true);
@@ -101,50 +83,25 @@ impl Gr2 {
         );
     }
 
-    /// With the GPU scan-out: compose the frame there if `recompose`.
-    /// Ok(false) when the board has none (the CPU compose runs), Err when
-    /// the one it has failed: the device has been told, and stops the
-    /// machine.
-    pub(super) fn gpu_compose(&self, recompose: bool) -> Result<bool, ()> {
+    /// With the GPU scan-out: compose the frame there if `recompose`, and
+    /// fill `out` from it. Ok(false) when the board has none (the CPU compose
+    /// runs); Err when the one it has failed, which has stopped the machine.
+    pub(super) fn gpu_frame(&self, recompose: bool, need: crate::gfx_display::Need, out: &mut crate::gfx_display::Frame) -> Result<bool, String> {
         #[cfg(feature = "wgpu")]
         {
             // SAFETY: the scan-out is the display thread's, and this runs there.
             let Some(sc) = unsafe { &mut *self.scanout.get() }.as_mut() else { return Ok(false) };
-            if !recompose && sc.composed() {
-                return Ok(true);
+            if recompose || !sc.composed() {
+                let r = self.regs();
+                sc.compose(self.vram(), &r.vc1, &r.xmap, &r.dac)?;
             }
-            let r = self.regs();
-            return match sc.compose(self.vram(), &r.vc1, &r.xmap, &r.dac) {
-                Ok(()) => Ok(true),
-                Err(e) => Err(sc.fail(&e)),
-            };
+            sc.show(need, out)?;
+            return Ok(true);
         }
         #[cfg(not(feature = "wgpu"))]
         {
-            let _ = recompose;
+            let _ = (recompose, need, out);
             Ok(false)
-        }
-    }
-
-    /// Read the GPU's last frame into `fb_rgb`. False if that failed
-    /// (reported to the device, as in `gpu_compose`).
-    fn gpu_read(&self, fb_rgb: &mut [u32]) -> bool {
-        #[cfg(feature = "wgpu")]
-        {
-            // SAFETY: as `gpu_compose`.
-            let Some(sc) = unsafe { &mut *self.scanout.get() }.as_mut() else { return false };
-            return match sc.read(fb_rgb, gr2comp::OUT_STRIDE) {
-                Ok(()) => true,
-                Err(e) => {
-                    sc.fail(&e);
-                    false
-                }
-            };
-        }
-        #[cfg(not(feature = "wgpu"))]
-        {
-            let _ = fb_rgb;
-            false
         }
     }
 }

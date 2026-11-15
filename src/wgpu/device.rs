@@ -2,7 +2,7 @@
 //! raster kernels need and the errors wgpu reports asynchronously.
 
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -112,6 +112,8 @@ pub struct Gpu {
 /// The first error on a device, which stays, and the machine's reaction to
 /// it, run once.
 struct Failure {
+    /// Set after `error`, so the write path asks with one load.
+    failed: AtomicBool,
     error: Mutex<Option<String>>,
     fatal: Arc<dyn Fn(&str) + Send + Sync>,
 }
@@ -123,6 +125,7 @@ impl Failure {
             let first = e.is_none();
             if first {
                 *e = Some(msg.clone());
+                self.failed.store(true, Ordering::Release);
             }
             first
         };
@@ -143,38 +146,12 @@ const READBACK_BYTES: u64 = 16 << 20;
 #[derive(Default)]
 struct Readback {
     free: Mutex<Vec<wgpu::Buffer>>,
-    created: AtomicU64,
-    reads: AtomicU64,
-    bytes: AtomicU64,
 }
 
-/// What `Gpu::read` has done on a device so far.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ReadStats {
-    /// Completed reads.
-    pub reads: u64,
-    /// Bytes they returned.
-    pub bytes: u64,
-    /// Readback buffers allocated (each `READBACK_BYTES`, none freed unless a read on it failed).
-    pub buffers: u64,
-}
-
-/// The writes queued by `Gpu::write` and `Gpu::write_texture`: copies out
-/// of a fixed ring of staging buffers, recorded into one encoder that the
-/// next `Gpu::submit` sends ahead of its own work.
-///
-/// The ring is allocated with the device, sized so a batch's worst case
-/// fits one slot. A slot is written while mapped, unmapped by the
-/// submission that copies out of it, and mapped again once that submission
-/// completes. A writer that finds every slot in use adds one, which stays:
-/// nothing is ever freed and allocated again.
-///
-/// `Queue::write_buffer` and `write_texture` create a fresh mappable
-/// staging buffer for every call. On Vulkan that memory is CPU-visible
-/// VRAM, freed when the submission completes and allocated again by the
-/// next write, and the kernel's placement of each new buffer in the small
-/// visible window dominated the profile of a draw-heavy session (40% of
-/// all samples).
+/// Writes queued by `Gpu::write` and `Gpu::write_texture`: copies out of a
+/// ring of staging buffers, recorded into one encoder that the next
+/// `Gpu::submit` sends ahead of its own work. The ring is made on the first
+/// write, and a writer that finds every slot in flight adds one for good.
 struct Uploads {
     slots: Vec<UploadSlot>,
     /// The slot being written.
@@ -263,9 +240,8 @@ impl UploadSlot {
 }
 
 impl Uploads {
-    fn new(device: &wgpu::Device) -> Uploads {
-        let slots = (0..UPLOAD_SLOTS).map(|i| UploadSlot::new(device, i)).collect();
-        Uploads { slots, cur: 0, encoder: None }
+    fn new() -> Uploads {
+        Uploads { slots: Vec::new(), cur: 0, encoder: None }
     }
 
     /// Room for `len` bytes (at most a slot): the slot and offset to write
@@ -277,6 +253,9 @@ impl Uploads {
     /// None once the device has failed: its slots never come back.
     fn reserve(&mut self, gpu: &Gpu, len: u64, bulk: &mut bool) -> Option<(usize, u64)> {
         assert!(len <= UPLOAD_SLOT_BYTES, "an upload piece larger than a slot");
+        if self.slots.is_empty() {
+            self.slots.extend((0..UPLOAD_SLOTS).map(|i| UploadSlot::new(&gpu.device, i)));
+        }
         loop {
             if gpu.check().is_err() {
                 return None;
@@ -306,7 +285,10 @@ impl Uploads {
                 gpu.submit_locked(self, None);
                 *bulk = true;
             } else if *bulk {
-                let _ = gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(30)) });
+                if let Err(e) = gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(30)) }) {
+                    gpu.fail(&format!("wait for an upload slot: {e}"));
+                    return None;
+                }
             } else {
                 self.slots.push(UploadSlot::new(&gpu.device, n));
                 self.cur = n;
@@ -324,6 +306,9 @@ impl Drop for Gpu {
     /// The upload ring's host memory is ours to free, once the GPU is done
     /// with it.
     fn drop(&mut self) {
+        if self.uploads.get_mut().slots.is_empty() {
+            return;
+        }
         let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(30)) });
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         for s in &mut self.uploads.get_mut().slots {
@@ -436,7 +421,7 @@ impl Gpu {
         }))
         .map_err(|e| format!("request device on {}: {e}", info.name))?;
 
-        let failure = Arc::new(Failure { error: Mutex::new(None), fatal });
+        let failure = Arc::new(Failure { failed: AtomicBool::new(false), error: Mutex::new(None), fatal });
         let sink = Arc::clone(&failure);
         device.on_uncaptured_error(Arc::new(move |e| {
             let msg = format!("wgpu error: {e}");
@@ -463,17 +448,17 @@ impl Gpu {
             int64_atomic_min_max: features.contains(wgpu::Features::SHADER_INT64_ATOMIC_MIN_MAX),
             timestamps: features.contains(wgpu::Features::TIMESTAMP_QUERY),
         };
-        let uploads = Mutex::new(Uploads::new(&device));
+        let uploads = Mutex::new(Uploads::new());
         Ok(Arc::new(Gpu { instance, adapter, device, queue, caps, failure, readback: Arc::default(), uploads }))
     }
 
     /// The first asynchronous error, if any. Kernels that misbehave are
     /// reported here, not at the call that queued them.
     pub fn check(&self) -> Result<(), String> {
-        match self.failure.error.lock().clone() {
-            Some(e) => Err(e),
-            None => Ok(()),
+        if !self.failure.failed.load(Ordering::Acquire) {
+            return Ok(());
         }
+        Err(self.failure.error.lock().clone().unwrap_or_default())
     }
 
     /// Record `msg` as the device's error, if it has none yet, and raise the
@@ -486,11 +471,9 @@ impl Gpu {
         self.failure.set(msg.to_string());
     }
 
-    /// Another handle on the same device and queue with an upload ring of
-    /// its own, for a board on a device that another board already uses.
-    /// The error, and so the fatal callback, is shared: a loss is every
-    /// board's. The ring is per handle, so one board's writes wait for its
-    /// own next submission only, and its lock is held by that board alone.
+    /// Another handle on the same device and queue, with an upload ring of
+    /// its own (made on its first write). The error, and so the fatal
+    /// callback, is shared: a loss is every board's.
     pub fn share(self: &Arc<Self>) -> Arc<Gpu> {
         Arc::new(Gpu {
             instance: self.instance.clone(),
@@ -500,13 +483,8 @@ impl Gpu {
             caps: self.caps.clone(),
             failure: Arc::clone(&self.failure),
             readback: Arc::clone(&self.readback),
-            uploads: Mutex::new(Uploads::new(&self.device)),
+            uploads: Mutex::new(Uploads::new()),
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inject_device_loss(&self, message: &str) {
-        self.failure.set(format!("wgpu device lost (test): {message}"));
     }
 
     /// Submit one command buffer, after the writes queued so far.
@@ -613,11 +591,7 @@ impl Gpu {
     /// length. Waits for every submission so far, so the bytes include all
     /// work queued before the call, and changes `out` only for the pieces
     /// that arrived. `src` needs `COPY_SRC`.
-    ///
-    /// The staging buffer is lent from the device's free list for the call.
-    /// A read bigger than a buffer goes through it in pieces; a read that
-    /// fails (a wait that timed out leaves the map pending) drops its
-    /// buffer instead of returning it.
+    /// A read that fails drops its staging buffer instead of returning it.
     pub fn read(&self, src: &wgpu::Buffer, ranges: &[(u64, u64)], out: &mut [u8]) -> Result<(), String> {
         let span: u64 = ranges.iter().map(|r| r.1).sum();
         if span != out.len() as u64 {
@@ -628,15 +602,11 @@ impl Gpu {
         }
         self.check()?;
         let staging = self.readback.free.lock().pop().unwrap_or_else(|| {
-            self.readback.created.fetch_add(1, Ordering::Relaxed);
             self.buffer("readback", READBACK_BYTES, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST)
         });
         self.read_through(&staging, src, ranges, out)?;
         self.readback.free.lock().push(staging);
-        self.check()?;
-        self.readback.reads.fetch_add(1, Ordering::Relaxed);
-        self.readback.bytes.fetch_add(span, Ordering::Relaxed);
-        Ok(())
+        self.check()
     }
 
     /// As `read`, into a new vector.
@@ -645,15 +615,6 @@ impl Gpu {
         let mut out = vec![0u8; ranges.iter().map(|r| r.1).sum::<u64>() as usize];
         self.read(src, ranges, &mut out)?;
         Ok(out)
-    }
-
-    /// Reads, bytes and readback buffers so far, for every `Gpu` on the device.
-    pub fn read_stats(&self) -> ReadStats {
-        ReadStats {
-            reads: self.readback.reads.load(Ordering::Relaxed),
-            bytes: self.readback.bytes.load(Ordering::Relaxed),
-            buffers: self.readback.created.load(Ordering::Relaxed),
-        }
     }
 
     fn read_through(&self, staging: &wgpu::Buffer, src: &wgpu::Buffer, ranges: &[(u64, u64)], out: &mut [u8]) -> Result<(), String> {

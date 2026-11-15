@@ -108,11 +108,8 @@ fn r64(pi: u32, i: u32) -> I64 {
     return I64(recs[pi].w[i], recs[pi].w[i + 1u]);
 }
 
-// x through an xor with a value the compiler cannot fold: a product or
-// difference is rounded on its own before it joins a sum. Metal compiles
-// with fast math, which may fuse a multiply into an add and reassociate;
-// a multiply by a run-time 1.0 did not stop it there (9 raster tests were
-// a step off the CPU path), an xor on the bits does.
+// An xor with a run-time zero rounds a product on its own: Metal's fast math
+// would otherwise fuse it into the sum.
 fn p(x: f32) -> f32 {
     return bitcast<f32>(bitcast<u32>(x) ^ nz);
 }
