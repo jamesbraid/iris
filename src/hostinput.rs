@@ -141,10 +141,8 @@ impl HostInput {
         Some(format!("pipe {pipe}, channel {channel}"))
     }
 
-    /// This input with the pointer steered on screen `n`: a viewer of that
-    /// screen drives the guest's mouse with that screen's own cursor. It
-    /// shares the keyboard and mouse controller with `self` but keeps its own
-    /// button and steering state.
+    /// This input with the pointer steered on screen `n`, by that screen's
+    /// cursor. It shares the PS/2 controller but keeps its own button state.
     pub fn for_screen(&self, n: usize) -> Result<HostInput, String> {
         if self.locate(n).is_none() {
             return Err(self.no_screen(n));
@@ -520,9 +518,7 @@ impl HostInput {
         }).count()
     }
 
-    /// Screen `n`'s frame, tight, with its size, and whether it is fresh: false
-    /// when the board did not compose a new one within 250 ms, so it is the
-    /// last one it did.
+    /// Screen `n`'s frame, tight, and whether it is fresh (composed within 250 ms).
     pub fn frame(&self, n: usize) -> Result<(usize, usize, Vec<u32>, bool), String> {
         if self.displays.is_empty() {
             return Err("no display (headless)".into());
@@ -596,10 +592,8 @@ fn num<T: std::str::FromStr>(args: &[&str], i: usize, what: &str) -> Result<T, S
 
 const SCREEN_HELP: &str = "screen info | screen frames [reset] | screen cursor | screen shot <file.png> [x y w h] | screen pix <x> <y> | screen wait [quiet_ms] [timeout_ms] | screen list; with several screens, screen <N> <verb> picks one (default 0)";
 
-/// Split a `screen` command's arguments into the screen they address and the
-/// verb with its own arguments: `shot a.png` is screen 0, `1 shot a.png`
-/// screen 1. The index is checked against `count` only when written, so the
-/// bare form still reaches a headless machine's own answer.
+/// Split `screen` arguments into the screen and the verb's own: `shot a.png` is
+/// screen 0, `1 shot a.png` screen 1. Only a written index is checked against `count`.
 fn screen_route<'a, 'b>(args: &'b [&'a str], count: usize) -> Result<(usize, &'b [&'a str]), String> {
     let Some(Ok(n)) = args.first().map(|a| a.parse::<usize>()) else { return Ok((0, args)) };
     if n < count {

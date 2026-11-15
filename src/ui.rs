@@ -82,11 +82,8 @@ enum ResizeRequest {
     ToggleFullscreen,
 }
 
-// Which context we actually got. GlCompositor and the texelFetch/integer-sampler
-// shaders need GL 3.2 core (usampler2D, #version 150). If the driver can't give us
-// that, we drop to a plain GL 2.1-compatible context, Newport composes on the CPU,
-// and a legacy (#version 120) copy-only shader draws the words — no integer
-// textures, no texelFetch.
+// The context we got: Core32 runs GlCompositor and the texelFetch shaders;
+// Legacy (GL 2.1) draws words with a copy shader and Newport composes on the CPU.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum GlTier { Core32, Legacy }
 
@@ -158,30 +155,8 @@ struct GlRenderer {
 unsafe impl Send for GlRenderer {}
 
 impl GlRenderer {
-    /// Idempotent GL setup + per-thread current-binding, called at the top
-    /// of every `present()`. Returns `false` if the context couldn't be
-    /// made current on this thread (caller should skip the frame).
-    ///
-    /// Splits into exactly two cases:
-    /// - `self.state.is_none()` (the true first call, ever): consumes
-    ///   `not_current_context` — a genuine one-shot resource; `take()`
-    ///   here plus this whole branch only ever running once per process is
-    ///   what guarantees it's never consumed twice — and does the full
-    ///   one-time setup (surface, shader compile, VAO/VBOs), ending with
-    ///   `self.state = Some(...)`.
-    /// - `self.state.is_some()` (every later call, including the first
-    ///   `present()` from every subsequent respawned refresh thread — REX3's
-    ///   refresh thread is respawned on every stop()/start() cycle,
-    ///   jitcheck's checkpoint capture/restore among the real callers):
-    ///   the one-time setup is never repeated (`not_current_context` is
-    ///   already `None` by then, so there's nothing left to consume even in
-    ///   principle), but the context's "current" binding is per-OS-thread —
-    ///   `state` surviving the respawn doesn't mean it's current on
-    ///   *this* thread, so `make_current` is called again here,
-    ///   unconditionally, every time. Making an already-current context
-    ///   current again is a well-defined no-op per the GL/EGL spec, so this
-    ///   costs nothing extra on the overwhelmingly common case (same thread,
-    ///   every frame).
+    /// GL setup on the first call, and `make_current` on this thread on every
+    /// call (a respawned refresh thread is a new thread). `false` skips the frame.
     fn ensure_init(&mut self) -> bool {
         if let Some(state) = &self.state {
             return state.context.make_current(&state.surface).is_ok();
@@ -589,9 +564,8 @@ impl Renderer for GlRenderer {
                 Self::upload_quad(gl, state.main_vbo,
                     qx0, qy0, qx1, qy1,
                     0.0, 0.0, max_u, max_v_main);
-                // Status bar: same x extent as letterboxed display, scaled height, bottom of window.
-                // Texture is 2048×STATUS_BAR_HEIGHT, so v goes 0..1. A frame
-                // wider than the texture gets a bar over its left 2048 pixels.
+                // Status bar under the display, same x extent; a frame wider than
+                // the 2048-wide bar texture gets it over its left 2048 pixels.
                 let (qxb, max_ub) = if bar_w == width {
                     (qx1, width as f32 / 2048.0)
                 } else {
@@ -696,23 +670,8 @@ impl Renderer for GlRenderer {
             }
             self.main_tex = None;
             self.seen_seq = 0;
-            // Hand the context back to `not_current_context` so the next
-            // `ensure_init()` call (on whatever thread REX3's next
-            // start() respawns) sees a genuine "first call ever since the
-            // last real teardown" and re-runs full setup — mirrors this
-            // same `stop()` having just destroyed the compositor and
-            // dropped every other GlState resource (surface, shaders,
-            // VAO/VBOs — all recreated by ensure_init()'s first-call
-            // branch). Without this, `self.state.take()` above makes the
-            // *next* `ensure_init()` call take the "must still have
-            // not_current_context to consume" branch — but that Option
-            // was already permanently emptied by the true first call, long
-            // before this `stop()` ever ran, so it would panic instead of
-            // re-initializing (found live: `jitcheck`'s repeated
-            // checkpoint capture/restore is real code that calls
-            // Rex3::stop()/start() — and therefore this GlRenderer::stop()
-            // — many times in one process run, unlike normal boot which
-            // only ever sees it once at shutdown).
+            // Give the context back so the next ensure_init (after a stop/start,
+            // as jitcheck does repeatedly) sets up again.
             match state.context.make_not_current() {
                 Ok(not_current) => self.not_current_context = Some(not_current),
                 Err(e) => eprintln!("iris: failed to release GL context on stop(), the next start makes a new one: {e}"),
@@ -729,9 +688,8 @@ impl Renderer for GlRenderer {
     }
 }
 
-/// Words of a `width` by `height` picture, rows `width` apart, in a `tex_w`
-/// (2048, or wider for the side-by-side window) by `FB_MAX_H` texture made on
-/// first use; the texture holds the picture at its top left.
+/// Upload `words` (rows `width` apart) to the top left of a `tex_w` by
+/// `FB_MAX_H` texture made on first use.
 fn upload_words(gl: &glow::Context, tex: &mut Option<glow::Texture>, words: &[u32], width: usize, height: usize, tex_w: usize) -> glow::Texture {
     let (w, h) = (width.min(tex_w), height.min(crate::disp::FB_MAX_H));
     unsafe {
@@ -757,10 +715,8 @@ fn upload_words(gl: &glow::Context, tex: &mut Option<glow::Texture>, words: &[u3
     }
 }
 
-/// The window drawn through wgpu (`renderer = "wgpu"`): the frame, the
-/// debug overlay and the status bar presented by `crate::wgpu::Presenter`,
-/// on the device of the board that draws on one, else on its own. A board
-/// hands over words, or a frame already on the device.
+/// The window drawn through wgpu (`renderer = "wgpu"`), on the board's device
+/// when it has one, else its own.
 #[cfg(feature = "wgpu")]
 struct WgpuRenderer {
     presenter: crate::wgpu::Presenter,
@@ -793,9 +749,7 @@ impl WgpuRenderer {
             self.presenter.resize(w, h);
         }
         *self.display_res.lock() = (width as u32, height as u32);
-        // The presenter reads the bar at the frame's row length. The bar is
-        // drawn at most FB_STRIDE wide; a wider frame (side by side) gets its
-        // last column repeated.
+        // The bar is at most FB_STRIDE wide; a wider frame repeats its last column.
         let bar_w = width.min(crate::disp::FB_STRIDE);
         let rows = self.sbtex.render_pixels(&mut self.status, stats, bar_w);
         self.bar.clear();
@@ -905,10 +859,8 @@ pub struct Ui {
 }
 
 impl Ui {
-    /// The window(s) for a machine's `screens`, shown as `windows` says: one
-    /// window with a screen at a time (`cycle`), all of them in one window, or
-    /// a window each. A machine with one screen has one window whatever
-    /// `windows` says.
+    /// The window(s) for `screens`, shown as `windows` says; one screen always
+    /// gets one window. `machine` receives the window GPU's failures.
     pub fn new(ps2: Arc<Ps2Controller>, screens: Vec<Arc<Screen>>, discs: Option<Arc<dyn DiscChanger>>, timer_manager: Arc<TimerManager>, event_loop: &EventLoop<()>, scale: u32, scroll_pixels_per_line: f64, lock_aspect_ratio: bool, renderer: crate::config::UiRenderer, windows: ScreenWindows, machine: crate::workstation::MachineSlot) -> Self {
         assert!(!screens.is_empty(), "a window needs a screen");
         let fatal = Self::window_fatal(machine);
@@ -962,9 +914,8 @@ impl Ui {
         Arc::new(|_| {})
     }
 
-    /// One window on the host for screen `index`, with the renderer that draws
-    /// it (not yet installed): wgpu when asked and able, else GL. `wide`
-    /// makes room for a picture wider than one screen's.
+    /// A window for screen `index` and its renderer (not yet installed): wgpu
+    /// when asked and the host can, else GL. `wide` fits side-by-side's picture.
     #[allow(clippy::too_many_arguments)]
     fn open_window(screen: &Screen, index: usize, title: &str, event_loop: &EventLoop<()>, scale: u32, renderer: crate::config::UiRenderer, wide: bool, fatal: &Arc<dyn Fn(&str) + Send + Sync>) -> (Pane, Box<dyn Renderer>) {
         let tex_w = if wide { 2 * crate::disp::FB_STRIDE } else { crate::disp::FB_STRIDE };
@@ -1263,9 +1214,8 @@ impl Ui {
         }
     }
 
-    /// `shot` is the screen the window shows, for the screenshot hotkey;
-    /// `cycle` is the next-screen hotkey's state, when the window has several
-    /// screens to step through.
+    /// `shot` is the screen for the screenshot hotkey; `cycle` the next-screen
+    /// hotkey's state.
     #[allow(clippy::too_many_arguments)]
     fn handle_keyboard(ps2: &Ps2Controller, shot: &Arc<Screen>, discs: &Option<Arc<dyn DiscChanger>>,
         resize_request: &Mutex<Option<ResizeRequest>>,
@@ -1363,9 +1313,7 @@ impl Ui {
                 return;
             }
 
-            // RCtrl+Tab: show the next screen of a machine with several, in
-            // the one window. With one screen the key goes to the guest as
-            // before.
+            // RCtrl+Tab shows the next screen; with one screen it goes to the guest.
             if keycode == KeyCode::Tab && pressed && !input.repeat && *rctrl_held {
                 if let Some(cycle) = cycle {
                     if cycle.step().is_some() {

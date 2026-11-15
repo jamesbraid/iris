@@ -1,16 +1,5 @@
-//! One window showing all of a machine's screens next to each other
-//! (`[graphics] windows = "side-by-side"`).
-//!
-//! Each screen keeps its own display thread and its own frames. The window's
-//! real renderer is bound to one thread (a GL context is current on one), so
-//! it sits behind the first screen's slot and is only ever called from that
-//! screen's thread. Every screen's slot holds a [`SideBySide`]: the first
-//! screen's draws the newest frame of every screen into one picture and hands
-//! it to the real renderer; the others only tell the first one that there is
-//! something new to draw.
-//!
-//! Words only: the picture is built on the CPU from [`Screen::latest`], so no
-//! board composes on a device or hands over Newport's planes for this window.
+//! One window showing all screens in a row (`windows = "side-by-side"`): screen 0's
+//! slot holds the real renderer and joins the newest frames on the CPU; the others poke it.
 
 use std::sync::Arc;
 
@@ -27,9 +16,8 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Pictures of `sizes` (width, height) in a row, left to right with their
-    /// tops level and no gap. The row is as tall as the tallest; a screen with
-    /// no picture yet (0 by 0) takes no room.
+    /// Pictures of `sizes` (width, height) left to right, tops level; a screen
+    /// with no picture yet takes no room.
     pub fn row(sizes: &[(u32, u32)]) -> Layout {
         let mut x = 0;
         let mut origins = Vec::with_capacity(sizes.len());

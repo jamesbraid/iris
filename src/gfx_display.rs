@@ -1,12 +1,5 @@
-//! What the UI, CI socket and GUI front-end need from whichever graphics board
-//! drives the screen.
-//!
-//! A board owns its display thread and its composition; the thread is
-//! [`run_display`] with the board's closures. What the front-end sees is one
-//! [`Screen`] per head: the renderer slot it installs into, the newest
-//! composed frame (screenshots, VNC, the monitor), the requests it makes for
-//! a fresh one, and the counts of what the thread did. [`GfxDisplay`] only
-//! hands the screens out, with the hardware cursor and the CPU cycle counter.
+//! What the front-ends need from a graphics board: one [`Screen`] per head,
+//! driven by the board's [`run_display`] thread.
 
 use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -17,15 +10,8 @@ use parking_lot::Mutex;
 use crate::cpu::mips_core::CyclesPtr;
 use crate::disp::BarStats;
 
-/// What the front-end draws a screen's frames with: the GL window, the wgpu
-/// window, iris-gui's capture. It owns the status bar and draws it under the
-/// frame, and it never reads the picture back: the consumers that want words
-/// ask the screen for them ([`Need::words`]).
-///
-/// [`Screen::publish`] calls [`present`](Self::present) on the board's display
-/// thread, once for each new frame and again at the idle rate for an unchanged
-/// one (same [`Frame::seq`]), so the status bar moves. A renderer skips the
-/// upload of a frame it has already seen.
+/// What draws a screen's frames and status bar. [`present`](Self::present) runs
+/// on the display thread per new frame and at the idle rate for an unchanged one.
 pub trait Renderer: Send {
     fn present(&mut self, frame: &Frame, stats: &BarStats);
 
@@ -34,9 +20,8 @@ pub trait Renderer: Send {
     #[cfg(feature = "wgpu")]
     fn gpu(&self) -> Option<&Arc<crate::wgpu::Gpu>> { None }
 
-    /// Whether it composes Newport's planes itself ([`Frame::planes`]). Only
-    /// the GL window does, in a fragment shader: the CPU compose it would
-    /// otherwise be handed costs 7.4 ms for each changed Newport frame.
+    /// Whether it composes Newport's planes itself ([`Frame::planes`]); the
+    /// GL window does, saving the 7.4 ms CPU compose of each changed frame.
     fn takes_planes(&self) -> bool { false }
 
     fn resize(&mut self, _width: usize, _height: usize) {}
@@ -68,9 +53,8 @@ pub trait GfxDisplay: Send + Sync {
     fn cycles(&self) -> CyclesPtr;
 }
 
-/// Set when anything the scan-out reads may have changed; taken by the display
-/// before it reads. Marks store even with the flag up, so a frame that takes it
-/// between a writer's effect and its mark does not lose the effect.
+/// Set when anything the scan-out reads may have changed; taken before reading.
+/// Every mark stores, so a take between a writer's effect and its mark loses nothing.
 #[repr(align(64))]
 #[derive(Default)]
 pub struct ScreenChanged {
@@ -165,15 +149,8 @@ impl FrameCounts {
     }
 }
 
-/// Requests for a fresh frame, counted so that one made while a frame is being
-/// composed is still pending after it: asked and answered are counts, not a
-/// flag. A screenshot, `request_frame` and a capturing client (VNC) are each
-/// one of these on a board.
-///
-/// The display thread takes [`note`](Self::note) before it composes and calls
-/// [`answer`](Self::answer) with it once the frame is in the screen; a caller
-/// waits on [`pending`](Self::pending). A board that parks its display thread
-/// wakes it from the request ([`ScreenChanged::wake`]).
+/// Requests for a fresh frame, counted so one made during a compose stays
+/// pending. The display thread notes before composing and answers the note.
 #[derive(Default)]
 pub struct FrameRequests {
     asked: AtomicU64,
@@ -227,9 +204,8 @@ pub const IDLE_REFRESH: u32 = 6;
 /// marks as the thread falls asleep may not see that it sleeps.
 const PARK_RECHECK: Duration = Duration::from_millis(100);
 
-/// The display thread's wait between frames, paced from a fixed start so a slow
-/// frame does not stretch the rate and a stall resyncs to now. Call it last in
-/// the loop.
+/// The display thread's wait between frames, paced from a fixed start; a stall
+/// resyncs to now. Call it last in the loop.
 pub struct FrameWait<'a> {
     changed: &'a ScreenChanged,
     period: Duration,
@@ -266,9 +242,8 @@ impl<'a> FrameWait<'a> {
         }
     }
 
-    /// With nothing marked, park until a mark, a wake or `timer`, instead of
-    /// waking every period. A mark or wake then ends at the next vsync, so
-    /// marks between two vsyncs make one frame.
+    /// Park until a mark, a wake or `timer`; a mark ends at the next vsync, so
+    /// marks between two make one frame.
     pub fn park_until_marked(&mut self, timer: Instant) {
         let c = self.changed;
         let end = self.next + self.period;
@@ -303,25 +278,14 @@ impl<'a> FrameWait<'a> {
     }
 }
 
-/// Whether the display thread tears its renderer down when it ends.
-///
-/// Releasing a renderer's GL context has to happen on the thread that made
-/// it current, so the display thread does it as its last act. On macOS
-/// glutin runs that release on the main thread, and the main thread is the
-/// one stopping the machine when the window closes, waiting in the join.
-/// Neither goes on, and the disks are never flushed. So a board calls
-/// [`request`](Self::request) first thing in its stop, and its display
-/// thread ends with [`finish`](Self::finish), which leaves the renderer
-/// alone when the stop came from the main thread. That stop is final: the
-/// process is ending, and the renderer cannot be set up again.
+/// Whether the display thread releases its renderer on exit; a stop from the
+/// main thread skips it (on macOS the release needs that thread, which is joining).
 #[derive(Default)]
 pub struct DisplayStop(AtomicBool);
 
 impl DisplayStop {
     pub fn request(&self) {
-        // std has no is-main-thread test. The platform ones exist where the
-        // hang does (pthread_main_np on macOS), but Rust names the main
-        // thread, and the name lets a test on Linux stand in for it.
+        // std has no is-main-thread test; the name lets a Linux test stand in.
         self.0.store(std::thread::current().name() == Some("main"), Ordering::Release);
     }
 
@@ -347,9 +311,8 @@ pub struct Frame {
     /// The same pixels in the same order on the screen's device, `0xAABBGGRR`.
     #[cfg(feature = "wgpu")]
     pub gpu: Option<::wgpu::Buffer>,
-    /// A board's planes for the one presenter that composes them itself
-    /// (Newport's `Ng1Screen`, for the GL window); `words` is then empty. Only
-    /// [`Need::planes`] asks for it.
+    /// A board's planes for the one presenter that composes them (Newport's
+    /// `Ng1Screen`, for the GL window); `words` is then empty.
     pub planes: Option<Box<dyn std::any::Any + Send + Sync>>,
     /// Newport's debug overlay, `width` to a row in the same order as `words`
     /// (transparent where nothing is shown), only while it is on.
@@ -379,13 +342,8 @@ impl Need {
     }
 }
 
-/// The front-end's half of a screen: the renderer it installs, and which of
-/// the machine's screens that renderer is showing.
-///
-/// A window that shows several screens in turn keeps one renderer, in the
-/// slot of the screen it shows now. A GL renderer is bound to the thread that
-/// presents with it, so a move between screens is done by the thread that is
-/// giving the renderer up ([`pass_to`](Self::pass_to), [`hand_over`](Self::hand_over)).
+/// A screen's renderer slot; a cycling window's renderer moves between slots
+/// on the thread giving it up (a GL context is bound to a thread).
 #[derive(Default)]
 pub struct Window {
     pub renderer: Mutex<Option<Box<dyn Renderer>>>,
@@ -421,10 +379,8 @@ impl Window {
         self.next.lock().is_some()
     }
 
-    /// Done on the display thread of the screen that holds the renderer, at
-    /// the top of its tick: release what only this thread may and move the
-    /// renderer to the slot it was passed to. A request that arrives while
-    /// the renderer is elsewhere stays until it is here.
+    /// At the top of the holding screen's tick: stop the renderer and move it
+    /// to the slot it was passed to.
     pub fn hand_over(&self) {
         let mut mine = self.renderer.lock();
         if mine.is_none() {
@@ -467,9 +423,8 @@ impl Cycle {
         &self.screens[self.cur]
     }
 
-    /// Move the window to the next screen. A press while the last move is
-    /// still waiting for its display thread is ignored, so the renderer never
-    /// has two pending moves. Returns the new screen's index when it moved.
+    /// Move the window to the next screen; ignored while a move is pending.
+    /// Returns the new screen's index when it moved.
     pub fn step(&mut self) -> Option<usize> {
         if self.screens.iter().any(|s| s.window.passing()) {
             return None;
@@ -484,8 +439,6 @@ impl Cycle {
 }
 
 /// One head's output, shared by the board's display thread and every consumer.
-/// The board side takes no lock but its own: it marks changes, reads requests
-/// and publishes frames, and the consumers read.
 pub struct Screen {
     /// Set by whatever the scan-out reads (see [`ScreenChanged`]).
     pub changed: Arc<ScreenChanged>,
@@ -543,9 +496,8 @@ impl Default for Screen {
 }
 
 impl Screen {
-    /// What this tick has to compose: a request or a capturing client wants
-    /// words; a renderer is shown (and takes device frames or Newport's
-    /// planes, when it does and nobody wants words).
+    /// What this tick composes: words for a request or capturing client, else
+    /// what the shown renderer takes.
     pub fn need(&self) -> Need {
         let words = self.requests.pending() || self.requests.capturing();
         let renderer = self.window.renderer.lock();
@@ -573,10 +525,8 @@ impl Screen {
         self.gpu.get()
     }
 
-    /// A frame to compose into, `w` by `h` words, in a buffer no consumer
-    /// holds. It notes the requests the frame will answer: take it before
-    /// composing, and a request made meanwhile stays pending after
-    /// [`publish`](Self::publish).
+    /// A frame to compose into, in a buffer no consumer holds. It notes the
+    /// requests it will answer: take it before composing.
     pub fn frame(&self, w: u32, h: u32) -> Frame {
         self.noted.store(self.requests.note(), Ordering::Release);
         self.spare_frame(w, h)
@@ -588,14 +538,11 @@ impl Screen {
         Frame { width: w, height: h, words, ..Frame::default() }
     }
 
-    /// One tick of the display: compose if anything looks, and publish what
-    /// `compose` filled (see [`run_display`]). Returns what was needed. `stats`
-    /// is the status bar's input, taken only for a frame a renderer is shown.
+    /// One tick: compose if anything looks and publish it. `stats` is the
+    /// status bar's input, taken only for a renderer. Returns what was needed.
     pub fn tick(&self, mut stats: impl FnMut() -> BarStats, compose: impl FnOnce(&mut Frame, Need) -> bool) -> Need {
         self.window.hand_over();
-        // Note the requests before reading what is needed: one that arrives
-        // after the note is not answered by this frame, so it cannot be
-        // answered by one composed without words.
+        // Note before reading the need: a later request is left for the next frame.
         self.noted.store(self.requests.note(), Ordering::Release);
         let need = self.need();
         if need.any() {
@@ -634,9 +581,8 @@ impl Screen {
         crate::disp::StatusSource::detached().snapshot(Instant::now(), 0)
     }
 
-    /// Show the newest frame to the renderer again, so its status bar moves:
-    /// every [`IDLE_REFRESH`] ticks, and at once to a renderer that has not
-    /// seen it.
+    /// Show the newest frame again every [`IDLE_REFRESH`] ticks, and at once to
+    /// a renderer that has not seen it.
     fn repeat(&self, stats: &mut impl FnMut() -> BarStats) {
         let Some(frame) = self.latest() else { return };
         let mut renderer = self.window.renderer.lock();
@@ -709,18 +655,16 @@ impl Screen {
         self.latest().filter(|f| f.width > 0 && f.height > 0 && f.words.len() == f.width as usize * f.height as usize)
     }
 
-    /// End a parked display thread's wait. A board that ticks every period
-    /// sees a request at its next tick, and a wake would only cut its frame
-    /// short: one more retrace for the guest.
+    /// End a parked thread's wait; a thread that ticks every period needs none,
+    /// and a wake would cut its frame short for an extra retrace.
     pub fn wake(&self) {
         if self.parks {
             self.changed.wake();
         }
     }
 
-    /// Ask for a frame composed from now on, wait at most `timeout` for it and
-    /// return the newest with its words. When the wait ran out, that is an
-    /// older frame (or none) and [`FrameRequests::pending`] still says so.
+    /// Wait up to `timeout` for a frame composed from now on, and return the
+    /// newest with words (older if the wait ran out; `pending` says so).
     pub fn capture(&self, timeout: Duration) -> Option<Arc<Frame>> {
         // Held until the frame is read, so no frame without words replaces the
         // answer in between.
@@ -756,19 +700,8 @@ pub fn save_screenshot(screen: &Arc<Screen>) {
     });
 }
 
-/// The display thread of a board: until `running` clears, each frame period
-/// it composes if anyone looks, runs the board's per-frame duty and waits out
-/// the period. `compose` fills the frame it is given from the board's state
-/// and returns whether it did; false means the picture is unchanged, and the
-/// newest frame stands. A request is answered either way. The board counts
-/// the frames it runs in [`Screen::counts`]; a tick nobody looks at is counted
-/// here as skipped. `retrace` is the
-/// board's hardware duty (the retrace pulse and its interrupt, trace flushes,
-/// the status counters). It runs every tick, watched or not, after the frame
-/// is taken, so a flip the guest makes at the retrace shows from the next one.
-/// `stats` is the status bar's input; it is called for each frame a renderer is
-/// shown.
-/// The thread ends by releasing the renderer ([`DisplayStop`]).
+/// A board's display thread: each period compose if anyone looks, run `retrace`
+/// (the hardware duty, watched or not) and wait. `compose` returns false if unchanged.
 pub fn run_display(
     screen: &Screen,
     running: &AtomicBool,
@@ -790,9 +723,8 @@ pub fn run_display(
     stop.finish(&screen.window.renderer);
 }
 
-/// The hardware cursor: where the board draws its glyph and which of the
-/// glyph's pixels are opaque. The glyph's top-left is the pointer position
-/// minus the hotspot, which the hardware does not know.
+/// The hardware cursor's glyph: top-left plus opaque pixels. The hardware does
+/// not know the hotspot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HwCursor {
     /// Glyph top-left in display coordinates; negative near the top/left edge.
