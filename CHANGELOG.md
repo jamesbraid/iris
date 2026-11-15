@@ -64,6 +64,14 @@ hashes are given where a change is easiest to understand by reading the commit.
   gives up and drops bytes as before until the client reads again. The
   serial log still records every byte. The O2's serial DMA does not wait on
   the transmitter, so there a full socket still loses bytes.
+- The serial TCP ports now serve telnet and plain TCP clients alike.
+  `serial_mode` (`--serial-mode`) is `auto` (the default), `raw` or `telnet`.
+  `auto` sends nothing on connect and switches a client to telnet character
+  mode if it sends an IAC command, or ends its first line with CR LF or CR
+  NUL, before it has sent a complete line, so `nc`, `socat` and scripts get
+  the guest's bytes unchanged and telnet clients still get character mode.
+  Before, every client was offered telnet on connect, which is what
+  `serial_mode = "telnet"` keeps.
 ### Bedrock boot flash
 
 - The Fuel's, Tezro's and Origin 3200's boot flash serves array reads under a

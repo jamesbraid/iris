@@ -41,7 +41,7 @@ pub(crate) fn connect_serial_ports(cfg: &MachineConfig, name: &str, ports: &[Ser
             port.ci.clone()
         } else {
             let mut backend = null_serial_backend();
-            match tcp_serial_backend(port.port) {
+            match tcp_serial_backend(port.port, cfg.serial_mode) {
                 Some((socket, actual_port)) => {
                     eprintln!("iris: {tag} on 127.0.0.1:{actual_port}");
                     backend = socket;

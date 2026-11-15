@@ -157,6 +157,7 @@ the first `[section]`, because TOML tables continue until the next header.
 | `monitor_port` | `8888 when unset` | Monitor listener on loopback. |
 | `serial_port_a` | `8880 when unset` | SCC channel A listener (tty2); the O2's first serial port, its console when headless. |
 | `serial_port_b` | `8881 when unset` | SCC channel B listener (tty1/console); the O2's second serial port. GUI halt uses this port. |
+| `serial_mode` | `auto` | How the serial TCP ports (`serial_port_a`, `serial_port_b`, and the Fuel's, Tezro's and Origin 3000's other lines) talk to a client. `auto`: plain bytes, nothing sent on connect, until the client sends an IAC command or ends its first line CR LF or CR NUL (one piece), then telnet character mode for that client; a client whose first line ends otherwise stays plain. `raw`: plain bytes, never negotiates. `telnet`: character mode offered to every client on connect. `--serial-mode` sets it. The monitor port is always telnet. |
 | `serial_socket_a` | `unset` | Also serve serial channel A on this Unix socket (raw bytes, one client at a time). |
 | `serial_socket_b` | `unset` | Likewise for channel B. With `ci` the console stays readable through `serial-read` and `wait-serial` as well. |
 | `load_elf` | `unset` | Load a static big-endian MIPS ELF32 binary before starting the CPU. |

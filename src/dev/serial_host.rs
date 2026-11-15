@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
 
-use crate::config::MachineConfig;
+use crate::config::{MachineConfig, SerialMode};
+use crate::net::telnet::TelnetFilter;
 use crate::dev::serial_log::SerialLog;
 
 pub trait SerialBackend: Send + Sync {
@@ -266,16 +267,82 @@ impl SerialBackend for FanoutBackend {
     }
 }
 
-struct TcpConn {
+/// What a TCP serial line says on the wire, fixed when the backend is built.
+/// The backend is generic over it, so each line's byte loop is compiled for
+/// one protocol and carries no test for the other.
+pub(crate) trait Wire: Send + Sync + 'static {
+    /// Per-client receive state.
+    type State: Send;
+    fn new_state() -> Self::State;
+    /// Bytes to send a client the moment it connects.
+    fn greeting() -> &'static [u8];
+    /// One outbound data byte as it goes on the wire.
+    fn escape(byte: u8, out: &mut Vec<u8>);
+    /// One inbound byte: the data byte it carries, if any, with any reply it
+    /// calls for appended to `reply`.
+    fn feed(state: &mut Self::State, byte: u8, reply: &mut Vec<u8>) -> Option<u8>;
+}
+
+/// Telnet character mode: the handshake, 0xFF doubled, commands stripped.
+pub(crate) struct Telnet;
+
+impl Wire for Telnet {
+    type State = crate::net::telnet::TelnetFilter;
+    fn new_state() -> Self::State {
+        crate::net::telnet::TelnetFilter::new()
+    }
+    fn greeting() -> &'static [u8] {
+        const HS: [u8; 12] = crate::net::telnet::TelnetFilter::initial_handshake();
+        &HS
+    }
+    fn escape(byte: u8, out: &mut Vec<u8>) {
+        crate::net::telnet::escape_byte(byte, out);
+    }
+    fn feed(state: &mut Self::State, byte: u8, reply: &mut Vec<u8>) -> Option<u8> {
+        state.feed(byte, reply)
+    }
+}
+
+/// Plain bytes both ways: no handshake, no escaping, nothing filtered. For
+/// scripts, `nc` and tools that treat the port as a serial line.
+pub(crate) struct Raw;
+
+impl Wire for Raw {
+    type State = ();
+    fn new_state() {}
+    fn greeting() -> &'static [u8] {
+        &[]
+    }
+    fn escape(byte: u8, out: &mut Vec<u8>) {
+        out.push(byte);
+    }
+    fn feed(_: &mut (), byte: u8, _: &mut Vec<u8>) -> Option<u8> {
+        Some(byte)
+    }
+}
+
+pub(crate) struct TcpConn<S> {
     stream: TcpStream,
-    telnet: crate::net::telnet::TelnetFilter,
+    wire: S,
     /// Bytes this client's socket would not take yet: the rest of one
     /// escaped data byte and any telnet replies, in order. While any wait,
     /// the next data byte is refused (or, sent without retry, skipped).
     pending: Vec<u8>,
+    /// Bytes read from the client before it was recognised as telnet; see
+    /// [`Carry`]. Only `Auto`'s joining list sets it.
+    carry: Carry,
 }
 
-impl TcpConn {
+impl<S> TcpConn<S> {
+    fn new(stream: TcpStream, wire: S) -> Self {
+        Self {
+            stream,
+            wire,
+            pending: Vec::new(),
+            carry: Carry::default(),
+        }
+    }
+
     /// Write what is pending as far as the socket takes it. `Ok(true)` when
     /// nothing is left; an error means the client has gone.
     fn flush(&mut self) -> io::Result<bool> {
@@ -300,20 +367,487 @@ impl TcpConn {
     }
 }
 
-pub(crate) struct TcpSocketBackend {
+/// The clients of one TCP serial line, as a protocol decides to treat them.
+/// Each implementation runs its byte loops on connections whose protocol is
+/// already fixed; none tests it per byte.
+pub(crate) trait Lines: Default + Send + 'static {
+    fn is_empty(&self) -> bool;
+    /// Take a freshly accepted client. `false` drops it.
+    fn accept(&mut self, stream: TcpStream) -> bool;
+    /// Write what sockets held back. Gone clients are dropped.
+    fn flush(&mut self);
+    /// Give every client one outbound data byte, skipping any whose socket
+    /// is full.
+    fn send(&mut self, byte: u8);
+    /// As `send`, but refused (`false`, nothing sent) while any client still
+    /// has bytes its socket would not take, so all clients get every byte
+    /// once, paced by the slowest.
+    fn try_send(&mut self, byte: u8) -> bool;
+    /// Poll the clients for one inbound data byte.
+    fn recv(&mut self) -> Option<u8>;
+}
+
+/// Clients all speaking one protocol, fixed for the line.
+pub(crate) struct Fixed<W: Wire>(Vec<TcpConn<W::State>>);
+
+impl<W: Wire> Default for Fixed<W> {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl<W: Wire> std::ops::Deref for Fixed<W> {
+    type Target = Vec<TcpConn<W::State>>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<W: Wire> std::ops::DerefMut for Fixed<W> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+fn flush_all<S>(conns: &mut Vec<TcpConn<S>>) -> bool {
+    let mut clear = true;
+    conns.retain_mut(|c| match c.flush() {
+        Ok(done) => {
+            clear &= done;
+            true
+        }
+        Err(_) => false,
+    });
+    clear
+}
+
+fn send_all<S>(conns: &mut Vec<TcpConn<S>>, buf: &[u8]) {
+    conns.retain_mut(|c| match c.flush() {
+        Ok(true) => c.push(buf).is_ok(),
+        Ok(false) => true,
+        Err(_) => false,
+    });
+}
+
+/// Pull bytes from each client through its protocol until a data byte falls
+/// out or none has more. A client that has gone is dropped.
+fn recv_all<W: Wire>(conns: &mut Vec<TcpConn<W::State>>) -> Option<u8> {
+    let mut i = 0;
+    while i < conns.len() {
+        let mut gone = false;
+        loop {
+            let c = &mut conns[i];
+            let mut buf = [0u8; 1];
+            match c.stream.read(&mut buf) {
+                Ok(1) => {
+                    let mut reply = Vec::new();
+                    let data = W::feed(&mut c.wire, buf[0], &mut reply);
+                    // Behind any pending output, so a reply never lands
+                    // inside an escaped data byte.
+                    if !reply.is_empty() && c.push(&reply).is_err() {
+                        gone = true;
+                        break;
+                    }
+                    if let Some(d) = data {
+                        return Some(d);
+                    }
+                    // A protocol command consumed; keep reading.
+                }
+                Ok(_) => {
+                    gone = true;
+                    break;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => {
+                    gone = true;
+                    break;
+                }
+            }
+        }
+        if gone {
+            conns.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+impl<W: Wire> Lines for Fixed<W> {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    /// The client gets the protocol's greeting. One whose greeting cannot be
+    /// written is dropped; it can reconnect.
+    fn accept(&mut self, mut stream: TcpStream) -> bool {
+        if stream.write_all(W::greeting()).is_err() {
+            return false;
+        }
+        self.0.push(TcpConn::new(stream, W::new_state()));
+        true
+    }
+    fn flush(&mut self) {
+        flush_all(&mut self.0);
+    }
+    fn send(&mut self, byte: u8) {
+        let mut buf = Vec::with_capacity(2);
+        W::escape(byte, &mut buf);
+        send_all(&mut self.0, &buf);
+    }
+    fn try_send(&mut self, byte: u8) -> bool {
+        if !flush_all(&mut self.0) {
+            return false;
+        }
+        let mut buf = Vec::with_capacity(2);
+        W::escape(byte, &mut buf);
+        self.0.retain_mut(|c| c.push(&buf).is_ok());
+        true
+    }
+    fn recv(&mut self) -> Option<u8> {
+        recv_all::<W>(&mut self.0)
+    }
+}
+
+/// `serial_mode = "auto"`: a client is plain bytes until it shows it speaks
+/// telnet, and from then on it is a telnet client. The kinds sit in separate
+/// lists, so a client is moved once, when it is recognised, and no list's
+/// loops test which protocol a client is on.
+///
+/// Telnet is recognised in one of two ways, and only before the client has
+/// sent one complete line:
+/// - an IAC followed by a telnet command (SB, WILL, WONT, DO or DONT), at any
+///   point before that. PuTTY and other clients that negotiate on connect do
+///   it first. A lone 0xFF a plain client sends as data is not one, nor is
+///   the escaped pair 0xFF 0xFF.
+/// - the client's first line ending CR LF or CR NUL, when the whole line
+///   arrived in one chunk. Telnet clients that stay silent on connect (GNU
+///   inetutils, BSD, Apple and busybox telnet, screen) send their first line
+///   that way. `nc`, `ncat` and `socat` send a bare LF or CR for Enter.
+///
+/// A client whose first line ends any other way, or arrives in pieces, is
+/// plain for good: from then on nothing it sends changes that. Recognising
+/// telnet, the line sends the handshake, which puts such a client in
+/// character mode, and from then on escapes 0xFF and filters IAC.
+#[derive(Default)]
+pub(crate) struct Auto {
+    plain: Vec<TcpConn<SniffState>>,
+    /// Telnet clients just recognised: what they sent before it was clear
+    /// still reaches the guest first, then they move to `telnet`, which so
+    /// carries no test for it.
+    joining: Vec<TcpConn<TelnetFilter>>,
+    telnet: Fixed<Telnet>,
+}
+
+/// What `Auto` remembers of a plain client between the chunks it reads. It
+/// is not a [`Wire`]: a plain client's bytes go through unchanged.
+#[derive(Default)]
+pub(crate) struct SniffState {
+    /// A complete line has been seen with no sign of telnet: plain for good.
+    locked: bool,
+    /// Data bytes of the first line were read in an earlier chunk.
+    consumed: bool,
+    after_cr: bool,
+    after_iac: bool,
+    /// Data read from the socket and not yet given to the guest.
+    inq: VecDeque<u8>,
+    /// An IAC that ended the last chunk is not in `inq` until the next byte
+    /// says what it is, or until this long has passed with nothing after it.
+    held_iac_since: Option<Instant>,
+}
+
+/// What a chunk read from a plain client shows.
+enum Scan {
+    /// Nothing telnet: all of it is data.
+    Plain,
+    /// A telnet command starts at this index; the bytes before it are data.
+    Iac(usize),
+    /// The chunk starts with the command; its IAC ended the last chunk.
+    IacHeld,
+    /// The client's first line, which began in this chunk, ends CR LF or
+    /// CR NUL at this index; the bytes up to and including it are data.
+    NvtEnd { at: usize },
+}
+
+impl SniffState {
+    /// Look through a chunk for the first sign of telnet. Bytes before it are
+    /// data; the state carries what a later chunk needs.
+    fn scan(&mut self, chunk: &[u8]) -> Scan {
+        if self.locked {
+            return Scan::Plain;
+        }
+        let first_line_starts_here = !self.consumed;
+        for (i, &byte) in chunk.iter().enumerate() {
+            if self.after_iac {
+                self.after_iac = false;
+                if (crate::net::telnet::SB..=crate::net::telnet::DONT).contains(&byte) {
+                    return if i == 0 { Scan::IacHeld } else { Scan::Iac(i - 1) };
+                }
+                // 0xFF 0xFF is one escaped data byte. After a lone 0xFF this
+                // byte is data too, and is looked at as such below.
+                if byte == crate::net::telnet::IAC {
+                    continue;
+                }
+            } else if byte == crate::net::telnet::IAC {
+                self.consumed = true;
+                self.after_iac = true;
+                continue;
+            }
+            let nvt_end = self.after_cr && (byte == b'\n' || byte == 0);
+            let bare_cr_ended = self.after_cr && !nvt_end;
+            self.after_cr = byte == b'\r';
+            if nvt_end {
+                if first_line_starts_here {
+                    return Scan::NvtEnd { at: i };
+                }
+                // The line was in pieces: not enough to call it telnet.
+                self.lock();
+                return Scan::Plain;
+            }
+            if bare_cr_ended || byte == b'\n' {
+                self.lock();
+                return Scan::Plain;
+            }
+            self.consumed = true;
+        }
+        Scan::Plain
+    }
+
+    /// Plain for good, and nothing more of the line is kept.
+    fn lock(&mut self) {
+        self.locked = true;
+    }
+}
+
+/// How long `Auto` waits for what follows before it acts on a pause: a lone
+/// 0xFF at the end of a plain client's read is data after this long with
+/// nothing after it.
+const POLL_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// What a client that has just been recognised as telnet has sent that is
+/// still to reach the guest: plain data from the chunk that showed it, and
+/// the bytes after that, which are telnet.
+#[derive(Default)]
+pub(crate) struct Carry {
+    data: VecDeque<u8>,
+    wire: VecDeque<u8>,
+}
+
+impl Auto {
+    /// Pass one guest byte to the clients that are joining.
+    fn send_joining(&mut self, byte: u8) {
+        let mut out = Vec::with_capacity(2);
+        Telnet::escape(byte, &mut out);
+        send_all(&mut self.joining, &out);
+    }
+
+    /// Move clients that have nothing left to carry over to the telnet list.
+    fn settle_joining(&mut self) {
+        let mut i = 0;
+        while i < self.joining.len() {
+            let c = &self.joining[i];
+            let done = c.carry.data.is_empty() && c.carry.wire.is_empty();
+            if done {
+                let c = self.joining.remove(i);
+                self.telnet.0.push(c);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// The next data byte from clients just recognised as telnet: what was
+    /// read with the chunk that showed it, then what they send.
+    fn joining_recv(&mut self) -> Option<u8> {
+        let mut i = 0;
+        while i < self.joining.len() {
+            let c = &mut self.joining[i];
+            if let Some(d) = c.carry.data.pop_front() {
+                return Some(d);
+            }
+            while let Some(b) = c.carry.wire.pop_front() {
+                let mut reply = Vec::new();
+                let data = Telnet::feed(&mut c.wire, b, &mut reply);
+                if !reply.is_empty() && c.push(&reply).is_err() {
+                    break;
+                }
+                if let Some(d) = data {
+                    return Some(d);
+                }
+            }
+            i += 1;
+        }
+        if self.joining.is_empty() {
+            return None;
+        }
+        let got = recv_all::<Telnet>(&mut self.joining);
+        self.settle_joining();
+        got
+    }
+
+    /// Read a chunk from the plain client at `i` and look it over.
+    fn plain_recv(&mut self, i: usize) -> PlainStep {
+        let c = &mut self.plain[i];
+        if let Some(d) = c.wire.inq.pop_front() {
+            return PlainStep::Data(d);
+        }
+        let mut buf = [0u8; 256];
+        let n = match c.stream.read(&mut buf) {
+            Ok(0) => {
+                self.plain.remove(i);
+                return PlainStep::Gone;
+            }
+            Ok(n) => n,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // A lone IAC that nothing followed is data.
+                if c.wire.held_iac_since.is_some_and(|t| t.elapsed() >= POLL_TIMEOUT) {
+                    c.wire.held_iac_since = None;
+                    c.wire.after_iac = false;
+                    return PlainStep::Data(crate::net::telnet::IAC);
+                }
+                return PlainStep::Idle;
+            }
+            Err(_) => {
+                self.plain.remove(i);
+                return PlainStep::Gone;
+            }
+        };
+        let chunk = &buf[..n];
+        let held = c.wire.held_iac_since.take().is_some();
+        let mut iac_was_held = false;
+        let (mut cut, switched) = match c.wire.scan(chunk) {
+            Scan::Plain => (n, false),
+            Scan::Iac(at) => (at, true),
+            Scan::IacHeld => {
+                iac_was_held = true;
+                (0, true)
+            }
+            Scan::NvtEnd { at } => (at + 1, true),
+        };
+        if held && !iac_was_held {
+            // The IAC that ended the last chunk was data.
+            c.wire.inq.push_back(crate::net::telnet::IAC);
+        }
+        if !switched && c.wire.after_iac && !c.wire.locked {
+            // An IAC ending this chunk waits for what follows.
+            cut = n - 1;
+            c.wire.held_iac_since = Some(Instant::now());
+        }
+        c.wire.inq.extend(&chunk[..cut]);
+        if !switched {
+            return match c.wire.inq.pop_front() {
+                Some(d) => PlainStep::Data(d),
+                None => PlainStep::Idle,
+            };
+        }
+        // Telnet. Move the client over with what it has sent: the plain data
+        // up to the sign, and the rest as telnet.
+        let TcpConn { stream, mut pending, wire: sniff, .. } = self.plain.remove(i);
+        pending.extend_from_slice(Telnet::greeting());
+        let mut wire: VecDeque<u8> = VecDeque::new();
+        if iac_was_held {
+            wire.push_back(crate::net::telnet::IAC);
+        }
+        wire.extend(&chunk[cut..]);
+        let mut conn = TcpConn::new(stream, Telnet::new_state());
+        conn.pending = pending;
+        conn.carry = Carry { data: sniff.inq, wire };
+        if conn.flush().is_err() {
+            return PlainStep::Gone;
+        }
+        self.joining.push(conn);
+        PlainStep::Gone
+    }
+}
+
+enum PlainStep {
+    Data(u8),
+    /// The client was moved or dropped.
+    Gone,
+    /// Nothing to read from this client now.
+    Idle,
+}
+
+impl Lines for Auto {
+    fn is_empty(&self) -> bool {
+        self.plain.is_empty() && self.joining.is_empty() && self.telnet.is_empty()
+    }
+    fn accept(&mut self, stream: TcpStream) -> bool {
+        self.plain.push(TcpConn::new(stream, SniffState::default()));
+        true
+    }
+    fn flush(&mut self) {
+        flush_all(&mut self.plain);
+        flush_all(&mut self.joining);
+        flush_all(&mut self.telnet.0);
+    }
+    fn send(&mut self, byte: u8) {
+        send_all(&mut self.plain, &[byte]);
+        // Before the joining clients, so one that moves over on this byte is
+        // not sent it twice.
+        self.telnet.send(byte);
+        if !self.joining.is_empty() {
+            self.send_joining(byte);
+        }
+    }
+    fn try_send(&mut self, byte: u8) -> bool {
+        // Every list must be clear before any takes the byte.
+        let clear = flush_all(&mut self.plain) & flush_all(&mut self.joining) & flush_all(&mut self.telnet.0);
+        if !clear {
+            return false;
+        }
+        self.plain.retain_mut(|c| c.push(&[byte]).is_ok());
+        let taken = self.telnet.try_send(byte);
+        if !self.joining.is_empty() {
+            self.send_joining(byte);
+        }
+        taken
+    }
+    fn recv(&mut self) -> Option<u8> {
+        if !self.joining.is_empty() {
+            if let Some(d) = self.joining_recv() {
+                return Some(d);
+            }
+        }
+        if let Some(d) = self.telnet.recv() {
+            return Some(d);
+        }
+        let mut i = 0;
+        while i < self.plain.len() {
+            match self.plain_recv(i) {
+                PlainStep::Data(d) => return Some(d),
+                PlainStep::Idle => i += 1,
+                // A client that moved over has data waiting.
+                PlainStep::Gone => {
+                    if let Some(d) = self.joining_recv() {
+                        return Some(d);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+pub(crate) struct TcpSocketBackend<L: Lines = Fixed<Telnet>> {
     pub(crate) listener: TcpListener,
     /// Every connected client: each sees all the output and may type, so a
     /// person at the console and a script can share it.
-    conns: Mutex<Vec<TcpConn>>,
+    conns: Mutex<L>,
 }
 
-impl TcpSocketBackend {
+impl TcpSocketBackend<Fixed<Telnet>> {
+    pub(crate) fn new<A: std::net::ToSocketAddrs>(addr: A) -> Option<Self> {
+        Self::bind(addr)
+    }
+}
+
+impl<L: Lines> TcpSocketBackend<L> {
     /// Bind a TCP serial backend. Returns `None` (rather than panicking) if the
     /// port can't be bound — most commonly because a stale emulator process from
     /// an earlier crash is still holding it. Callers fall back to a NullBackend
     /// so the machine still boots; that serial channel is simply unavailable
     /// until the port frees.
-    pub(crate) fn new<A: std::net::ToSocketAddrs>(addr: A) -> Option<Self> {
+    pub(crate) fn bind<A: std::net::ToSocketAddrs>(addr: A) -> Option<Self> {
         let listener = match TcpListener::bind(addr) {
             Ok(l) => l,
             Err(e) => {
@@ -325,16 +859,11 @@ impl TcpSocketBackend {
             log::warn!("serial TCP backend disabled: failed to set nonblocking: {e}");
             return None;
         }
-        Some(Self {
-            listener,
-            conns: Mutex::new(Vec::new()),
-        })
+        Some(Self { listener, conns: Mutex::new(L::default()) })
     }
 
-    /// Take any clients waiting to connect, offering each telnet character
-    /// mode. One whose handshake cannot be written is dropped; it can
-    /// reconnect.
-    fn accept_waiting(&self, conns: &mut Vec<TcpConn>) {
+    /// Take any clients waiting to connect.
+    fn accept_waiting(&self, conns: &mut L) {
         while let Ok((socket, _)) = self.listener.accept() {
             if socket.set_nonblocking(true).is_err() {
                 continue;
@@ -344,28 +873,19 @@ impl TcpSocketBackend {
             // segment is acked, which shows up as a stutter on every
             // interaction. Set it on accept, before any byte is written.
             let _ = socket.set_nodelay(true);
-            let mut c = TcpConn { stream: socket, telnet: crate::net::telnet::TelnetFilter::new(), pending: Vec::new() };
-            if c.stream.write_all(&crate::net::telnet::TelnetFilter::initial_handshake()).is_ok() {
-                conns.push(c);
-            }
+            conns.accept(socket);
         }
     }
 }
 
-impl SerialBackend for TcpSocketBackend {
+impl<L: Lines> SerialBackend for TcpSocketBackend<L> {
     /// A client whose socket is still full misses this byte.
     fn send_byte(&self, byte: u8) {
         let mut conns = self.conns.lock();
         if conns.is_empty() {
             return;
         }
-        let mut buf = Vec::with_capacity(2);
-        crate::net::telnet::escape_byte(byte, &mut buf);
-        conns.retain_mut(|c| match c.flush() {
-            Ok(true) => c.push(&buf).is_ok(),
-            Ok(false) => true,
-            Err(_) => false,
-        });
+        conns.send(byte);
     }
 
     /// Refused while any client still has bytes its socket would not take,
@@ -374,22 +894,7 @@ impl SerialBackend for TcpSocketBackend {
     /// waits in that client's pending bytes. A client that has gone is
     /// dropped; with none the byte is taken and dropped.
     fn try_send_byte(&self, byte: u8) -> bool {
-        let mut conns = self.conns.lock();
-        let mut clear = true;
-        conns.retain_mut(|c| match c.flush() {
-            Ok(done) => {
-                clear &= done;
-                true
-            }
-            Err(_) => false,
-        });
-        if !clear {
-            return false;
-        }
-        let mut buf = Vec::with_capacity(2);
-        crate::net::telnet::escape_byte(byte, &mut buf);
-        conns.retain_mut(|c| c.push(&buf).is_ok());
-        true
+        self.conns.lock().try_send(byte)
     }
 
     fn recv_byte(&self) -> io::Result<u8> {
@@ -397,63 +902,33 @@ impl SerialBackend for TcpSocketBackend {
         self.accept_waiting(&mut conns);
         // The receive poll also moves output a full socket held back, so the
         // last byte before the guest falls quiet is not left waiting.
-        conns.retain_mut(|c| c.flush().is_ok());
+        conns.flush();
         if conns.is_empty() {
             return Err(io::Error::new(io::ErrorKind::WouldBlock, "No connection"));
         }
-        // Each client in turn: pull bytes through its telnet filter until a
-        // real data byte falls out or it has nothing more to give. A client
-        // that has gone away is dropped.
-        let mut i = 0;
-        while i < conns.len() {
-            let mut gone = false;
-            loop {
-                let c = &mut conns[i];
-                let mut buf = [0u8; 1];
-                match c.stream.read(&mut buf) {
-                    Ok(1) => {
-                        let mut reply = Vec::new();
-                        let data = c.telnet.feed(buf[0], &mut reply);
-                        // Behind any pending output, so a reply never lands
-                        // inside an escaped data byte.
-                        if !reply.is_empty() && c.push(&reply).is_err() {
-                            gone = true;
-                            break;
-                        }
-                        if let Some(d) = data {
-                            return Ok(d);
-                        }
-                        // Telnet command consumed; keep reading.
-                    }
-                    Ok(_) => {
-                        gone = true;
-                        break;
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(_) => {
-                        gone = true;
-                        break;
-                    }
-                }
-            }
-            if gone {
-                conns.remove(i);
-            } else {
-                i += 1;
-            }
+        match conns.recv() {
+            Some(d) => Ok(d),
+            None => Err(io::Error::new(io::ErrorKind::WouldBlock, "WouldBlock")),
         }
-        Err(io::Error::new(io::ErrorKind::WouldBlock, "WouldBlock"))
     }
 }
 
-/// A TCP serial console on 127.0.0.1:`port` (0 takes any free port), in
-/// telnet character mode, for any device with a serial line: every client
-/// connected sees the output and may type. Returns the backend and the port
-/// it bound, or `None` when the port is taken.
-pub fn tcp_serial_backend(port: u16) -> Option<(Arc<dyn SerialBackend>, u16)> {
-    let b = TcpSocketBackend::new(("127.0.0.1", port))?;
-    let bound = b.listener.local_addr().ok()?.port();
-    Some((Arc::new(b), bound))
+/// A TCP serial console on 127.0.0.1:`port` (0 takes any free port), for any
+/// device with a serial line: every client connected sees the output and may
+/// type. `mode` says how it talks to a client (see [`SerialMode`]). Returns
+/// the backend and the port it bound, or `None` when the port is taken.
+pub fn tcp_serial_backend(port: u16, mode: SerialMode) -> Option<(Arc<dyn SerialBackend>, u16)> {
+    // Chosen here, once: each backend is its own type with its own byte loops.
+    fn serve<L: Lines>(port: u16) -> Option<(Arc<dyn SerialBackend>, u16)> {
+        let b = TcpSocketBackend::<L>::bind(("127.0.0.1", port))?;
+        let bound = b.listener.local_addr().ok()?.port();
+        Some((Arc::new(b), bound))
+    }
+    match mode {
+        SerialMode::Auto => serve::<Auto>(port),
+        SerialMode::Raw => serve::<Fixed<Raw>>(port),
+        SerialMode::Telnet => serve::<Fixed<Telnet>>(port),
+    }
 }
 
 /// A serial line wired to nothing: output is dropped, nothing arrives.
@@ -663,6 +1138,8 @@ pub struct SerialLine<'a> {
     /// key.
     pub socket: Option<&'a str>,
     pub socket_setting: &'a str,
+    /// How the TCP port talks to a client (`serial_mode`).
+    pub mode: SerialMode,
 }
 
 /// Wire one serial line: TCP on `tcp_port` plus the Unix socket when one is
@@ -688,7 +1165,7 @@ pub fn serial_line(
     }
     let mut ends: Vec<Arc<dyn SerialBackend>> = Vec::new();
     if let Some(port) = line.tcp_port {
-        match tcp_serial_backend(port) {
+        match tcp_serial_backend(port, line.mode) {
             Some((b, p)) => {
                 eprintln!("iris: {} on 127.0.0.1:{p}", line.label);
                 ends.push(b);
@@ -736,6 +1213,7 @@ pub fn console_backends(
             tcp_setting: "serial_port_a",
             socket: cfg.serial_socket_a.as_deref(),
             socket_setting: "serial_socket_a",
+            mode: cfg.serial_mode,
         },
         log,
         ci,
@@ -749,6 +1227,7 @@ pub fn console_backends(
             tcp_setting: "serial_port_b",
             socket: cfg.serial_socket_b.as_deref(),
             socket_setting: "serial_socket_b",
+            mode: cfg.serial_mode,
         },
         log,
         None,
@@ -805,7 +1284,7 @@ mod tests {
         let log_path = dir.join("tcp.log");
         let log = SerialLog::create(&log_path, Default::default()).unwrap();
         let (backend, served) = serial_line(
-            &SerialLine { label: "Test", tcp_port: Some(0), tcp_setting: "port", socket: None, socket_setting: "socket" },
+            &SerialLine { label: "Test", tcp_port: Some(0), tcp_setting: "port", socket: None, socket_setting: "socket", mode: SerialMode::Auto },
             Some(log),
             None,
         );
@@ -816,7 +1295,7 @@ mod tests {
         let log_path = dir.join("none.log");
         let log = SerialLog::create(&log_path, Default::default()).unwrap();
         let (backend, served) = serial_line(
-            &SerialLine { label: "Test", tcp_port: None, tcp_setting: "port", socket: None, socket_setting: "socket" },
+            &SerialLine { label: "Test", tcp_port: None, tcp_setting: "port", socket: None, socket_setting: "socket", mode: SerialMode::Auto },
             Some(log),
             None,
         );
@@ -904,7 +1383,7 @@ mod tests {
         let log = SerialLog::create(&log_path, Default::default()).unwrap();
         let path = sock.to_string_lossy().into_owned();
         let (backend, served) = serial_line(
-            &SerialLine { label: "Test", tcp_port: Some(0), tcp_setting: "port", socket: Some(&path), socket_setting: "socket" },
+            &SerialLine { label: "Test", tcp_port: Some(0), tcp_setting: "port", socket: Some(&path), socket_setting: "socket", mode: SerialMode::Auto },
             Some(log),
             None,
         );
@@ -1106,6 +1585,325 @@ mod tests {
         }
         assert!(last_taken);
         assert!(got == want, "the client saw {} bytes, wanted {}, or not in order", got.len(), want.len());
+    }
+
+    /// A scripted client on a serial line: it connects, sends what it is
+    /// told, and the line is polled as the guest's SCC would poll it.
+    struct Client {
+        line: Arc<dyn SerialBackend>,
+        stream: TcpStream,
+        got: Vec<u8>,
+    }
+
+    impl Client {
+        fn connect(mode: SerialMode) -> Self {
+            let (line, port) = tcp_serial_backend(0, mode).expect("bind");
+            let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream.set_nonblocking(true).unwrap();
+            let mut c = Client { line, stream, got: Vec::new() };
+            c.settle();
+            c
+        }
+
+        /// Poll the line for the guest's input and read what reached the
+        /// client, until both have been quiet for a few polls.
+        fn settle(&mut self) -> Vec<u8> {
+            let mut input = Vec::new();
+            let mut quiet = 0;
+            let t0 = Instant::now();
+            while quiet < 20 {
+                assert!(t0.elapsed() < Duration::from_secs(10));
+                let mut moved = false;
+                while let Ok(b) = self.line.recv_byte() {
+                    input.push(b);
+                    moved = true;
+                }
+                let mut buf = [0u8; 256];
+                if let Ok(n) = self.stream.read(&mut buf) {
+                    self.got.extend_from_slice(&buf[..n]);
+                    moved = moved || n > 0;
+                }
+                quiet = if moved { 0 } else { quiet + 1 };
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            input
+        }
+
+        /// The client sends `bytes`; returns what the guest read.
+        fn send(&mut self, bytes: &[u8]) -> Vec<u8> {
+            use std::io::Write;
+            self.stream.set_nonblocking(false).unwrap();
+            self.stream.write_all(bytes).unwrap();
+            self.stream.set_nonblocking(true).unwrap();
+            self.settle()
+        }
+
+        /// As `send`, but the guest echoes each byte as it reads it, the way a
+        /// tty does, answering CR with `cr` and LF with `lf`.
+        fn send_echoing(&mut self, bytes: &[u8], cr: &[u8], lf: &[u8]) -> Vec<u8> {
+            use std::io::Write;
+            self.stream.set_nonblocking(false).unwrap();
+            self.stream.write_all(bytes).unwrap();
+            self.stream.set_nonblocking(true).unwrap();
+            let mut input = Vec::new();
+            let mut quiet = 0;
+            while quiet < 20 {
+                let mut moved = false;
+                while let Ok(b) = self.line.recv_byte() {
+                    input.push(b);
+                    moved = true;
+                    let echo: &[u8] = match b {
+                        b'\r' => cr,
+                        b'\n' => lf,
+                        _ => std::slice::from_ref(&b),
+                    };
+                    for e in echo {
+                        self.line.send_byte(*e);
+                    }
+                }
+                let mut buf = [0u8; 256];
+                if let Ok(n) = self.stream.read(&mut buf) {
+                    self.got.extend_from_slice(&buf[..n]);
+                    moved = moved || n > 0;
+                }
+                quiet = if moved { 0 } else { quiet + 1 };
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            input
+        }
+
+        /// The guest writes `bytes`; returns what the client has received in
+        /// total since the last call.
+        fn guest_writes(&mut self, bytes: &[u8]) -> Vec<u8> {
+            for b in bytes {
+                self.line.send_byte(*b);
+            }
+            self.settle();
+            std::mem::take(&mut self.got)
+        }
+    }
+
+    const GREETING: [u8; 12] = crate::net::telnet::TelnetFilter::initial_handshake();
+
+    /// `raw` is plain bytes whatever the client sends; `telnet` greets on
+    /// connect and filters and escapes.
+    #[test]
+    fn raw_and_telnet_modes_are_fixed_from_the_first_byte() {
+        let mut raw = Client::connect(SerialMode::Raw);
+        assert_eq!(std::mem::take(&mut raw.got), b"", "raw sends nothing on connect");
+        assert_eq!(raw.send(b"a\r\n\xff\xfb\x01"), b"a\r\n\xff\xfb\x01", "and passes IAC as data");
+        assert_eq!(raw.guest_writes(b"x\xffy"), b"x\xffy");
+
+        let mut tel = Client::connect(SerialMode::Telnet);
+        assert_eq!(std::mem::take(&mut tel.got), GREETING, "telnet offers on connect");
+        assert_eq!(tel.send(b"a\r\n\xff\xff"), b"a\r\n\xff", "filters, and unescapes 0xff");
+        assert_eq!(tel.guest_writes(b"x\xffy"), b"x\xff\xffy");
+    }
+
+    /// Auto starts as raw bytes with nothing sent, so `nc`, `ncat` and
+    /// `socat` (bare LF or CR for Enter) see exactly the guest's bytes,
+    /// including 0xff, however long they type.
+    #[test]
+    fn auto_leaves_a_plain_client_plain() {
+        for enter in [&b"\n"[..], &b"\r"[..]] {
+            let mut c = Client::connect(SerialMode::Auto);
+            assert_eq!(std::mem::take(&mut c.got), b"", "nothing is sent on connect");
+            for _ in 0..3 {
+                let mut line = b"root".to_vec();
+                line.extend_from_slice(enter);
+                assert_eq!(c.send(&line), line);
+            }
+            assert_eq!(c.guest_writes(b"login: \xff"), b"login: \xff", "no negotiation, no escaping");
+        }
+    }
+
+    /// Only a client's first line can show it is telnet. Once it has sent a
+    /// complete line with no sign of it, a later line ending CR LF (a script
+    /// whose first line was a bare LF, a user pasting from a Windows editor)
+    /// leaves it plain, and so does a telnet command after that.
+    #[test]
+    fn auto_keeps_a_client_plain_once_it_has_sent_a_line() {
+        let mut c = Client::connect(SerialMode::Auto);
+        assert_eq!(c.send(b"one\n"), b"one\n");
+        assert_eq!(c.send(b"two\r\nthree\r\0"), b"two\r\nthree\r\0");
+        assert_eq!(c.send(b"\xff\xfb\x01"), b"\xff\xfb\x01", "an IAC command is data now");
+        assert_eq!(std::mem::take(&mut c.got), b"", "no negotiation was ever sent");
+        assert_eq!(c.guest_writes(b"\xff"), b"\xff", "and nothing is escaped");
+
+        // A first line ended by a bare CR (socat) locks as well.
+        let mut c = Client::connect(SerialMode::Auto);
+        assert_eq!(c.send(b"one\r"), b"one\r");
+        assert_eq!(c.send(b"two\r\n"), b"two\r\n");
+        assert_eq!(std::mem::take(&mut c.got), b"");
+    }
+
+    /// Once a client has sent a complete line with no sign of telnet, an
+    /// IAC WILL later on is data, and 0xFF is not doubled to it.
+    #[test]
+    fn auto_does_not_take_a_locked_plain_client_for_telnet_on_a_later_iac_will() {
+        let mut c = Client::connect(SerialMode::Auto);
+        assert_eq!(c.send(b"login\n"), b"login\n");
+        assert_eq!(c.send(&[255, 251, 1]), [255, 251, 1], "IAC WILL ECHO reaches the guest as data");
+        assert_eq!(c.send(&[255, 253, 3, b'x']), [255, 253, 3, b'x'], "so does IAC DO SGA");
+        assert_eq!(std::mem::take(&mut c.got), b"", "nothing was offered");
+        assert_eq!(c.guest_writes(b"\xff"), b"\xff", "and the client is still plain");
+    }
+
+    /// A first line that arrives in pieces is not enough to call a client
+    /// telnet, even if its last piece ends CR LF.
+    #[test]
+    fn auto_leaves_a_first_line_that_arrives_in_pieces_plain() {
+        let mut c = Client::connect(SerialMode::Auto);
+        assert_eq!(c.send(b"ab"), b"ab");
+        assert_eq!(c.send(b"\r\n"), b"\r\n");
+        assert_eq!(std::mem::take(&mut c.got), b"", "no negotiation");
+        // A CR LF split between chunks is the same.
+        let mut c = Client::connect(SerialMode::Auto);
+        assert_eq!(c.send(b"ab\r"), b"ab\r");
+        assert_eq!(c.send(b"\n"), b"\n");
+        assert_eq!(std::mem::take(&mut c.got), b"");
+        assert_eq!(c.guest_writes(b"\xff"), b"\xff");
+    }
+
+    /// A plain client may send the byte 0xFF as data: it is not a telnet
+    /// command unless one follows, so it and the byte after it reach the guest
+    /// and the client stays plain. The escaped pair 0xFF 0xFF is data too,
+    /// whatever follows it.
+    #[test]
+    fn auto_passes_a_plain_clients_ff_data_byte() {
+        let mut c = Client::connect(SerialMode::Auto);
+        assert_eq!(c.send(b"x\xffy\xff\xffz\n"), b"x\xffy\xff\xffz\n");
+        assert_eq!(std::mem::take(&mut c.got), b"", "no negotiation was sent");
+        assert_eq!(c.guest_writes(b"\xff"), b"\xff", "and it is still plain");
+        let mut c = Client::connect(SerialMode::Auto);
+        assert_eq!(c.send(b"\xff\xff\xfb"), b"\xff\xff\xfb", "0xFF 0xFF 0xFB is escaped data, not WILL");
+        assert_eq!(std::mem::take(&mut c.got), b"");
+    }
+
+    /// A lone 0xFF that ends a plain client's read (`printf '\377' | nc`)
+    /// waits for what follows, and is data after a short idle with nothing
+    /// after it.
+    #[test]
+    fn auto_gives_a_trailing_lone_ff_to_the_guest_after_a_pause() {
+        let mut c = Client::connect(SerialMode::Auto);
+        assert_eq!(c.send(b"\xff"), b"", "held back for the moment");
+        std::thread::sleep(POLL_TIMEOUT + Duration::from_millis(100));
+        assert_eq!(c.settle(), b"\xff", "then it is data");
+        assert_eq!(std::mem::take(&mut c.got), b"", "and the client was not taken for telnet");
+        assert_eq!(c.send(b"x\n"), b"x\n");
+        assert_eq!(c.guest_writes(b"\xff"), b"\xff");
+    }
+
+    /// A command split from its IAC by a read boundary is still a command.
+    #[test]
+    fn auto_takes_an_iac_command_split_across_reads_as_telnet() {
+        let mut c = Client::connect(SerialMode::Auto);
+        assert_eq!(c.send(b"\xff"), b"");
+        assert_eq!(c.send(b"\xfb\x18"), b"", "the option is not data");
+        assert!(c.got.starts_with(&GREETING), "{:x?}", c.got);
+    }
+
+    /// A client that negotiates on connect (PuTTY in telnet mode, whose
+    /// first bytes are IAC WILL NAWS ...) is telnet from its first byte: it
+    /// gets the handshake, the guest sees none of its options, and 0xff is
+    /// escaped from then on.
+    #[test]
+    fn auto_takes_a_client_that_negotiates_on_connect_as_telnet() {
+        let mut c = Client::connect(SerialMode::Auto);
+        let first = [255u8, 251, 31, 255, 251, 32, 255, 251, 24, 255, 253, 1, 255, 251, 3, 255, 253, 3];
+        assert_eq!(c.send(&first), b"", "options are not data");
+        assert!(c.got.starts_with(&GREETING), "{:x?}", c.got);
+        c.got.clear();
+        assert_eq!(c.send(b"a\r\0"), b"a\r\0");
+        assert_eq!(c.guest_writes(b"\xff"), b"\xff\xff");
+    }
+
+    /// A line-mode telnet client that stays silent on connect (GNU inetutils,
+    /// BSD, netkit and Apple-derived telnet, busybox, screen) sends its first
+    /// line ending in CR LF. That line reaches the guest, the handshake
+    /// follows so the client goes to character mode, and the Enter it then
+    /// sends (CR NUL, or CR LF from busybox) is passed as telnet does.
+    #[test]
+    fn auto_takes_a_line_mode_telnet_client_at_its_first_line_ending() {
+        let mut c = Client::connect(SerialMode::Auto);
+        assert_eq!(c.guest_writes(b"PROM> \xff"), b"PROM> \xff", "plain until it shows itself");
+        assert_eq!(c.send(b"go\r\n"), b"go\r\n");
+        assert_eq!(c.got, GREETING, "then it is offered character mode");
+        // Its reply to the offer is consumed, and the next key is data.
+        assert_eq!(c.send(&[255, 253, 1, 255, 253, 3, b'x']), b"x");
+        c.got.clear();
+        assert_eq!(c.guest_writes(b"\xff"), b"\xff\xff");
+    }
+
+    /// The same, for a client whose first Enter is CR NUL.
+    #[test]
+    fn auto_takes_cr_nul_as_telnet_too() {
+        let mut c = Client::connect(SerialMode::Auto);
+        assert_eq!(c.send(b"\r\0"), b"\r\0");
+        assert_eq!(c.got, GREETING);
+    }
+
+
+    /// `serial_mode` in the config reaches the console line: the
+    /// default is auto, and each value gives the behaviour above.
+    #[test]
+    fn serial_mode_in_the_config_picks_the_console_lines_protocol() {
+        let free = || TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        assert_eq!(MachineConfig::default().serial_mode, SerialMode::Auto);
+        for (mode, greets) in [(SerialMode::Auto, false), (SerialMode::Raw, false), (SerialMode::Telnet, true)] {
+            let mut cfg = MachineConfig::default();
+            cfg.serial_mode = mode;
+            cfg.serial_port_a = Some(free());
+            cfg.serial_port_b = Some(0);
+            let (console, _) = console_backends(&cfg, "Test", None);
+            let mut client = TcpStream::connect(("127.0.0.1", cfg.serial_port_a.unwrap())).unwrap();
+            client.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+            let _ = console.recv_byte(); // accepts the client
+            assert!(console.try_send_byte(b'A'));
+            let mut got = Vec::new();
+            let mut buf = [0u8; 32];
+            while let Ok(n) = client.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+                if got.ends_with(b"A") {
+                    break;
+                }
+            }
+            let mut want = if greets { GREETING.to_vec() } else { Vec::new() };
+            want.push(b'A');
+            assert_eq!(got, want, "{mode:?}");
+        }
+    }
+
+    /// Not a test: serves a line that echoes what it reads, in the mode named
+    /// by `IRIS_SERIAL_MODE`, on the port in `IRIS_SERIAL_PORT`, for
+    /// `IRIS_SERIAL_SECS` seconds, so real telnet and netcat clients can be
+    /// pointed at it. Run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn serve_an_echo_line_for_real_clients() {
+        let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+        let mode = match env("IRIS_SERIAL_MODE", "auto").as_str() {
+            "raw" => SerialMode::Raw,
+            "telnet" => SerialMode::Telnet,
+            _ => SerialMode::Auto,
+        };
+        let (line, _) = tcp_serial_backend(env("IRIS_SERIAL_PORT", "0").parse().unwrap(), mode).expect("bind");
+        let end = Instant::now() + Duration::from_secs(env("IRIS_SERIAL_SECS", "20").parse().unwrap());
+        while Instant::now() < end {
+            match line.recv_byte() {
+                // A guest that echoes, and answers a line end with CR LF.
+                Ok(b'\n') => {}
+                Ok(b'\r') => {
+                    line.send_byte(b'\r');
+                    line.send_byte(b'\n');
+                }
+                Ok(b) => line.send_byte(b),
+                Err(_) => std::thread::sleep(Duration::from_millis(1)),
+            }
+        }
     }
 
     /// A Unix-socket client that stops reading makes the backend refuse;

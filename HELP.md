@@ -461,6 +461,30 @@ The ports are the defaults: `serial_port_a` and `serial_port_b` in the config
 monitor, so that two iris processes can run at once. Under `--ci` no serial
 port is served on TCP, so several `--ci` instances coexist.
 
+The serial TCP ports work with both telnet clients and plain TCP clients
+(`nc`, `ncat`, `socat`, scripts). `serial_mode` (or `--serial-mode`) chooses:
+
+- `auto` (the default) sends nothing on connect and passes bytes through
+  unchanged until the client shows it speaks telnet. It can only do that
+  before it has sent one complete line: by sending an IAC followed by a
+  telnet command (SB, WILL, WONT, DO or DONT; PuTTY and other clients that
+  negotiate on connect do), or by ending its first line with CR LF or CR NUL
+  when that line arrives in one piece, which telnet clients that stay silent
+  on connect send for Enter and netcat does not (it sends LF, or CR from a
+  raw terminal). That client is then offered character mode, 0xFF is doubled
+  to it and IAC sequences are filtered from it. A client whose first line
+  ends any other way, or arrives in pieces, is plain for good, and a lone
+  0xFF a plain client sends as data is not a sign.
+- `raw` never negotiates: plain bytes both ways.
+- `telnet` offers character mode to every client on connect.
+
+Limits: a client whose first line ends with CR LF or CR NUL and arrives in
+one read is taken for telnet. PuTTY's raw mode does that (its Enter is CR LF),
+as does a script that starts with a CR LF line, and so does data that starts
+0xFF followed by one of 0xFA to 0xFE; give such a client
+`serial_mode = "raw"`. The monitor port is always
+telnet.
+
 Each serial line can also be served on a Unix socket:
 `serial_socket_a` / `serial_socket_b` (or `--serial-socket-a` /
 `--serial-socket-b`). The socket carries raw bytes with no telnet negotiation,
@@ -852,6 +876,7 @@ Automation and debugging
   --ci-display                With --ci, keep the window
   --serial-log <FILE>         Log everything the guest prints on its serial console to FILE
   --serial-log-overwrite      Start the serial logs over each run instead of adding to them
+  --serial-mode <MODE>        Serial TCP ports: auto (default: telnet if the client is), raw or telnet
   --serial-log-timestamps <MODE>  off (raw), wall (stamp each completed line) or ecs
   --monitor-port <PORT>       Monitor TCP port (default 8888)
   --vnc [ADDR]                VNC server on ADDR (host:port or port; default 127.0.0.1:5900)

@@ -1376,6 +1376,22 @@ impl Default for GraphicsSection {
     }
 }
 
+/// How the serial TCP ports talk to a client, `serial_mode`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+#[clap(rename_all = "lower")]
+pub enum SerialMode {
+    /// Plain bytes until the client shows it speaks telnet (an IAC, or a CR LF
+    /// or CR NUL line ending), then telnet character mode.
+    #[default]
+    Auto,
+    /// Plain bytes in both directions, for `nc`, `socat` and scripts.
+    Raw,
+    /// Telnet character mode from the first byte: WILL ECHO, SGA and BINARY
+    /// offered on connect, 0xFF doubled, IAC sequences filtered.
+    Telnet,
+}
+
 /// Physical shape of the host keyboard: which keys it has, not what they print.
 /// The guest applies the character layout itself (PROM `keybd`, IRIX X11
 /// keymaps); this only matters because the host reports the US `\|` key
@@ -1474,6 +1490,10 @@ pub struct MachineSection {
     /// [`crate::identity`].
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub emu_id: u32,
+}
+
+fn is_default_serial_mode(m: &SerialMode) -> bool {
+    *m == SerialMode::Auto
 }
 
 fn is_zero_u32(v: &u32) -> bool {
@@ -2478,6 +2498,15 @@ pub struct MachineConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_port_b: Option<u16>,
 
+    /// How the serial TCP ports talk to a client: `auto` (default), `raw`
+    /// or `telnet`. `auto` starts as plain bytes, sending nothing, and
+    /// switches that client to telnet character mode when it sends an IAC or
+    /// its first CR LF or CR NUL. Use `raw` for a script that sends CR LF
+    /// and wants no negotiation, `telnet` to negotiate with every client
+    /// from the first byte. The monitor port is always telnet.
+    #[serde(default, skip_serializing_if = "is_default_serial_mode")]
+    pub serial_mode: SerialMode,
+
     /// Unix socket paths that serve serial channels A and B as well as their
     /// TCP ports: raw bytes, one client at a time. Where the machine has a CI
     /// socket, a console on a socket is also still readable through
@@ -2884,6 +2913,7 @@ impl Default for MachineConfig {
             monitor_port: None,
             serial_port_a: None,
             serial_port_b: None,
+            serial_mode: SerialMode::Auto,
             serial_socket_a: None,
             serial_socket_b: None,
             keyboard: KeyboardLayout::default(),
@@ -4207,6 +4237,9 @@ pub struct Cli {
     /// Start the serial logs over each run instead of adding to them.
     #[arg(long = "serial-log-overwrite", default_value_t = false)]
     pub serial_log_overwrite: bool,
+    /// How the serial TCP ports talk to a client: auto, raw or telnet.
+    #[arg(long = "serial-mode", value_enum, value_name = "MODE")]
+    pub serial_mode: Option<SerialMode>,
 
     /// `off` (raw transcript), `wall` (prefix each completed serial-log line
     /// with a UTC ISO-8601 timestamp) or `ecs` (one JSON document a line).
@@ -4298,6 +4331,7 @@ impl Cli {
         if self.ci_display { cfg.ci_display = true; }
         if let Some(p) = &self.serial_log { cfg.serial_log = Some(p.clone()); }
         if self.serial_log_overwrite { cfg.serial_log_overwrite = true; }
+        if let Some(mode) = self.serial_mode { cfg.serial_mode = mode; }
         if let Some(mode) = self.serial_log_timestamps { cfg.serial_log_timestamps = mode; }
         if let Some(p) = &self.serial_log_a { cfg.serial_log_a = Some(p.clone()); }
         if let Some(p) = &self.serial_log_b { cfg.serial_log_b = Some(p.clone()); }
