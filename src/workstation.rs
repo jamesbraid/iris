@@ -72,7 +72,7 @@ fn build_rejects_newport_resident_wgpu_raster_without_prior_config_validation() 
         cfg.machine.profile = profile;
         cfg.graphics.raster = crate::config::RasterUnit::Wgpu;
         let error = build(cfg).err().expect("Newport raster gate");
-        assert!(error.contains("until M3") && error.contains("IRIS_REX3_GPU"), "{error}");
+        assert!(error.contains("until M3"), "{error}");
     }
 }
 

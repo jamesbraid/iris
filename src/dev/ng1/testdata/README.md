@@ -26,7 +26,7 @@ keep generated files' canonical LF line endings on every checkout.
 | `tiny_tiles` | 8x8 blocks, 8-pixel spans and single pixels |
 | `hostrw_residual` | HOSTW/HOSTR reads and residual packed-CI8 shifter state |
 | `dma_hostrw` | Packed-CI8 bulk upload, bulk read and primed scalar DMA read |
-| `clip_ci8_mixed` | SMASK0 clipping and CI8 fallback between RGB24 fills |
+| `clip_ci8_mixed` | SMASK0 clipping and a CI8 block between RGB24 fills |
 | `batch_1025_fence` | 1,025 draws, with a surviving first-batch pixel and an overlapping final draw, followed by an XMAP display fence |
 
 Run the mandatory CPU gate with
@@ -95,21 +95,6 @@ succeeds after anchor removal when junctions are supported. If junctions are
 unavailable, the affected checks are reported as such. Windows without file
 symlink privilege tests junctions instead; Linux CI exercises file and
 directory symlinks when the configured job runs.
-
-GPU validation is optional and explicitly ignored unless selected:
-`cargo test -p iris --lib --features rex-gpu,rex-jit,rexdiag
-rex3_corpus_gpu_ -- --ignored --nocapture --test-threads=1`. It requires an actual
-integrated/discrete adapter and the default batch size; the test then pins the
-batch to the 1,024 draws these recordings were authored for. It verifies
-handled/fallback counts and reasons, interpreter fallback, state equivalence,
-and the batch-full and display-fence flushes. The batch case preserves pixel
-(6,5) from the first 1,024 draws while draw 1,025 overwrites (5,5); dropping
-the first batch fails both the pixel probe and checkpoints. A test-only
-observer compares both framebuffer planes at the `gfifo_fence` publication,
-before any later idle flush, and requires completed display-fence readback.
-An injected early publication proves that stale pixels fail even if a later
-idle flush repairs the final state. An unavailable adapter is not reported as
-a successful GPU validation.
 
 The DMA case uses one 64-bit word per transfer; BUS_BUSY retry is covered by
 separate mocked replay tests, not by a full real GFIFO. Multiword DMA resume,

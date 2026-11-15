@@ -293,6 +293,8 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ### Newport: experimental live rendering on the host GPU
 
+- Removed: the `rex-gpu` feature, its `IRIS_REX3_GPU` and `REX3_GPU_*` variables
+  and `REX3_REPLAY_ENGINE=gpu` are gone. The CPU and resident paths are unchanged.
 - A `rex-gpu` build renders Newport's flat fills on the host GPU when
   `IRIS_REX3_GPU=auto|vulkan|metal|dx12|gl` is set. It is experimental and off by
   default; without the variable a `rex-gpu` build renders as before, and
