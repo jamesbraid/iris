@@ -3489,6 +3489,9 @@ impl Rex3 {
         let mut gpu_planes: Option<crate::dev::ng1::wgpu::Ng1Planes> = None;
         #[cfg(feature = "wgpu")]
         let mut gpu_planes_current = false;
+        // The screen's own copy of the planes is behind: GPU-composed frames
+        // skip it, and a frame of words or an overlay needs it whole.
+        let mut screen_stale = false;
         #[cfg(all(feature = "wgpu", feature = "rex-dirty-upload"))]
         let mut damage_rects: (Vec<DamageRect>, Vec<DamageRect>) = (Vec::new(), Vec::new());
         let screen_out = &self.screens[0];
@@ -3663,20 +3666,23 @@ impl Rex3 {
             if direct_gpu.is_some() && !overlay.active() {
                 #[cfg(feature = "wgpu")]
                 screen.refresh_gpu_display_state(&self.vc2, &self.xmap0, &self.cmap0, &self.bt445, &self.diag);
+                screen_stale = true;
             } else {
+                let whole = direct_gpu.is_some() || screen_stale;
+                screen_stale = false;
                 // The overlay reads the CPU's copies of both planes and its
                 // window-id map, which a GPU-composed frame never made.
                 #[cfg(feature = "rex-dirty-upload")]
                 {
                     let mut all = crate::dev::ng1::rex3_dirty::DamageSnapshot::default();
-                    if direct_gpu.is_some() {
+                    if whole {
                         all.mark_full(DamagePlane::Rgb);
                         all.mark_full(DamagePlane::Aux);
                     }
                     screen.refresh(
                         &**fb_rgb,
                         &**fb_aux,
-                        if direct_gpu.is_some() { &all } else { &fb_damage },
+                        if whole { &all } else { &fb_damage },
                         &self.vc2,
                         &self.xmap0,
                         &self.cmap0,
@@ -3688,7 +3694,7 @@ impl Rex3 {
                 screen.refresh(
                     &**fb_rgb,
                     &**fb_aux,
-                    fb_was_dirty || direct_gpu.is_some(),
+                    fb_was_dirty || whole,
                     &self.vc2,
                     &self.xmap0,
                     &self.cmap0,
