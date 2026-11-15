@@ -30,22 +30,6 @@ pub use plane::CpuPlane;
 #[cfg(not(all(test, feature = "wgpu")))]
 pub type CpuPlane = Box<[u32]>;
 
-/// A frame Newport's scan-out composed on the window's device, or None after
-/// reporting the failure to the device, which stops the machine. An empty
-/// message is a failure already reported.
-#[cfg(feature = "wgpu")]
-pub(crate) fn gpu_frame_or_fail(gpu: &crate::wgpu::Gpu, frame: Result<::wgpu::Buffer, String>) -> Option<::wgpu::Buffer> {
-    match frame {
-        Ok(buffer) => Some(buffer),
-        Err(e) => {
-            if !e.is_empty() {
-                gpu.fail(&format!("newport scan-out: {e}"));
-            }
-            None
-        }
-    }
-}
-
 pub const REX3_SIZE: u32 = 0x2000; // 8KB
 pub const REX3_BASE: u32 = 0x1F0F0000; // Physical base address of registers
 pub const GFIFO_DEPTH: usize = 65536;
@@ -1983,6 +1967,19 @@ impl Rex3 {
         *self.fifo_full_cb.lock() = Some(irq);
     }
 
+    /// Newport's scan-out failed on the window's device, whose own callback
+    /// only prints: fail the device and stop the machine through its
+    /// fatal channel.
+    #[cfg(feature = "wgpu")]
+    pub(crate) fn report_scanout_failure(&self, gpu: &crate::wgpu::Gpu, why: &str) {
+        gpu.fail(&format!("newport scan-out: {why}"));
+        if let Some(sender) = &*self.fatal_sender.lock() {
+            if sender.send(crate::traits::MachineFatal::new("Newport scan-out", why)).is_err() {
+                log::error!("REX3 scan-out failure could not reach machine control");
+            }
+        }
+    }
+
     pub(crate) fn set_fatal_sender(
         &self,
         sender: std::sync::mpsc::Sender<crate::traits::MachineFatal>,
@@ -3492,6 +3489,8 @@ impl Rex3 {
         // The screen's own copy of the planes is behind: GPU-composed frames
         // skip it, and a frame of words or an overlay needs it whole.
         let mut screen_stale = false;
+        #[cfg(feature = "wgpu")]
+        let mut scanout_failed = false;
         #[cfg(all(feature = "wgpu", feature = "rex-dirty-upload"))]
         let mut damage_rects: (Vec<DamageRect>, Vec<DamageRect>) = (Vec::new(), Vec::new());
         let screen_out = &self.screens[0];
@@ -3567,6 +3566,13 @@ impl Rex3 {
                 need.gpu,
                 need.planes,
             );
+
+            // A failed scan-out has stopped the machine; no frame is made on
+            // the CPU in its place.
+            #[cfg(feature = "wgpu")]
+            if scanout_failed {
+                return false;
+            }
 
             // Idle skip: only run the presentation pipeline when something
             // visible changed. `fb_damage` covers REX3 drawing; the
@@ -3726,25 +3732,22 @@ impl Rex3 {
             let mut composed = false;
             #[cfg(feature = "wgpu")]
             if let (Some(gpu), Some(planes)) = (direct_gpu.as_ref(), gpu_planes.as_ref()) {
-                if scanout.is_none() {
-                    scanout = Some(crate::dev::ng1::wgpu::Ng1Scanout::new(gpu));
-                }
-                let frame = match scanout.as_mut() {
-                    Some(Ok(sc)) => {
+                let sc = scanout.get_or_insert_with(|| crate::dev::ng1::wgpu::Ng1Scanout::new(gpu));
+                let frame = match sc {
+                    Ok(sc) => {
                         crate::pf_scope!(crate::perfetto::events::REX3_COMPOSE);
                         let display = screen.display_state();
                         sc.seed_did(&display)
                             .and_then(|()| sc.compose(&display, planes))
                             .map_err(|e| e.to_string())
                     }
-                    Some(Err(e)) => Err(e.clone()),
-                    None => unreachable!("made above"),
+                    Err(e) => Err(e.clone()),
                 };
-                match gpu_frame_or_fail(gpu, frame) {
-                    Some(buffer) => out.gpu = Some(buffer),
-                    None => {
-                        // Reported once; later frames stop here quietly.
-                        scanout = Some(Err(String::new()));
+                match frame {
+                    Ok(buffer) => out.gpu = Some(buffer),
+                    Err(e) => {
+                        scanout_failed = true;
+                        self.report_scanout_failure(gpu, &e);
                         self.diag.fetch_and(!Self::DIAG_LOCK_SCREEN, Ordering::Relaxed);
                         return false;
                     }

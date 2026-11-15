@@ -231,22 +231,32 @@ fn a_newport_window_is_handed_words_or_planes_as_it_asks() {
     }
 }
 
-/// A Newport scan-out that fails on the window's device stops the machine
-/// through the device, as the other boards' GPU failures do; no frame is made
-/// on the CPU in its place.
+/// A Newport scan-out that fails on the window's device, whose own callback
+/// only prints, still stops the machine through the board's fatal channel.
 #[cfg(feature = "wgpu")]
 #[test]
 fn a_newport_scanout_failure_is_fatal_not_a_cpu_frame() {
-    let fatal = Arc::new(AtomicBool::new(false));
-    let flag = fatal.clone();
-    let gpu = match crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default(), Box::new(move |_| flag.store(true, SeqCst))) {
+    let gpu = match crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default(), Box::new(|_| {})) {
         Ok(g) => g,
         Err(e) => {
+            if std::env::var_os("IRIS_REQUIRE_GPU").is_some_and(|v| v == "1") { panic!("no GPU: {e}") }
             eprintln!("skipped: {e}");
             return;
         }
     };
-    let shown = crate::dev::ng1::rex3::gpu_frame_or_fail(&gpu, Err("kernel refused".into()));
-    assert!(shown.is_none(), "no frame comes from the failure");
-    assert!(fatal.load(SeqCst), "the device was told, and stops the machine");
+    // A REX3 is too big for a test thread's stack.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let rex = Box::new(crate::dev::ng1::rex3::Rex3::new(crate::disp::StatusSource::detached()));
+            let (tx, rx) = std::sync::mpsc::channel();
+            rex.set_fatal_sender(tx);
+            rex.report_scanout_failure(&gpu, "kernel refused");
+            let fault = rx.try_recv().expect("the machine was told");
+            assert!(fault.message.contains("kernel refused"), "{fault}");
+            assert!(gpu.check().is_err(), "and the device holds the failure");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
