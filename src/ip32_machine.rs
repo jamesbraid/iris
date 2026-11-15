@@ -1492,25 +1492,28 @@ mod display_tests {
         assert!(!screen.requests.pending());
         assert!(frame.width > 0 && frame.words.len() == (frame.width * frame.height) as usize);
         assert_eq!(frame.words[0], 0xff33_2211, "scan-out, in the renderers' format, opaque");
-        assert_eq!(composed(), 1);
+        // The request's hold may let one more tick compose: wait for two idle ones.
+        let idle = screen.counts.get().2;
+        until("the display idle again", || screen.counts.get().2 >= idle + 2);
+        let base = composed();
 
         // A renderer watches: a frame at once for its arrival, then marks.
         let probe = crate::display_stop_tests::Probe::new(|| {});
         *screen.window.renderer.lock() = Some(Box::new(probe));
-        until("the renderer's frame", || composed() == 2);
+        until("the renderer's frame", || composed() == base + 1);
         std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(composed(), 2, "an unchanged screen is not scanned again at once");
+        assert_eq!(composed(), base + 1, "an unchanged screen is not scanned again at once");
         // A write to a GBE register.
         bus.gbe.write32((0x1600_0000 + CMAP + 4 * 5) as u64, 0x4455_6600);
-        until("the register's frame", || composed() == 3);
+        until("the register's frame", || composed() == base + 2);
         until("its publication", || screen.latest().is_some_and(|f| f.words[0] == 0xff66_5544));
         // A mark from memory, as the engine makes.
         bus.ram.screen_changed().mark();
-        until("the memory mark's frame", || composed() == 4);
+        until("the memory mark's frame", || composed() == base + 3);
 
         // A capturing client gets a frame every period while it is on.
         screen.requests.capture(true);
-        until("captured frames", || composed() >= 7);
+        until("captured frames", || composed() >= base + 6);
         screen.requests.capture(false);
 
         running.store(false, Ordering::SeqCst);
