@@ -111,10 +111,9 @@ impl SideBySide {
 impl Renderer for SideBySide {
     fn present(&mut self, _frame: &Frame, stats: &BarStats) {
         if self.me != 0 {
-            // Another thread draws: ask it for a picture that includes this frame.
-            let first = &self.screens[0];
-            first.window.poke();
-            first.changed.wake();
+            // Screen 0's thread draws at its next tick; a wake would cut its
+            // frame short and add a retrace.
+            self.screens[0].window.poke();
             return;
         }
         if !self.compose() {
@@ -208,7 +207,11 @@ mod tests {
         publish(&screens[0], 2, 2, 1);
         // The second screen has no frame yet: its room is empty.
         assert_eq!(window.shown.lock().last().unwrap(), &(2, 2, vec![1; 4]));
+        let mut wait = crate::gfx_display::FrameWait::new(&screens[0].changed, std::time::Duration::from_millis(300));
+        let start = std::time::Instant::now();
         publish(&screens[1], 3, 1, 2);
+        wait.wait();
+        assert!(start.elapsed() >= std::time::Duration::from_millis(250), "the second screen's frame does not cut the first one's period short");
         assert_eq!(window.shown.lock().len(), 1, "the second screen's thread does not draw");
         assert!(screens[0].window.label().is_none());
         // The first screen's next tick shows the newest frames of both.
