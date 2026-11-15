@@ -47,6 +47,7 @@ fn gpu() -> Option<Arc<Gpu>> {
     match Gpu::new(&GpuOptions { software, ..GpuOptions::default() }, Box::new(|_| {})) {
         Ok(g) => Some(g),
         Err(e) => {
+            if std::env::var_os("IRIS_REQUIRE_GPU").is_some_and(|v| v == "1") { panic!("no GPU: {e}") }
             eprintln!("skipped: {e}");
             None
         }

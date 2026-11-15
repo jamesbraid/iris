@@ -547,8 +547,8 @@ mod resident_gate_tests {
                         std::thread::yield_now();
                     }
                 }
-                gpu.inject_device_loss(stage);
-                gpu.inject_device_loss("later loss must not replace the first");
+                gpu.fail(&format!("wgpu device lost (test): {stage}"));
+                gpu.fail("wgpu device lost (test): later loss must not replace the first");
                 if stage == "before submission" {
                     rex.gfifo_push(GFIFO_PURE_GO, 0);
                 }

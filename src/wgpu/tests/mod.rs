@@ -68,6 +68,7 @@ fn gpu() -> Option<Arc<Gpu>> {
     match Gpu::new(&GpuOptions::default(), Box::new(|_| {})) {
         Ok(g) => Some(g),
         Err(e) => {
+            if std::env::var_os("IRIS_REQUIRE_GPU").is_some_and(|v| v == "1") { panic!("no GPU: {e}") }
             eprintln!("skipped: {e}");
             None
         }
@@ -415,6 +416,7 @@ fn counted() -> Option<(Arc<Gpu>, Arc<std::sync::atomic::AtomicUsize>)> {
     match Gpu::new(&GpuOptions::default(), Box::new(move |_| { seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst); })) {
         Ok(g) => Some((g, calls)),
         Err(e) => {
+            if std::env::var_os("IRIS_REQUIRE_GPU").is_some_and(|v| v == "1") { panic!("no GPU: {e}") }
             eprintln!("skipped: {e}");
             None
         }

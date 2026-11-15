@@ -487,11 +487,6 @@ impl Gpu {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn inject_device_loss(&self, message: &str) {
-        self.failure.set(format!("wgpu device lost (test): {message}"));
-    }
-
     /// Submit one command buffer, after the writes queued so far.
     pub fn submit(&self, encoder: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
         let mut u = self.uploads.lock();
