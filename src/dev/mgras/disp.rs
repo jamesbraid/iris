@@ -251,18 +251,11 @@ impl Mgras {
             },
             |out, need| {
                 let dirty = self.dirty.swap(false, Ordering::AcqRel);
-                // Someone reads the words (monitor screenshots, VNC): with
-                // the GPU scan-out, only then is a frame read back.
-                let want = need.words;
-                // The window shares the GPU unit's device: compose there and
-                // present from there, every frame (cheap; the cursor and the
-                // last batches show without a dirty mark).
-                #[cfg(feature = "wgpu")]
-                if self.presents_on_gpu() && !want && need.gpu && self.compose_on_gpu(out) {
-                    screen.counts.count(true);
-                    return true;
-                }
-                if !(dirty || want || !composed_once) {
+                // On the GPU unit the frame is composed there every frame for
+                // a window on its device; else only when something changed or
+                // someone reads the words, and then it is read back.
+                let on_gpu = self.presents_on_gpu();
+                if !(on_gpu && need.gpu) && !(dirty || need.words || !composed_once) {
                     screen.counts.count(false);
                     return false;
                 }
@@ -274,14 +267,24 @@ impl Mgras {
                 // tolerated.
                 let rss = unsafe { &*self.rss.get() };
                 crate::pf_begin!(crate::perfetto::events::MGRAS_CAPTURE, self.rss_fifo.len());
-                let (w, h) = match self.compose_gpu_into(rss, &mut scan) {
-                    Some(size) => size,
-                    None => {
-                        snap.snapshot(rss, &self.front_view().dcb);
-                        snap.compose(&mut scan);
-                        (snap.width, snap.height)
+                // A GPU that fails has stopped the machine: no frame comes
+                // from the CPU's stale mirror in its place.
+                match self.gpu_frame(rss, need, out) {
+                    Ok(true) => {
+                        crate::pf_end!(crate::perfetto::events::MGRAS_CAPTURE);
+                        screen.counts.count(true);
+                        return true;
                     }
-                };
+                    Ok(false) => {}
+                    Err(_) => {
+                        crate::pf_end!(crate::perfetto::events::MGRAS_CAPTURE);
+                        screen.counts.count(false);
+                        return false;
+                    }
+                }
+                snap.snapshot(rss, &self.front_view().dcb);
+                snap.compose(&mut scan);
+                let (w, h) = (snap.width, snap.height);
                 crate::pf_end!(crate::perfetto::events::MGRAS_CAPTURE);
                 out.width = w as u32;
                 out.height = h as u32;
@@ -296,55 +299,27 @@ impl Mgras {
         );
     }
 
-    /// With the GPU unit: compose the displayed frame on the GPU and read
-    /// it back into `out` (`frame.rs`'s layout); its size. None on the CPU
-    /// raster path, or if the scan-out fails (the planes are then composed
-    /// on the CPU, current as of the last sync).
-    fn compose_gpu_into(&self, rss: &Rss, out: &mut [u32]) -> Option<(usize, usize)> {
+    /// With the GPU unit: compose the displayed frame on the GPU for this
+    /// tick's consumer. Ok(false) on the CPU raster path; Err when the
+    /// scan-out failed, which has stopped the machine.
+    fn gpu_frame(&self, rss: &Rss, need: crate::gfx_display::Need, out: &mut crate::gfx_display::Frame) -> Result<bool, String> {
         #[cfg(feature = "wgpu")]
         {
-            // SAFETY: the scan-out is the display thread's (and this runs
-            // there, or from the monitor with the display stopped).
-            let sc = unsafe { &mut *self.gpu_scanout.get() }.as_mut()?;
-            match sc.read(rss, &self.front_view().dcb, out, frame::OUT_STRIDE) {
-                Ok(size) => {
-                    self.gpu_frames[1].fetch_add(1, Ordering::Relaxed);
-                    return Some(size);
-                }
-                Err(e) => eprintln!("mgras: GPU scan-out: {e}"),
-            }
+            // SAFETY: the scan-out is the display thread's; the registers and
+            // the DCB are read racily, as the CPU snapshot reads them.
+            let Some(sc) = (unsafe { &mut *self.gpu_scanout.get() }).as_mut() else { return Ok(false) };
+            sc.show(rss, &self.front_view().dcb, need, out)?;
+            self.gpu_frames[!need.gpu as usize].fetch_add(1, Ordering::Relaxed);
+            return Ok(true);
         }
-        let _ = (rss, out);
-        None
-    }
-
-    /// One frame composed on the GPU into `out`, for a renderer on the same
-    /// device: nothing is read back. False if the scan-out fails.
-    #[cfg(feature = "wgpu")]
-    fn compose_on_gpu(&self, out: &mut crate::gfx_display::Frame) -> bool {
-        // SAFETY: the scan-out is the display thread's; the registers and
-        // the DCB are read racily, as the CPU snapshot reads them.
-        let Some(sc) = (unsafe { &mut *self.gpu_scanout.get() }).as_mut() else { return false };
-        let rss = unsafe { &*self.rss.get() };
-        crate::pf_begin!(crate::perfetto::events::MGRAS_CAPTURE, self.rss_fifo.len());
-        let composed = sc.compose(rss, &self.front_view().dcb);
-        crate::pf_end!(crate::perfetto::events::MGRAS_CAPTURE);
-        match composed {
-            Ok((buffer, w, h)) => {
-                self.gpu_frames[0].fetch_add(1, Ordering::Relaxed);
-                out.width = w;
-                out.height = h;
-                out.gpu = Some(buffer);
-                true
-            }
-            Err(e) => {
-                eprintln!("mgras: GPU scan-out: {e}");
-                false
-            }
+        #[cfg(not(feature = "wgpu"))]
+        {
+            let _ = (rss, need, out);
+            Ok(false)
         }
     }
 
-    /// Start the engines and the display refresh thread.    /// Start the engines and the display refresh thread.
+    /// Start the engines and the display refresh thread.
     pub fn start_display(self: &Arc<Self>) {
         self.start_engines();
         if self.running.swap(true, Ordering::AcqRel) {

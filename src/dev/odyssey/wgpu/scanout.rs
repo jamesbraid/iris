@@ -101,23 +101,18 @@ impl VproScanout {
         Arc::clone(self.scanout.gpu())
     }
 
-    /// A composition came back refused (`Gpu::fail`): there is no CPU
-    /// substitute for a frame the GPU owes.
-    pub fn fail(&self, why: &str) {
-        self.scanout.gpu().fail(why);
+    /// The display slot of `frame`; a base the kernel cannot address fails
+    /// the device like any other scan-out error.
+    fn slot(&self, frame: &Frame, regs: &DisplayRegs) -> Result<DisplaySlot, String> {
+        DisplaySlot::of(frame, regs).map_err(|e| {
+            self.scanout.gpu().fail(&format!("vpro scan-out: {}", e.0));
+            e.0
+        })
     }
 
     /// Over the raster unit's memory buffer.
     pub fn new(gpu: &Arc<Gpu>, vram: &wgpu::Buffer, words: u64) -> Result<VproScanout, String> {
-        let layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vpro scanout vram"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
-                count: None,
-            }],
-        });
+        let layout = crate::wgpu::storage_layout(gpu, "vpro scanout vram", false);
         let pipeline = ScanoutPipeline::new(
             gpu,
             &ScanoutShaders {
@@ -139,20 +134,20 @@ impl VproScanout {
 
     /// Compose `frame` under `regs` into `out` (rows of `width`).
     pub fn run(&mut self, frame: &Frame, regs: &DisplayRegs, width: u32, height: u32, out: &mut [u32]) -> Result<(), String> {
-        let slot = DisplaySlot::of(frame, regs).map_err(|e| e.0)?;
+        let slot = self.slot(frame, regs)?;
         self.scanout.run(&self.pipeline, width, height, bytemuck::bytes_of(&slot), &[&self.vram_group], out)
     }
 
     /// Compose `frame` under `regs` (rows of `width`) and submit it with no
     /// readback; the buffer it is in, for a renderer on this device.
     pub fn compose(&mut self, frame: &Frame, regs: &DisplayRegs, width: u32, height: u32) -> Result<wgpu::Buffer, String> {
-        let slot = DisplaySlot::of(frame, regs).map_err(|e| e.0)?;
+        let slot = self.slot(frame, regs)?;
         self.scanout.compose(&self.pipeline, width, height, bytemuck::bytes_of(&slot), &[&self.vram_group])?;
         Ok(self.scanout.output().clone())
     }
 
-    /// Frames composed and bytes read back.
-    pub fn counts(&self) -> (u64, u64) {
-        (self.scanout.frames, self.scanout.read_back_bytes)
+    /// Frames composed.
+    pub fn frames(&self) -> u64 {
+        self.scanout.frames
     }
 }

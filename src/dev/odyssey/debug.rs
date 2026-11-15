@@ -303,15 +303,13 @@ impl Odyssey {
     }
 
     /// The GPU unit's counters (`GpuRaster::report`) and the GPU scan-out's
-    /// (frames composed, bytes read back: a frame the window presents from
-    /// the GPU is not read back), None on the CPU unit.
+    /// frames composed, None on the CPU unit.
     fn gpu_text(&self) -> Option<String> {
         #[cfg_attr(not(feature = "wgpu"), allow(unused_mut))]
         let mut out = self.gpu_run(|g| g.report())?;
         #[cfg(feature = "wgpu")]
         if let Some(s) = self.state.shared.gpu_scanout.get() {
-            let (frames, bytes) = s.lock().counts();
-            out.push_str(&format!("  gpu scanout: {frames} frames composed, {} MiB read back\n", bytes >> 20));
+            out.push_str(&format!("  gpu scanout: {} frames composed\n", s.lock().frames()));
         }
         Some(out)
     }

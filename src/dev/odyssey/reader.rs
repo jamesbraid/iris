@@ -518,16 +518,10 @@ impl ScanoutReader {
         self.snap_gen = shared.regs.snapshot(&mut self.snap, self.snap_gen);
         let frame = Frame::snapshot(&self.snap, displayed)?;
         let (w, h) = (frame.width.min(self.frame_width), frame.height.min(self.frame_height));
-        let composed = scanout.lock().compose(&frame, &self.snap, w, h);
-        match composed {
-            Ok(buffer) => Some((buffer, w, h)),
-            Err(e) => {
-                // No frame: the failure stops the machine, and a CPU
-                // composition would show a stale board memory meanwhile.
-                scanout.lock().fail(&format!("VPro scan-out: {e}"));
-                None
-            }
-        }
+        // An error has stopped the machine: no frame, and no CPU
+        // composition of a stale board memory in its place.
+        let composed = scanout.lock().compose(&frame, &self.snap, w, h).ok()?;
+        Some((composed, w, h))
     }
 
     /// Compose the frame again if anything the scan-out reads has changed
@@ -604,11 +598,8 @@ impl ScanoutReader {
                     }
                     return Composed::InFrame;
                 }
-                Err(e) => {
-                    // No frame; see `update_on_gpu`.
-                    scanout.lock().fail(&format!("VPro scan-out: {e}"));
-                    return Composed::No;
-                }
+                // No frame; see `update_on_gpu`.
+                Err(_) => return Composed::No,
             }
         }
         // The memory lives as long as the board; the display reads it while

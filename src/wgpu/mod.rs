@@ -66,6 +66,7 @@ pub use batch::{ArchShaders, Batch, BatchPipelines, Full};
 pub use device::{set_display, Gpu, GpuOptions};
 pub use memory::GpuMemory;
 pub use present::{Frame, Placement, Presenter};
-pub use scanout::{Scanout, ScanoutPipeline, ScanoutShaders};
+pub(crate) use scanout::defines;
+pub use scanout::{storage_layout, Scanout, ScanoutPipeline, ScanoutShaders};
 pub use shader::{Fragment, Source};
 pub use tiles::{TileBox, TileGrid, TILE_H, TILE_W};
