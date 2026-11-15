@@ -1,28 +1,8 @@
 //! A pool of workers that draw a screen cut into square tiles, one owner per
-//! tile.
-//!
-//! The producer writes each job into the next slot of a ring and appends the
-//! slot's index to the queue of every tile the job's bounding box touches.
-//! A tile with jobs waiting goes on a ready queue; a worker takes it and
-//! owns it until its queue is empty, running the pool's closure on each job
-//! in the order the producer wrote them. One owner per tile is the only
-//! ordering: every pixel sees its jobs in order, and a large job is run by
-//! as many workers as it covers tiles. The closure is given the job and the
-//! tile and clips its work to the tile.
-//!
-//! A slot counts the tiles still to run it. The producer retires slots whose
-//! count is zero in order (`tail`) and writes a slot again only after it has
-//! retired, so a count of zero means no queue and no worker holds the slot.
-//! A producer that finds the ring or a tile queue full runs ready tiles
-//! itself while it waits.
-//!
-//! A bounding box must contain every pixel the job writes: a box too small
-//! lets a pixel be written out of order, and the pool cannot check it.
-//!
-//! Tiles form a grid `GRID_SPAN` pixels across from the plane's origin;
-//! coordinates wrap onto it, so pixels that far apart share a tile, which only
-//! orders them. The closure sees the first copy of its tile and works out
-//! which copies a job reaches (`copies`).
+//! tile: jobs reach a tile in the order the producer wrote them, and a large
+//! job runs on as many workers as it covers tiles. A job's bounding box must
+//! contain every pixel it writes; the pool cannot check it. Tiles wrap onto a
+//! `GRID_SPAN` grid, which only orders pixels that far apart.
 
 use parking_lot::{Condvar, Mutex};
 use std::cell::UnsafeCell;
