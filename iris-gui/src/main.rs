@@ -2592,7 +2592,7 @@ impl App {
     /// Open (or reconnect) the in-app IRIX serial-console viewer. Connects to
     /// the loopback serial server the running emulator exposes.
     fn open_serial_console(&mut self) {
-        self.serial_console = Some(serial_console::SerialConsole::connect(self.cfg.serial_ports()[1]));
+        self.serial_console = Some(serial_console::SerialConsole::connect(self.cfg.serial_ports()[1], self.cfg.serial_mode));
     }
 
     /// Draw the in-app serial-console window (no-op when closed). Demonstrates

@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 
+use iris::config::SerialMode;
 use iris::net::telnet::{self, TelnetFilter};
 
 /// Cap on retained scrollback so a long boot doesn't grow the buffer forever.
@@ -45,12 +46,19 @@ pub struct SerialConsole {
     worker: Option<JoinHandle<()>>,
     /// The loopback address of the emulator's ttyd1 (IRIX serial console).
     addr: SocketAddr,
+    /// The machine's `serial_mode`: what the port speaks.
+    mode: SerialMode,
 }
 
 impl SerialConsole {
     /// Connect to the loopback serial console on `port` (the machine's
     /// channel B port, `MachineConfig::serial_ports()[1]`) and start streaming.
-    pub fn connect(port: u16) -> Self {
+    ///
+    /// `mode` is the machine's `serial_mode`. `raw` carries plain bytes both
+    /// ways. `telnet` and `auto` are a telnet client, and `auto` opens with a
+    /// request to suppress go-ahead so the port switches this client to
+    /// telnet at once, as a viewer that filters and escapes IAC expects.
+    pub fn connect(port: u16, mode: SerialMode) -> Self {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let shared = Arc::new(Mutex::new(Shared::default()));
         let running = Arc::new(AtomicBool::new(true));
@@ -58,9 +66,9 @@ impl SerialConsole {
         let (s2, r2, w2) = (shared.clone(), running.clone(), write.clone());
         let worker = std::thread::Builder::new()
             .name("iris-gui-serial".into())
-            .spawn(move || run(addr, s2, r2, w2))
+            .spawn(move || run(addr, mode, s2, r2, w2))
             .expect("spawn serial-console worker");
-        Self { shared, running, write, worker: Some(worker), addr }
+        Self { shared, running, write, worker: Some(worker), addr, mode }
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -79,12 +87,9 @@ impl SerialConsole {
         g.seq = g.seq.wrapping_add(1);
     }
 
-    /// Send raw bytes to the guest console (telnet-escaping 0xFF).
+    /// Send bytes to the guest console (telnet-escaping 0xFF, unless raw).
     pub fn send(&self, bytes: &[u8]) {
-        let mut esc = Vec::with_capacity(bytes.len());
-        for &b in bytes {
-            telnet::escape_byte(b, &mut esc);
-        }
+        let esc = encode(self.mode, bytes);
         if let Some(s) = self.write.lock().as_mut() {
             let _ = s.write_all(&esc);
             let _ = s.flush();
@@ -106,7 +111,7 @@ impl Drop for SerialConsole {
     }
 }
 
-fn run(addr: SocketAddr, shared: Arc<Mutex<Shared>>, running: Arc<AtomicBool>, write: Arc<Mutex<Option<TcpStream>>>) {
+fn run(addr: SocketAddr, mode: SerialMode, shared: Arc<Mutex<Shared>>, running: Arc<AtomicBool>, write: Arc<Mutex<Option<TcpStream>>>) {
     let stream = match TcpStream::connect_timeout(&addr, Duration::from_millis(800)) {
         Ok(s) => s,
         Err(e) => {
@@ -123,6 +128,11 @@ fn run(addr: SocketAddr, shared: Arc<Mutex<Shared>>, running: Arc<AtomicBool>, w
         }
     };
     *write.lock() = Some(wclone);
+    if !opening(mode).is_empty() {
+        if let Some(s) = write.lock().as_mut() {
+            let _ = s.write_all(opening(mode));
+        }
+    }
     // Short read timeout so the loop can observe `running` for shutdown.
     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
     {
@@ -143,12 +153,7 @@ fn run(addr: SocketAddr, shared: Arc<Mutex<Shared>>, running: Arc<AtomicBool>, w
             Ok(0) => break, // EOF — server closed
             Ok(n) => {
                 let mut replies = Vec::new();
-                let mut data = Vec::with_capacity(n);
-                for &b in &buf[..n] {
-                    if let Some(d) = filter.feed(b, &mut replies) {
-                        data.push(d);
-                    }
-                }
+                let data = decode(mode, &mut filter, &buf[..n], &mut replies);
                 if !replies.is_empty() {
                     if let Some(s) = write.lock().as_mut() {
                         let _ = s.write_all(&replies);
@@ -175,6 +180,41 @@ fn run(addr: SocketAddr, shared: Arc<Mutex<Shared>>, running: Arc<AtomicBool>, w
     g.seq = g.seq.wrapping_add(1);
 }
 
+/// What a viewer says on connecting. An IAC tells an `auto` port the client
+/// speaks telnet, so that the port switches to the framing the viewer
+/// expects (it filters IAC and escapes 0xFF); `telnet` ports already do, and
+/// `raw` ports would take the bytes as data.
+fn opening(mode: SerialMode) -> &'static [u8] {
+    match mode {
+        SerialMode::Auto => &[telnet::IAC, telnet::DO, telnet::OPT_SGA],
+        SerialMode::Raw | SerialMode::Telnet => &[],
+    }
+}
+
+/// Typed bytes as they go on the wire: plain on a `raw` port, 0xFF doubled
+/// on the others.
+fn encode(mode: SerialMode, bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for &b in bytes {
+        if mode == SerialMode::Raw {
+            out.push(b);
+        } else {
+            telnet::escape_byte(b, &mut out);
+        }
+    }
+    out
+}
+
+/// Received bytes as the guest's text: unchanged on a `raw` port, otherwise
+/// through the telnet filter, which strips commands and appends what has to
+/// be answered to `replies`.
+fn decode(mode: SerialMode, filter: &mut TelnetFilter, bytes: &[u8], replies: &mut Vec<u8>) -> Vec<u8> {
+    if mode == SerialMode::Raw {
+        return bytes.to_vec();
+    }
+    bytes.iter().filter_map(|&b| filter.feed(b, replies)).collect()
+}
+
 fn append_text(shared: &Arc<Mutex<Shared>>, data: &[u8]) {
     let chunk = String::from_utf8_lossy(data);
     let mut g = shared.lock();
@@ -193,4 +233,46 @@ fn append_text(shared: &Arc<Mutex<Shared>>, data: &[u8]) {
         g.text.drain(..idx);
     }
     g.seq = g.seq.wrapping_add(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IAC: u8 = telnet::IAC;
+
+    /// `auto` opens with IAC DO SGA so the port treats the viewer as telnet;
+    /// the other two say nothing.
+    #[test]
+    fn only_an_auto_port_is_told_the_viewer_speaks_telnet() {
+        assert_eq!(opening(SerialMode::Auto), [IAC, telnet::DO, telnet::OPT_SGA]);
+        assert!(opening(SerialMode::Telnet).is_empty());
+        assert!(opening(SerialMode::Raw).is_empty());
+    }
+
+    /// 0xFF is doubled for a telnet or auto port and left alone on a raw one.
+    #[test]
+    fn typed_bytes_are_escaped_except_on_a_raw_port() {
+        assert_eq!(encode(SerialMode::Auto, b"a\xffb\n"), b"a\xff\xffb\n");
+        assert_eq!(encode(SerialMode::Telnet, b"a\xffb\n"), b"a\xff\xffb\n");
+        assert_eq!(encode(SerialMode::Raw, b"a\xffb\n"), b"a\xffb\n");
+    }
+
+    /// A telnet or auto port's negotiation is stripped from the text and
+    /// answered (the passive filter declines the echo it is offered); a raw
+    /// port's bytes are the text, whatever they are.
+    #[test]
+    fn received_bytes_are_filtered_except_on_a_raw_port() {
+        let offer = [IAC, telnet::WILL, telnet::OPT_ECHO, b'h', b'i', IAC, IAC, b'\n'];
+        for mode in [SerialMode::Auto, SerialMode::Telnet] {
+            let mut filter = TelnetFilter::new_passive();
+            let mut replies = Vec::new();
+            assert_eq!(decode(mode, &mut filter, &offer, &mut replies), [b'h', b'i', IAC, b'\n'], "{mode:?}");
+            assert_eq!(replies, [IAC, telnet::DONT, telnet::OPT_ECHO], "{mode:?}");
+        }
+        let mut filter = TelnetFilter::new_passive();
+        let mut replies = Vec::new();
+        assert_eq!(decode(SerialMode::Raw, &mut filter, &offer, &mut replies), offer);
+        assert!(replies.is_empty());
+    }
 }

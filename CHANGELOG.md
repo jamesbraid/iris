@@ -75,6 +75,7 @@ hashes are given where a change is easiest to understand by reading the commit.
 - On an `auto` port, a telnet client that edits its first line locally (GNU
   inetutils, BSD, Apple and busybox telnet, `screen`) no longer sees the
   guest's echo of that line a second time.
+- The iris-gui serial viewer follows the machine's `serial_mode`.
 ### Bedrock boot flash
 
 - The Fuel's, Tezro's and Origin 3200's boot flash serves array reads under a
