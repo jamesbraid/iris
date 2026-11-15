@@ -331,6 +331,9 @@ pub(crate) struct TcpConn<S> {
     /// Bytes read from the client before it was recognised as telnet; see
     /// [`Carry`]. Only `Auto`'s joining list sets it.
     carry: Carry,
+    /// The echo of its first line to drop; see [`EchoHold`]. Only `Auto`'s
+    /// joining list sets it.
+    hold: Option<EchoHold>,
 }
 
 impl<S> TcpConn<S> {
@@ -340,6 +343,7 @@ impl<S> TcpConn<S> {
             wire,
             pending: Vec::new(),
             carry: Carry::default(),
+            hold: None,
         }
     }
 
@@ -534,6 +538,8 @@ pub(crate) struct Auto {
     /// Telnet clients just recognised: what they sent before it was clear
     /// still reaches the guest first, then they move to `telnet`, which so
     /// carries no test for it.
+    /// While an echo of their first line is to be dropped their output goes
+    /// through [`EchoHold`] too.
     joining: Vec<TcpConn<TelnetFilter>>,
     telnet: Fixed<Telnet>,
 }
@@ -548,6 +554,11 @@ pub(crate) struct SniffState {
     consumed: bool,
     after_cr: bool,
     after_iac: bool,
+    /// The first line so far (up to [`MAX_HELD_LINE`] bytes): what a
+    /// line-mode telnet client has already drawn itself, if this turns out to
+    /// be one.
+    line: Vec<u8>,
+    line_overflow: bool,
     /// Data read from the socket and not yet given to the guest.
     inq: VecDeque<u8>,
     /// An IAC that ended the last chunk is not in `inq` until the next byte
@@ -565,7 +576,9 @@ enum Scan {
     IacHeld,
     /// The client's first line, which began in this chunk, ends CR LF or
     /// CR NUL at this index; the bytes up to and including it are data.
-    NvtEnd { at: usize },
+    /// `line` is the line it ends, when there is one worth holding the
+    /// guest's echo of.
+    NvtEnd { at: usize, line: Option<Vec<u8>> },
 }
 
 impl SniffState {
@@ -597,7 +610,8 @@ impl SniffState {
             self.after_cr = byte == b'\r';
             if nvt_end {
                 if first_line_starts_here {
-                    return Scan::NvtEnd { at: i };
+                    let line = (!self.line_overflow && !self.line.is_empty()).then(|| std::mem::take(&mut self.line));
+                    return Scan::NvtEnd { at: i, line };
                 }
                 // The line was in pieces: not enough to call it telnet.
                 self.lock();
@@ -608,6 +622,11 @@ impl SniffState {
                 return Scan::Plain;
             }
             self.consumed = true;
+            match byte {
+                b'\r' => {}
+                _ if self.line.len() < MAX_HELD_LINE => self.line.push(byte),
+                _ => self.line_overflow = true,
+            }
         }
         Scan::Plain
     }
@@ -615,12 +634,17 @@ impl SniffState {
     /// Plain for good, and nothing more of the line is kept.
     fn lock(&mut self) {
         self.locked = true;
+        self.line = Vec::new();
     }
 }
+
+/// The longest first line `Auto` will hold the guest's echo of.
+const MAX_HELD_LINE: usize = 128;
 
 /// How long `Auto` waits for what follows before it acts on a pause: a lone
 /// 0xFF at the end of a plain client's read is data after this long with
 /// nothing after it.
+/// An echo being dropped is given up on after this long without more of it.
 const POLL_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// What a client that has just been recognised as telnet has sent that is
@@ -632,20 +656,129 @@ pub(crate) struct Carry {
     wire: VecDeque<u8>,
 }
 
+/// The guest's echo of the line a line-mode telnet client sent just before
+/// `Auto` recognised it. That client shows what it types itself, and goes to
+/// character mode only when the offer reaches it, so it has already drawn the
+/// line; a guest that echoes would draw it again. The line arrived in one
+/// chunk and is recognised on reading it, before the guest sees a byte of it,
+/// so the guest's echo, byte by byte, finds this in place. While it is held
+/// the guest's output is matched against the line byte for byte and the match
+/// dropped, then the line break that ends the echo (at most as many CR and LF
+/// bytes as the client's line ending had, each of which a tty may echo as a
+/// line break). The first byte that does not match releases what was held and
+/// everything after it unchanged, as does the timeout, so a guest that does
+/// not echo (a password prompt) loses nothing.
+struct EchoHold {
+    /// The line the client sent, without its ending.
+    text: Vec<u8>,
+    /// How much of `text` the guest has echoed so far.
+    matched: usize,
+    /// How many CR and LF bytes of the echo's ending may still be dropped.
+    ending: u8,
+    since: Instant,
+}
+
+enum HoldStep {
+    /// The byte was part of the echo: send nothing.
+    Dropped,
+    /// The hold is over: send these bytes (what was matched if the echo
+    /// broke off, then the byte unless it was part of the echo's ending).
+    Done(Vec<u8>),
+}
+
+impl EchoHold {
+    /// The most CR and LF bytes dropped after the echoed text: each of the
+    /// two bytes of the client's line ending may be echoed as CR LF.
+    const ENDING_BYTES: u8 = 4;
+
+    fn new(text: Vec<u8>) -> Self {
+        Self { text, matched: 0, ending: Self::ENDING_BYTES, since: Instant::now() }
+    }
+
+    fn step(&mut self, byte: u8) -> HoldStep {
+        if self.matched < self.text.len() {
+            if byte == self.text[self.matched] {
+                self.matched += 1;
+                self.since = Instant::now();
+                return HoldStep::Dropped;
+            }
+            let mut out = self.text[..self.matched].to_vec();
+            out.push(byte);
+            return HoldStep::Done(out);
+        }
+        // The text is echoed; the line break that ends it goes with it.
+        if (byte == b'\r' || byte == b'\n') && self.ending > 0 {
+            self.ending -= 1;
+            self.since = Instant::now();
+            return HoldStep::Dropped;
+        }
+        HoldStep::Done(vec![byte])
+    }
+}
+
 impl Auto {
-    /// Pass one guest byte to the clients that are joining.
+    /// Pass one guest byte through the clients that are joining: one whose
+    /// echo hold ends, and that has nothing left to read, moves to the telnet
+    /// list.
     fn send_joining(&mut self, byte: u8) {
-        let mut out = Vec::with_capacity(2);
-        Telnet::escape(byte, &mut out);
-        send_all(&mut self.joining, &out);
+        let mut i = 0;
+        while i < self.joining.len() {
+            let c = &mut self.joining[i];
+            let mut out = Vec::new();
+            match c.hold.as_mut().map(|h| h.step(byte)) {
+                Some(HoldStep::Dropped) => {}
+                Some(HoldStep::Done(bytes)) => {
+                    c.hold = None;
+                    for b in bytes {
+                        Telnet::escape(b, &mut out);
+                    }
+                }
+                None => Telnet::escape(byte, &mut out),
+            }
+            if c.flush().is_ok() && (out.is_empty() || c.push(&out).is_ok()) {
+                i += 1;
+            } else {
+                self.joining.remove(i);
+            }
+        }
+        self.settle_joining();
+    }
+
+    /// End the echo holds that have waited too long, giving back what they
+    /// matched if the echo was cut short.
+    fn expire_holds(&mut self) {
+        let now = Instant::now();
+        let mut i = 0;
+        while i < self.joining.len() {
+            let c = &mut self.joining[i];
+            if c.hold.as_ref().is_some_and(|h| now.duration_since(h.since) >= POLL_TIMEOUT) {
+                let mut out = Vec::new();
+                if let Some(h) = c.hold.take() {
+                    // An echo that was all there stops here and was to be
+                    // dropped: only a partial one is given back.
+                    if h.matched < h.text.len() {
+                        for b in &h.text[..h.matched] {
+                            Telnet::escape(*b, &mut out);
+                        }
+                    }
+                }
+                if c.push(&out).is_err() {
+                    self.joining.remove(i);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        self.settle_joining();
     }
 
     /// Move clients that have nothing left to carry over to the telnet list.
+    /// An echo still to be dropped keeps a client here too.
     fn settle_joining(&mut self) {
         let mut i = 0;
         while i < self.joining.len() {
             let c = &self.joining[i];
-            let done = c.carry.data.is_empty() && c.carry.wire.is_empty();
+            let done = c.carry.data.is_empty() && c.carry.wire.is_empty() && c.hold.is_none();
             if done {
                 let c = self.joining.remove(i);
                 self.telnet.0.push(c);
@@ -714,6 +847,7 @@ impl Auto {
         let chunk = &buf[..n];
         let held = c.wire.held_iac_since.take().is_some();
         let mut iac_was_held = false;
+        let mut hold_text = None;
         let (mut cut, switched) = match c.wire.scan(chunk) {
             Scan::Plain => (n, false),
             Scan::Iac(at) => (at, true),
@@ -721,7 +855,10 @@ impl Auto {
                 iac_was_held = true;
                 (0, true)
             }
-            Scan::NvtEnd { at } => (at + 1, true),
+            Scan::NvtEnd { at, line } => {
+                hold_text = line;
+                (at + 1, true)
+            }
         };
         if held && !iac_was_held {
             // The IAC that ended the last chunk was data.
@@ -751,6 +888,11 @@ impl Auto {
         let mut conn = TcpConn::new(stream, Telnet::new_state());
         conn.pending = pending;
         conn.carry = Carry { data: sniff.inq, wire };
+        // A line-mode client has drawn its first line; hold the guest's echo
+        // of it.
+        if let Some(text) = hold_text {
+            conn.hold = Some(EchoHold::new(text));
+        }
         if conn.flush().is_err() {
             return PlainStep::Gone;
         }
@@ -779,6 +921,9 @@ impl Lines for Auto {
         flush_all(&mut self.plain);
         flush_all(&mut self.joining);
         flush_all(&mut self.telnet.0);
+        if !self.joining.is_empty() {
+            self.expire_holds();
+        }
     }
     fn send(&mut self, byte: u8) {
         send_all(&mut self.plain, &[byte]);
@@ -1843,6 +1988,119 @@ mod tests {
         assert_eq!(c.got, GREETING);
     }
 
+    /// A line-mode telnet client draws its first line itself, so a guest that
+    /// echoes must not draw it again: the echo is dropped, in the CR LF, LF
+    /// and doubled-newline shapes a tty gives, and what follows is untouched.
+    #[test]
+    fn auto_drops_the_guests_echo_of_a_line_mode_clients_first_line() {
+        for echo in [&b"ab\r\n"[..], b"ab\n", b"ab\r\n\r\n", b"ab\r\r\n", b"ab"] {
+            let mut c = Client::connect(SerialMode::Auto);
+            c.send(b"ab\r\n");
+            c.got.clear();
+            let mut out = echo.to_vec();
+            out.extend_from_slice(b"# ");
+            assert_eq!(c.guest_writes(&out), b"# ", "echo {echo:?}");
+            // Over: the same text later is the guest's own output.
+            assert_eq!(c.guest_writes(b"ab\xff"), b"ab\xff\xff", "echo {echo:?}");
+        }
+    }
+
+    /// The echo comes back byte by byte while the line is still being read,
+    /// as a tty does it: the hold is in place before the guest sees the first
+    /// byte, so none of the echo reaches the client, whichever way the tty
+    /// echoes the line ending.
+    #[test]
+    fn auto_drops_an_echo_that_comes_back_as_the_line_is_read() {
+        for (cr, lf) in [(&b"\r\n"[..], &b""[..]), (b"\r\n", b"\r\n"), (b"\r", b"\n"), (b"\r\n", b"\n")] {
+            let mut c = Client::connect(SerialMode::Auto);
+            let input = c.send_echoing(b"ab\r\n", cr, lf);
+            assert_eq!(input, b"ab\r\n");
+            assert_eq!(c.got, GREETING, "nothing of the echo arrived; cr {cr:?} lf {lf:?}");
+            c.got.clear();
+            assert_eq!(c.guest_writes(b"# "), b"# ", "cr {cr:?} lf {lf:?}");
+        }
+    }
+
+    /// Only the line break that ends the echo is dropped, not whatever line
+    /// breaks the guest prints after it.
+    #[test]
+    fn auto_drops_no_more_line_breaks_than_an_echo_can_end_with() {
+        let mut c = Client::connect(SerialMode::Auto);
+        c.send(b"ab\r\n");
+        c.got.clear();
+        assert_eq!(c.guest_writes(b"ab\r\n\r\n\r\n\r\n# "), b"\r\n\r\n# ", "four of the six are the echo's");
+    }
+
+    /// A complete echo is dropped for good: the hold ending by timeout, with
+    /// the user thinking for longer than it, gives nothing back.
+    #[test]
+    fn auto_does_not_give_back_a_complete_echo_when_the_hold_times_out() {
+        let mut c = Client::connect(SerialMode::Auto);
+        c.send_echoing(b"ab\r\n", b"\r\n", b"");
+        c.got.clear();
+        std::thread::sleep(POLL_TIMEOUT + Duration::from_millis(100));
+        c.settle();
+        assert_eq!(std::mem::take(&mut c.got), b"", "nothing was released");
+        assert_eq!(c.guest_writes(b"cd"), b"cd");
+    }
+
+    /// A guest that does not echo (a password prompt) loses nothing: its first
+    /// byte is not the line's, so it goes through.
+    #[test]
+    fn auto_holds_nothing_back_from_a_guest_that_does_not_echo() {
+        let mut c = Client::connect(SerialMode::Auto);
+        c.send(b"hunter2\r\n");
+        c.got.clear();
+        assert_eq!(c.guest_writes(b"\r\nLast login: now\r\n$ "), b"\r\nLast login: now\r\n$ ");
+    }
+
+    /// A partial echo followed by something else is released unchanged, in
+    /// order, with nothing added or lost.
+    #[test]
+    fn auto_releases_a_partial_echo_that_then_differs() {
+        let mut c = Client::connect(SerialMode::Auto);
+        c.send(b"abc\r\n");
+        c.got.clear();
+        assert_eq!(c.guest_writes(b"abX\r\nrest"), b"abX\r\nrest");
+        let mut c = Client::connect(SerialMode::Auto);
+        c.send(b"abc\r\n");
+        c.got.clear();
+        assert_eq!(c.guest_writes(b"abc"), b"", "echo so far is held");
+        assert_eq!(c.guest_writes(b"abcd"), b"abcd", "the echo was complete, so this is the guest's own output");
+    }
+
+    /// An echo that stops short is released after the timeout, so a guest
+    /// whose output merely starts like the line is not held for good.
+    #[test]
+    fn auto_releases_a_held_echo_after_the_timeout() {
+        let mut c = Client::connect(SerialMode::Auto);
+        c.send(b"abc\r\n");
+        c.got.clear();
+        assert_eq!(c.guest_writes(b"ab"), b"", "held for now");
+        std::thread::sleep(POLL_TIMEOUT + Duration::from_millis(100));
+        c.settle();
+        assert_eq!(std::mem::take(&mut c.got), b"ab", "released unchanged");
+        assert_eq!(c.guest_writes(b"abc"), b"abc", "and the hold is over");
+    }
+
+    /// Only a line-mode client's first line, which arrived whole, is held
+    /// for: an IAC client, a bare Enter and a line sent in pieces are not.
+    #[test]
+    fn auto_holds_for_no_other_client() {
+        let mut c = Client::connect(SerialMode::Auto);
+        c.send(&[255, 251, 31]);
+        c.got.clear();
+        assert_eq!(c.guest_writes(b"ab"), b"ab");
+        let mut c = Client::connect(SerialMode::Auto);
+        c.send(b"\r\n");
+        c.got.clear();
+        assert_eq!(c.guest_writes(b"\r\n# "), b"\r\n# ");
+        let mut c = Client::connect(SerialMode::Auto);
+        c.send(b"ab");
+        c.send(b"\r\n");
+        c.got.clear();
+        assert_eq!(c.guest_writes(b"ab\r\n# "), b"ab\r\n# ", "a first line in pieces is plain, so nothing is dropped");
+    }
 
     /// `serial_mode` in the config reaches the console line: the
     /// default is auto, and each value gives the behaviour above.

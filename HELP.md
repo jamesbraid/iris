@@ -485,6 +485,15 @@ as does a script that starts with a CR LF line, and so does data that starts
 `serial_mode = "raw"`. The monitor port is always
 telnet.
 
+GNU inetutils, netkit, BSD, Apple and busybox telnet and `screen` stay
+silent on connect and edit their first line locally, so they have already
+drawn it when `auto` recognises them. `auto` drops the guest's echo of that
+one line, and the line break that ends it, while it matches what the client
+sent; the first byte that differs, or a quarter of a second without more of
+it, gives back what was held, so a guest that does not echo (a password
+prompt) loses nothing. It does this only for a first line that arrived in
+one piece.
+
 Each serial line can also be served on a Unix socket:
 `serial_socket_a` / `serial_socket_b` (or `--serial-socket-a` /
 `--serial-socket-b`). The socket carries raw bytes with no telnet negotiation,
