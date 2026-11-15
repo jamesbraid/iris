@@ -518,7 +518,7 @@ impl Cycle {
         let to = Self::after(self.cur, self.screens.len());
         self.screens[self.cur].window.pass_to(self.screens[to].window.clone());
         // The thread gives it up at its next tick; do not wait for a parked one.
-        self.screens[self.cur].changed.wake();
+        self.screens[self.cur].wake();
         self.cur = to;
         Some(to)
     }
@@ -749,6 +749,15 @@ impl Screen {
         self.latest().filter(|f| f.width > 0 && f.height > 0 && f.words.len() == f.width as usize * f.height as usize)
     }
 
+    /// End a parked display thread's wait. A board that ticks every period
+    /// sees a request at its next tick, and a wake would only cut its frame
+    /// short: one more retrace for the guest.
+    pub fn wake(&self) {
+        if self.parks {
+            self.changed.wake();
+        }
+    }
+
     /// Ask for a frame composed from now on, wait at most `timeout` for it and
     /// return the newest with its words. When the wait ran out, that is an
     /// older frame (or none) and [`FrameRequests::pending`] still says so.
@@ -757,7 +766,7 @@ impl Screen {
         // answer in between.
         self.requests.capture(true);
         self.requests.request();
-        self.changed.wake();
+        self.wake();
         let deadline = Instant::now() + timeout;
         while self.requests.pending() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(2));
@@ -1049,6 +1058,22 @@ mod tests {
         running.store(false, Ordering::SeqCst);
         s.changed.wake();
         t.join().unwrap();
+    }
+
+    /// A consumer's request is seen at the next tick by a board that ticks
+    /// every period; only a parked board is woken for it.
+    #[test]
+    fn a_capture_wakes_only_a_parked_display_thread() {
+        let period = Duration::from_millis(300);
+        for parks in [false, true] {
+            let mut s = screen();
+            s.parks = parks;
+            let mut wait = FrameWait::new(&s.changed, period);
+            let start = Instant::now();
+            s.capture(Duration::from_millis(1));
+            wait.wait();
+            assert_eq!(start.elapsed() < period / 2, parks, "parks: {parks}");
+        }
     }
 
     /// A frame a consumer holds is never overwritten; its buffer comes back

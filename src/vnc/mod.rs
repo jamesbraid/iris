@@ -215,7 +215,7 @@ fn grab_loop(s: &Shared) {
             if watching {
                 // A frame at once, so the new viewer is not left waiting for a change.
                 screen.requests.request();
-                screen.changed.wake();
+                screen.wake();
             }
             capturing = watching;
             last_seq = None;
