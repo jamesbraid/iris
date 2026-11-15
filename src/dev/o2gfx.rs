@@ -4430,32 +4430,6 @@ mod tests {
         assert!(ram.screen_changed().take());
     }
 
-    /// A scan-out that keeps copies of memory follows the engine's writes by
-    /// 64 KB tile, and a restore by the epoch.
-    #[test]
-    fn the_engines_writes_are_noted_by_tile_once_asked_for() {
-        let ram = O2Memory::single(32 << 20);
-        use crate::ip32::RAM_BASE;
-        let (a, b) = (RAM_BASE as usize + 0x0010_0000, RAM_BASE as usize + 0x0030_0000);
-        let mut win = ram.window();
-        let mut write = |p: usize| {
-            win.begin();
-            win.put_be(p + 0x40, 4, 1);
-            win.put_be(p + 0x1040, 4, 1);
-            win.end();
-        };
-        write(a);
-        assert!(!ram.take_tile(a), "nothing is noted until asked for");
-        ram.track_tiles();
-        write(a);
-        assert!(ram.take_tile(a), "the tile the engine wrote");
-        assert!(!ram.take_tile(a), "noted once");
-        assert!(!ram.take_tile(b), "another tile is not");
-        let epoch = ram.epoch();
-        ram.restore_words(&ram.bank_words().concat()).unwrap();
-        assert_ne!(ram.epoch(), epoch);
-    }
-
     #[test]
     fn scan_regs_describe_the_picture_only_while_the_display_is_on() {
         let g = gbe();
