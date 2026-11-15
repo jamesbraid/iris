@@ -620,6 +620,10 @@ impl Screen {
     /// [`publish`](Self::publish).
     pub fn frame(&self, w: u32, h: u32) -> Frame {
         self.noted.store(self.requests.note(), Ordering::Release);
+        self.spare_frame(w, h)
+    }
+
+    fn spare_frame(&self, w: u32, h: u32) -> Frame {
         let mut words = std::mem::take(&mut *self.spare.lock());
         words.resize(w as usize * h as usize, 0);
         Frame { width: w, height: h, words, ..Frame::default() }
@@ -630,9 +634,13 @@ impl Screen {
     /// is the status bar's input, taken only for a frame a renderer is shown.
     pub fn tick(&self, mut stats: impl FnMut() -> BarStats, compose: impl FnOnce(&mut Frame, Need) -> bool) -> Need {
         self.window.hand_over();
+        // Note the requests before reading what is needed: one that arrives
+        // after the note is not answered by this frame, so it cannot be
+        // answered by one composed without words.
+        self.noted.store(self.requests.note(), Ordering::Release);
         let need = self.need();
         if need.any() {
-            let mut frame = self.frame(0, 0);
+            let mut frame = self.spare_frame(0, 0);
             if compose(&mut frame, need) {
                 // A tick with nobody shown has no use for the bar's figures.
                 let stats = if need.redraw { self.bar(&mut stats) } else { self.idle_stats() };
@@ -735,17 +743,28 @@ impl Screen {
         self.latest.lock().clone()
     }
 
+    /// The newest frame that has a picture in `words`: a frame composed only
+    /// on a device (for a wgpu window) does not.
+    pub fn latest_words(&self) -> Option<Arc<Frame>> {
+        self.latest().filter(|f| f.width > 0 && f.height > 0 && f.words.len() == f.width as usize * f.height as usize)
+    }
+
     /// Ask for a frame composed from now on, wait at most `timeout` for it and
-    /// return the newest. When the wait ran out, that is an older frame and
-    /// [`FrameRequests::pending`] still says so.
+    /// return the newest with its words. When the wait ran out, that is an
+    /// older frame (or none) and [`FrameRequests::pending`] still says so.
     pub fn capture(&self, timeout: Duration) -> Option<Arc<Frame>> {
+        // Held until the frame is read, so no frame without words replaces the
+        // answer in between.
+        self.requests.capture(true);
         self.requests.request();
         self.changed.wake();
         let deadline = Instant::now() + timeout;
         while self.requests.pending() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(2));
         }
-        self.latest()
+        let frame = self.latest_words();
+        self.requests.capture(false);
+        frame
     }
 }
 
@@ -760,7 +779,7 @@ pub fn save_screenshot(screen: &Arc<Screen>) {
     static SHOTS: AtomicU64 = AtomicU64::new(0);
     let screen = screen.clone();
     std::thread::spawn(move || {
-        let Some(frame) = screen.capture(Duration::from_secs(2)).filter(|f| f.width > 0 && f.height > 0) else {
+        let Some(frame) = screen.capture(Duration::from_secs(2)) else {
             println!("iris: screenshot failed: the display has no frame");
             return;
         };
@@ -972,6 +991,64 @@ mod tests {
         s.tick(stats, |_, _| false);
         assert!(!s.requests.pending());
         assert_eq!(s.latest().unwrap().seq, 2, "and the newest frame stands");
+    }
+
+    /// Asks for words as the renderer is asked what it takes, as a consumer
+    /// connecting at that moment would.
+    struct AsksForWords(Arc<Screen>);
+
+    impl Renderer for AsksForWords {
+        fn present(&mut self, _: &Frame, _: &BarStats) {}
+        fn takes_planes(&self) -> bool {
+            self.0.requests.request();
+            true
+        }
+    }
+
+    /// A request that arrives while the tick decides what to compose is not
+    /// answered by a frame composed without words.
+    #[test]
+    fn a_request_made_as_the_need_is_read_gets_a_frame_with_words() {
+        let s = Arc::new(screen());
+        *s.window.renderer.lock() = Some(Box::new(AsksForWords(s.clone())));
+        let need = s.tick(stats, |f, need| { assert!(!need.words); f.width = 1; f.height = 1; true });
+        assert!(need.planes);
+        assert!(s.requests.pending(), "the planes-only frame does not answer it");
+        let need = s.tick(stats, |f, need| { assert!(need.words); f.width = 1; f.height = 1; f.words.push(9); true });
+        assert!(need.words);
+        assert!(!s.requests.pending(), "the frame with words answers it");
+        assert_eq!(s.latest().unwrap().words, [9]);
+    }
+
+    /// A frame composed only on a device has no picture for a consumer that
+    /// reads words, and capture asks for one rather than return it.
+    #[test]
+    fn words_consumers_never_see_a_frame_without_words() {
+        let s = Arc::new(screen());
+        let mut f = s.frame(2, 1);
+        f.words.clear();
+        s.publish(f, &stats());
+        assert!(s.latest().is_some() && s.latest_words().is_none());
+        let running = Arc::new(AtomicBool::new(true));
+        let t = {
+            let (s, running) = (s.clone(), running.clone());
+            std::thread::spawn(move || {
+                run_display(&s, &running, &DisplayStop::default(), stats, || {}, |f, need| {
+                    f.width = 2;
+                    f.height = 1;
+                    if need.words {
+                        f.words.extend([3, 4]);
+                    }
+                    true
+                })
+            })
+        };
+        let f = s.capture(Duration::from_secs(5)).expect("a frame with words");
+        assert_eq!(f.words, [3, 4]);
+        assert!(!s.requests.capturing(), "the capture is released");
+        running.store(false, Ordering::SeqCst);
+        s.changed.wake();
+        t.join().unwrap();
     }
 
     /// A frame a consumer holds is never overwritten; its buffer comes back

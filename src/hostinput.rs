@@ -544,7 +544,7 @@ impl HostInput {
         let screen = self.screen_at(n).ok_or_else(|| self.no_screen(n))?;
         let frame = screen.capture(Duration::from_millis(250));
         let fresh = !screen.requests.pending();
-        let frame = frame.filter(|f| f.width > 0 && f.height > 0).ok_or("the display has no video mode yet")?;
+        let frame = frame.ok_or("the display has no video mode yet")?;
         Ok((frame.width as usize, frame.height as usize, frame.words.clone(), fresh))
     }
 

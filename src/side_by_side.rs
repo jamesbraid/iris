@@ -79,7 +79,7 @@ impl SideBySide {
     /// Copy the newest frame of every screen into `out`, when any is new.
     /// Returns whether there is a picture to show.
     fn compose(&mut self) -> bool {
-        let frames: Vec<_> = self.screens.iter().map(|s| s.latest().filter(|f| f.width > 0 && f.height > 0 && !f.words.is_empty())).collect();
+        let frames: Vec<_> = self.screens.iter().map(|s| s.latest_words()).collect();
         let sizes: Vec<_> = frames.iter().map(|f| f.as_ref().map_or((0, 0), |f| (f.width, f.height))).collect();
         let seqs: Vec<_> = frames.iter().map(|f| f.as_ref().map_or(0, |f| f.seq)).collect();
         let layout = Layout::row(&sizes);

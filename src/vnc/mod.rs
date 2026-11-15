@@ -226,7 +226,7 @@ fn grab_loop(s: &Shared) {
             s.changed.wait_for(&mut f, Duration::from_millis(200));
             continue;
         }
-        if let Some(frame) = screen.latest().filter(|f| f.width > 0 && f.height > 0) {
+        if let Some(frame) = screen.latest_words() {
             if last_seq != Some(frame.seq) {
                 last_seq = Some(frame.seq);
                 cur.clear();
