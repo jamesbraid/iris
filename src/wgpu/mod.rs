@@ -34,6 +34,7 @@
 
 pub mod batch;
 pub mod device;
+pub mod export;
 pub mod host;
 pub mod memory;
 pub mod present;
@@ -63,7 +64,8 @@ pub mod library {
 }
 
 pub use batch::{ArchShaders, Batch, BatchPipelines, Full};
-pub use device::{set_display, Gpu, GpuOptions};
+pub use device::{set_display, set_export_memory, Gpu, GpuOptions};
+pub use export::{ExportFrame, ExportHandle, ExportInfo, ExportRing, ExportStats, HandleType};
 pub use memory::{GpuMemory, Staging};
 pub use present::{Frame, Placement, Presenter};
 pub use scanout::{Scanout, ScanoutPipeline, ScanoutShaders};

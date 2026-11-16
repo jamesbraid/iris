@@ -13,6 +13,7 @@ use super::memory::GpuMemory;
 use super::shader::Fragment;
 use super::tiles::{TileGrid, MAX_PRIMS};
 
+mod export;
 mod softfloat;
 
 #[repr(C)]

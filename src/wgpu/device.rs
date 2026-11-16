@@ -23,6 +23,18 @@ pub fn set_display(display: winit::event_loop::OwnedDisplayHandle) {
     let _ = DISPLAY.set(display);
 }
 
+/// Whether every device opened from now on is asked for exportable memory,
+/// whatever its `GpuOptions` say. See [`set_export_memory`].
+static EXPORT_MEMORY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ask every device opened from now on for exportable memory, as
+/// `GpuOptions::export_memory` does for one. A board opens its own device
+/// from the machine's configuration, which an embedder cannot reach, so this
+/// is the embedder's way to set the option before it builds the machine.
+pub fn set_export_memory(on: bool) {
+    EXPORT_MEMORY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// How to open the GPU. All fields have defaults; `backend` is the only
 /// one users set.
 #[derive(Clone, Debug)]
@@ -37,6 +49,12 @@ pub struct GpuOptions {
     /// Prefer a software adapter (lavapipe, SwiftShader) when one exists:
     /// what CI runs the goldens on.
     pub software: bool,
+    /// Enable the Vulkan external-memory extension for this platform (file
+    /// descriptors on Linux, Win32 handles on Windows) when the adapter has
+    /// it, so a board's scan-out can be a ring of buffers another process
+    /// imports (`export.rs`). Off: nothing changes. See
+    /// [`Gpu::export_handle_type`] for whether it took effect.
+    pub export_memory: bool,
 }
 
 impl Default for GpuOptions {
@@ -46,6 +64,7 @@ impl Default for GpuOptions {
             high_performance: true,
             optional_features: true,
             software: false,
+            export_memory: false,
         }
     }
 }
@@ -103,6 +122,11 @@ pub struct Gpu {
     error: Arc<Mutex<Option<String>>>,
     /// Writes waiting for the next submission (`write`).
     uploads: Mutex<Uploads>,
+    /// The kind of handle exported memory is shared as, when the device was
+    /// opened with the extension (`GpuOptions::export_memory`).
+    export: Option<super::export::HandleType>,
+    /// The rings of exportable buffers made on this device.
+    rings: Mutex<Vec<std::sync::Weak<super::export::ExportRing>>>,
 }
 
 /// The writes queued by `Gpu::write` and `Gpu::write_texture`: copies out
@@ -245,7 +269,7 @@ impl Uploads {
             if let Some(k) = (1..n).map(|d| (self.cur + d) % n).find(|&k| self.slots[k].mapped && !self.slots[k].used) {
                 self.cur = k;
             } else if self.slots.iter().any(|s| s.used) {
-                gpu.submit_locked(self, None);
+                gpu.submit_locked(self, Vec::new());
                 *bulk = true;
             } else if *bulk {
                 let _ = gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(30)) });
@@ -352,6 +376,17 @@ impl Gpu {
                 }
             }
         }
+        let export = if opts.export_memory || EXPORT_MEMORY.load(std::sync::atomic::Ordering::Relaxed) {
+            let kind = super::export::HandleType::of(have);
+            if let Some(kind) = kind {
+                features |= kind.feature();
+            } else {
+                log::warn!("wgpu: exportable memory asked for, but {} has no external-memory extension", info.name);
+            }
+            kind
+        } else {
+            None
+        };
         // Limits: the adapter's own for buffer sizes, so a 128 MiB board
         // memory is one binding; the defaults elsewhere.
         let mut required = wgpu::Limits::default();
@@ -404,7 +439,35 @@ impl Gpu {
             timestamps: features.contains(wgpu::Features::TIMESTAMP_QUERY),
         };
         let uploads = Mutex::new(Uploads::new(&device));
-        Ok(Arc::new(Gpu { instance, adapter, device, queue, caps, error, uploads }))
+        Ok(Arc::new(Gpu { instance, adapter, device, queue, caps, error, uploads, export, rings: Mutex::new(Vec::new()) }))
+    }
+
+    /// How exported memory is shared on this device, or None when it was not
+    /// opened for export (the option was off, or the adapter lacks the
+    /// extension): buffers made by [`ExportRing`](super::export::ExportRing)
+    /// need it.
+    pub fn export_handle_type(&self) -> Option<super::export::HandleType> {
+        self.export
+    }
+
+    /// Record a ring so a presenter that is handed one of its buffers can
+    /// find the ring ([`export_ring_of`](Self::export_ring_of)).
+    pub(super) fn register_ring(&self, ring: &Arc<super::export::ExportRing>) {
+        let mut rings = self.rings.lock();
+        rings.retain(|r| r.strong_count() > 0);
+        rings.push(Arc::downgrade(ring));
+    }
+
+    /// The live rings of exportable buffers on this device.
+    pub fn export_rings(&self) -> Vec<Arc<super::export::ExportRing>> {
+        self.rings.lock().iter().filter_map(|r| r.upgrade()).collect()
+    }
+
+    /// The ring and slot `buffer` belongs to: how an embedder that is handed
+    /// a board's composed frame (a `Renderer`'s `present_gpu_frame`) finds
+    /// the exportable buffer it is.
+    pub fn export_ring_of(&self, buffer: &wgpu::Buffer) -> Option<(Arc<super::export::ExportRing>, usize)> {
+        self.export_rings().into_iter().find_map(|r| r.index_of(buffer).map(|i| (r, i)))
     }
 
     /// The first asynchronous error, if any. Kernels that misbehave are
@@ -423,8 +486,14 @@ impl Gpu {
 
     /// Submit one command buffer, after the writes queued so far.
     pub fn submit(&self, encoder: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
+        self.submit_all([encoder])
+    }
+
+    /// Submit several command buffers in order, after the writes queued so
+    /// far, as one submission.
+    pub fn submit_all(&self, encoders: impl IntoIterator<Item = wgpu::CommandEncoder>) -> wgpu::SubmissionIndex {
         let mut u = self.uploads.lock();
-        let index = self.submit_locked(&mut u, Some(encoder));
+        let index = self.submit_locked(&mut u, encoders.into_iter().collect());
         drop(u);
         // The ring's slots come back as their maps complete, which a poll
         // reports.
@@ -434,7 +503,7 @@ impl Gpu {
 
     /// Submit the queued writes and then `encoder`; unmap the slots the
     /// writes used and map them again behind the submission.
-    fn submit_locked(&self, u: &mut Uploads, encoder: Option<wgpu::CommandEncoder>) -> wgpu::SubmissionIndex {
+    fn submit_locked(&self, u: &mut Uploads, encoders: Vec<wgpu::CommandEncoder>) -> wgpu::SubmissionIndex {
         let up = u.encoder.take().map(|e| e.finish());
         for s in &mut u.slots {
             if s.used {
@@ -446,7 +515,7 @@ impl Gpu {
                 s.sent = true;
             }
         }
-        let index = self.queue.submit(up.into_iter().chain(encoder.map(|e| e.finish())));
+        let index = self.queue.submit(up.into_iter().chain(encoders.into_iter().map(|e| e.finish())));
         for s in &mut u.slots {
             if std::mem::take(&mut s.sent) {
                 let ready = Arc::clone(&s.ready);

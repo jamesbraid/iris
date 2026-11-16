@@ -131,7 +131,7 @@ pub(super) mod vk {
         }
     }
 
-    fn usage_flags(usage: wgpu::BufferUsages) -> vk::BufferUsageFlags {
+    pub(crate) fn usage_flags(usage: wgpu::BufferUsages) -> vk::BufferUsageFlags {
         let mut f = vk::BufferUsageFlags::empty();
         for (w, v) in [
             (wgpu::BufferUsages::STORAGE, vk::BufferUsageFlags::STORAGE_BUFFER),
