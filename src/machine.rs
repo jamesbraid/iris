@@ -353,14 +353,14 @@ impl Machine {
         testdev_override: Option<Arc<crate::dev::testdev::TestDevice>>,
     ) -> Result<Self, String> {
         let prom = Prom::for_profile(cfg.machine.profile, &cfg.prom)?;
-        Ok(Self::with_prom(cfg, testdev_override, prom))
+        Self::with_prom(cfg, testdev_override, prom)
     }
 
     fn with_prom(
         mut cfg: MachineConfig,
         testdev_override: Option<Arc<crate::dev::testdev::TestDevice>>,
         prom: Prom,
-    ) -> Self {
+    ) -> Result<Self, String> {
         // The rig takes any part: `MachineConfig::cpu_part` looks at this.
         cfg.test_device |= testdev_override.is_some();
         // Capture config flags that are needed after the local `cfg` binding
@@ -500,10 +500,7 @@ impl Machine {
         let scsi_buses = Hpc3::new_scsi_buses(guinness);
         let attached = match crate::scsi::attach_from_config(&cfg, None, &|c| Hpc3::route_scsi(&scsi_buses, c)) {
             Ok(a) => a,
-            Err(e) => {
-                eprintln!("iris: fatal: {e}");
-                std::process::exit(1);
-            }
+            Err(e) => return Err(e),
         };
         let hpc3 = Hpc3::with_net(eeprom_hpc3.clone(), ioc.clone(), guinness, heartbeat.clone(), cfg.network(), cfg.no_audio, cfg.audio.clone(), cfg.nvram.clone(), cfg.rtc_offset, cfg.scsi_deferred_int, scsi_buses);
         hpc3.set_timer_manager(timer_manager.clone());
@@ -544,10 +541,7 @@ impl Machine {
             }
             Ok(())
         };
-        if let Err(e) = daynaports() {
-            eprintln!("iris: fatal: {e}");
-            std::process::exit(1);
-        }
+        daynaports()?;
         let scratch_path = attached.scratch;
         // The Indy and Indigo2 have always listed CD-ROMs beside the disks.
         let disk_provenance: Vec<DiskRef> = attached.tables.iter()
@@ -613,10 +607,7 @@ impl Machine {
                 Some(crate::dev::mgras::Mgras::with_raster(cfg.graphics_board(), {
                     use crate::dev::ioc::IocInterrupt::{GioSgFifo, GioSgGraphics, GioSgRetrace};
                     [ioc.irq_line(GioSgFifo), ioc.irq_line(GioSgGraphics), ioc.irq_line(GioSgRetrace)]
-                }, status.clone(), cfg.graphics.raster, &cfg.graphics.gpu_backend).unwrap_or_else(|e| {
-                    eprintln!("mgras: {e}");
-                    std::process::exit(1)
-                }))
+                }, status.clone(), cfg.graphics.raster, &cfg.graphics.gpu_backend).map_err(|e| format!("mgras: {e}"))?)
             }
             _ => None,
         };
@@ -990,7 +981,7 @@ impl Machine {
 
         crate::thread_affinity::init(perf);
 
-        Self {
+        Ok(Self {
             memory,            cpu,
             board,
             mc,
@@ -1015,7 +1006,7 @@ impl Machine {
             controller_slot: None,
             controller_registered: false,
             lifecycle: GuestState::Idle,
-        }
+        })
     }
 
     fn apply_host_display_resolution(&self) {
