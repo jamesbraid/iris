@@ -742,6 +742,16 @@ fn remove_listed(list: &Mutex<Vec<std::path::PathBuf>>) {
     }
 }
 
+/// A host that embeds iris calls this once, before building a machine, so a
+/// guest power-off, a console `quit` or a CI `quit` stops the machine and
+/// leaves the process to the host. The environment variable
+/// `IRIS_NO_EXIT_ON_POWEROFF` does the same and stays for scripts.
+pub fn set_process_exit_enabled(enabled: bool) {
+    PROCESS_EXIT_DISABLED.store(!enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+static PROCESS_EXIT_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// End the process. This is the only place machine and device code may call
 /// `std::process::exit`: it skips every Drop, which is where a copy-on-write
 /// overlay would otherwise write its sector record, so the caller has to hand
@@ -753,7 +763,8 @@ fn remove_listed(list: &Mutex<Vec<std::path::PathBuf>>) {
 /// every exit through here, the terminal console's `quit` too. A guard test
 /// fails on any other `process::exit` in the library.
 pub fn exit_process(at: &str, code: i32, stop_and_flush: impl FnOnce() -> Flushed) {
-    let exiting = std::env::var_os("IRIS_NO_EXIT_ON_POWEROFF").is_none();
+    let exiting = std::env::var_os("IRIS_NO_EXIT_ON_POWEROFF").is_none()
+        && !PROCESS_EXIT_DISABLED.load(std::sync::atomic::Ordering::SeqCst);
     // The console's line editor may be waiting for input on another thread
     // with the terminal in raw mode; give the shell its terminal back. Before
     // the flush too, so what the flush reports prints as ordinary lines.
