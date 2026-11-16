@@ -49,6 +49,26 @@ impl SharedMem {
             "ppmem: SharedMem length {len:#x} is not granularity-aligned"
         );
 
+        // Linux: a memfd. It is anonymous RAM that is limited only by the
+        // memory the process may use. A POSIX shm object lives in /dev/shm,
+        // whose size limit (half of RAM, or 64 MiB in a default Docker
+        // container) is not checked when the object is sized: guest RAM
+        // beyond it ends in SIGBUS on the first touch, in the CPU thread.
+        #[cfg(target_os = "linux")]
+        {
+            let fd = unsafe { libc::memfd_create(c"iris-pp".as_ptr(), libc::MFD_CLOEXEC) };
+            if fd >= 0 {
+                if unsafe { libc::ftruncate(fd, len as libc::off_t) } != 0 {
+                    let e = oserr("ftruncate");
+                    unsafe { libc::close(fd) };
+                    return Err(e);
+                }
+                return Ok(Self { fd, len });
+            }
+            // An old kernel or a seccomp filter without memfd_create: fall
+            // through to shm_open.
+        }
+
         // Unique per process *and* per object, so O_EXCL can never collide with
         // one of our own live objects.
         static SEQ: AtomicU32 = AtomicU32::new(0);
