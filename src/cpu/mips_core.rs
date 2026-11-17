@@ -2297,23 +2297,14 @@ impl MipsCore {
             }
             15 => { /* PRId is read-only */ }
             16 => {
-                // Bits 5:0 always writable (K0, CU, DB, IB).
+                // Only K0 and CU are writable. The line sizes (DB, IB) are
+                // hardwired: an R5000 reads 32 bytes whatever the PROM writes.
                 // Triton: bit 12 (CONFIG_SE) also writable.
                 #[cfg(not(feature = "r5ksc_triton"))]
-                let mask = 0x3F;
+                let mask = 0x0F;
                 #[cfg(feature = "r5ksc_triton")]
-                let mask = 0x103F; // adds bit 12 (SE)
-                let old = self.cp0_config;
-                let new = (old & !mask) | ((value as u32) & mask);
-                if new != old {
-                    let ib = (new >> 5) & 1;
-                    let db = (new >> 4) & 1;
-                    let ic_line = if ib == 1 { 32 } else { 16 };
-                    let dc_line = if db == 1 { 32 } else { 16 };
-                    //eprintln!("CP0 Config written: {:#010x} -> {:#010x}  (L1I-line={}B L1D-line={}B K0={})",
-                    //    old, new, ic_line, dc_line, new & 7);
-                }
-                self.cp0_config = new;
+                let mask = 0x100F; // adds bit 12 (SE)
+                self.cp0_config = (self.cp0_config & !mask) | ((value as u32) & mask);
             }
             17 => self.cp0_lladdr = value,
             18 => self.cp0_watchlo = value as u32,
@@ -3176,5 +3167,21 @@ mod ip7_ticket_tests {
         assert_eq!(compare_delay_ns(5, 5, hz), (1u64 << 32) * 1_000_000_000 / hz);
         // A target behind Count waits out the wrap.
         assert!(compare_delay_ns(0x10, 0x20, hz) > 40_000_000_000);
+    }
+}
+
+#[cfg(test)]
+mod config_write_tests {
+    use super::*;
+
+    /// NetBSD refuses an R5000 whose Config says 16-byte I-cache lines. The
+    /// IP22 PROM writes Config back with IB and DB clear, and a write must
+    /// not change them; K0 and CU still take.
+    #[test]
+    fn a_config_write_leaves_the_cache_line_sizes_alone() {
+        let mut core = MipsCore::default();
+        core.cp0_config = 0x00c2_86f3; // R5000: IB and DB set, K0 = 3
+        core.write_cp0(16, 0x00c2_86c2);
+        assert_eq!(core.cp0_config, 0x00c2_86f2);
     }
 }
