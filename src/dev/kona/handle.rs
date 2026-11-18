@@ -20,6 +20,12 @@ pub struct DisplayHandle {
     host: Arc<Host>,
 }
 
+impl super::back::tiles::Activity for DisplayHandle {
+    fn activity(&self) {
+        self.host.activity.store(true, Relaxed);
+    }
+}
+
 impl DisplayHandle {
     pub(super) fn new(host: &Arc<Host>) -> Self {
         DisplayHandle { host: host.clone() }

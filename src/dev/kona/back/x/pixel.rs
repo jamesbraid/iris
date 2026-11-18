@@ -1069,13 +1069,13 @@ impl XState {
         let verdict = match plan {
             Ok(Some(mut plan)) => {
                 // The back buffer's words: the plan was made for the front's.
-                let other = if back { surface.sibling_array(crate::dev::kona::back::textport::COLOUR_WORD + 1) } else { Some(plan.array) };
+                let other = if back { surface.sibling_array((crate::dev::kona::back::store::layout::MAIN_COLOUR_WORD as usize) + 1) } else { Some(plan.array) };
                 match other {
                     Some(array) => {
                         plan.pitch = array.pitch();
                         plan.array = array;
                         if back {
-                            plan.word = crate::dev::kona::back::textport::COLOUR_WORD + 1;
+                            plan.word = (crate::dev::kona::back::store::layout::MAIN_COLOUR_WORD as usize) + 1;
                         }
                         copy_rows(surface.store(), &plan, s, rect, &mut spans, &mut row)
                     }
