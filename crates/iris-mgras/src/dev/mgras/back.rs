@@ -20,7 +20,7 @@ use crate::wgpu::Gpu;
 pub struct ImpactBack {
     // The engine points into the planes and the fault cell, so it goes
     // first and drops first.
-    rss: Box<Rss>,
+    pub(super) rss: Box<Rss>,
     gpu: Option<Box<GpuRaster>>,
     fault: Box<SpinLock<Option<String>>>,
     planes: Box<Planes>,
