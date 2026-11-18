@@ -412,10 +412,7 @@ pub(crate) fn rgb24_to_rgb12(val: u32) -> u32 {
     (b << 8) | (g << 4) | r
 }
 
-// Bayer 4x4 dither matrix packed as 16 nibbles in a u64.
-// Indexed by (y&3)<<2|(x&3): threshold = (BAYER_PACKED >> (idx*4)) & 0xF.
-// Table: [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5]
-pub(crate) const BAYER_PACKED: u64 = 0x5D7F91B36E4CA280;
+pub(crate) use crate::dev::bayer::{bayer_threshold, BAYER_PACKED};
 
 /// Pack bayer index into bits 27:24 of color value (top byte unused by 24-bit BGR).
 /// Encoding: bits[3:2] = y&3, bits[1:0] = x&3 → index = (y&3)<<2|(x&3).
@@ -423,11 +420,6 @@ pub(crate) const BAYER_PACKED: u64 = 0x5D7F91B36E4CA280;
 #[inline(always)]
 pub(crate) fn bayer_pack(color: u32, x: i32, y: i32) -> u32 {
     (color & 0x00FFFFFF) | (((y as u32 & 3) << 2 | (x as u32 & 3)) << 24)
-}
-
-#[inline(always)]
-pub(crate) fn bayer_threshold(idx: u32) -> u32 {
-    ((BAYER_PACKED >> (idx * 4)) & 0xF) as u32
 }
 
 pub(crate) fn rgb24_to_rgb4_dither(val: u32) -> u32 {

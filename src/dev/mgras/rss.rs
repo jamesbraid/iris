@@ -626,7 +626,7 @@ impl Pair {
     /// The word with an 8-8-8-8 colour in both halves (the plane mask picks
     /// what is written), dithered when the fill mode says so.
     pub(super) fn pack(self, pp1fillmode: u32, v: u32, x: i32, y: i32) -> u32 {
-        let t = (pp1fillmode & PP1_DITHER != 0).then(|| crate::dev::ng1::rex3_generic::bayer_threshold(((y as u32 & 3) << 2) | (x as u32 & 3)));
+        let t = (pp1fillmode & PP1_DITHER != 0).then(|| crate::dev::bayer::bayer_threshold(((y as u32 & 3) << 2) | (x as u32 & 3)));
         self.pack_with(v, t)
     }
 

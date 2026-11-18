@@ -190,10 +190,13 @@ rex-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelif
 # Host-GPU rasterisation on wgpu: board memory on the GPU, primitives binned
 # into 8x8 tiles and rasterised by compute kernels (src/wgpu, and
 # src/dev/<board>/wgpu for each board). See clanker/plans/wgpu-raster.md.
-wgpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu", "dep:ash", "present"]
+wgpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu", "dep:ash", "present", "scanout"]
 # The window-facing half of src/wgpu (src/wgpu/present.rs, the display handle).
 # crates/sgi-gpu-core builds the same files without it.
 present = []
+# The boards' GPU scan-out compose, which needs the display side of the board.
+# The back-end crates under crates/ build without it.
+scanout = []
 # Cranelift-based JIT for IMPACT (GR4) raster shaders: RSS/TE1 pixel
 # pipelines monomorphised on a 64-bit key (src/dev/mgras/rss_jit).
 gr4-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]
