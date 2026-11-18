@@ -836,9 +836,9 @@ impl KonaBackend {
         let (store, cfg, handle) = (&self.store, &self.cfg, &self.handle);
         self.tiles.get_or_insert_with(|| {
             // A tile size that is not a power of two is a configuration mistake: say so and use the default.
-            Tiles::new(store.clone(), cfg.tile, cfg.threads, RING, BUDGET, handle.clone()).unwrap_or_else(|why| {
+            Tiles::new(store.clone(), cfg.tile, cfg.threads, RING, BUDGET, activity(handle)).unwrap_or_else(|why| {
                 crate::dlog!(crate::devlog::LogModule::Kona, "kona: tile size {} refused ({why:?}); using {DEFAULT_TILE}", cfg.tile);
-                Tiles::new(store.clone(), DEFAULT_TILE, cfg.threads, RING, BUDGET, handle.clone()).expect("the default tile size is a power of two")
+                Tiles::new(store.clone(), DEFAULT_TILE, cfg.threads, RING, BUDGET, activity(handle)).expect("the default tile size is a power of two")
             })
         })
     }
@@ -1556,6 +1556,10 @@ impl KonaBackend {
         }
         Reply::Done
     }
+}
+
+fn activity(handle: &Option<DisplayHandle>) -> Option<Arc<dyn tiles::Activity>> {
+    handle.clone().map(|h| Arc::new(h) as Arc<dyn tiles::Activity>)
 }
 
 #[cfg(test)]

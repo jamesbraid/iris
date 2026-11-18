@@ -31,7 +31,6 @@
 use super::raster::pixel;
 use super::raster::setup::TriJob;
 use super::raster::{ClearReq, DrawState, Rect};
-use super::super::handle::DisplayHandle;
 use super::store::Store;
 use crate::tile_pool::{Rect as PoolRect, Tile, TilePool, GRID_SPAN};
 use std::cell::UnsafeCell;
@@ -82,6 +81,11 @@ impl RasterJob {
         let r = self.rect();
         (r.x1 - r.x0).max(0) as u64 * (r.y1 - r.y0).max(0) as u64
     }
+}
+
+/// What the producer tells its owner while it waits on the workers.
+pub trait Activity: Send + Sync {
+    fn activity(&self);
 }
 
 /// A tile size or ring size that is not a power of two (or a ring under two slots).
@@ -163,14 +167,14 @@ pub struct Tiles {
     stats: TileStats,
     /// Told the producer is working while it waits, so the driver's watchdog
     /// does not take a long drain for a dead pipe.
-    handle: Option<DisplayHandle>,
+    handle: Option<Arc<dyn Activity>>,
 }
 
 impl Tiles {
     /// Tiles for a `store`'s screen cut into `tile`-pixel squares (a power of
     /// two), `threads` workers (0: inline), `ring` slots (a power of two) and a
     /// budget in pixels of cost.
-    pub fn new(store: Arc<Store>, tile: u32, threads: usize, ring: usize, budget: u64, handle: Option<DisplayHandle>) -> Result<Tiles, Invalid> {
+    pub fn new(store: Arc<Store>, tile: u32, threads: usize, ring: usize, budget: u64, handle: Option<Arc<dyn Activity>>) -> Result<Tiles, Invalid> {
         if !tile.is_power_of_two() {
             return Err(Invalid::Tile(tile));
         }
@@ -572,10 +576,10 @@ mod tests {
         use std::sync::atomic::Ordering::Relaxed;
         let f = crate::dev::kona::tests::Fixture::new();
         let host = f.kona.shared.host.clone();
-        let handle = DisplayHandle::new(&host);
+        let handle = crate::dev::kona::handle::DisplayHandle::new(&host);
         let all = Rect { x0: 0, y0: 0, x1: W as i32, y1: H as i32 };
         // A two-slot ring: the third job has to wait for a worker.
-        let mut t = Tiles::new(store(), 16, 1, 2, 1 << 20, Some(handle.clone())).unwrap();
+        let mut t = Tiles::new(store(), 16, 1, 2, 1 << 20, Some(Arc::new(handle.clone()))).unwrap();
         let s = t.state(draw_state());
         host.activity.store(false, Relaxed);
         for k in 0..64u32 {
@@ -585,7 +589,7 @@ mod tests {
         assert!(t.stats().waits > 0 && host.activity.load(Relaxed), "{:?}", t.stats());
         // A budget below one job's cost makes the next submission wait.
         host.activity.store(false, Relaxed);
-        let mut t = Tiles::new(store(), 16, 1, 64, 10, Some(handle)).unwrap();
+        let mut t = Tiles::new(store(), 16, 1, 64, 10, Some(Arc::new(handle))).unwrap();
         let s = t.state(draw_state());
         for k in 0..8u32 {
             t.submit(clear(all, k, s)).unwrap();

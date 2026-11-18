@@ -257,7 +257,7 @@ impl<'a> Plan<'a> {
             Target::OverlayBoth => unreachable!("refused above"),
         };
         // The word after the colour word is the second buffer's.
-        let back = two_buffers.then(|| surface.sibling(crate::dev::kona::back::textport::COLOUR_WORD + 1).array());
+        let back = two_buffers.then(|| surface.sibling((crate::dev::kona::back::store::layout::MAIN_COLOUR_WORD as usize) + 1).array());
         let needs = gc.needs_destination();
         let clips = if x.clip_rects().len() > 1 { x.clip_rects() } else { &[] };
         Ok(Some(Plan { gc, word, pitch: array.pitch(), array, height: height as i64, bounds: x.bounds(width, height), clips, stipple, needs, back }))
@@ -266,7 +266,7 @@ impl<'a> Plan<'a> {
     /// The same plan on the second buffer's words, if the context paints both.
     fn second(&self) -> Option<Plan<'a>> {
         let array = self.back?;
-        Some(Plan { gc: self.gc.clone(), word: crate::dev::kona::back::textport::COLOUR_WORD + 1, array, pitch: array.pitch(), height: self.height, bounds: self.bounds, clips: self.clips, stipple: self.stipple, needs: self.needs, back: None })
+        Some(Plan { gc: self.gc.clone(), word: (crate::dev::kona::back::store::layout::MAIN_COLOUR_WORD as usize) + 1, array, pitch: array.pitch(), height: self.height, bounds: self.bounds, clips: self.clips, stipple: self.stipple, needs: self.needs, back: None })
     }
 
     /// The word position the plan draws into.
