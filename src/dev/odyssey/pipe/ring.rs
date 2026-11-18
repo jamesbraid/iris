@@ -21,9 +21,8 @@
 
 use super::backend::{DestMem, BackendState, ClearDraw};
 use super::raster::{triangle_quads, RasterState};
-use super::super::gl::{DrawFrame, GlDrawJob};
+use std::any::Any;
 use super::setup::{LiveLine, Tri};
-use super::super::raster_unit::Completion;
 use crate::tile_pool::{copies, Rect, Tile, TilePool, GRID_SPAN};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -138,8 +137,13 @@ impl Default for RingQuad {
     }
 }
 
-/// A draw kept until the tail passes `end`: its job and context.
-type Held = (u64, Box<GlDrawJob>, Box<DrawFrame>);
+/// One completion: a write the guest sees once the drawing before it is
+/// stored.
+pub(in crate::dev::odyssey) type Completion = Box<dyn FnOnce() + Send>;
+
+/// A draw kept until the tail passes `end`: its job and context, which the
+/// front end gives back and downcasts.
+type Held = (u64, Box<dyn Any>, Box<dyn Any>);
 
 /// The pool's closure: a plain function, so the ring's type names it.
 type RunSlot = fn(&RingQuad, Tile);
@@ -272,13 +276,13 @@ impl QuadRing {
 
     /// Keep a draw's job and context until the tail is past every slot
     /// written so far.
-    pub fn hold(&self, job: Box<GlDrawJob>, frame: Box<DrawFrame>) {
+    pub fn hold(&self, job: Box<dyn Any>, frame: Box<dyn Any>) {
         self.held.lock().push_back((self.tiles.staged(), job, frame));
     }
 
     /// The jobs of the held draws the tail is past, to give back, and
     /// their contexts, for reuse.
-    pub fn reclaim(&self) -> (Vec<Box<GlDrawJob>>, Vec<Box<DrawFrame>>) {
+    pub fn reclaim(&self) -> (Vec<Box<dyn Any>>, Vec<Box<dyn Any>>) {
         self.retire();
         let tail = self.tiles.retire();
         let mut h = self.held.lock();

@@ -31,8 +31,7 @@ pub(super) const ODSY_GL_HELD_VERTICES: u32 = 4;
 /// largest count, a 16-word burst.
 pub(super) const ODSY_CMD_OPERANDS_MAX: u32 = 16;
 
-/// The window-clip register's four rectangles, two words each.
-pub(super) const ODSY_CLIP_RECTS: u32 = 4;
+pub(super) use super::consts::ODSY_CLIP_RECTS;
 
 /// The polygon-mode word 0x415 out of reset: fill for both faces, the GL
 /// default the library sends at make-current (the board's own reset value
@@ -55,7 +54,6 @@ pub(super) const ODSY_GL_PROGRAM_REPORTS: u32 = 16;
 /// Program memory: 2048 instructions of six halfwords, of which the window
 /// at 0x738 is the last 0xc7 (prog::WINDOW_BASE).
 pub(super) const ODSY_GL_PROGRAM_ENTRIES: u32 = 2048;
-pub(super) const ODSY_GL_WINDOW_ENTRIES: u32 = 0xc7;
 
 /// The one modeled mode: the desktop target size.
 pub(super) const ODSY_WIDTH: u32 = 1280;

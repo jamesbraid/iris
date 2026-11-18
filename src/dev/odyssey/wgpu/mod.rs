@@ -19,6 +19,7 @@
 // RasterQueue, in the next milestone; until then only the tests drive it.
 #![allow(dead_code, reason = "wired into the board in the next milestone")]
 
+#[cfg(feature = "scanout")]
 pub(crate) mod scanout;
 #[cfg(test)]
 mod tests;
@@ -41,6 +42,7 @@ use super::pipe::state::{BackendWords, RasterWords};
 use super::pipe::texture;
 use super::view::{Kind, Rows, View, MAX_DIM};
 use super::vram::{VramPtr, DIRTY_BLOCK_SHIFT};
+use super::gpu_unit::{fail_gpu, GpuFault};
 
 /// The plane the batch grid covers, per axis, in pixels: records beyond
 /// it are dropped and counted.

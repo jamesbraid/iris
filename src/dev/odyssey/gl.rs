@@ -6,7 +6,7 @@
 
 use super::pipe::backend::DestMem;
 use crate::devlog::LogModule;
-use super::pipe::state::FragmentWords;
+use super::pipe::state::{BackendWords, FragmentWords, RasterWords, ShaderWords};
 use super::pipe::PipeDraw;
 use super::trace::TRACE_DRAW;
 use super::board::{
@@ -317,6 +317,47 @@ impl GlDrawJob {
         }
         let phase = d.line_phase;
         (phase, frame)
+    }
+}
+
+impl Board {
+    /// The fragment pipeline's state as the board holds it now.
+    pub fn fragment_words(&self) -> FragmentWords {
+        let m = self.stream.pattern_mode;
+        let raster = RasterWords {
+            mode: m,
+            polygon_mode: self.polygon_mode_word,
+            polygon_offset: self.polygon_offset_word,
+            clip_box: self.gl_clip_box,
+            origin: self.win.origin,
+            clip_rect: self.win.clip_rect,
+            clip_kept: self.win.clip_kept,
+            id_compare: self.win.id_compare,
+            line_point: self.line_point_words,
+            line_stipple: self.stream.line_stipple,
+            pattern: self.stream.pattern_buffer,
+            pattern_shape: self.stream.pattern_shape,
+            depth_func: self.gl_depth_func,
+        };
+        let shader = ShaderWords {
+            mode: m,
+            fog: self.gl_fog,
+            alpha: self.alpha_word,
+        };
+        let backend = BackendWords {
+            mode: m,
+            depth_func: self.gl_depth_func,
+            write_mask: self.gl_write_mask,
+            stencil: self.stencil_word,
+            blend: [self.blend_word, self.const_colour[0], self.const_colour[1]],
+            logic_op: self.logic_op_word,
+            dest_select: self.dest_buffer_word,
+            plane_mask: self.plane_write_mask,
+            draw_mask: self.draw_mask,
+            colour_mode: self.colour_mode,
+            dest: self.dest_views(),
+        };
+        FragmentWords { raster, shader, backend }
     }
 }
 

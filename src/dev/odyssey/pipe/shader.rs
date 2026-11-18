@@ -9,7 +9,7 @@ use super::fixed;
 use super::state::{Compare, ShaderWords};
 use super::super::bits::sextract32;
 use super::texture::{Class, Env, TexRegs};
-use super::super::geometry::odyssey_f32;
+use super::super::bits::odyssey_f32;
 
 /// Which of a texel's components the environment takes: alpha alone for an
 /// alpha texture, and no alpha for one without.
