@@ -47,6 +47,7 @@ pub mod microcode;
 mod pixmem;
 mod pixpipe;
 mod plain;
+mod quirks;
 mod record;
 mod rss;
 #[cfg(feature = "gr4-jit")]
