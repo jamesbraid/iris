@@ -6,6 +6,7 @@
 
 pub mod aic7880;
 pub mod audio_dump;
+pub mod bayer;
 pub mod crime_mem;
 pub mod o2gfx;
 #[cfg(feature = "wgpu")]

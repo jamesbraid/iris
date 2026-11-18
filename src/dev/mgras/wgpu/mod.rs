@@ -34,6 +34,7 @@
 //! the memory layout here (`DRBsize` bits 7:6, which the kernels' locate
 //! follows), as it is for one CPU engine with `IRIS_MGRAS_ENGINES=1`.
 
+#[cfg(feature = "scanout")]
 pub(crate) mod scanout;
 #[cfg(test)]
 mod tests;
