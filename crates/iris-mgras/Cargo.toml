@@ -1,0 +1,28 @@
+[package]
+name = "iris-mgras"
+version = "0.1.0"
+edition = "2021"
+description = "Iris's IMPACT (MGRAS) raster engine, CPU and GPU, without the board"
+publish = false
+
+[lib]
+# The tests inside the mounted files drive the whole board and stay with iris.
+test = false
+doctest = false
+
+[features]
+default = ["wgpu"]
+wgpu = []
+
+[dependencies]
+sgi-gpu-core = { path = "../sgi-gpu-core", default-features = false }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan", "metal", "dx12"] }
+bytemuck = { version = "1", features = ["derive"] }
+parking_lot = "0.12"
+serde = { version = "1.0.228", features = ["derive"] }
+log = "0.4"
+postcard = { version = "1", features = ["alloc"] }
+crossbeam-utils = "0.8"
+
+[dev-dependencies]
+blake3 = "1"
