@@ -5,7 +5,7 @@
 pub(super) const CLIP_MAX: usize = 16;
 
 #[derive(Clone, Copy, Default, Debug)]
-pub(super) struct ClipRect {
+pub struct ClipRect {
     pub x0: i32,
     pub y0: i32,
     pub x1: i32,

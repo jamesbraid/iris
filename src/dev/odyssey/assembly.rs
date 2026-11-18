@@ -15,16 +15,16 @@ use crate::dev::gl::math::{xform, IDENT};
 use crate::dev::gl::vertex::{NearW, Viewport, Wv};
 
 /// The board's primitive types (the 0x0400 begin word), in assembly order.
-pub(super) const POINTS: u32 = 0;
-pub(super) const LINES: u32 = 1;
-pub(super) const LINE_LOOP: u32 = 2;
-pub(super) const LINE_STRIP: u32 = 3;
-pub(super) const TRIANGLES: u32 = 4;
+pub const POINTS: u32 = 0;
+pub const LINES: u32 = 1;
+pub const LINE_LOOP: u32 = 2;
+pub const LINE_STRIP: u32 = 3;
+pub const TRIANGLES: u32 = 4;
 pub(super) const TRIANGLE_STRIP: u32 = 5;
 pub(super) const TRIANGLE_FAN: u32 = 6;
 pub(super) const QUADS: u32 = 7;
 pub(super) const QUAD_STRIP: u32 = 8;
-pub(super) const POLYGON: u32 = 9;
+pub const POLYGON: u32 = 9;
 
 /// The user clip planes.
 pub(super) const CLIP_PLANES: u32 = 6;
@@ -34,7 +34,7 @@ pub(super) const CLIP_PLANES: u32 = 6;
 pub(super) const HELD_VERTICES: u32 = 3;
 
 /// A vertex as assembly hands it on: floats at these offsets.
-pub(super) mod vtx {
+pub mod vtx {
     pub const FLOATS: usize = 28;
     pub const POSITION: usize = 0;
     pub const COLOR: usize = 4;
@@ -68,7 +68,7 @@ pub(super) fn report_w_plane_clip() {
 /// viewport, window depth through the depth range, and the user clip
 /// planes, in eye coordinates, those whose bit is set enabled.
 #[derive(Clone, Copy)]
-pub(super) struct XfState {
+pub struct XfState {
     /// Column-major.
     pub modelview: [f32; 16],
     pub projection: [f32; 16],
@@ -115,7 +115,7 @@ impl XfState {
 
 /// One piece of a primitive, or a whole polygon, as the pipeline takes it.
 #[derive(Clone, Copy)]
-pub(super) struct Prim<'a> {
+pub struct Prim<'a> {
     /// The board's context identity.
     pub context: u32,
     /// POINTS to POLYGON.
