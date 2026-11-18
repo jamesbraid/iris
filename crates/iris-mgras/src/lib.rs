@@ -7,6 +7,11 @@
 
 pub use sgi_gpu_core as wgpu;
 
+#[path = "../../../src/perfetto_macros.rs"]
+mod perfetto_macros;
+
 pub mod display;
+pub mod jit;
 pub mod locks;
+pub mod traits;
 pub mod dev;
