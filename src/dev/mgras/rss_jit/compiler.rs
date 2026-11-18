@@ -36,7 +36,7 @@ use cranelift_module::{Linkage, Module};
 
 use super::{ClipRect, Draw, PipeKey, Pix, Prim, RasterCtx, ShaderFn, Target, Tex, XFmt};
 use crate::dev::mgras::rss::Pair;
-use crate::dev::ng1::rex3_generic::BAYER_PACKED;
+use crate::dev::bayer::BAYER_PACKED;
 use crate::dev::mgras::pixmem::{PAGES, PAGE_WORDS, RE_WORDS, TILE_H, TILE_W, WORD_MASK};
 use crate::dev::mgras::rss::WIDTH;
 use crate::dev::mgras::fixed;
