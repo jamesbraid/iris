@@ -33,3 +33,9 @@ pub(super) fn cmax<T: PartialOrd>(a: T, b: T) -> T {
 pub(super) fn cmin<T: PartialOrd>(a: T, b: T) -> T {
     if a < b { a } else { b }
 }
+
+/// The single a command word holds. Arithmetic that is done in double
+/// widens it at the use (`f64::from`).
+pub(super) fn odyssey_f32(bits: u32) -> f32 {
+    f32::from_bits(bits)
+}

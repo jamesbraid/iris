@@ -147,9 +147,9 @@ impl RasterCtx {
         };
         let (jobs, frames) = r.reclaim();
         for f in frames {
-            self.give_frame(f);
+            self.give_frame(f.downcast().expect("a DrawFrame"));
         }
-        jobs
+        jobs.into_iter().map(|j| j.downcast().expect("a GlDrawJob")).collect()
     }
 
     /// Keep a finished draw's frame for a later draw, up to FRAMES_KEPT.
@@ -163,9 +163,7 @@ impl RasterCtx {
 /// One unit of raster work.
 pub(super) type RasterJob = Box<dyn FnOnce(&mut RasterCtx) + Send>;
 
-/// One completion: a write the guest sees once the drawing before it is
-/// stored.
-pub(super) type Completion = Box<dyn FnOnce() + Send>;
+pub(super) use super::pipe::ring::Completion;
 
 /// The ring entry's address word: the value is a boxed `RasterJob`.
 const ENTRY_JOB: u32 = 1;

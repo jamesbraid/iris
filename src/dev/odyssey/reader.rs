@@ -27,23 +27,28 @@ use super::frame::Frame;
 use super::vram::VramPtr;
 use super::interface::HostInterface;
 use super::registers::cursor_rgb;
+use super::gpu_unit::{fail_gpu, GpuFault};
+#[cfg(feature = "wgpu")]
+use super::wgpu::scanout::VproScanout as GpuScanout;
 use super::scanout::ScanoutMode;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, Ordering::{Acquire, Relaxed, Release}};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 
-pub(super) type GpuFault = Arc<Mutex<Option<String>>>;
+#[cfg(not(feature = "wgpu"))]
+mod stub_scanout {
+    /// The display thread's scan-out on the GPU.
+    pub(crate) enum GpuScanout {}
 
-pub(super) fn fail_gpu(fault: &GpuFault, operation: &str, error: impl std::fmt::Display) -> String {
-    let message = format!("{operation}: {error}");
-    let mut current = fault.lock();
-    if current.is_none() {
-        crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi-odyssey: GPU unit failed: {message}");
-        *current = Some(message.clone());
+    impl GpuScanout {
+        pub fn run(&mut self, _frame: &super::super::frame::Frame, _regs: &super::DisplayRegs, _width: u32, _height: u32, _out: &mut [u32]) -> Result<(), String> {
+            match *self {}
+        }
     }
-    current.clone().unwrap_or(message)
 }
+#[cfg(not(feature = "wgpu"))]
+use stub_scanout::GpuScanout;
 
 /// The back end's registers the scanout resolves through: the colour
 /// lookup RAM, the per-drawable display modes, the overlay modes and the
@@ -477,7 +482,7 @@ pub(super) struct DisplayShared {
     /// The scan-out on the GPU, set with the GPU raster unit: the display
     /// composes there from the memory the unit draws into, instead of
     /// from the mirror.
-    pub gpu_scanout: OnceLock<Mutex<super::gpu_unit::GpuScanout>>,
+    pub gpu_scanout: OnceLock<Mutex<GpuScanout>>,
     /// A raster or scanout failure is sticky and closes board accesses.
     pub gpu_fault: GpuFault,
     /// The command stream position (`CommandFifo::retired`) the raster

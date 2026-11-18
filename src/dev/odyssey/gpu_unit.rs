@@ -4,6 +4,20 @@
 //! uninhabited, so the board's dispatch compiles to the CPU path alone.
 
 use super::view::View;
+use parking_lot::Mutex;
+use std::sync::Arc;
+
+pub(super) type GpuFault = Arc<Mutex<Option<String>>>;
+
+pub(super) fn fail_gpu(fault: &GpuFault, operation: &str, error: impl std::fmt::Display) -> String {
+    let message = format!("{operation}: {error}");
+    let mut current = fault.lock();
+    if current.is_none() {
+        crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi-odyssey: GPU unit failed: {message}");
+        *current = Some(message.clone());
+    }
+    current.clone().unwrap_or(message)
+}
 
 /// Why GPU-owned board memory is made visible to the CPU mirror.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,8 +161,6 @@ pub(crate) struct CopyWindow {
 }
 
 #[cfg(feature = "wgpu")]
-pub(super) use super::wgpu::scanout::VproScanout as GpuScanout;
-#[cfg(feature = "wgpu")]
 pub(super) use super::wgpu::{GpuRaster, Slot, TexSlot};
 
 #[cfg(not(feature = "wgpu"))]
@@ -275,18 +287,4 @@ mod stub {
 }
 
 #[cfg(not(feature = "wgpu"))]
-mod stub_scanout {
-    /// The display thread's scan-out on the GPU.
-    pub(crate) enum GpuScanout {}
-
-    impl GpuScanout {
-        pub fn run(&mut self, _frame: &super::super::frame::Frame, _regs: &super::super::reader::DisplayRegs, _width: u32, _height: u32, _out: &mut [u32]) -> Result<(), String> {
-            match *self {}
-        }
-    }
-}
-
-#[cfg(not(feature = "wgpu"))]
 pub(super) use stub::{GpuRaster, Slot, TexSlot};
-#[cfg(not(feature = "wgpu"))]
-pub(super) use stub_scanout::GpuScanout;

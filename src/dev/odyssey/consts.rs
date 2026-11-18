@@ -2,7 +2,8 @@
 //!
 //! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
-use super::board::ODSY_GL_WINDOW_ENTRIES;
+/// The window-clip register's four rectangles, two words each.
+pub(super) const ODSY_CLIP_RECTS: u32 = 4;
 // The whole aperture a driver maps.
 pub(super) const ODSY_APERTURE: u64 = 0x410000;
 pub(super) const ODSY_PART: u32 = 0xc013;
@@ -830,7 +831,7 @@ pub(super) mod prog {
     // How far a program list is read before it counts as unrecognised.
     pub const LIST_MAX: u32 = 64;
     pub const WINDOW_BASE: u32 = 0x738;
-    pub const WINDOW_ENTRIES: u32 = super::ODSY_GL_WINDOW_ENTRIES;
+    pub const WINDOW_ENTRIES: u32 = 0xc7;
 }
 
 pub(super) mod colour {

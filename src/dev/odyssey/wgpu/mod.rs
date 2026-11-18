@@ -18,6 +18,7 @@
 
 #![allow(dead_code, reason = "GPU raster helper entry points")]
 
+#[cfg(feature = "scanout")]
 pub(crate) mod scanout;
 #[cfg(test)]
 mod tests;
@@ -40,7 +41,7 @@ use super::pipe::state::{BackendWords, RasterWords};
 use super::pipe::texture;
 use super::view::{Kind, Rows, View, MAX_DIM};
 use super::vram::{VramPtr, DIRTY_BLOCK_SHIFT};
-use super::reader::{fail_gpu, GpuFault};
+use super::gpu_unit::{fail_gpu, GpuFault};
 
 /// The plane the batch grid covers, per axis, in pixels: records beyond
 /// it are dropped and counted.

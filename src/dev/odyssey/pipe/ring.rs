@@ -23,9 +23,8 @@
 use super::backend::{DestMem, BackendState, ClearDraw};
 use crate::display::Rect;
 use super::raster::{triangle_quads, RasterState};
-use super::super::gl::{DrawFrame, GlDrawJob};
+use std::any::Any;
 use super::setup::{LiveLine, Tri};
-use super::super::raster_unit::Completion;
 use parking_lot::{Condvar, Mutex};
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
@@ -176,8 +175,13 @@ impl Waiter {
     }
 }
 
-/// A draw kept until the tail passes `end`: its job and context.
-type Held = (u64, Box<GlDrawJob>, Box<DrawFrame>);
+/// One completion: a write the guest sees once the drawing before it is
+/// stored.
+pub(in crate::dev::odyssey) type Completion = Box<dyn FnOnce() + Send>;
+
+/// A draw kept until the tail passes `end`: its job and context, which the
+/// front end gives back and downcasts.
+type Held = (u64, Box<dyn Any>, Box<dyn Any>);
 
 /// The plane the tile grid covers, per axis; coordinates wrap onto it
 /// (pixels that far apart then share a tile, which only orders them).
@@ -476,13 +480,13 @@ impl QuadRing {
 
     /// Keep a draw's job and context until the tail is past every slot
     /// written so far.
-    pub fn hold(&self, job: Box<GlDrawJob>, frame: Box<DrawFrame>) {
+    pub fn hold(&self, job: Box<dyn Any>, frame: Box<dyn Any>) {
         self.held.lock().push_back((self.staged.load(Relaxed), job, frame));
     }
 
     /// The jobs of the held draws the tail is past, to give back, and
     /// their contexts, for reuse.
-    pub fn reclaim(&self) -> (Vec<Box<GlDrawJob>>, Vec<Box<DrawFrame>>) {
+    pub fn reclaim(&self) -> (Vec<Box<dyn Any>>, Vec<Box<dyn Any>>) {
         self.retire();
         let tail = self.tail.load(Acquire);
         let mut h = self.held.lock();
