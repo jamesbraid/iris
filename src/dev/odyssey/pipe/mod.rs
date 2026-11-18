@@ -17,7 +17,7 @@ pub(super) mod prims;
 pub(super) mod raster;
 pub(super) mod setup;
 pub(super) mod shader;
-pub(super) mod state;
+pub mod state;
 pub(super) mod texture;
 pub(super) mod ring;
 pub(super) mod slot;

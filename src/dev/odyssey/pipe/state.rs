@@ -206,7 +206,7 @@ fn field12(word: u32, shift: u32) -> u16 {
 /// depth pre-test.
 #[derive(Clone, Copy, Default, Debug)]
 #[repr(C, align(64))]
-pub(crate) struct RasterWords {
+pub struct RasterWords {
     /// 0x404, the raster enable word.
     pub mode: u32,
     /// 0x415.
@@ -369,7 +369,7 @@ impl RasterWords {
 /// What the shader reads: texturing, fog and the alpha test.
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C, align(64))]
-pub(crate) struct ShaderWords {
+pub struct ShaderWords {
     /// 0x404.
     pub mode: u32,
     /// 0x181a.
@@ -408,7 +408,7 @@ impl ShaderWords {
 /// planes they write.
 #[derive(Clone, Copy, Default, Debug)]
 #[repr(C, align(64))]
-pub(crate) struct BackendWords {
+pub struct BackendWords {
     /// 0x404.
     pub mode: u32,
     /// 0x420.
@@ -529,7 +529,7 @@ impl BackendWords {
 /// The three records of one draw.
 #[derive(Clone, Copy, Default, Debug)]
 #[repr(C, align(64))]
-pub(crate) struct FragmentWords {
+pub struct FragmentWords {
     pub raster: RasterWords,
     pub shader: ShaderWords,
     pub backend: BackendWords,

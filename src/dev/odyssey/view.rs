@@ -13,7 +13,7 @@ use super::field::{Codec, Field, Layout, FIELD_FOUR, PIXEL_FMT_B};
 use super::vram::{Format, Surface, VramPtr, PITCH_MASK, TILE, UNIT};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Kind {
+pub enum Kind {
     /// No such field: loads find nothing, stores are dropped.
     #[default]
     None,
@@ -27,7 +27,7 @@ pub(crate) enum Kind {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct View {
+pub struct View {
     /// The surface's first byte.
     base: u64,
     pitch: u32,
@@ -183,7 +183,7 @@ pub(crate) fn pixel_bytes(at: u32, len: u32) -> u64 {
 /// the scan-out names (PB&J 0x2800 base, 0x2807 stride), which the id test
 /// reads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct DestViews {
+pub struct DestViews {
     pub colour: [View; 2],
     pub depth: View,
     pub stencil: View,
