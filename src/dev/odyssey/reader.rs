@@ -338,6 +338,9 @@ struct ModeCell {
     height: AtomicU32,
     frame_clocks: AtomicU64,
     clock_hz: AtomicU32,
+    line_clocks: AtomicU32,
+    blank_lines: AtomicU32,
+    fields: AtomicU32,
     /// Moves when the mode is set.
     gen: AtomicU64,
     /// Moves when the retrace phase restarts: a new mode or a reset.
@@ -351,6 +354,9 @@ impl ModeCell {
             height: AtomicU32::new(0),
             frame_clocks: AtomicU64::new(0),
             clock_hz: AtomicU32::new(0),
+            line_clocks: AtomicU32::new(0),
+            blank_lines: AtomicU32::new(0),
+            fields: AtomicU32::new(0),
             gen: AtomicU64::new(1),
             restart: AtomicU64::new(1),
         }
@@ -403,6 +409,9 @@ impl DisplayShared {
         cell.height.store(mode.height, Relaxed);
         cell.frame_clocks.store(mode.frame_clocks, Relaxed);
         cell.clock_hz.store(mode.clock_hz, Relaxed);
+        cell.line_clocks.store(mode.line_clocks, Relaxed);
+        cell.blank_lines.store(mode.blank_lines, Relaxed);
+        cell.fields.store(mode.fields, Relaxed);
         cell.restart.fetch_add(1, Release);
         cell.gen.fetch_add(1, Release);
     }
@@ -487,6 +496,9 @@ impl ScanoutReader {
             height: cell.height.load(Relaxed),
             frame_clocks: cell.frame_clocks.load(Relaxed),
             clock_hz: cell.clock_hz.load(Relaxed),
+            line_clocks: cell.line_clocks.load(Relaxed),
+            blank_lines: cell.blank_lines.load(Relaxed),
+            fields: cell.fields.load(Relaxed),
         };
 
         if gen != self.mode_gen {
