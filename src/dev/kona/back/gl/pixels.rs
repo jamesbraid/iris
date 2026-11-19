@@ -1138,8 +1138,18 @@ fn emit(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, img: &Image) {
     }
 }
 
+/// The most pixels a read or copy rectangle may name: the largest drawable, 4096 by 4096. The
+/// rectangle's size is the guest's (32 bits each way), and what lies outside the window reads zero
+/// but is still built, so it is bounded before anything is allocated; `pack` refuses a larger
+/// answer anyway (`MAX_PACK_BYTES`).
+pub const MAX_CAPTURE_PIXELS: u64 = 1 << 24;
+
 /// The rectangle of the read buffer, as an image of `kind`. Pixels outside the window read zero.
+/// None for a rectangle of more than `MAX_CAPTURE_PIXELS`.
 fn capture(gl: &Gl, canvas: &Canvas<'_>, x: i32, y: i32, w: usize, h: usize, kind: u32) -> Option<Image> {
+    if w as u64 * h as u64 > MAX_CAPTURE_PIXELS {
+        return None;
+    }
     let ds = &canvas.ds;
     // A multisampled window's depth and stencil are in its samples; a read takes the first.
     if let Some(ms) = &ds.samples {
