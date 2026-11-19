@@ -23,10 +23,15 @@ pub mod raster;
 pub mod tiles;
 pub mod snapshot;
 pub mod store;
+#[cfg(feature = "wgpu")]
+pub mod gpu;
 pub mod context;
 pub mod gl;
 pub mod textport;
 pub mod x;
+pub mod lodmath;
+#[cfg(feature = "wgpu")]
+pub mod gpu_lib;
 #[cfg(test)]
 mod golden;
 #[cfg(test)]
@@ -53,7 +58,7 @@ use raster::setup::Shape;
 use raster::Rect;
 use tiles::{ClearJob, RasterJob, Tiles};
 use store::texture::{Exclusive, TextureStore, PAGE_WORDS};
-use store::PixelStore;
+use store::{Drained, Store, StoreOp};
 use super::stream;
 use crate::devlog::LogModule;
 use std::io::{self, Write};
@@ -214,12 +219,15 @@ pub struct KonaBackend {
     /// The window the board shows the guest, which the machine keeps a clone
     /// of (`KonaBackend::display`).
     display: Arc<Display>,
+    /// The display's scan-out on the GPU, when the machine gave the board one.
+    #[cfg(feature = "wgpu")]
+    scanout: display::scanout::Shared,
     /// The textport's colour map, copied by the display once a frame.
     map: Arc<parking_lot::Mutex<ColourMap>>,
     /// The X server's colour map and display-ID table, which the display
     /// reads a frame at a time.
     tables: Arc<parking_lot::Mutex<Tables>>,
-    store: Arc<PixelStore>,
+    store: Arc<Store>,
     textport: Textport,
     /// The X path's state, one copy per rendering context.
     contexts: Contexts,
@@ -277,9 +285,54 @@ fn write_lines(port: &mut BackPort<'_>, done: &x::pixel::FeedDone) -> bool {
 }
 
 impl KonaBackend {
+    /// A CPU back end, for tests. With the `wgpu` feature and `KONA_TEST_GPU_ARM` set it draws on
+    /// the GPU instead (`KONA_TEST_GPU` picks the device), to run the suites that were written for
+    /// the CPU arm against the other one.
+    #[cfg(test)]
     pub fn new(cfg: KonaConfig) -> Self {
+        #[cfg(feature = "wgpu")]
+        if std::env::var_os("KONA_TEST_GPU_ARM").is_some() {
+            if let Some(gpu) = gpu::tests::shared_gpu() {
+                return Self::with_gpu(cfg, Some(gpu)).expect("a store on the test GPU");
+            }
+        }
+        Self::on(cfg, Store::with_texture(cfg.managed.0, cfg.managed.1, TextureStore::with_capacity_bytes(cfg.texture_bytes_per_rm())))
+    }
+
+    /// A back end that draws on `gpu` when there is one (`[graphics] raster = "wgpu"`), else on
+    /// the CPU. A GPU that cannot hold the screen is an error here, not a quiet CPU back end.
+    pub fn with_gpu(cfg: KonaConfig, gpu: Option<crate::SharedGpu>) -> Result<Self, String> {
+        let tex = TextureStore::with_capacity_bytes(cfg.texture_bytes_per_rm());
+        #[cfg(feature = "wgpu")]
+        if let Some(gpu) = gpu {
+            let mut back = Self::on(cfg, Store::with_gpu(gpu.clone(), cfg.managed.0, cfg.managed.1, tex)?);
+            back.scan_out_on(gpu)?;
+            return Ok(back);
+        }
+        #[cfg(not(feature = "wgpu"))]
+        if let Some(never) = gpu {
+            match never {}
+        }
+        Ok(Self::on(cfg, Store::with_texture(cfg.managed.0, cfg.managed.1, tex)))
+    }
+
+    /// Compose the display on `gpu` too: the frame is made there from the store's planes, and a
+    /// window on the same device shows it without a readback. The managed area may be too big for
+    /// the device's buffer limits, and then the CPU composes. A GPU that fails later stops the
+    /// machine (it was given the device's fatal callback).
+    #[cfg(feature = "wgpu")]
+    fn scan_out_on(&mut self, gpu: crate::SharedGpu) -> Result<(), String> {
+        let (w, h) = (self.store.cpu().width(), self.store.cpu().height());
+        let Some(sc) = display::scanout::GpuScanout::new(&gpu, w, h)? else { return Ok(()) };
+        eprintln!("kona: scan-out on the GPU: {}", gpu.caps);
+        self.display.set_gpu(gpu);
+        *self.scanout.lock() = Some(sc);
+        Ok(())
+    }
+
+    fn on(cfg: KonaConfig, store: Store) -> Self {
         let map = Arc::new(parking_lot::Mutex::new(ColourMap::default()));
-        let store = Arc::new(PixelStore::with_texture(cfg.managed.0, cfg.managed.1, TextureStore::with_capacity_bytes(cfg.texture_bytes_per_rm())));
+        let store = Arc::new(store);
         let tables = Arc::<parking_lot::Mutex<Tables>>::default();
         let display = Arc::new(Display::detached());
         display.set_tables(tables.clone());
@@ -289,6 +342,8 @@ impl KonaBackend {
             map,
             tables,
             display,
+            #[cfg(feature = "wgpu")]
+            scanout: Arc::default(),
             contexts: Contexts::default(),
             regions: RegionCounts::default(),
             dac_cursor_loads: 0,
@@ -401,8 +456,10 @@ impl KonaBackend {
     /// Put what `prepare_chunks` read into the store.
     pub fn apply_chunks(&mut self, p: snapshot::Prepared) -> Result<(), String> {
         self.drain();
-        let applied = snapshot::apply(&self.store, &mut self.tables.lock(), p);
-        self.store.touch();
+        // SAFETY: the tiles are drained, and nothing draws until the restore returns.
+        let drained = unsafe { Drained::assume() };
+        let applied = snapshot::apply(&self.store, drained, &mut self.tables.lock(), p);
+        self.store.cpu().touch();
         applied
     }
 
@@ -438,7 +495,10 @@ impl KonaBackend {
         writeln!(w, "record bound      {} words per pixel", c.record_words())?;
         writeln!(w, "display handle    {}", if self.handle.is_some() { "attached" } else { "detached" })?;
         writeln!(w, "display           {} frames, {} retraces completed, thread {}", self.clock.frames(), self.clock.completed(), if self.thread.is_some() { "running" } else { "stopped" })?;
-        writeln!(w, "pixel store       {} word arrays of {} x {}", self.store.allocated().len(), self.store.width(), self.store.height())?;
+        writeln!(w, "pixel store       {} word arrays of {} x {}", self.store.cpu().allocated().len(), self.store.cpu().width(), self.store.cpu().height())?;
+        if let Some(line) = self.store.gpu_report() {
+            writeln!(w, "pixel planes      on the GPU: {line}")?;
+        }
         writeln!(w, "textport          colour {} raster {:?}, {} drawn, {} unmodelled", self.textport.colour(), self.textport.raster(), self.textport.drawn, self.textport.unmodelled)?;
         let x = &self.contexts.current().x;
         let gc = match x.gc() {
@@ -491,7 +551,7 @@ impl KonaBackend {
         }
         drop(tables);
         let c = &self.tex_counts;
-        let t = self.store.texture();
+        let t = self.store.cpu().texture();
         writeln!(
             w,
             "textures          {} level loads ({} by DMA, {} refused, {} past memory), {} finishes, {} binds ({} refused), {} tokens not modelled; {} volume slice loads, {} volume binds; texture memory {} KiB held (peak {} KiB, ceiling {} KiB)",
@@ -553,7 +613,7 @@ impl KonaBackend {
         writeln!(w, "multisample       {} draws ({} with alpha to mask, {} with a sample mask), by the model's own rules", r.multisampled, r.alpha_to_mask, r.sample_mask)?;
         let c = &self.tex_counts;
         writeln!(w, "textures          {} level loads ({} by DMA, {} detail image loads, {} volume slice loads, {} refused, {} past memory), {} finishes, {} binds ({} of volumes, {} refused), {} tokens not modelled", c.loads, c.dma_loads, c.detail_loads, c.volume_loads, c.unsupported_load, c.full, c.finishes, c.binds, c.volume_binds, c.bind_refused, c.unmodelled)?;
-        let t = self.store.texture();
+        let t = self.store.cpu().texture();
         writeln!(w, "texture memory   {} KiB held in {} pages, peak {} KiB, ceiling {} KiB", t.resident_pages() * (PAGE_WORDS / 256), t.resident_pages(), t.peak_pages() * (PAGE_WORDS / 256), t.cap_pages() * (PAGE_WORDS / 256))?;
         writeln!(w, "texel read-backs  {} ({} in a bracket); answered with zeros: {} for a format or type the packer does not know, {} for a level not loaded; {} too big; {} with nowhere to answer", c.reads, c.reads_bracketed, c.read_unsupported, c.read_missing, c.read_oversize, c.read_unposted)?;
         if let Some(l) = &self.last_layout {
@@ -598,7 +658,7 @@ impl KonaBackend {
         let retrace = matches!(job, Job::Retrace { .. });
         let reply = self.handle_job(port, job);
         if !retrace {
-            self.store.touch();
+            self.store.cpu().touch();
         }
         reply
     }
@@ -615,6 +675,8 @@ impl KonaBackend {
             return;
         }
         let sink = Compositor::new(self.store.clone(), textport::COLOUR_WORD, self.map.clone(), self.tables.clone(), self.display.clone());
+        #[cfg(feature = "wgpu")]
+        let sink = sink.with_scanout(self.scanout.clone());
         self.thread = Some(DisplayThread::spawn(self.clock.clone(), handle.clone(), FRAME_PERIOD, sink));
         self.handle = Some(handle);
     }
@@ -630,7 +692,7 @@ impl KonaBackend {
         // Jobs queued before the reset finish first: they write the store it clears.
         self.drain();
         // SAFETY: the tiles are drained, and nothing draws until the reset returns.
-        unsafe { self.store.reset() };
+        self.store.apply(StoreOp::Reset(unsafe { Drained::assume() }));
         self.textport.reset();
         self.tables.lock().reset();
         self.contexts.reset();
@@ -735,12 +797,12 @@ fn drains_first(job: &Job<'_>) -> bool {
 /// the planes without a lock, so a write may happen only while none runs; every writer in the
 /// back end gets its `Exclusive` here, which waits for them first, so a write that skips the wait
 /// cannot be written down. Nothing draws until the caller returns: the producer is this thread.
-fn texture_exclusive<'a>(tiles: &mut Option<Tiles>, store: &'a PixelStore) -> Exclusive<'a> {
+fn texture_exclusive<'a>(tiles: &mut Option<Tiles>, store: &'a Store) -> Exclusive<'a> {
     if let Some(t) = tiles {
         let _ = t.drain();
     }
     // SAFETY: the tiles are drained, and the producer submits nothing until the caller is done.
-    unsafe { store.texture().exclusive() }
+    unsafe { store.cpu().texture().exclusive() }
 }
 
 /// What set-up counted, over the draws handed to it.
@@ -795,18 +857,18 @@ impl KonaBackend {
 
     /// Allocate the arrays a job writes, before a worker can see it.
     fn arrays(&self, ds: &raster::DrawState) {
-        ds.colour[..ds.colours as usize].iter().for_each(|&w| self.store.ensure(w as usize));
+        ds.colour[..ds.colours as usize].iter().for_each(|&w| self.store.cpu().ensure(w as usize));
         if ds.depth_bits != 0 {
-            self.store.ensure(ds.depth_word as usize);
+            self.store.cpu().ensure(ds.depth_word as usize);
         }
         if ds.stencil_bits != 0 {
-            self.store.ensure(ds.stencil_word as usize);
+            self.store.cpu().ensure(ds.stencil_word as usize);
         }
         if ds.ownership.is_some() {
-            self.store.ensure(store::DID_PLANE);
+            self.store.cpu().ensure(store::DID_PLANE);
         }
         if let Some(ms) = &ds.samples {
-            [ms.colour, ms.depth, ms.stencil].iter().for_each(|&(first, n)| (first..first + n).for_each(|w| self.store.ensure(w as usize)));
+            [ms.colour, ms.depth, ms.stencil].iter().for_each(|&(first, n)| (first..first + n).for_each(|w| self.store.cpu().ensure(w as usize)));
         }
     }
 
@@ -829,7 +891,9 @@ impl KonaBackend {
                 self.raster.sample_mask += (ms.cover != !0) as u64;
             }
             let drawable = !ds.clip.is_empty() && (ds.colours != 0 || (ds.depth_test && ds.depth_bits != 0) || (ds.stencil.enabled && ds.stencil_bits != 0));
-            let state = self.tiles().state(ds);
+            // The GPU arm takes the jobs itself, one op at a time; there are no tile workers.
+            let gpu = self.store.is_gpu();
+            let state = if gpu { 0 } else { self.tiles().state(ds) };
             if drawable {
                 self.arrays(&ds);
             }
@@ -843,7 +907,11 @@ impl KonaBackend {
                 match raster::setup::shaped(t, &ds, state, shape) {
                     Ok(mut job) => {
                         job.line = line;
-                        let _ = b.tiles().submit(RasterJob::Tri(job));
+                        if gpu {
+                            b.store.apply(StoreOp::Tri { ds: &ds, job: &job });
+                        } else {
+                            let _ = b.tiles().submit(RasterJob::Tri(job));
+                        }
                     }
                     Err(raster::setup::Skip::NoArea) => b.raster.no_area += 1,
                     Err(raster::setup::Skip::NoSample) => b.raster.no_sample += 1,
@@ -885,7 +953,11 @@ impl KonaBackend {
                     continue;
                 }
                 self.arrays(&ds);
-                let _ = self.tiles().submit(RasterJob::Clear(ClearJob { req, state }));
+                if gpu {
+                    self.store.apply(StoreOp::Clear { ds: &ds, req: &req });
+                } else {
+                    let _ = self.tiles().submit(RasterJob::Clear(ClearJob { req, state }));
+                }
             }
         }
         prims.clear();
@@ -963,7 +1035,7 @@ impl KonaBackend {
                     self.tex_counts.read_oversize += 1;
                     Answer::TooBig
                 } else {
-                    let texels = match c.tex.read_level(self.store.texture(), &h) {
+                    let texels = match c.tex.read_level(self.store.cpu().texture(), &h) {
                         Some(t) => t,
                         None => {
                             self.tex_counts.read_missing += 1;
@@ -1058,7 +1130,7 @@ impl KonaBackend {
         let c = self.contexts.select(port.context());
         let ds = c.gl.draw_state(screen);
         if let Some(l) = c.gl.layout.clone() {
-            l.colour.chain(l.accumulation).for_each(|w| self.store.ensure(w as usize));
+            l.colour.chain(l.accumulation).for_each(|w| self.store.cpu().ensure(w as usize));
         }
         self.arrays(&ds);
         ds
@@ -1322,7 +1394,7 @@ impl KonaBackend {
             }
             Job::Command { grammar: Grammar::Textport, selector, args, .. } => {
                 let (tiles, store) = (&mut self.tiles, &self.store);
-                self.textport.command(|| raster::surface(tiles, store, textport::COLOUR_WORD), selector, args);
+                self.textport.command(|| raster::surface(tiles, store, textport::COLOUR_WORD).store(), selector, args);
             }
             Job::Command { grammar: Grammar::Kernel, selector, args, .. } => {
                 self.regions.note(selector, args);
@@ -1478,7 +1550,7 @@ impl KonaBackend {
             }
             Job::Bitmap { header, payload } => {
                 let surface = raster::surface(&mut self.tiles, &self.store, textport::COLOUR_WORD);
-                self.textport.bitmap(&surface, header, payload)
+                self.textport.bitmap(surface.store(), header, payload)
             }
             _ => {}
         }
