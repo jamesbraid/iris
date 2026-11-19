@@ -21,7 +21,7 @@ use sgi_engine::{BoardEngine, Chunk, Event, Fault, HostMem, Idle, Interrupt, Out
 use super::back::snapshot::Layout;
 use super::back::KonaBackend;
 use super::defs::*;
-use super::flash::Flash;
+use super::flash::{Flash, FlashSink};
 use super::front::{Front, Host, InterruptPacket};
 use super::handle::DisplayHandle;
 use super::ident::KonaConfig;
@@ -82,17 +82,28 @@ impl InterruptController for Events {
     }
 }
 
+/// The flash a pipe starts with and where its programmed bytes go: the shell's drive.
+pub struct FlashDrive {
+    /// Exactly `FLASH_SIZE` bytes.
+    pub image: Vec<u8>,
+    pub sink: Box<dyn FlashSink>,
+}
+
 /// What a pipe is built with.
 pub struct Options {
     /// The pixel store and the drawing on the GPU, when the shell has one.
     pub gpu: Option<SharedGpu>,
     /// The most stores the command stream holds before `write` answers busy.
     pub queue: usize,
+    /// A flash held on a drive; None is a new flash that outlasts nothing.
+    pub flash: Option<FlashDrive>,
+    /// Told the widget the pipe's DMA goes to, now and at each change the guest makes.
+    pub dma_widget: Option<Box<dyn Fn(u8) + Send>>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { gpu: None, queue: 1 << 16 }
+        Options { gpu: None, queue: 1 << 16, flash: None, dma_widget: None }
     }
 }
 
@@ -152,6 +163,8 @@ pub struct KonaEngine<M: HostMem> {
     source: Source,
     parked: bool,
     fault: Arc<Mutex<Option<String>>>,
+    /// The widget the shell was last told, and who tells it.
+    widget: (Option<u8>, Option<Box<dyn Fn(u8) + Send>>),
     _mem: std::marker::PhantomData<M>,
 }
 
@@ -167,9 +180,13 @@ impl<M: HostMem> KonaEngine<M> {
         let host = Arc::new(Host::new(front, events.clone(), Arc::new(Mem(mem))));
         back.attach_manual(DisplayHandle::new(&host));
         back.latch_swaps(true);
-        Ok(KonaEngine {
+        let flash = match opts.flash {
+            Some(d) => Flash::with_sink(&d.image, d.sink)?,
+            None => Flash::fresh(),
+        };
+        let mut engine = KonaEngine {
             host,
-            core: Core::new(cfg, Flash::fresh()),
+            core: Core::new(cfg, flash),
             back,
             stream: VecDeque::new(),
             cap: opts.queue,
@@ -179,8 +196,22 @@ impl<M: HostMem> KonaEngine<M> {
             source: Source::default(),
             parked: false,
             fault: Arc::new(Mutex::new(None)),
+            widget: (None, opts.dma_widget),
             _mem: std::marker::PhantomData,
-        })
+        };
+        engine.report_widget();
+        Ok(engine)
+    }
+
+    /// Tell the shell the widget the pipe's DMA goes to, if it is not the one it was last told.
+    fn report_widget(&mut self) {
+        let now = self.events.host_widget.load(Relaxed);
+        if self.widget.0 != Some(now) {
+            self.widget.0 = Some(now);
+            if let Some(f) = &self.widget.1 {
+                f(now);
+            }
+        }
     }
 
     /// What a GPU unit's device-loss callback calls once this engine exists (`GpuLoss::attach`): post
@@ -317,6 +348,7 @@ impl<M: HostMem> KonaEngine<M> {
         if off == INT_CAUSE && self.core.reasons_waiting() {
             self.core.reason_drain(&host);
         }
+        self.report_widget();
     }
 
     /// The Hub's accounting after the pipe took a store's words (`before`: the packets completed
@@ -370,6 +402,7 @@ impl<M: HostMem> KonaEngine<M> {
             host.with_front(|f| ((), f.lowater()));
         }
         self.notice_fault();
+        self.report_widget();
         ran
     }
 
@@ -643,6 +676,8 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         self.back.apply_chunks(prepared).map_err(bad)?;
         self.host.activity.store(false, Relaxed);
         self.events.out.post(Event::Irq);
+        self.core.flash.write_through();
+        self.report_widget();
         Ok(())
     }
 
@@ -665,6 +700,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         self.events.out.clear();
         *self.fault.lock() = None;
         self.events.out.post(Event::Irq);
+        self.report_widget();
         Ok(())
     }
 

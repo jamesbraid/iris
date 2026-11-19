@@ -63,9 +63,26 @@ pub fn flash_file(path: &std::path::Path) -> Result<File, String> {
     std::fs::OpenOptions::new().read(true).write(true).open(path).map_err(err)
 }
 
+/// A new pipe's flash, as the image a drive is made from.
+pub fn fresh_image() -> Vec<u8> {
+    Flash::fresh().image().to_vec()
+}
+
+/// Where the bytes a pipe programs go besides its image: the file or drive that keeps them.
+pub trait FlashSink: Send {
+    /// `data` was programmed at `offset`.
+    fn write(&mut self, offset: usize, data: &[u8]) -> Result<(), String>;
+}
+
+impl FlashSink for File {
+    fn write(&mut self, offset: usize, data: &[u8]) -> Result<(), String> {
+        self.seek(SeekFrom::Start(offset as u64)).and_then(|_| self.write_all(data)).map_err(|e| e.to_string())
+    }
+}
+
 pub(super) struct Flash {
     image: Box<[u8]>,
-    backing: Option<File>,
+    backing: Option<Box<dyn FlashSink>>,
     /// A write-through failed: reported once, the bytes stay in the flash.
     sync_failed: bool,
 }
@@ -87,7 +104,19 @@ impl Flash {
         let mut f = Flash::fresh();
         file.seek(SeekFrom::Start(0)).and_then(|_| file.read_exact(&mut f.image))
             .map_err(|e| format!("kona: cannot read the flash image: {e}"))?;
-        f.backing = Some(file);
+        f.backing = Some(Box::new(file));
+        Ok(f)
+    }
+
+    /// A flash that starts as `image`, exactly `FLASH_SIZE` bytes, and sends every byte the pipe
+    /// programs to `sink`.
+    pub fn with_sink(image: &[u8], sink: Box<dyn FlashSink>) -> Result<Self, String> {
+        if image.len() != FLASH_SIZE {
+            return Err(format!("kona: the flash image is {} bytes, not the required {FLASH_SIZE}", image.len()));
+        }
+        let mut f = Flash::fresh();
+        f.image.copy_from_slice(image);
+        f.backing = Some(sink);
         Ok(f)
     }
 
@@ -137,8 +166,8 @@ impl Flash {
     }
 
     fn sync(&mut self, from: usize, to: usize) {
-        let Some(file) = self.backing.as_mut() else { return };
-        let r = file.seek(SeekFrom::Start(from as u64)).and_then(|_| file.write_all(&self.image[from..to]));
+        let Some(sink) = self.backing.as_mut() else { return };
+        let r = sink.write(from, &self.image[from..to]);
         if r.is_err() && !self.sync_failed {
             self.sync_failed = true;
             crate::dlog!(LogModule::Kona, "kona: write to the flash image failed; later writes may be lost from the image too");

@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::dev::w1::crc::crc8;
+use crate::dev::kona::ident::HostBoard;
 use crate::dev::w1::sgi::BoardRecord;
 
 const WIDGET_ID: u64 = 0x04;
@@ -507,6 +508,59 @@ fn onewire_has_no_second_record() {
     let (_, mem) = w.read_memory(0, 8);
     assert_eq!(mem, [0xff; 8], "no part answers a Read Memory after a Match ROM nothing matched");
     assert_eq!(w.search(), vec![geometry_rom()]);
+}
+
+fn rom_of(serial: u64) -> [u8; 8] {
+    let mut rom = [0x09, 0, 0, 0, 0, 0, 0, 0];
+    rom[1..7].copy_from_slice(&serial.to_le_bytes()[..6]);
+    rom[7] = crc8(&rom[..7]);
+    rom
+}
+
+fn board(cfg: KonaConfig) -> Fixture {
+    let host = TestHost::new();
+    Fixture::of(host.clone(), Kona::new(cfg, host.clone(), host, crate::dev::kona::tests::test_status(), None).unwrap())
+}
+
+/// A rack pipe's chain holds the geometry board's record and the Ktown's, which names itself
+/// KTOWN, part 030-1067-001, revision F, with a serial and barcode from its slot's second instance.
+/// A Ktown2 shows the model no record.
+#[test]
+fn a_rack_chain_holds_the_geometry_board_and_the_ktown() {
+    let rack = KonaConfig { host_board: HostBoard::Ktown, identity_index: 2, ..test_cfg() };
+    let f = board(rack);
+    let w = Wire::new(&f, ONEWIRE);
+    let (geometry, ktown) = (rom_of(0x5145_4d55_0000 | (b'G' as u64) << 8 | 32), rom_of(0x5145_4d55_0000 | (b'G' as u64) << 8 | 33));
+    let mut found = w.search();
+    found.sort();
+    let mut want = vec![geometry, ktown];
+    want.sort();
+    assert_eq!(found, want);
+    assert!(w.match_rom(&ktown));
+    let mem = w.read_memory(0, 64).1;
+    let text = |a: usize, n: usize| String::from_utf8(mem[a..a + n].to_vec()).unwrap();
+    assert_eq!((text(1, 6), text(21, 9), text(35, 3), text(38, 1), text(48, 5)), ("EMUG33".into(), "030-1067-".into(), "001".into(), "F".into(), "KTOWN".into()));
+    let ktown2 = board(KonaConfig { host_board: HostBoard::Ktown2, ..test_cfg() });
+    assert_eq!(Wire::new(&ktown2, ONEWIRE).search(), vec![geometry_rom()]);
+}
+
+/// A pipe sharing another slot's Ktown takes that slot's serial for it; a geometry serial the
+/// machine gives replaces the synthetic one, and its barcode is instance 0 unless it carries the marker.
+#[test]
+fn the_chains_serials_follow_the_slot_and_the_geometry_override() {
+    let shared = board(KonaConfig { host_board: HostBoard::Ktown, identity_index: 3, shared_identity: Some(1), ..test_cfg() });
+    assert!(Wire::new(&shared, ONEWIRE).match_rom(&rom_of(0x5145_4d55_0000 | (b'G' as u64) << 8 | 17)), "the Ktown of slot 1: instance 17");
+    let own = KonaConfig { geometry_serial: Some(0x1234_5678_9abc), ..test_cfg() };
+    let f = board(own);
+    let w = Wire::new(&f, ONEWIRE);
+    assert!(w.match_rom(&rom_of(0x1234_5678_9abc)));
+    let mem = w.read_memory(0, 64).1;
+    assert_eq!(&mem[1..7], b"EMUG00", "an unmarked serial gives instance 0");
+    assert!(KonaConfig::default().with_geometry_serial(1 << 48).is_err());
+    assert!(KonaConfig::default().with_shared_identity(4).is_err());
+    assert_eq!(KonaConfig::host_board_of(&["030-1067-001"], false), Ok(HostBoard::Ktown));
+    assert_eq!(KonaConfig::host_board_of(&[], true), Ok(HostBoard::Ktown2));
+    assert!(KonaConfig::host_board_of(&["030-0000-000"], false).is_err());
 }
 
 /// +0x9c is the kernel

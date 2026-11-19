@@ -38,7 +38,16 @@ fn config(product: *const std::ffi::c_char) -> IrisKonaConfig {
         pixel_depth: null(),
         texture_mb: 0,
         channels: 0,
-        host_board: 0,
+        ktown2: 0,
+        parts: null(),
+        num_parts: 0,
+        shared_identity: 0,
+        geometry_serial: 0,
+        user: null_mut(),
+        flash_image: null(),
+        flash_len: 0,
+        flash_write: None,
+        dma_widget: None,
     }
 }
 
@@ -69,12 +78,17 @@ fn the_boards_are_inputs_and_what_a_product_cannot_have_is_refused() {
     };
     // A rack pipe: a Ktown allows four raster managers and a DG5-2 with its own two channels.
     let mut rack = config(ir3.as_ptr());
-    (rack.host_board, rack.rm_count, rack.display, rack.channels, rack.texture_mb) = (1, 4, dg5_2.as_ptr(), 2, 256);
+    let (ktown, bogus) = (c("030-1067-001"), c("030-9999-001"));
+    let parts = [ktown.as_ptr()];
+    (rack.parts, rack.num_parts, rack.rm_count, rack.display, rack.channels, rack.texture_mb) = (parts.as_ptr(), 1, 4, dg5_2.as_ptr(), 2, 256);
     assert!(builds(&rack));
-    rack.host_board = 2;
+    (rack.parts, rack.num_parts, rack.ktown2) = (null(), 0, 1);
     assert!(builds(&rack), "an Onyx 3400's Ktown2 too");
-    rack.host_board = 0;
+    rack.ktown2 = 0;
     assert!(!builds(&rack), "a deskside holds two raster managers at most");
+    let other = [bogus.as_ptr()];
+    (rack.parts, rack.num_parts) = (other.as_ptr(), 1);
+    assert!(!builds(&rack), "the chain holds no part but the Ktown");
     let mut two = config(ir2.as_ptr());
     (two.geometry, two.pixel_depth) = (ge14_2.as_ptr(), medium.as_ptr());
     assert!(builds(&two), "a two-engine geometry board and medium pixels");
