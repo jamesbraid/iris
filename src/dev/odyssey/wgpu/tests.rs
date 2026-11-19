@@ -677,6 +677,18 @@ fn clears_and_cpu_shaded_quads_keep_the_order() {
 }
 
 #[test]
+fn a_surface_based_past_4_gib_wraps_into_memory_as_the_cpu_unit_does() {
+    let Some(gpu) = gpu() else { return };
+    let mut rng = Lcg(9);
+    // Bit 28 of the base word is 4 GiB: the same bytes as RGBA_MODE, mod memory.
+    let mode = [RGBA_MODE[0] | 0x1000_0000, RGBA_MODE[1], RGBA_MODE[2], RGBA_MODE[3]];
+    let mut p = Pair::new(&gpu, &mut rng, &mode);
+    let c = ClearDraw { planes: p.planes(), targets: [true, false], colour: Some(0x1234_5678), colour_mask: u32::MAX, depth: None, stencil: None, id_value: 0, id_mask: 0 };
+    clear(&mut p, &c, 0, 0, 255, 255);
+    p.check("a clear of a surface based at 4 GiB");
+}
+
+#[test]
 fn index_draws_share_words_between_pixels() {
     let Some(gpu) = gpu() else { return };
     let mut rng = Lcg(6);
