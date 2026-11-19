@@ -374,13 +374,19 @@ impl VproEngine {
 
     /// The scan-out composed from board memory as the registers describe
     /// it, 0x00RRGGBB, `(width, height, pixels)`; None with no mode or once
-    /// the engine has stopped. Drains the board first, and with the GPU unit
-    /// brings all of its memory back to the host's copy.
+    /// the engine has stopped. With the GPU unit it drains the board first and
+    /// brings all of its memory back to the host's copy. Without it nothing
+    /// waits: the frame is composed from memory the raster threads may still be
+    /// writing, as the board's own display thread does, so a drawing in progress
+    /// shows for one frame.
     pub fn scanout(&mut self) -> Option<(u32, u32, Vec<u32>)> {
-        let g = self.settle().ok()?;
-        g.gpu_upload_tick(true);
-        g.gpu_sync();
-        drop(g);
+        if self.gpu {
+            let g = self.settle().ok()?;
+            g.gpu_upload_tick(true);
+            g.gpu_sync();
+        } else if self.faulted() {
+            return None;
+        }
         let r = &mut self.reader;
         r.attach(&self.locks.shared);
         r.recompose();
