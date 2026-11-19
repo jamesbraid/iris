@@ -124,6 +124,8 @@ struct Failure {
     /// Set after `error`, so the write path asks with one load.
     failed: AtomicBool,
     error: Mutex<Option<String>>,
+    /// Which adapter this is, for the machine's reaction: the error itself stays the device's own text.
+    adapter: String,
     fatal: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
@@ -140,7 +142,7 @@ impl Failure {
         };
         // Outside the lock: the machine's reaction may look at the device.
         if first {
-            (self.fatal)(&msg);
+            (self.fatal)(&format!("{}: {msg}", self.adapter));
         }
     }
 }
@@ -438,7 +440,7 @@ impl Gpu {
         }))
         .map_err(|e| format!("request device on {}: {e}", info.name))?;
 
-        let failure = Arc::new(Failure { failed: AtomicBool::new(false), error: Mutex::new(None), fatal });
+        let failure = Arc::new(Failure { failed: AtomicBool::new(false), error: Mutex::new(None), adapter: info.name.clone(), fatal });
         let sink = Arc::clone(&failure);
         device.on_uncaptured_error(Arc::new(move |e| {
             let msg = format!("wgpu error: {e}");
@@ -714,4 +716,21 @@ fn candidates(backend: &str) -> Result<Vec<(&'static str, wgpu::Backends)>, Stri
         "auto" => vec![("vulkan", wgpu::Backends::VULKAN), ("gl", wgpu::Backends::GL)],
         other => return Err(format!("backend={other}: want auto, vulkan, metal, dx12 or gl")),
     })
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    /// The machine's reaction names the adapter, and runs once, on the first failure only.
+    #[test]
+    fn the_fatal_callback_names_the_adapter_and_runs_once() {
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let sink = told.clone();
+        let failure = Failure { failed: AtomicBool::new(false), error: Mutex::new(None), adapter: "RTX 4090".into(), fatal: Arc::new(move |m| sink.lock().push(m.to_string())) };
+        failure.set("wgpu device lost (Unknown): gone".into());
+        failure.set("wgpu error: later".into());
+        assert_eq!(*told.lock(), ["RTX 4090: wgpu device lost (Unknown): gone"]);
+        assert_eq!(failure.error.lock().as_deref(), Some("wgpu device lost (Unknown): gone"), "the stored error is the device's text");
+    }
 }
