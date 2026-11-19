@@ -642,9 +642,10 @@ impl Mgras {
             }
             ov.extend(ov_plane[y * WIDTH..y * WIDTH + dw].iter().map(|&p| p as u8));
         }
-        write_png(&dir.join("rgb.png"), dw, dh, &rgb, png::ColorType::Rgb)?;
-        write_png(&dir.join("ci.png"), dw, dh, &ci, png::ColorType::Grayscale)?;
-        write_png(&dir.join("overlay.png"), dw, dh, &ov, png::ColorType::Grayscale)?;
+        let (dw, dh) = (dw as u32, dh as u32);
+        crate::disp::write_png(dir.join("rgb.png"), dw, dh, png::ColorType::Rgb, &rgb)?;
+        crate::disp::write_png(dir.join("ci.png"), dw, dh, png::ColorType::Grayscale, &ci)?;
+        crate::disp::write_png(dir.join("overlay.png"), dw, dh, png::ColorType::Grayscale, &ov)?;
         self.save_shot(dir.join("screen.png").to_str().unwrap_or("screen.png")).map_err(std::io::Error::other)
     }
 }
@@ -724,15 +725,6 @@ fn hexdump16(w: &mut dyn Write, start: usize, words: &[u32]) -> std::io::Result<
         writeln!(w, "  {:#06x}: {}", start + i * 8, line.join(" "))?;
     }
     Ok(())
-}
-
-fn write_png(path: &std::path::Path, width: usize, height: usize, data: &[u8], color: png::ColorType) -> std::io::Result<()> {
-    let file = File::create(path)?;
-    let mut enc = png::Encoder::new(BufWriter::new(file), width as u32, height as u32);
-    enc.set_color(color);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut w = enc.write_header().map_err(std::io::Error::other)?;
-    w.write_image_data(data).map_err(std::io::Error::other)
 }
 
 /// Display control bus device names, and each device's register selects.

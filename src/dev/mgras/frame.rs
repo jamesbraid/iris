@@ -19,7 +19,7 @@
 //! whole framebuffer, of which the screen is the bottom-left corner.
 //!
 //! Output: stride `OUT_STRIDE`, `0xFFBBGGRR` (red in the low byte), what the
-//! renderers take as a prebuilt frame.
+//! display thread cuts the screen's frame from.
 
 use super::dcb::Dcb;
 use super::pixmem::{Buffer, Kind};

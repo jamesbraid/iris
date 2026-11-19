@@ -64,7 +64,8 @@ use crate::dev::kona::defs::*;
 use super::gc::{Gc, Status, Target};
 use super::state::XState;
 use super::fill::{apply, Plan, Refused};
-use crate::dev::kona::back::raster::Surface;
+use crate::dev::kona::back::raster::{Rect, Surface};
+use crate::dev::kona::back::store::{Store, StoreOp};
 
 pub const X_PIXEL_SETUP: u32 = WINDOW_SYSTEM_PIXEL_PATH_SET_UP;
 pub const X_PIXEL_COPY: u32 = WINDOW_SYSTEM_PIXEL_COPY;
@@ -304,7 +305,7 @@ const OPAQUE: u8 = 2;
 
 /// How a source pixel becomes the word a plane takes.
 #[derive(Clone, Copy)]
-struct Conv {
+pub(in crate::dev::kona) struct Conv {
     fg: u32,
     bg: u32,
     shift: u32,
@@ -315,7 +316,7 @@ struct Conv {
 
 /// Where an image lands and how its rows lie.
 #[derive(Clone, Copy)]
-struct Geo {
+pub(in crate::dev::kona) struct Geo {
     x: i64,
     y: i64,
     width: i64,
@@ -503,7 +504,7 @@ fn draw_image<const GX: u32, const NEEDS: bool>(p: &Plan<'_>, kind: u8, c: &Conv
     });
 }
 
-fn draw_by_op(p: &Plan<'_>, kind: u8, c: &Conv, g: &Geo, words: &[u32], spans: &mut Vec<(i64, i64)>, pad: &mut Vec<u32>) {
+pub(in crate::dev::kona::back) fn draw_by_op(p: &Plan<'_>, kind: u8, c: &Conv, g: &Geo, words: &[u32], spans: &mut Vec<(i64, i64)>, pad: &mut Vec<u32>) {
     macro_rules! by_op {
         ($needs:literal, $($gx:literal),*) => {
             match p.gc.gx as u32 {
@@ -551,28 +552,31 @@ fn copy_by_op(plan: &Plan<'_>, row: &[u32], spans: &[(i64, i64)], dbase: usize, 
     by_op!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 }
 
-/// Copy `s.width` x `s.height` pixels from (`sx`, `sy`) to (`dx`, `dy`) under
-/// the plan's context, clipped. `row` holds one source row at a time.
-fn copy_rows(plan: &Plan<'_>, s: &Setup, [sx, sy, dx, dy]: [i64; 4], spans: &mut Vec<(i64, i64)>, row: &mut Vec<u32>) -> Verdict {
+/// The part of a copy of `s.width` x `s.height` pixels from (`sx`, `sy`) to (`dx`, `dy`) that lies
+/// inside the managed area and the plan's bounds, as source columns `i0..i1` and rows `j0..j1`
+/// of the rectangle; None when nothing of it does.
+fn copy_extent(plan: &Plan<'_>, s: &Setup, [sx, sy, dx, dy]: [i64; 4]) -> Option<(i64, i64, i64, i64)> {
     let (w, h) = (s.width as i64, s.height as i64);
-    let array = plan.array;
-    let pitch = plan.pitch;
-    let top = plan.height - 1;
-    let width = pitch as i64;
+    let width = plan.pitch as i64;
     let b = plan.bounds;
     let (i0, i1) = ((-sx).max(0).max(b.x1 - dx), w.min(width - sx).min(b.x2 - dx));
     let (j0, j1) = ((-sy).max(0).max(b.y1 - dy), h.min(plan.height - sy).min(b.y2 - dy));
-    if i0 >= i1 || j0 >= j1 {
-        return Verdict::Done;
-    }
+    (i0 < i1 && j0 < j1).then_some((i0, i1, j0, j1))
+}
+
+/// Whether a copy is allowed: every source word, and every destination word a write reads, must fit
+/// the target. A check of the words before anything is written.
+fn copy_fits(plan: &Plan<'_>, [sx, sy, dx, dy]: [i64; 4], (i0, i1, j0, j1): (i64, i64, i64, i64)) -> bool {
+    let array = plan.array;
+    let pitch = plan.pitch;
+    let top = plan.height - 1;
     let mask = plan.gc.width_mask;
-    // Every source word, and every destination word a write reads, must be in range.
     for j in j0..j1 {
         let sbase = (top - (sy + j)) as usize * pitch;
         for i in i0..i1 {
             // SAFETY: the rectangle is inside the managed area; i0..i1 and j0..j1 clip it.
             if unsafe { array.load(sbase + (sx + i) as usize) } > mask {
-                return Verdict::Destination;
+                return false;
             }
         }
     }
@@ -582,22 +586,100 @@ fn copy_rows(plan: &Plan<'_>, s: &Setup, [sx, sy, dx, dy]: [i64; 4], spans: &mut
             for i in i0..i1 {
                 // SAFETY: as above.
                 if unsafe { array.load(dbase + (dx + i) as usize) } > mask {
-                    return Verdict::Destination;
+                    return false;
                 }
             }
         }
     }
+    true
+}
+
+/// Copy `s.width` x `s.height` pixels from (`sx`, `sy`) to (`dx`, `dy`) under
+/// the plan's context, clipped. The words are checked first (`copy_fits`); the rows are
+/// written by the store (`copy_write`).
+fn copy_rows(store: &Store, plan: &Plan<'_>, s: &Setup, rect: [i64; 4], spans: &mut Vec<(i64, i64)>, row: &mut Vec<u32>) -> Verdict {
+    let Some(extent) = copy_extent(plan, s, rect) else { return Verdict::Done };
+    // A store that holds the words elsewhere checks them where they are, as part of the copy;
+    // otherwise they are read here, current first.
+    if !store.takes_copy(plan.word(), plan.clip_list().len()) {
+        store.observe(plan.word(), plan.bounds_rect());
+        if !copy_fits(plan, rect, extent) {
+            return Verdict::Destination;
+        }
+    }
+    store.apply(StoreOp::XCopy { plan, setup: s, rect, spans, row });
+    Verdict::Copied
+}
+
+/// A copy as a GPU store takes it: the clipped extent and everything `copy_write` reads from the
+/// plan.
+#[cfg(feature = "wgpu")]
+#[derive(Clone, Copy, Debug)]
+pub struct LoweredCopy<'a> {
+    pub word: usize,
+    /// Source and destination origins, in X coordinates.
+    pub sx: i64,
+    pub sy: i64,
+    pub dx: i64,
+    pub dy: i64,
+    /// The extent that lies inside the managed area and the plan's bounds: source columns
+    /// `i0..i1` and rows `j0..j1` of the rectangle.
+    pub i0: i64,
+    pub i1: i64,
+    pub j0: i64,
+    pub j1: i64,
+    pub gx: u32,
+    pub mask: u32,
+    pub width_mask: u32,
+    pub needs: bool,
+    pub clips: &'a [[i32; 4]],
+}
+
+/// An image write as the GPU takes it: the pixels the walk lands on the store, each as its store
+/// index and the word it converts to, and what `apply` reads from the plan.
+#[cfg(feature = "wgpu")]
+pub struct LoweredImage {
+    pub word: usize,
+    pub pitch: usize,
+    pub pixels: Vec<(usize, u32)>,
+    pub gx: u32,
+    pub mask: u32,
+    pub width_mask: u32,
+    pub needs: bool,
+}
+
+/// `draw_by_op` as a record: the pixels of the walk, in row order.
+#[cfg(feature = "wgpu")]
+pub(in crate::dev::kona::back) fn lower_image(p: &Plan<'_>, kind: u8, c: &Conv, g: &Geo, words: &[u32]) -> LoweredImage {
+    let mut pixels = Vec::new();
+    walk_kind(p, kind, c, g, words, &mut Vec::new(), &mut Vec::new(), |i, src| pixels.push((i, src)));
+    LoweredImage { word: p.word(), pitch: p.pitch, pixels, gx: p.gc.gx as u32, mask: p.gc.mask, width_mask: p.gc.width_mask, needs: p.needs }
+}
+
+/// `copy_write` as a record: None when nothing of the rectangle lies on the store.
+#[cfg(feature = "wgpu")]
+pub(in crate::dev::kona::back) fn lower_copy<'a>(plan: &Plan<'a>, s: &Setup, rect @ [sx, sy, dx, dy]: [i64; 4]) -> Option<LoweredCopy<'a>> {
+    let (i0, i1, j0, j1) = copy_extent(plan, s, rect)?;
+    let gc = &plan.gc;
+    Some(LoweredCopy { word: plan.word(), sx, sy, dx, dy, i0, i1, j0, j1, gx: gc.gx as u32, mask: gc.mask, width_mask: gc.width_mask, needs: plan.needs, clips: plan.clip_list() })
+}
+
+/// The writing half of `copy_rows`, which `row` holds one source row at a time for.
+pub(in crate::dev::kona::back) fn copy_write(plan: &Plan<'_>, s: &Setup, rect @ [sx, sy, dx, dy]: [i64; 4], spans: &mut Vec<(i64, i64)>, row: &mut Vec<u32>) {
+    let Some((i0, i1, j0, j1)) = copy_extent(plan, s, rect) else { return };
+    let array = plan.array;
+    let pitch = plan.pitch;
+    let top = plan.height - 1;
     // Rows run away from where an overlapping destination lies.
     for k in j0..j1 {
         let j = if dy > sy { j1 - 1 - (k - j0) } else { k };
         let (sbase, dbase) = ((top - (sy + j)) as usize * pitch, (top - (dy + j)) as usize * pitch);
         row.clear();
-        // SAFETY: as above.
+        // SAFETY: the rectangle is inside the managed area; i0..i1 and j0..j1 clip it.
         row.extend((i0..i1).map(|i| unsafe { array.load(sbase + (sx + i) as usize) }));
         plan.row_spans(dy + j, dx + i0, dx + i1, spans);
         copy_by_op(plan, row, spans, dbase, dx + i0);
     }
-    Verdict::Copied
 }
 
 impl XState {
@@ -713,7 +795,8 @@ impl XState {
         let mut pad = std::mem::take(&mut self.pixel.row);
         let verdict = match Plan::with_gc(self, surface, gc, stipple) {
             Ok(Some(plan)) => {
-                let within = !plan.needs || {
+                let b = plan.bounds;
+                let fits = !plan.needs || surface.store().settle(&plan, None, std::iter::once((b.x1, b.y1, b.x2, b.y2))) || {
                     let mut ok = true;
                     let mask = plan.gc.width_mask;
                     walk_kind(&plan, kind, &conv, &geo, words, &mut spans, &mut pad, |i, _| {
@@ -722,8 +805,8 @@ impl XState {
                     });
                     ok
                 };
-                if within {
-                    draw_by_op(&plan, kind, &conv, &geo, words, &mut spans, &mut pad);
+                if fits {
+                    surface.store().apply(StoreOp::XImage { plan: &plan, kind, conv: &conv, geo: &geo, words, spans: &mut spans, pad: &mut pad });
                     Verdict::Done
                 } else {
                     Verdict::Destination
@@ -883,6 +966,8 @@ impl XState {
         if pitch > limit || height as usize > limit / pitch {
             return Err("payload exceeds the room for it");
         }
+        // The rows the rectangle covers in the store, which counts them from the bottom of the screen.
+        surface.store().observe(surface.word(), Rect { x0: x as i32, y0: (sh as i64 - y - height) as i32, x1: (x + width) as i32, y1: (sh as i64 - y) as i32 });
         let array = surface.array();
         let limit = if rgb { 0xff_ffff } else { 0xffff };
         let at = |c: i64, r: i64| (sh as i64 - 1 - y - r) as usize * array.pitch() + (x + c) as usize;
@@ -952,7 +1037,7 @@ impl XState {
         }
         let (mut spans, mut row) = (std::mem::take(&mut self.spans), std::mem::take(&mut self.pixel.row));
         let verdict = match Plan::with_gc(self, surface, gc, None) {
-            Ok(Some(plan)) => copy_rows(&plan, &s, [sx as i32 as i64, sy as i32 as i64, dx as i32 as i64, dy as i32 as i64], &mut spans, &mut row),
+            Ok(Some(plan)) => copy_rows(surface.store(), &plan, &s, [sx as i32 as i64, sy as i32 as i64, dx as i32 as i64, dy as i32 as i64], &mut spans, &mut row),
             Ok(None) => Verdict::Done,
             Err(Refused::Target) => Verdict::Target,
             Err(_) => Verdict::Context,
@@ -989,7 +1074,10 @@ impl XState {
                     Some(array) => {
                         plan.pitch = array.pitch();
                         plan.array = array;
-                        copy_rows(&plan, s, rect, &mut spans, &mut row)
+                        if back {
+                            plan.word = crate::dev::kona::back::textport::COLOUR_WORD + 1;
+                        }
+                        copy_rows(surface.store(), &plan, s, rect, &mut spans, &mut row)
                     }
                     None => Verdict::Done,
                 }
@@ -1024,7 +1112,7 @@ impl XState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dev::kona::back::store::{PixelStore, POPUP_PLANE};
+    use crate::dev::kona::back::store::{Store, POPUP_PLANE};
 
     /// An index context, native 16-bit index, full mask.
     const INDEX: [u32; 13] = [0x5a000, 0x1ffe, 0xa5000, 0x1ffe, 0xf00fff, 0, 0x180c, 0x40001, 1, 6, 5, 1, 1];
@@ -1035,27 +1123,27 @@ mod tests {
     /// An opaque one-bit image: foreground index 0x1230, background 0x10.
     const OPAQUE_GC: [u32; 13] = [0x1230, 0, 0x10, 0, 0xf00fff, 0, 0x180c, 0x40001, 1, 6, 5, 1, 1];
 
-    fn rig(gc: &[u32; 13]) -> (XState, PixelStore) {
+    fn rig(gc: &[u32; 13]) -> (XState, Store) {
         let mut x = XState::default();
         x.command(0x129, gc);
-        (x, PixelStore::new(32, 32))
+        (x, Store::new(32, 32))
     }
 
     /// The word at X coordinates (`x`, `y`): the store is bottom-origin.
-    fn at(s: &PixelStore, x: u32, y: u32) -> u32 {
+    fn at(s: &Store, x: u32, y: u32) -> u32 {
         s.read(x, 31 - y, 1)
     }
 
-    fn row(s: &PixelStore, y: u32, n: u32) -> Vec<u32> {
+    fn row(s: &Store, y: u32, n: u32) -> Vec<u32> {
         (0..n).map(|c| at(s, c, y)).collect()
     }
 
-    fn cmd(x: &mut XState, s: &PixelStore, selector: u32, args: &[u32]) -> Next {
+    fn cmd(x: &mut XState, s: &Store, selector: u32, args: &[u32]) -> Next {
         x.pixel_command(&Surface::new(s, 1), selector, args, true)
     }
 
     /// Set up, open a write at `pos` and send its rows as the data run.
-    fn write(x: &mut XState, s: &PixelStore, w: [u32; 7], pos: (u32, u32), rows: &[u32]) -> Next {
+    fn write(x: &mut XState, s: &Store, w: [u32; 7], pos: (u32, u32), rows: &[u32]) -> Next {
         cmd(x, s, X_PIXEL_SETUP, &w);
         let next = cmd(x, s, X_PIXEL_WRITE, &[pos.0, pos.1]);
         if let Next::Words(n) = next {
@@ -1183,7 +1271,7 @@ mod tests {
     }
 
     /// The popup planes, as a pull-down menu draws them.
-    fn popup(s: &PixelStore, x: u32, y: u32) -> u32 {
+    fn popup(s: &Store, x: u32, y: u32) -> u32 {
         s.read(x, 31 - y, POPUP_PLANE)
     }
 
@@ -1348,7 +1436,7 @@ mod tests {
     /// refused and counted.
     #[test]
     fn a_window_copy_context_is_read_by_its_fields() {
-        let sources = |s: &PixelStore| {
+        let sources = |s: &Store| {
             for (px, py) in (0..8).flat_map(|py| (0..8).map(move |px| (px, py))) {
                 s.write(px, 31 - py, 1, 0x10_0000 | py << 8 | px);
             }

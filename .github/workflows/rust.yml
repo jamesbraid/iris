@@ -78,10 +78,6 @@ jobs:
     - name: Build
       if: ${{ !matrix.gates }}
       run: cargo build --workspace --verbose
-    # Linux's nextest build below compiles the replay example.
-    - name: Check REX3 GPU replay
-      if: runner.os != 'Linux'
-      run: cargo check -p iris --lib --example rex3-gpu-probe --features rex-gpu
     # The VPro fragment pipeline's SIMD kernels against their scalar
     # formulas, on every level the runner's CPU has (src/dev/odyssey/pipe/
     # lanes.rs): deterministic, so they gate everywhere. macos-26 and

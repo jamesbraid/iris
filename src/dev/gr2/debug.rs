@@ -401,6 +401,7 @@ impl Gr2 {
     /// composed screen. PNGs are top-down (display orientation).
     pub(super) fn dump_framebuffer(&self, dir: &std::path::Path) -> std::io::Result<()> {
         use re3::{FB_H, FB_W};
+        let (fw, fh) = (FB_W as u32, FB_H as u32);
         std::fs::create_dir_all(dir)?;
         // SAFETY: read-only views; tearing tolerated.
         let re = unsafe { &*self.re3.get() };
@@ -420,10 +421,10 @@ impl Gr2 {
                 cid.push(((p >> 28) * 17) as u8);
             }
         }
-        write_png(&dir.join("rgb.png"), &rgb, png::ColorType::Rgb)?;
-        write_png(&dir.join("ci.png"), &ci, png::ColorType::Grayscale)?;
-        write_png(&dir.join("aux.png"), &aux, png::ColorType::Grayscale)?;
-        write_png(&dir.join("cid.png"), &cid, png::ColorType::Grayscale)?;
+        crate::disp::write_png(dir.join("rgb.png"), fw, fh, png::ColorType::Rgb, &rgb)?;
+        crate::disp::write_png(dir.join("ci.png"), fw, fh, png::ColorType::Grayscale, &ci)?;
+        crate::disp::write_png(dir.join("aux.png"), fw, fh, png::ColorType::Grayscale, &aux)?;
+        crate::disp::write_png(dir.join("cid.png"), fw, fh, png::ColorType::Grayscale, &cid)?;
 
         let r = self.regs();
         let mut out = vec![0u32; gr2comp::OUT_STRIDE * FB_H];
@@ -435,7 +436,7 @@ impl Gr2 {
                 scr.extend_from_slice(&[p as u8, (p >> 8) as u8, (p >> 16) as u8]);
             }
         }
-        write_png(&dir.join("screen.png"), &scr, png::ColorType::Rgb)
+        crate::disp::write_png(dir.join("screen.png"), fw, fh, png::ColorType::Rgb, &scr)
     }
 
     pub(super) fn gr2_status(&self, w: &mut dyn Write) -> std::io::Result<()> {
@@ -650,15 +651,6 @@ fn region_detail(off: u32) -> String {
         0x6b000 => "fin3_port(0x6b000)".into(),
         _ => format!("[{off:#07x}]"),
     }
-}
-
-fn write_png(path: &std::path::Path, data: &[u8], color: png::ColorType) -> std::io::Result<()> {
-    let file = File::create(path)?;
-    let mut enc = png::Encoder::new(BufWriter::new(file), re3::FB_W as u32, re3::FB_H as u32);
-    enc.set_color(color);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut w = enc.write_header().map_err(std::io::Error::other)?;
-    w.write_image_data(data).map_err(std::io::Error::other)
 }
 
 /// Decode a recorded PLL programming (7 bytes + bit count in byte 7) and

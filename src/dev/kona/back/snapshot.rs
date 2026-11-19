@@ -17,7 +17,7 @@
 
 use super::display::tables::Tables;
 use super::store::texture::{Page, PAGE_WORDS, PLANES};
-use super::store::{PixelStore, POSITIONS};
+use super::store::{Drained, Store, StoreOp, POSITIONS};
 use crate::chunk_store::{ChunkHash, ChunkStore, CHUNK_SIZE};
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -100,8 +100,10 @@ fn get(cs: &ChunkStore, hashes: &[ChunkHash], len: usize) -> Result<Vec<u32>, St
 }
 
 /// Save the store's allocated arrays and the cursor memory.
-pub fn save(store: &PixelStore, tables: &Tables, cs: &ChunkStore) -> io::Result<Vec<KonaChunk>> {
+pub fn save(store: &Store, tables: &Tables, cs: &ChunkStore) -> io::Result<Vec<KonaChunk>> {
     let mut out = Vec::new();
+    store.observe_all();
+    let store = store.cpu();
     for w in store.allocated() {
         let a = store.array(w).expect("allocated");
         // SAFETY: `i` is below the array's length.
@@ -134,10 +136,11 @@ pub struct Prepared {
 
 /// Read and check every chunk `save` wrote for a store and tables of the same configuration, and
 /// change nothing.
-pub fn prepare(store: &PixelStore, tables: &Tables, cs: &ChunkStore, list: &[KonaChunk]) -> Result<Prepared, String> {
+pub fn prepare(store: &Store, tables: &Tables, cs: &ChunkStore, list: &[KonaChunk]) -> Result<Prepared, String> {
     let mut arrays = Vec::new();
     let mut cursor = None;
     let mut texture = Vec::new();
+    let store = store.cpu();
     for c in list {
         if let Some((p, n)) = c.name.strip_prefix("texture-g").and_then(|r| r.split_once('-')).and_then(|(p, n)| Some((p.parse::<u16>().ok()?, n.parse::<usize>().ok()?))) {
             if p as usize >= PLANES || texture.iter().any(|&(q, _, _)| q == p) {
@@ -188,21 +191,17 @@ pub fn prepare(store: &PixelStore, tables: &Tables, cs: &ChunkStore, list: &[Kon
 
 /// Put what `prepare` read into the store and tables: every array the snapshot names is allocated
 /// and filled, and the others are zeroed, so the store reads as it did when saved.
-pub fn apply(store: &PixelStore, tables: &mut Tables, p: Prepared) -> Result<(), String> {
-    // SAFETY: the caller drained the back end's tiles (`apply_chunks`), and nothing draws until this returns.
-    unsafe { store.reset() };
-    // SAFETY: as above.
-    let mut texture = unsafe { store.texture().exclusive() };
+pub fn apply(store: &Store, drained: Drained, tables: &mut Tables, p: Prepared) -> Result<(), String> {
+    store.apply(StoreOp::Reset(drained));
+    // SAFETY: `drained` says no tile worker runs, and nothing draws until this returns.
+    let mut texture = unsafe { store.cpu().texture().exclusive() };
     for (plane, pages) in p.planes {
         if !texture.set_pages(plane, pages) {
             return Err(format!("texture plane {plane}: refused"));
         }
     }
     for (w, words) in p.data {
-        store.ensure(w);
-        let a = store.array(w).ok_or("no array after ensure")?;
-        // SAFETY: the array holds `entries` words.
-        words.iter().enumerate().for_each(|(i, &v)| unsafe { a.store(i, v) });
+        store.apply(StoreOp::Restore { word: w, words: &words, drained });
     }
     tables.load_cursor_words(&p.cursor);
     Ok(())

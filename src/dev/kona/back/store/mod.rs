@@ -30,9 +30,18 @@
 //!
 //! The elements are `AtomicU32` and accessed relaxed: a racing read and write
 //! is then defined, and costs a plain load or store.
+//!
+//! # The seam
+//!
+//! Writers do not reach the arrays themselves: they hand a `StoreOp` to `Store::apply`, and a
+//! reader calls `Store::observe` before it reads (see `seam`). `PixelStore` is the only store so
+//! far, and the tile workers, the display and the pre-write checks still use it directly.
 
 pub mod layout;
+pub mod seam;
 pub mod texture;
+
+pub use seam::{Drained, Store, StoreOp};
 
 use std::alloc::{alloc_zeroed, dealloc, Layout as MemLayout};
 use std::marker::PhantomData;

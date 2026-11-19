@@ -68,6 +68,9 @@ fn new_page() -> Box<Page> {
 #[derive(Default)]
 pub struct Plane {
     pages: Vec<Option<Box<Page>>>,
+    /// The `version` of the store at the last change to each page's words (a page `stamp` says
+    /// nothing for a page that is not held). Shorter than `pages` where no page has been written.
+    stamps: Vec<u64>,
 }
 
 impl Plane {
@@ -93,10 +96,19 @@ impl Plane {
         while matches!(self.pages.last(), Some(None)) {
             self.pages.pop();
         }
+        self.stamps.truncate(self.pages.len());
+    }
+
+    /// Note that page `pg` changed at `version`.
+    fn stamp_at(&mut self, pg: usize, version: u64) {
+        if self.stamps.len() <= pg {
+            self.stamps.resize(pg + 1, 0);
+        }
+        self.stamps[pg] = version;
     }
 }
 
-static NO_PLANE: Plane = Plane { pages: Vec::new() };
+static NO_PLANE: Plane = Plane { pages: Vec::new(), stamps: Vec::new() };
 
 #[derive(Default)]
 struct Planes {
@@ -104,6 +116,8 @@ struct Planes {
     /// Pages held across every plane, and the most there have been since power-on.
     resident: usize,
     peak: usize,
+    /// Counts every change, so a copy (the GPU's) finds what changed: pages stamped after its version, or gone.
+    version: u64,
 }
 
 pub struct TextureStore {
@@ -201,6 +215,19 @@ impl TextureStore {
         unsafe { &*self.inner.get() }.planes.iter().enumerate().filter(|(_, d)| d.held() > 0).map(|(i, d)| (i as u16, d.pages.len())).collect()
     }
 
+    /// How many changes the words have had. A copy made at version `v` is current while this is `v`.
+    #[cfg(any(feature = "wgpu", test))]
+    pub fn version(&self) -> u64 {
+        // SAFETY: as for `plane`.
+        unsafe { &*self.inner.get() }.version
+    }
+
+    /// The version at which page `page` of plane `plane` last changed, 0 if it never has.
+    #[cfg(any(feature = "wgpu", test))]
+    pub fn page_version(&self, plane: u16, page: usize) -> u64 {
+        self.plane(plane).stamps.get(page).copied().unwrap_or(0)
+    }
+
     /// Page `page` of plane `plane`, if it is held.
     pub fn page(&self, plane: u16, page: usize) -> Option<&Page> {
         self.plane(plane).pages.get(page)?.as_deref()
@@ -268,6 +295,8 @@ impl Exclusive<'_> {
         let end = (from as usize + n).min(self.0.bank_words());
         let from = from as usize;
         let Some(pl) = st.planes.get_mut(plane as usize).filter(|_| from < end) else { return };
+        st.version += 1;
+        let version = st.version;
         let mut freed = 0;
         for pg in from >> PAGE_SHIFT..=(end - 1) >> PAGE_SHIFT {
             let (lo, hi) = (pg << PAGE_SHIFT, (pg + 1) << PAGE_SHIFT);
@@ -276,6 +305,7 @@ impl Exclusive<'_> {
                 freed += slot.take().is_some() as usize;
             } else if let Some(p) = slot {
                 p[from.max(lo) - lo..end.min(hi) - lo].fill(0);
+                pl.stamp_at(pg, version);
             }
         }
         pl.trim();
@@ -289,6 +319,8 @@ impl Exclusive<'_> {
         if let Some(pl) = st.planes.get_mut(plane as usize) {
             st.resident -= pl.held();
             pl.pages = Vec::new();
+            pl.stamps = Vec::new();
+            st.version += 1;
         }
     }
 
@@ -321,6 +353,8 @@ impl Exclusive<'_> {
         }
         if let Some(Some(p)) = pl.pages.get_mut(pg) {
             p[i] = v;
+            st.version += 1;
+            pl.stamp_at(pg, st.version);
         }
         true
     }
@@ -336,11 +370,15 @@ impl Exclusive<'_> {
         if st.planes.len() <= plane as usize {
             st.planes.resize_with(PLANES, Plane::default);
         }
-        let mut pl = Plane { pages };
+        let mut pl = Plane { pages, stamps: Vec::new() };
         pl.trim();
         let (old, new) = (st.planes[plane as usize].held(), pl.held());
         if st.resident - old + new > self.0.cap_pages {
             return false;
+        }
+        st.version += 1;
+        for pg in 0..pl.pages.len() {
+            pl.stamp_at(pg, st.version);
         }
         st.resident = st.resident - old + new;
         st.peak = st.peak.max(st.resident);
@@ -355,6 +393,7 @@ impl Exclusive<'_> {
         st.planes.clear();
         st.resident = 0;
         st.peak = 0;
+        st.version += 1;
     }
 }
 
@@ -377,6 +416,31 @@ mod tests {
         assert_eq!((t.used(), t.resident_pages()), (vec![(1, 1)], 1));
         t.ex().reset();
         assert_eq!((t.resident_pages(), t.peak_pages()), (0, 0));
+    }
+
+    /// Every change to the words moves the version, and stamps the pages it touched, so a copy can tell
+    /// which pages to refresh; a page given back has no stamp to read.
+    #[test]
+    fn changes_move_the_version_and_stamp_their_pages() {
+        let t = TextureStore::default();
+        let w = PAGE_WORDS as u32;
+        assert_eq!((t.version(), t.page_version(0, 0)), (0, 0));
+        assert!(t.ex().set(0, 3, 1) && t.ex().set(0, w + 3, 1));
+        let (v, p0, p1) = (t.version(), t.page_version(0, 0), t.page_version(0, 1));
+        assert!(p0 > 0 && p1 > p0 && v == p1);
+        assert!(t.ex().set(0, 9, 5));
+        assert_eq!((t.page_version(0, 0), t.page_version(0, 1)), (v + 1, p1), "only the page written is stamped");
+        assert!(t.ex().set(1, 5, 0));
+        assert_eq!(t.version(), v + 1, "a zero into a page that is not held changes nothing");
+        t.ex().clear(0, w - 2, 4);
+        assert_eq!((t.page_version(0, 0), t.page_version(0, 1)), (v + 2, v + 2), "a clear over part of two pages stamps both");
+        assert!(t.ex().set_pages(2, vec![None, Some(new_page())]));
+        assert_eq!(t.page_version(2, 1), v + 3);
+        let before = t.version();
+        t.ex().drop_plane(2);
+        assert!(t.version() > before && t.page(2, 1).is_none());
+        t.ex().reset();
+        assert!(t.version() > before + 1);
     }
 
     /// A page is made by the first nonzero word in it: a single word at the top of the bank holds one page, not a bank.

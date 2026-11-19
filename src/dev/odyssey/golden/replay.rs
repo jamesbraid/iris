@@ -232,7 +232,7 @@ pub fn run_with(recs: &[Rec], setup: impl FnOnce(&mut Board), every: usize, opts
     if opts.gpu {
         #[cfg(feature = "wgpu")]
         {
-            b.enable_gpu(&crate::wgpu::GpuOptions::default()).expect("the GPU raster unit");
+            b.enable_gpu(&crate::wgpu::Gpu::new(&Default::default(), Box::new(|_| {})).expect("the GPU")).expect("the GPU raster unit");
             // VPRO_REPLAY_LAZY=1: no readbacks between checkpoints, to time
             // the GPU path alone (the planes the front end reads go stale,
             // so the checkpoints are not expected to hold).
@@ -478,13 +478,9 @@ fn save_screen(b: &Board, path: &str) {
     frame.compose(b.vram.ptr_shared(), &regs, &mut px, w as usize, h as usize);
     let mut rgb = Vec::with_capacity(px.len() * 3);
     for p in px {
-        rgb.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
+        rgb.extend_from_slice(&[p as u8, (p >> 8) as u8, (p >> 16) as u8]);
     }
-    let file = std::fs::File::create(path).unwrap();
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    enc.write_header().unwrap().write_image_data(&rgb).unwrap();
+    crate::disp::write_png(path, w, h, png::ColorType::Rgb, &rgb).unwrap();
 }
 
 fn recordings() -> Vec<PathBuf> {

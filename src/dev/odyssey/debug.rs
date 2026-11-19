@@ -163,15 +163,6 @@ fn dispmode_text(mode: u32) -> String {
     }
 }
 
-fn write_png(path: &Path, width: usize, height: usize, data: &[u8], color: png::ColorType) -> std::io::Result<()> {
-    let file = std::fs::File::create(path)?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), width as u32, height as u32);
-    enc.set_color(color);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut w = enc.write_header().map_err(std::io::Error::other)?;
-    w.write_image_data(data).map_err(std::io::Error::other)
-}
-
 impl Odyssey {
     /// The frame the scan-out registers describe now, and board memory.
     fn screen(&self) -> Result<(Frame, VramPtr, DisplayRegs), String> {
@@ -312,15 +303,13 @@ impl Odyssey {
     }
 
     /// The GPU unit's counters (`GpuRaster::report`) and the GPU scan-out's
-    /// (frames composed, bytes read back: a frame the window presents from
-    /// the GPU is not read back), None on the CPU unit.
+    /// frames composed, None on the CPU unit.
     fn gpu_text(&self) -> Option<String> {
         #[cfg_attr(not(feature = "wgpu"), allow(unused_mut))]
         let mut out = self.gpu_run(|g| g.report())?;
         #[cfg(feature = "wgpu")]
         if let Some(s) = self.state.shared.gpu_scanout.get() {
-            let (frames, bytes) = s.lock().counts();
-            out.push_str(&format!("  gpu scanout: {frames} frames composed, {} MiB read back\n", bytes >> 20));
+            out.push_str(&format!("  gpu scanout: {} frames composed\n", s.lock().frames()));
         }
         Some(out)
     }
@@ -875,10 +864,11 @@ impl Odyssey {
         let (width, height) = (frame.width as usize, frame.height as usize);
         let mut px = vec![0u32; width * height];
         frame.compose(mem, &regs, &mut px, width, height);
-        // save_png takes 0x00BBGGRR.
-        let px: Vec<u32> = px.iter().map(|&p| (p & 0xff) << 16 | (p & 0xff00) | p >> 16).collect();
-        let (w, h) = crate::hostinput::save_png(path, &px, width, height, None)?;
-        Ok(format!("saved {path} {w}x{h}\n"))
+        // Composed words are 0xAABBGGRR.
+        let rgb: Vec<u8> = px.iter().flat_map(|&p| [p as u8, (p >> 8) as u8, (p >> 16) as u8]).collect();
+        crate::disp::write_png(path, width as u32, height as u32, png::ColorType::Rgb, &rgb)
+            .map_err(|e| format!("{path}: {e}"))?;
+        Ok(format!("saved {path} {width}x{height}\n"))
     }
 
     /// `vpro fbdump`: the composed screen as PNG, the whole of board memory
@@ -892,9 +882,9 @@ impl Odyssey {
         frame.compose(mem, &regs, &mut px, w, h);
         let mut rgb = Vec::with_capacity(w * h * 3);
         for &p in &px {
-            rgb.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
+            rgb.extend_from_slice(&[p as u8, (p >> 8) as u8, (p >> 16) as u8]);
         }
-        write_png(&dir.join("screen.png"), w, h, &rgb, png::ColorType::Rgb).map_err(io)?;
+        crate::disp::write_png(dir.join("screen.png"), w as u32, h as u32, png::ColorType::Rgb, &rgb).map_err(io)?;
         std::fs::write(dir.join("board.bin"), mem.address_bytes().collect::<Vec<u8>>()).map_err(io)?;
         let mut layout = match self.state.quiesce(QUIESCE) {
             Some(g) => Self::layout_text(&g),

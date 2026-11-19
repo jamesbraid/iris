@@ -26,6 +26,8 @@ pub mod scenes;
 pub mod vertices;
 #[cfg(test)]
 mod linetest;
+#[cfg(test)]
+mod frame_pins;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -2,8 +2,8 @@
 //!
 //! Runs on the display thread. The output uses the same format as
 //! `SwCompositor`: stride 2048, `0xAABBGGRR` (R in the low byte, i.e. R,G,B,A
-//! in memory, which is what the GL RGBA upload expects). Either UI compositor
-//! can then present it verbatim (`Rex3Screen::prebuilt`). Internally the
+//! in memory, which is what the GL RGBA upload expects). The display thread cuts
+//! the screen's frame from it row by row. Internally the
 //! XMAP5 CLUT holds `0x00RRGGBB`; only this final pack swaps to screen order.
 //!
 //! Per pixel, highest priority first (VC1.h "screen composition"): cursor,

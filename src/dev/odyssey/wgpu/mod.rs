@@ -1504,6 +1504,13 @@ impl GpuRaster {
         &self.gpu
     }
 
+    /// A GPU call came back refused: the device records it and the machine
+    /// stops (`Gpu::fail`). The mirror is stale until then, and nothing
+    /// substitutes for the GPU's work.
+    pub fn fail(&self, why: &str) {
+        self.gpu.fail(why);
+    }
+
     /// The memory buffer and its size in words, for the scanout's own
     /// bind group.
     pub fn vram_buffer(&self) -> (wgpu::Buffer, u64) {

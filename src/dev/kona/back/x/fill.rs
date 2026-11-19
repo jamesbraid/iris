@@ -85,8 +85,8 @@ use crate::dev::kona::defs::*;
 use super::gc::{Gc, Target};
 use crate::dev::kona::back::raster::ops::LogicOp;
 use super::state::XState;
-use crate::dev::kona::back::raster::Surface;
-use crate::dev::kona::back::store::{WordArray, DID_PLANE, OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE};
+use crate::dev::kona::back::raster::{Rect, Surface};
+use crate::dev::kona::back::store::{StoreOp, WordArray, DID_PLANE, OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE};
 
 /// The two-word data token (tests).
 #[cfg(test)]
@@ -159,7 +159,7 @@ pub(super) enum Refused {
 }
 
 /// A box, far corner exclusive, in the X server's coordinates.
-pub(super) type Box4 = (i64, i64, i64, i64);
+pub(in crate::dev::kona) type Box4 = (i64, i64, i64, i64);
 
 /// The stipple pattern of a request: its rows, size and the point it is
 /// measured from.
@@ -171,9 +171,30 @@ pub struct StipplePattern {
     pub origin: (i64, i64),
 }
 
+/// One clipped box of a request with everything `rows` reads from its plan, as the GPU store
+/// takes it in place of running the loop.
+#[cfg(feature = "wgpu")]
+#[derive(Clone, Copy, Debug)]
+pub struct LoweredFill<'a> {
+    pub word: usize,
+    pub b: Box4,
+    pub height: i64,
+    pub fg: u32,
+    pub bg: u32,
+    pub mask: u32,
+    pub width_mask: u32,
+    pub gx: u32,
+    pub opaque: bool,
+    pub needs: bool,
+    pub stipple: Option<StipplePattern>,
+    pub clips: &'a [[i32; 4]],
+}
+
 /// Everything about a request, looked up once.
-pub(super) struct Plan<'a> {
+pub(in crate::dev::kona) struct Plan<'a> {
     pub(super) gc: Gc,
+    /// The word position drawn into, and `array` its words.
+    pub(super) word: usize,
     pub(super) array: WordArray<'a>,
     pub(super) pitch: usize,
     pub(super) height: i64,
@@ -227,25 +248,61 @@ impl<'a> Plan<'a> {
         }
         let (width, height) = surface.size();
         // The colour word, or the plane the target names.
-        let array = match gc.target {
-            Target::MainCi8 | Target::MainIndex16 | Target::MainRgb8 => surface.array(),
-            Target::Did => surface.sibling(DID_PLANE).array(),
-            Target::Overlay0 => surface.sibling(OVERLAY0_PLANE).array(),
-            Target::Overlay1 => surface.sibling(OVERLAY1_PLANE).array(),
-            Target::Popup => surface.sibling(POPUP_PLANE).array(),
+        let (word, array) = match gc.target {
+            Target::MainCi8 | Target::MainIndex16 | Target::MainRgb8 => (surface.word(), surface.array()),
+            Target::Did => (DID_PLANE, surface.sibling(DID_PLANE).array()),
+            Target::Overlay0 => (OVERLAY0_PLANE, surface.sibling(OVERLAY0_PLANE).array()),
+            Target::Overlay1 => (OVERLAY1_PLANE, surface.sibling(OVERLAY1_PLANE).array()),
+            Target::Popup => (POPUP_PLANE, surface.sibling(POPUP_PLANE).array()),
             Target::OverlayBoth => unreachable!("refused above"),
         };
         // The word after the colour word is the second buffer's.
         let back = two_buffers.then(|| surface.sibling(crate::dev::kona::back::textport::COLOUR_WORD + 1).array());
         let needs = gc.needs_destination();
         let clips = if x.clip_rects().len() > 1 { x.clip_rects() } else { &[] };
-        Ok(Some(Plan { gc, pitch: array.pitch(), array, height: height as i64, bounds: x.bounds(width, height), clips, stipple, needs, back }))
+        Ok(Some(Plan { gc, word, pitch: array.pitch(), array, height: height as i64, bounds: x.bounds(width, height), clips, stipple, needs, back }))
     }
 
     /// The same plan on the second buffer's words, if the context paints both.
     fn second(&self) -> Option<Plan<'a>> {
         let array = self.back?;
-        Some(Plan { gc: self.gc.clone(), array, pitch: array.pitch(), height: self.height, bounds: self.bounds, clips: self.clips, stipple: self.stipple, needs: self.needs, back: None })
+        Some(Plan { gc: self.gc.clone(), word: crate::dev::kona::back::textport::COLOUR_WORD + 1, array, pitch: array.pitch(), height: self.height, bounds: self.bounds, clips: self.clips, stipple: self.stipple, needs: self.needs, back: None })
+    }
+
+    /// The word position the plan draws into.
+    pub(in crate::dev::kona::back) fn word(&self) -> usize {
+        self.word
+    }
+
+    /// The box `b` (X coordinates, far corner exclusive) as store pixels: the store's rows run the
+    /// other way.
+    pub(in crate::dev::kona::back) fn store_rect(&self, b: Box4) -> Rect {
+        Rect { x0: b.0 as i32, y0: (self.height - b.3) as i32, x1: b.2 as i32, y1: (self.height - b.1) as i32 }
+    }
+
+    /// The widest word the target holds.
+    #[cfg(feature = "wgpu")]
+    pub(in crate::dev::kona::back) fn width_mask(&self) -> u32 {
+        self.gc.width_mask
+    }
+
+    /// The area the plan can draw in, as store pixels.
+    pub(in crate::dev::kona::back) fn bounds_rect(&self) -> Rect {
+        self.store_rect((self.bounds.x1, self.bounds.y1, self.bounds.x2, self.bounds.y2))
+    }
+
+    /// The clip rectangles when there are several (one is the bounds).
+    pub(in crate::dev::kona::back) fn clip_list(&self) -> &'a [[i32; 4]] {
+        self.clips
+    }
+
+    /// The box `b` as a GPU store record takes it: everything `rows` reads from the plan.
+    #[cfg(feature = "wgpu")]
+    pub(in crate::dev::kona::back) fn lower(&self, b: Box4) -> LoweredFill<'a> {
+        let gc = &self.gc;
+        // With no destination read the colour alone makes each word, as in `rows`.
+        let (fg, bg) = if self.needs { (gc.foreground, gc.background) } else { (gc.apply(gc.foreground, 0), gc.apply(gc.background, 0)) };
+        LoweredFill { word: self.word, b, height: self.height, fg, bg, mask: gc.mask, width_mask: gc.width_mask, gx: gc.gx as u32, opaque: gc.opaque_or_tiled, needs: self.needs, stipple: self.stipple, clips: self.clips }
     }
 
     /// The plan for `gc` over the whole managed area: the clip list and the scissor do not limit it.
@@ -391,8 +448,8 @@ fn rows<const GX: u32, const NEEDS: bool, const STIP: bool>(p: &Plan<'_>, b: Box
     }
 }
 
-/// Draw `b` with the loop that suits the request: chosen once, not per pixel.
-fn draw(p: &Plan<'_>, b: Box4, spans: &mut Vec<(i64, i64)>) {
+/// Draw `b` with the loop that fits the request: chosen once, not per pixel.
+pub(in crate::dev::kona::back) fn draw(p: &Plan<'_>, b: Box4, spans: &mut Vec<(i64, i64)>) {
     macro_rules! by_op {
         ($stip:literal, $($gx:literal),*) => {
             match p.gc.gx as u32 {
@@ -436,15 +493,19 @@ impl XState {
             Err(why) => return Outcome { drawn: 0, refused: Some(why) },
         };
         let back = plan.second();
-        if plan.needs && !boxes.clone().all(|b| plan.destination_in_range(b, spans) && back.as_ref().is_none_or(|p| p.destination_in_range(b, spans))) {
+        let store = surface.store();
+        // The check reads the destination words. A store that keeps them elsewhere answers it from
+        // what its writers could have stored where the boxes lie, or brings those words up to date first.
+        let proven = plan.needs && store.settle(&plan, back.as_ref(), boxes.clone().filter_map(|b| plan.clip(b)));
+        if plan.needs && !proven && !boxes.clone().all(|b| plan.destination_fits(b, spans) && back.as_ref().is_none_or(|p| p.destination_fits(b, spans))) {
             return Outcome { drawn: 0, refused: Some(Refused::Destination) };
         }
         let mut drawn = 0;
         for b in boxes {
             if let Some(b) = plan.clip(b) {
-                draw(&plan, b, spans);
+                store.apply(StoreOp::XFill { plan: &plan, b, spans: &mut *spans });
                 if let Some(p) = &back {
-                    draw(p, b, spans);
+                    store.apply(StoreOp::XFill { plan: p, b, spans: &mut *spans });
                 }
                 drawn += 1;
             }
@@ -586,23 +647,23 @@ impl XState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dev::kona::back::store::PixelStore;
+    use crate::dev::kona::back::store::Store;
 
     /// An index-16 context: foreground 0x5a00, background 0xa500, full mask.
     const GC: [u32; 13] = [0x5a000, 0x1ffe, 0xa5000, 0x1ffe, 0xf00fff, 0, 0x180c, 0x40001, 1, 6, 5, 1, 1];
 
-    fn rig() -> (XState, PixelStore) {
+    fn rig() -> (XState, Store) {
         let mut x = XState::default();
         x.command(0x129, &GC);
-        (x, PixelStore::new(32, 32))
+        (x, Store::new(32, 32))
     }
 
     /// The word at X coordinates (`x`, `y`): the store is bottom-origin.
-    fn at(s: &PixelStore, x: u32, y: u32) -> u32 {
+    fn at(s: &Store, x: u32, y: u32) -> u32 {
         s.read(x, 31 - y, 1)
     }
 
-    fn lit(s: &PixelStore) -> usize {
+    fn lit(s: &Store) -> usize {
         (0..32).flat_map(|y| (0..32).map(move |x| (x, y))).filter(|&(x, y)| s.read(x, y, 1) != 0).count()
     }
 
@@ -631,7 +692,7 @@ mod tests {
         let mut x = XState::default();
         x.command(0x129, &GC);
         // Tall and wide enough for position 100,50 and a box beyond it.
-        let s = PixelStore::new(128, 64);
+        let s = Store::new(128, 64);
         let d = Surface::new(&s, 1);
         let at = |x: u32, y: u32| s.read(x, 63 - y, 1);
         let lit = || (0..64).flat_map(|y| (0..128).map(move |x| (x, y))).filter(|&(x, y)| s.read(x, y, 1) != 0).count();
@@ -1014,7 +1075,7 @@ mod tests {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             ((seed >> 33) as u32) % n
         };
-        let store = PixelStore::new(W as u32, H as u32);
+        let store = Store::new(W as u32, H as u32);
         let surface = Surface::new(&store, 1);
         // The reference's own copy of the screen, by X row (y down), and the store
         // is bottom-origin: store row = H - 1 - y.

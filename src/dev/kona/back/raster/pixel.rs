@@ -87,7 +87,7 @@ struct SampleArrays<'a> {
 
 /// The bits of sample `k` in a run of words at `index`: `width` bits from bit `k * stride`.
 #[inline(always)]
-fn sample_get(words: &[WordArray<'_>], index: usize, k: usize, stride: u32, width: u32) -> u32 {
+pub(crate) fn sample_get(words: &[WordArray<'_>], index: usize, k: usize, stride: u32, width: u32) -> u32 {
     let bit = k * stride as usize;
     let (w, sh) = (bit / 32, (bit % 32) as u32);
     // SAFETY: the pixel is inside the screen, which every array covers.
@@ -98,7 +98,7 @@ fn sample_get(words: &[WordArray<'_>], index: usize, k: usize, stride: u32, widt
 }
 
 #[inline(always)]
-fn sample_set(words: &[WordArray<'_>], index: usize, k: usize, stride: u32, width: u32, v: u32) {
+pub(crate) fn sample_set(words: &[WordArray<'_>], index: usize, k: usize, stride: u32, width: u32, v: u32) {
     let bit = k * stride as usize;
     let (w, sh) = (bit / 32, (bit % 32) as u32);
     let mask = ((1u64 << width) - 1) << sh;
@@ -550,7 +550,7 @@ fn run_tri<const FOG: u8, const AA: bool, const PLAIN: bool, const ADD: bool, S:
                         (rho, scale) = (rr, rs);
                     }
                 }
-                (rho * scale / 16.0f32).max(1e-6f32).log2()
+                crate::dev::kona::back::lodmath::log2((rho * scale / 16.0f32).max(1e-6f32))
             });
             for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
                 let (x, y) = (qx + dx, qy + dy);

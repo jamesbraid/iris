@@ -4145,3 +4145,58 @@ fn real_board_fogtest() {
     m.stop_engines();
     assert!(bad.is_empty(), "more than 3 levels from the board: {bad:?}");
 }
+
+/// Composed-frame pins for IMPACT with no guest. A checked-in capture
+/// replays on a fresh board; the board's scan-out (`snapshot_frame` +
+/// `Frame::compose`, what the refresh thread and `save_shot` run) makes the
+/// frame; it is hashed with its size. High Impact (one raster engine) and
+/// Maximum Impact (two) must agree. `MGRAS_PIN_GPU=1` replays on the wgpu
+/// raster unit instead.
+fn impact_frame_hash(text: &str, kind: crate::config::GraphicsBoard) -> String {
+    use super::frame::{H, OUT_STRIDE, W};
+    let recs = load_text(text).unwrap();
+    let raster = if std::env::var("MGRAS_PIN_GPU").is_ok() { crate::config::RasterUnit::Wgpu } else { crate::config::RasterUnit::Cpu };
+    let m = super::record::tests::live_board_with(kind, raster, false);
+    let rep = replay_recs(&m, &recs, false).unwrap();
+    assert!(!rep.diverged(), "{kind:?}: {rep:?}");
+    m.state_hash(); // waits for the board to finish
+    let mut f = m.snapshot_frame();
+    // The captures carry the raster writes only: the X server's VC3, XMAP,
+    // colormap and DAC setup came long before them. Preset the display chain
+    // (one colour-index window ID, a fixed palette, identity gamma) so the
+    // frame is a function of the planes alone.
+    use super::frame::MainMode;
+    (f.width, f.height) = (W, H);
+    f.blank = false;
+    f.cursor_on = false;
+    for (i, g) in f.gamma.iter_mut().enumerate() {
+        *g = [i as u8; 3];
+    }
+    for (i, c) in f.cmap.iter_mut().enumerate() {
+        *c = ((i as u32 * 37) & 0xff) << 16 | ((i as u32 * 91) & 0xff) << 8 | (i as u32 * 53) & 0xff;
+    }
+    f.main_mode[0] = MainMode { rgb: false, cmap_base: 0, index_mask: 0xFFF, pair: None };
+    let mut out = vec![0u32; OUT_STRIDE * H];
+    f.compose(&mut out);
+    let (w, h) = (f.width, f.height);
+    m.stop_engines();
+    let colours = crate::test_frame_pin::colour_count(w, h, OUT_STRIDE, &out);
+    assert!(colours >= 2, "the frame is blank");
+    crate::test_frame_pin::frame_hash(w, h, OUT_STRIDE, &out)
+}
+
+#[test]
+fn impact_composed_frames_are_pinned() {
+    use crate::config::GraphicsBoard::{HighImpact, MaxImpact};
+    for (name, text, want) in [
+        ("xsetroot_red", include_str!("testdata/xsetroot_red.txt"), "6f94147b5cce844606d655d10b1a7cfeceb5dc4fa0c5f8e9f5fc781b000c32be"),
+    ] {
+        let a = impact_frame_hash(text, HighImpact);
+        eprintln!("impact frame hash {name} high {a}");
+        assert_eq!(a, impact_frame_hash(text, HighImpact), "{name}: two runs");
+        if name == "xsetroot_red" {
+            assert_eq!(a, impact_frame_hash(text, MaxImpact), "{name}: two raster engines");
+        }
+        assert_eq!(a, want, "{name}");
+    }
+}

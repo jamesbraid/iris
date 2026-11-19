@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use crate::gfx_display::ScanoutShow;
 use crate::wgpu::{Fragment, Gpu, Scanout, ScanoutPipeline, ScanoutShaders};
 
 use super::super::dcb::Dcb;
@@ -100,7 +101,7 @@ pub(crate) struct MgrasScanout {
     group: wgpu::BindGroup,
     slot: Vec<u32>,
     runs: Vec<(u16, u8)>,
-    /// The last frame's size, and a readback's 0x00RRGGBB words.
+    /// The last frame's size, and a readback's 0xAABBGGRR words.
     pub width: u32,
     pub height: u32,
     words: Vec<u32>,
@@ -109,15 +110,7 @@ pub(crate) struct MgrasScanout {
 impl MgrasScanout {
     /// Over the unit's pixel memory buffer (`GpuRaster::pix_buffer`).
     pub fn new(gpu: &Arc<Gpu>, pix: &wgpu::Buffer) -> Result<MgrasScanout, String> {
-        let layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("mgras scanout pages"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
-                count: None,
-            }],
-        });
+        let layout = crate::wgpu::storage_layout(gpu, "mgras scanout pages", false);
         let defines = defines();
         let pipeline = ScanoutPipeline::new(
             gpu,
@@ -220,32 +213,25 @@ impl MgrasScanout {
         D_RUNS + n
     }
 
-    /// Compose the frame and submit it, no readback; the buffer it is in
-    /// (0x00RRGGBB, rows of `width`) and its size.
-    pub fn compose(&mut self, r: &Rss, dcb: &Dcb) -> Result<(wgpu::Buffer, u32, u32), String> {
+    /// Compose the frame for this tick's consumer (`Scanout::show`).
+    pub fn show(&mut self, r: &Rss, dcb: &Dcb, need: crate::gfx_display::Need, frame: &mut crate::gfx_display::Frame) -> Result<(), String> {
         let n = self.build(r, dcb);
         let (w, h) = (self.width, self.height);
         self.scanout.compose(&self.pipeline, w, h, bytemuck::cast_slice(&self.slot[..n]), &[&self.group])?;
-        Ok((self.scanout.output().clone(), w, h))
+        self.scanout.show(w, h, need, frame)
     }
 
     /// Compose the frame and read it back as `frame.rs` composes it:
     /// `0xFFBBGGRR`, rows of `stride`, `out` at least `stride * height`.
+    #[cfg(test)]
     pub fn read(&mut self, r: &Rss, dcb: &Dcb, out: &mut [u32], stride: usize) -> Result<(usize, usize), String> {
         let n = self.build(r, dcb);
         let (w, h) = (self.width as usize, self.height as usize);
         self.words.resize(w * h, 0);
         self.scanout.run(&self.pipeline, w as u32, h as u32, bytemuck::cast_slice(&self.slot[..n]), &[&self.group], &mut self.words)?;
         for y in 0..h {
-            for (o, v) in out[y * stride..y * stride + w].iter_mut().zip(&self.words[y * w..(y + 1) * w]) {
-                *o = 0xFF00_0000 | (v & 0xFF) << 16 | (v & 0xFF00) | (v >> 16) & 0xFF;
-            }
+            out[y * stride..y * stride + w].copy_from_slice(&self.words[y * w..(y + 1) * w]);
         }
         Ok((w, h))
-    }
-
-    /// Frames composed and bytes read back.
-    pub fn counts(&self) -> (u64, u64) {
-        (self.scanout.frames, self.scanout.read_back_bytes)
     }
 }
