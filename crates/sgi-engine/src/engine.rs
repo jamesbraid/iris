@@ -102,9 +102,11 @@ pub struct Pump {
     pub irq_levels: u64,
 }
 
-/// Where a store comes from, for flow control. `charged` is false for a
-/// store that took no credit (a test's), so the count never runs past zero.
-/// A board with no source of its own (KONA's absent hub) gives it id 0.
+/// Where a store comes from, for flow control. The id is the shell's: the
+/// engine echoes it in `Event::Credits` and never interprets it, so a KONA
+/// hub numbered 0 is as real as any other. `charged` is false for a store
+/// that took no credit (a test's), so the count never runs past zero; id 0
+/// with `charged` false is a store with no sender.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Source {
     pub id: u32,
@@ -208,7 +210,9 @@ pub trait BoardEngine {
     /// `min_access_size` to 4).
     fn write(&mut self, off: u32, bits: u32, val: u64) -> Write;
     /// FIFO words in a batch, in order (an 8-byte store is two words); the
-    /// number taken (all, or what the queue had room for).
+    /// number taken (all, or what the queue had room for). A charged source
+    /// earns one credit for each word the board retires, so a shell with
+    /// 8-byte stores that wants one credit for the pair uses `write`.
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize;
     fn read(&mut self, off: u32, bits: u32) -> Read;
     /// Name where the stores that follow come from, for flow control: the
@@ -227,9 +231,13 @@ pub trait BoardEngine {
     /// at a stall; returns how many ran. With a worker running or after a
     /// fault: runs nothing and returns 0.
     fn run(&mut self, max_ops: usize) -> usize;
-    /// A frame boundary of the shell's scan-out timing: retrace requests
-    /// complete and held swaps latch, in that order, and an engine stalled on
-    /// `StallOn::Frame` goes on. For boards whose retrace is the shell's
+    /// A frame boundary of the shell's scan-out timing: held swaps latch and
+    /// retrace requests complete, in the order the board's hardware does (the
+    /// board's manual page says which: KONA shows the swap first, then
+    /// completes the requests waiting), and an engine stalled on
+    /// `StallOn::Frame` goes on. A swap with nothing queued behind it leaves
+    /// the engine `Idle::Yes`: the display changes at the next `frame`, which
+    /// the shell keeps calling at every retrace. For boards whose retrace is the shell's
     /// (KONA's per pipe); a board that times its own retrace names it in
     /// `Pump::next_deadline` and ignores this. MGRAS ignores it.
     fn frame(&mut self, _now_ns: u64) {}
@@ -238,7 +246,8 @@ pub trait BoardEngine {
     /// what it has recorded), completes what is due at `now_ns` (a stall on
     /// `StallOn::Time` ends here), then the write-backs, the credits and the
     /// interrupts that follow from them, in that order. Never executes queued
-    /// work and never waits.
+    /// work and never waits. A board that runs a store inside `write` (VPro
+    /// inline) has nothing queued, and `run` returns 0.
     fn advance(&mut self, now_ns: u64) -> Pump;
     /// The idle-wait input: the shell waits for the engine's CPU work to
     /// finish, at `now_ns`, for at most `budget_ns` of host time. Inline mode
@@ -276,7 +285,9 @@ pub trait BoardEngine {
     fn observe_all(&mut self) -> Result<(), Refused>;
 
     /// Run everything queued and park the workers, for at most `budget_ns`
-    /// of host time (`u64::MAX`: no bound). Before `observe_all`, `save`,
+    /// of host time (`u64::MAX`: no bound). At least one slice of work runs
+    /// before the budget is looked at, so `quiesce(0)` still makes progress
+    /// (and so does `wait_idle`). Before `observe_all`, `save`,
     /// `load` and `reset`, and when the VM stops. A stalled engine, or one
     /// still busy at the budget, answers `Midway` and keeps running; `Faulted`
     /// still parks. Never hangs on a shell input.
@@ -294,7 +305,10 @@ pub trait BoardEngine {
     /// The version of the state `save` writes and `load` takes, so a shell
     /// can set its migration version and refuse an older stream cleanly.
     fn state_version(&self) -> u32;
-    /// Power-on state; clears a fault. Needs quiescence. Posts `Event::Irq`.
+    /// Power-on state; clears a fault. Needs quiescence (a faulted engine
+    /// parks on `quiesce`, which answers `Faulted`). Drops the queued events
+    /// and the credits still owed, so the shell resets its own credit counts
+    /// with it, then posts one `Event::Irq`.
     fn reset(&mut self) -> Result<(), Refused>;
 
     /// The device-fault message, if the engine stopped.
