@@ -88,25 +88,6 @@ use super::state::XState;
 use crate::dev::kona::back::raster::{Rect, Surface};
 use crate::dev::kona::back::store::{StoreOp, WordArray, DID_PLANE, OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE};
 
-/// The two-word data token (tests).
-#[cfg(test)]
-pub const X_DATA2: u32 = WINDOW_SYSTEM_2_WORD_DATA_PRELOAD;
-pub const X_RECT: u32 = FILL_RECTANGLES_ORIGIN_WIDTH_HEIGHT;
-pub const X_RECT6: u32 = FILL_RECTANGLES_ORIGIN_WIDTH_HEIGHT_BURST_OF_6;
-pub const X_BOX: u32 = FILL_BOXES_TWO_CORNERS;
-pub const X_BOX6: u32 = FILL_BOXES_TWO_CORNERS_BURST_OF_6;
-pub const X_POINT: u32 = DRAW_ABSOLUTE_POINTS;
-pub const X_POINT6: u32 = DRAW_ABSOLUTE_POINTS_BURST_OF_6;
-pub const X_POINT24: u32 = DRAW_ABSOLUTE_POINTS_BURST_OF_24;
-pub const X_RPOINT: u32 = DRAW_RELATIVE_POINTS;
-pub const X_RPOINT6: u32 = DRAW_RELATIVE_POINTS_BURST_OF_6;
-pub const X_RPOINT24: u32 = DRAW_RELATIVE_POINTS_BURST_OF_24;
-pub const X_BGPOINT: u32 = DRAW_POINTS_IN_BACKGROUND_COLOUR;
-pub const X_BGPOINT6: u32 = DRAW_POINTS_IN_BACKGROUND_COLOUR_BURST_OF_6;
-pub const X_BGPOINT24: u32 = DRAW_POINTS_IN_BACKGROUND_COLOUR_BURST_OF_24;
-pub const X_SPANS: u32 = FILL_SPANS;
-pub const X_SPANS2: u32 = FILL_SPANS_BURST_OF_2;
-pub const X_SPANS6: u32 = FILL_SPANS_BURST_OF_6;
 /// The data tokens, 0x141 to 0x14b: how many words each carries.
 const DATA: [(u32, usize); 8] = [(WINDOW_SYSTEM_1_WORD_DATA_PRELOAD, 1), (WINDOW_SYSTEM_2_WORD_DATA_PRELOAD, 2), (WINDOW_SYSTEM_3_WORD_DATA_PRELOAD, 3), (WINDOW_SYSTEM_4_WORD_DATA_PRELOAD, 4), (WINDOW_SYSTEM_5_WORD_DATA_PRELOAD, 5), (WINDOW_SYSTEM_6_WORD_DATA_PRELOAD, 6), (WINDOW_SYSTEM_8_WORD_DATA_PRELOAD, 8), (WINDOW_SYSTEM_10_WORD_DATA_PRELOAD, 10)];
 /// The most words a data run may hold.
@@ -136,18 +117,49 @@ pub fn data_words(selector: u32) -> Option<usize> {
 /// Whether `selector` is a token that writes pixels when it arrives: a box,
 /// rectangle, point (absolute, relative or background) or span. The data tokens only collect words for one.
 pub fn paints(selector: u32) -> bool {
-    super::line::is_line(selector) || matches!(selector, X_RECT | X_RECT6 | X_BOX | X_BOX6 | X_POINT | X_POINT6 | X_POINT24 | X_BGPOINT | X_BGPOINT6 | X_BGPOINT24 | X_RPOINT | X_RPOINT6 | X_RPOINT24 | X_SPANS | X_SPANS2 | X_SPANS6)
+    super::line::is_line(selector) || matches!(selector,
+        FILL_RECTANGLES_ORIGIN_WIDTH_HEIGHT
+        | FILL_RECTANGLES_ORIGIN_WIDTH_HEIGHT_BURST_OF_6
+        | FILL_BOXES_TWO_CORNERS
+        | FILL_BOXES_TWO_CORNERS_BURST_OF_6
+        | DRAW_ABSOLUTE_POINTS
+        | DRAW_ABSOLUTE_POINTS_BURST_OF_6
+        | DRAW_ABSOLUTE_POINTS_BURST_OF_24
+        | DRAW_POINTS_IN_BACKGROUND_COLOUR
+        | DRAW_POINTS_IN_BACKGROUND_COLOUR_BURST_OF_6
+        | DRAW_POINTS_IN_BACKGROUND_COLOUR_BURST_OF_24
+        | DRAW_RELATIVE_POINTS
+        | DRAW_RELATIVE_POINTS_BURST_OF_6
+        | DRAW_RELATIVE_POINTS_BURST_OF_24
+        | FILL_SPANS
+        | FILL_SPANS_BURST_OF_2
+        | FILL_SPANS_BURST_OF_6
+    )
 }
 
 /// Whether `selector` is a token `draw_command` takes.
 pub fn is_draw(selector: u32) -> bool {
-    keeps_run(selector) || super::line::is_line(selector) || matches!(selector, X_SPANS | X_SPANS2 | X_SPANS6)
+    keeps_run(selector) || super::line::is_line(selector) || matches!(selector, FILL_SPANS | FILL_SPANS_BURST_OF_2 | FILL_SPANS_BURST_OF_6)
 }
 
 /// A token that keeps a waiting data run: the data tokens, boxes, rectangles,
 /// points and the four polylines, whose points a run precedes.
 pub fn keeps_run(selector: u32) -> bool {
-    data_words(selector).is_some() || super::line::is_polyline(selector) || matches!(selector, X_RECT | X_RECT6 | X_BOX | X_BOX6 | X_POINT | X_POINT6 | X_POINT24 | X_BGPOINT | X_BGPOINT6 | X_BGPOINT24 | X_RPOINT | X_RPOINT6 | X_RPOINT24)
+    data_words(selector).is_some() || super::line::is_polyline(selector) || matches!(selector,
+        FILL_RECTANGLES_ORIGIN_WIDTH_HEIGHT
+        | FILL_RECTANGLES_ORIGIN_WIDTH_HEIGHT_BURST_OF_6
+        | FILL_BOXES_TWO_CORNERS
+        | FILL_BOXES_TWO_CORNERS_BURST_OF_6
+        | DRAW_ABSOLUTE_POINTS
+        | DRAW_ABSOLUTE_POINTS_BURST_OF_6
+        | DRAW_ABSOLUTE_POINTS_BURST_OF_24
+        | DRAW_POINTS_IN_BACKGROUND_COLOUR
+        | DRAW_POINTS_IN_BACKGROUND_COLOUR_BURST_OF_6
+        | DRAW_POINTS_IN_BACKGROUND_COLOUR_BURST_OF_24
+        | DRAW_RELATIVE_POINTS
+        | DRAW_RELATIVE_POINTS_BURST_OF_6
+        | DRAW_RELATIVE_POINTS_BURST_OF_24
+    )
 }
 
 /// Why a request was refused.
@@ -552,12 +564,12 @@ impl XState {
             return true;
         }
         match selector {
-            X_BOX | X_BOX6 => self.boxes(surface, false, args),
-            X_RECT | X_RECT6 => self.boxes(surface, true, args),
-            X_POINT | X_POINT6 | X_POINT24 => self.points(surface, args, false),
-            X_BGPOINT | X_BGPOINT6 | X_BGPOINT24 => self.points(surface, args, true),
-            X_RPOINT | X_RPOINT6 | X_RPOINT24 => self.relative_points(surface, args),
-            X_SPANS | X_SPANS2 | X_SPANS6 => self.spans(surface, args),
+            FILL_BOXES_TWO_CORNERS | FILL_BOXES_TWO_CORNERS_BURST_OF_6 => self.boxes(surface, false, args),
+            FILL_RECTANGLES_ORIGIN_WIDTH_HEIGHT | FILL_RECTANGLES_ORIGIN_WIDTH_HEIGHT_BURST_OF_6 => self.boxes(surface, true, args),
+            DRAW_ABSOLUTE_POINTS | DRAW_ABSOLUTE_POINTS_BURST_OF_6 | DRAW_ABSOLUTE_POINTS_BURST_OF_24 => self.points(surface, args, false),
+            DRAW_POINTS_IN_BACKGROUND_COLOUR | DRAW_POINTS_IN_BACKGROUND_COLOUR_BURST_OF_6 | DRAW_POINTS_IN_BACKGROUND_COLOUR_BURST_OF_24 => self.points(surface, args, true),
+            DRAW_RELATIVE_POINTS | DRAW_RELATIVE_POINTS_BURST_OF_6 | DRAW_RELATIVE_POINTS_BURST_OF_24 => self.relative_points(surface, args),
+            FILL_SPANS | FILL_SPANS_BURST_OF_2 | FILL_SPANS_BURST_OF_6 => self.spans(surface, args),
             t if super::line::is_line(t) => self.lines(surface, t, args),
             _ => return false,
         }
@@ -677,7 +689,7 @@ mod tests {
     fn a_box_draws_the_pixels_it_names() {
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
-        assert!(x.draw_command(&d, X_BOX, &[pack(2, 3), pack(5, 7)]));
+        assert!(x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(2, 3), pack(5, 7)]));
         assert_eq!(lit(&s), 3 * 4);
         assert_eq!(at(&s, 2, 3), 0x5a00);
         assert_eq!(at(&s, 4, 6), 0x5a00);
@@ -697,7 +709,7 @@ mod tests {
         let at = |x: u32, y: u32| s.read(x, 63 - y, 1);
         let lit = || (0..64).flat_map(|y| (0..128).map(move |x| (x, y))).filter(|&(x, y)| s.read(x, y, 1) != 0).count();
         x.command(0x12a, &[100, 50, 100, 100]);
-        x.draw_command(&d, X_BOX, &[pack(2, 3), pack(5, 7)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(2, 3), pack(5, 7)]);
         assert_eq!(lit(), 3 * 4);
         assert_eq!((at(102, 53), at(104, 56), at(105, 53), at(102, 57), at(2, 3)), (0x5a00, 0x5a00, 0, 0, 0));
         // Six boxes of one pixel, two columns apart.
@@ -706,12 +718,12 @@ mod tests {
             six[2 * i] = pack(10 + 2 * i as i32, 0);
             six[2 * i + 1] = pack(11 + 2 * i as i32, 1);
         }
-        x.draw_command(&d, X_BOX6, &six);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS_BURST_OF_6, &six);
         assert_eq!(lit(), 3 * 4 + 6);
         assert!((0..6).all(|i| at(110 + 2 * i, 50) == 0x5a00) && at(10, 0) == 0);
         // Back at position zero a box is where its words put it.
         x.command(0x12a, &[0, 0, 100, 100]);
-        x.draw_command(&d, X_BOX, &[pack(20, 20), pack(22, 22)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(20, 20), pack(22, 22)]);
         assert_eq!((lit(), at(20, 20), at(21, 21), at(22, 22)), (3 * 4 + 6 + 4, 0x5a00, 0x5a00, 0));
     }
 
@@ -721,7 +733,7 @@ mod tests {
         let (mut x, s) = rig();
         x.command(0x12a, &[10, 20, 100, 100]);
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_RECT, &[pack(1, 2), 4 << 16 | 3]);
+        x.draw_command(&d, FILL_RECTANGLES_ORIGIN_WIDTH_HEIGHT, &[pack(1, 2), 4 << 16 | 3]);
         assert_eq!(lit(&s), 12);
         assert_eq!(at(&s, 11, 22), 0x5a00);
         assert_eq!(at(&s, 14, 24), 0x5a00);
@@ -735,12 +747,12 @@ mod tests {
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
         x.draw_command(&d, 0x144, &[pack(0, 0), pack(2, 2), pack(10, 10), pack(12, 12)]);
-        x.draw_command(&d, X_BOX, &[pack(20, 20), pack(22, 22)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(20, 20), pack(22, 22)]);
         assert_eq!(lit(&s), 4 + 4 + 4);
         assert_eq!(x.fills.drawn, 3);
         // Three words are not boxes: the run is dropped, the token's own box draws.
         x.draw_command(&d, 0x143, &[pack(1, 1), pack(2, 2), pack(3, 3)]);
-        x.draw_command(&d, X_BOX, &[pack(25, 25), pack(26, 26)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(25, 25), pack(26, 26)]);
         assert_eq!(x.runs_dropped, 1);
         assert_eq!(at(&s, 1, 1), 0x5a00, "the first run's box 0,0-2,2 covers it");
         assert_eq!(at(&s, 25, 25), 0x5a00);
@@ -757,16 +769,16 @@ mod tests {
     fn a_fill_clips_to_the_screen_the_clip_and_the_scissor() {
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_BOX, &[pack(-10, -10), pack(4, 4)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(-10, -10), pack(4, 4)]);
         assert_eq!(lit(&s), 16);
         x.command(0x12b, &[1, 10, 10, 20, 20]);
-        x.draw_command(&d, X_BOX, &[pack(0, 0), pack(31, 31)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(0, 0), pack(31, 31)]);
         assert_eq!(at(&s, 10, 10), 0x5a00);
         assert_eq!(at(&s, 9, 10), 0);
         assert_eq!(at(&s, 20, 15), 0);
         x.command(0x12d, &[12, 12, 2, 2]);
         let before = lit(&s);
-        x.draw_command(&d, X_BOX, &[pack(0, 0), pack(1, 1)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(0, 0), pack(1, 1)]);
         assert_eq!(lit(&s), before, "nothing in the scissor");
     }
 
@@ -777,7 +789,7 @@ mod tests {
         x.command(0x145, &[2, 0, 0, 8]);
         x.command(0x12b, &[8, 20, 20, 30, 30]);
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_BOX, &[pack(0, 0), pack(31, 31)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(0, 0), pack(31, 31)]);
         assert_eq!(lit(&s), 64 + 100);
         assert_eq!(at(&s, 15, 15), 0);
     }
@@ -787,12 +799,12 @@ mod tests {
     fn a_write_mask_and_operation_apply_to_the_destination() {
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_BOX, &[pack(0, 0), pack(2, 2)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(0, 0), pack(2, 2)]);
         let mut gc = GC;
         gc[0] = 0xff000; // foreground 0xff00
         gc[4] = 0xf0000f; // mask: only the low nibble of the high byte? index mask 0xf000
         x.command(0x129, &gc);
-        x.draw_command(&d, X_BOX, &[pack(0, 0), pack(1, 1)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(0, 0), pack(1, 1)]);
         let g = x.gc().unwrap();
         assert_eq!(at(&s, 0, 0), g.apply(g.foreground, 0x5a00));
         assert_eq!(at(&s, 1, 1), 0x5a00);
@@ -800,7 +812,7 @@ mod tests {
         let mut gc = GC;
         gc[9] = 10;
         x.command(0x129, &gc);
-        x.draw_command(&d, X_BOX, &[pack(0, 0), pack(2, 2)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(0, 0), pack(2, 2)]);
         assert_eq!(at(&s, 0, 0), g.apply(g.foreground, 0x5a00));
     }
 
@@ -814,13 +826,13 @@ mod tests {
         let mut bad = GC;
         bad[9] = 1;
         x.command(0x129, &bad);
-        x.draw_command(&d, X_BOX, &[pack(0, 0), pack(4, 4)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(0, 0), pack(4, 4)]);
         assert_eq!((x.fills.bad_context, lit(&s)), (1, 0));
         // An opaque stippled context with no stipple loaded.
         let mut opaque = GC;
         opaque[4] |= 0x8000_0000;
         x.command(0x129, &opaque);
-        x.draw_command(&d, X_BOX, &[pack(0, 0), pack(4, 4)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(0, 0), pack(4, 4)]);
         assert_eq!((x.fills.bad_context, lit(&s)), (2, 0));
         // A destination wider than the 16-bit target (a direct pixel there),
         // with a mask that needs the destination.
@@ -828,12 +840,12 @@ mod tests {
         masked[4] = 0xf0053f;
         x.command(0x129, &masked);
         s.write(10, 31 - 10, 1, 0x12_3456);
-        x.draw_command(&d, X_BOX, &[pack(8, 8), pack(12, 12)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(8, 8), pack(12, 12)]);
         assert_eq!((x.fills.bad_destination, at(&s, 8, 8)), (1, 0), "nothing of the request drew");
         // One bad box in a request stops the whole request: the first box is
         // fine, the second reaches the bad destination.
         x.draw_command(&d, 0x142, &[pack(0, 0), pack(2, 2)]);
-        x.draw_command(&d, X_BOX, &[pack(9, 9), pack(11, 11)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(9, 9), pack(11, 11)]);
         assert_eq!(x.fills.bad_destination, 2);
         assert_eq!(at(&s, 0, 0), 0, "the first box of the refused request did not draw");
     }
@@ -849,10 +861,10 @@ mod tests {
         let id = |value: u32| [0, value << 9 & 0x3ffde00, 0, 0, 0, 0xfc000, 8, 1, 0, 6, 0, 1, 1];
         s.write(1, 31 - 1, DID_PLANE, 0x1f03);
         x.command(0x129, &id(0));
-        x.draw_command(&d, X_BOX, &[pack(0, 0), pack(2, 2)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(0, 0), pack(2, 2)]);
         assert_eq!(s.read(1, 31 - 1, DID_PLANE), 0x1f03, "ID 0 into bits 7:2 leaves them zero");
         s.write(1, 31 - 1, DID_PLANE, 0x1fff);
-        x.draw_command(&d, X_BOX, &[pack(0, 0), pack(2, 2)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(0, 0), pack(2, 2)]);
         assert_eq!(s.read(1, 31 - 1, DID_PLANE), 0x1f03, "the ID bits cleared, the overlay field kept");
         assert_eq!(lit(&s), 0, "the colour word is untouched");
         assert_eq!(x.fills.other_target, 0);
@@ -865,20 +877,20 @@ mod tests {
         let (mut x, s) = rig();
         x.command(0x12a, &[100, 100, 5, 5]);
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_SPANS2, &[2, pack(1, 1), pack(4, 3), 5, 2]);
+        x.draw_command(&d, FILL_SPANS_BURST_OF_2, &[2, pack(1, 1), pack(4, 3), 5, 2]);
         assert_eq!(lit(&s), 7);
         assert_eq!(at(&s, 1, 1), 0x5a00);
         assert_eq!(at(&s, 5, 1), 0x5a00);
         assert_eq!(at(&s, 6, 1), 0);
         assert_eq!(at(&s, 5, 3), 0x5a00);
-        x.draw_command(&d, X_SPANS, &[2, pack(0, 9), 3]);
+        x.draw_command(&d, FILL_SPANS, &[2, pack(0, 9), 3]);
         assert_eq!((x.fills.malformed, lit(&s)), (1, 7));
         // A zero width draws nothing; spans end a waiting data run.
         x.draw_command(&d, 0x141, &[pack(20, 20)]);
         // (the back end offers every kernel command to `command` first, which
         // ends the run)
-        assert!(!x.command(X_SPANS, &[]));
-        x.draw_command(&d, X_SPANS, &[1, pack(0, 9), 0]);
+        assert!(!x.command(FILL_SPANS, &[]));
+        x.draw_command(&d, FILL_SPANS, &[1, pack(0, 9), 0]);
         assert_eq!((x.runs_dropped, lit(&s)), (1, 7));
     }
 
@@ -888,9 +900,9 @@ mod tests {
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
         x.draw_command(&d, 0x142, &[pack(1, 1), pack(2, 2)]);
-        x.draw_command(&d, X_POINT, &[pack(3, 3)]);
+        x.draw_command(&d, DRAW_ABSOLUTE_POINTS, &[pack(3, 3)]);
         assert_eq!(lit(&s), 3);
-        x.draw_command(&d, X_POINT6, &[pack(10, 1), pack(11, 1), pack(12, 1), pack(13, 1), pack(14, 1), pack(-1, 1)]);
+        x.draw_command(&d, DRAW_ABSOLUTE_POINTS_BURST_OF_6, &[pack(10, 1), pack(11, 1), pack(12, 1), pack(13, 1), pack(14, 1), pack(-1, 1)]);
         assert_eq!(lit(&s), 3 + 5);
     }
 
@@ -902,9 +914,9 @@ mod tests {
         x.command(0x12a, &[10, 20, 100, 100]);
         let d = Surface::new(&s, 1);
         x.draw_command(&d, 0x141, &[pack(1, 1)]);
-        x.draw_command(&d, X_POINT, &[pack(2, 2)]);
+        x.draw_command(&d, DRAW_ABSOLUTE_POINTS, &[pack(2, 2)]);
         assert_eq!((lit(&s), at(&s, 11, 21), at(&s, 12, 22), at(&s, 1, 1)), (2, 0x5a00, 0x5a00, 0));
-        x.draw_command(&d, X_BGPOINT, &[pack(-1, -1)]);
+        x.draw_command(&d, DRAW_POINTS_IN_BACKGROUND_COLOUR, &[pack(-1, -1)]);
         assert_eq!(at(&s, 9, 19), 0xa500);
     }
 
@@ -916,18 +928,18 @@ mod tests {
         let (mut x, s) = rig();
         x.command(0x12a, &[10, 20, 100, 100]);
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_RPOINT, &[pack(1, 2)]);
+        x.draw_command(&d, DRAW_RELATIVE_POINTS, &[pack(1, 2)]);
         assert_eq!((lit(&s), at(&s, 11, 22)), (1, 0x5a00));
         // The run's words come first, and the burst continues the walk.
         x.draw_command(&d, 0x142, &[pack(0, 0), pack(2, 0)]);
-        x.draw_command(&d, X_RPOINT6, &[pack(0, 1), pack(-1, 0), pack(0, 0), pack(5, 1), pack(0, 0), pack(0, 0)]);
+        x.draw_command(&d, DRAW_RELATIVE_POINTS_BURST_OF_6, &[pack(0, 1), pack(-1, 0), pack(0, 0), pack(5, 1), pack(0, 0), pack(0, 0)]);
         let want = [(10, 20), (12, 20), (12, 21), (11, 21), (11, 21), (16, 22), (16, 22), (16, 22)];
         for &(px, py) in &want {
             assert_eq!(at(&s, px, py), 0x5a00, "({px}, {py})");
         }
         assert_eq!(lit(&s), 1 + 5, "a pixel named twice is one pixel");
         // A step of -1 in both axes from the origin goes up and left of it.
-        x.draw_command(&d, X_RPOINT, &[pack(-1, -1)]);
+        x.draw_command(&d, DRAW_RELATIVE_POINTS, &[pack(-1, -1)]);
         assert_eq!(at(&s, 9, 19), 0x5a00);
     }
 
@@ -938,15 +950,15 @@ mod tests {
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
         x.draw_command(&d, 0x141, &[pack(1, 1)]);
-        x.draw_command(&d, X_BGPOINT, &[pack(2, 2)]);
+        x.draw_command(&d, DRAW_POINTS_IN_BACKGROUND_COLOUR, &[pack(2, 2)]);
         assert_eq!((lit(&s), at(&s, 1, 1), at(&s, 2, 2)), (2, 0xa500, 0xa500));
-        x.draw_command(&d, X_BGPOINT6, &[pack(10, 1), pack(11, 1), pack(12, 1), pack(13, 1), pack(14, 1), pack(-1, 1)]);
+        x.draw_command(&d, DRAW_POINTS_IN_BACKGROUND_COLOUR_BURST_OF_6, &[pack(10, 1), pack(11, 1), pack(12, 1), pack(13, 1), pack(14, 1), pack(-1, 1)]);
         assert_eq!((lit(&s), at(&s, 14, 1)), (2 + 5, 0xa500));
         let words: Vec<u32> = (0..24).map(|i| pack(i, 20)).collect();
-        x.draw_command(&d, X_BGPOINT24, &words);
+        x.draw_command(&d, DRAW_POINTS_IN_BACKGROUND_COLOUR_BURST_OF_24, &words);
         assert_eq!((lit(&s), at(&s, 23, 20)), (2 + 5 + 24, 0xa500));
         // The foreground token still draws the foreground.
-        x.draw_command(&d, X_POINT, &[pack(5, 5)]);
+        x.draw_command(&d, DRAW_ABSOLUTE_POINTS, &[pack(5, 5)]);
         assert_eq!(at(&s, 5, 5), 0x5a00);
     }
 
@@ -960,9 +972,9 @@ mod tests {
         x.command(0x13d, &[1, 8, 1]);
         x.stipple.rows(&[0xaaaa_aaaa]);
         x.command(0x13c, &[1]);
-        x.draw_command(&d, X_BGPOINT6, &[pack(0, 0), pack(1, 0), pack(2, 0), pack(3, 0), pack(4, 0), pack(5, 0)]);
+        x.draw_command(&d, DRAW_POINTS_IN_BACKGROUND_COLOUR_BURST_OF_6, &[pack(0, 0), pack(1, 0), pack(2, 0), pack(3, 0), pack(4, 0), pack(5, 0)]);
         assert_eq!((0..6).map(|c| at(&s, c, 0)).collect::<Vec<_>>(), [0xa500; 6]);
-        x.draw_command(&d, X_POINT6, &[pack(0, 1), pack(1, 1), pack(2, 1), pack(3, 1), pack(4, 1), pack(5, 1)]);
+        x.draw_command(&d, DRAW_ABSOLUTE_POINTS_BURST_OF_6, &[pack(0, 1), pack(1, 1), pack(2, 1), pack(3, 1), pack(4, 1), pack(5, 1)]);
         assert_eq!((0..6).map(|c| at(&s, c, 1)).collect::<Vec<_>>(), [0x5a00, 0, 0x5a00, 0, 0x5a00, 0]);
     }
 
@@ -979,7 +991,7 @@ mod tests {
         let colour = Gc::decode_for_fill(&both).unwrap().foreground;
         assert_ne!(colour, 0);
         x.command(0x129, &both);
-        x.draw_command(&d, X_BOX, &[pack(2, 3), pack(5, 7)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(2, 3), pack(5, 7)]);
         for (px, py) in (0..32).flat_map(|y| (0..32).map(move |x| (x, y))) {
             let inside = (2..5).contains(&px) && (3..7).contains(&py);
             let want = if inside { colour } else { 0 };
@@ -990,7 +1002,7 @@ mod tests {
         let mut one = both;
         one[7] = 1;
         x.command(0x129, &one);
-        x.draw_command(&d, X_BOX, &[pack(10, 10), pack(12, 12)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(10, 10), pack(12, 12)]);
         assert_eq!((s.read(10, 31 - 10, 1), s.read(10, 31 - 10, 2)), (colour, 0));
     }
 
@@ -1005,7 +1017,7 @@ mod tests {
         x.command(0x145, &[2, 0, 0, 20]);
         x.command(0x12b, &[10, 10, 0, 30, 10]);
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_BOX, &[pack(0, 0), pack(32, 10)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(0, 0), pack(32, 10)]);
         let v = x.gc().unwrap().foreground;
         for px in [0, 15, 19, 25, 29] {
             assert_eq!(at(&s, px, 5), v, "x {px}");
@@ -1021,7 +1033,7 @@ mod tests {
         x.draw_command(&d, 0x142, &[1]);
         x.draw_command(&d, 0x141, &[1, 2]);
         assert_eq!((x.fills.malformed, x.runs_dropped), (2, 0));
-        x.draw_command(&d, X_BOX, &[pack(0, 0), pack(1, 1)]);
+        x.draw_command(&d, FILL_BOXES_TWO_CORNERS, &[pack(0, 0), pack(1, 1)]);
         assert_eq!(x.fills.drawn, 1, "the box alone");
     }
 
@@ -1157,7 +1169,7 @@ mod tests {
             }
             // `b` is where the box lands: it is sent relative to the position, which both corners take.
             let b = rect(&mut rnd);
-            x.draw_command(&surface, X_BOX, &[pack((b[0] - pos.0) as i32, (b[1] - pos.1) as i32), pack((b[2] - pos.0) as i32, (b[3] - pos.1) as i32)]);
+            x.draw_command(&surface, FILL_BOXES_TWO_CORNERS, &[pack((b[0] - pos.0) as i32, (b[1] - pos.1) as i32), pack((b[2] - pos.0) as i32, (b[3] - pos.1) as i32)]);
 
             // The reference.
             let mut limit = [0i64, 0, W, H];
@@ -1213,14 +1225,14 @@ mod tests {
 
     #[test]
     fn the_run_rule_names_the_tokens_that_keep_a_run() {
-        for t in [0x141, 0x142, 0x143, 0x144, 0x146, 0x147, 0x149, 0x14b, X_BOX, X_RECT, X_BOX6, X_RECT6] {
+        for t in [0x141, 0x142, 0x143, 0x144, 0x146, 0x147, 0x149, 0x14b, FILL_BOXES_TWO_CORNERS, FILL_RECTANGLES_ORIGIN_WIDTH_HEIGHT, FILL_BOXES_TWO_CORNERS_BURST_OF_6, FILL_RECTANGLES_ORIGIN_WIDTH_HEIGHT_BURST_OF_6] {
             assert!(keeps_run(t), "{t:#x}");
         }
-        for t in [X_POINT, X_POINT6, X_POINT24, X_BGPOINT, X_BGPOINT6, X_BGPOINT24] {
+        for t in [DRAW_ABSOLUTE_POINTS, DRAW_ABSOLUTE_POINTS_BURST_OF_6, DRAW_ABSOLUTE_POINTS_BURST_OF_24, DRAW_POINTS_IN_BACKGROUND_COLOUR, DRAW_POINTS_IN_BACKGROUND_COLOUR_BURST_OF_6, DRAW_POINTS_IN_BACKGROUND_COLOUR_BURST_OF_24] {
             assert!(keeps_run(t) && paints(t) && is_draw(t), "{t:#x}");
         }
-        assert!(!keeps_run(0x129) && !keeps_run(0x145) && !keeps_run(crate::dev::kona::back::x::line::X_SEGMENT));
-        for t in [crate::dev::kona::back::x::line::X_LINE, crate::dev::kona::back::x::line::X_LINE6, crate::dev::kona::back::x::line::X_RLINE, crate::dev::kona::back::x::line::X_RLINE6] {
+        assert!(!keeps_run(0x129) && !keeps_run(0x145) && !keeps_run(DRAW_LINE_SEGMENTS));
+        for t in [DRAW_CONNECTED_POLYLINE, DRAW_CONNECTED_POLYLINE_BURST_OF_6, DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS, DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS_BURST_OF_6] {
             assert!(keeps_run(t) && paints(t) && is_draw(t), "{t:#x}");
         }
         assert_eq!(data_words(0x14b), Some(10));

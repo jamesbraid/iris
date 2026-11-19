@@ -27,11 +27,6 @@
 use crate::dev::kona::defs::*;
 use super::gc::{Gc, Status};
 
-pub const X_GC: u32 = WINDOW_SYSTEM_GRAPHICS_CONTEXT_LOAD;
-pub const X_POSITION: u32 = WINDOW_SYSTEM_DRAWABLE_ORIGIN_AND_SIZE_LOAD;
-pub const X_CLIP: u32 = WINDOW_SYSTEM_CLIP_LOAD;
-pub const X_SCISSOR: u32 = WINDOW_SYSTEM_SCISSOR_LOAD;
-pub const X_BDATA4: u32 = WINDOW_SYSTEM_FOUR_WORD_DATA_PRELOAD_BYTE_FORM;
 
 /// Clip rectangles the model keeps.
 pub const CLIP_MAX_RECTS: usize = 64;
@@ -176,7 +171,7 @@ impl XState {
     /// there). This model drops it: the context-ownership rule is not modelled,
     /// to be revisited with the context-switch step.
     pub fn end_runs(&mut self, selector: u32) {
-        if selector != X_BDATA4 && selector != X_CLIP && !self.clip_run.is_empty() {
+        if selector != WINDOW_SYSTEM_FOUR_WORD_DATA_PRELOAD_BYTE_FORM && selector != WINDOW_SYSTEM_CLIP_LOAD && !self.clip_run.is_empty() {
             self.clip_run.clear();
             self.runs_dropped += 1;
         }
@@ -190,17 +185,17 @@ impl XState {
     pub fn command(&mut self, selector: u32, args: &[u32]) -> bool {
         self.end_runs(selector);
         match selector {
-            X_GC => {
+            WINDOW_SYSTEM_GRAPHICS_CONTEXT_LOAD => {
                 if let Ok(w) = <[u32; GC_WORDS]>::try_from(args) {
                     self.gc = w;
                 }
             }
-            X_POSITION => {
+            WINDOW_SYSTEM_DRAWABLE_ORIGIN_AND_SIZE_LOAD => {
                 if let Ok(w) = <[u32; 4]>::try_from(args) {
                     self.position = w;
                 }
             }
-            X_BDATA4 => {
+            WINDOW_SYSTEM_FOUR_WORD_DATA_PRELOAD_BYTE_FORM => {
                 if self.clip_run.len() + BDATA4_WORDS + CLIP_WORDS > CLIP_LIST_WORDS {
                     self.clip_run.clear();
                     self.runs_dropped += 1;
@@ -208,13 +203,13 @@ impl XState {
                     self.clip_run.extend_from_slice(args);
                 }
             }
-            X_CLIP => self.load_clip(args),
+            WINDOW_SYSTEM_CLIP_LOAD => self.load_clip(args),
             super::stipple::X_LOAD_STIPPLE => self.stipple.load(args),
             super::stipple::X_STORE_STIPPLE => {
                 self.stipple.begin_store(args);
             }
             super::stipple::X_ROTATE_STIPPLE => self.stipple.rotate(args),
-            X_SCISSOR => {
+            WINDOW_SYSTEM_SCISSOR_LOAD => {
                 if let Ok(w) = <[u32; 4]>::try_from(args) {
                     self.scissor = Some(w);
                 }
@@ -256,9 +251,9 @@ mod tests {
         // bdata4 carries words in fours, from the list's first word.
         for c in lead.chunks(BDATA4_WORDS) {
             assert_eq!(c.len(), BDATA4_WORDS, "the test builds lists the senders would");
-            x.command(X_BDATA4, c);
+            x.command(WINDOW_SYSTEM_FOUR_WORD_DATA_PRELOAD_BYTE_FORM, c);
         }
-        x.command(X_CLIP, last);
+        x.command(WINDOW_SYSTEM_CLIP_LOAD, last);
     }
 
     #[test]
@@ -275,8 +270,8 @@ mod tests {
     fn a_longer_list_arrives_through_bdata4() {
         let mut x = XState::default();
         // count 2: 1 + 8 = 9 words: bdata4 takes four, a second four, clip the last five? 9 = 4 + 5.
-        x.command(X_BDATA4, &[2, 0, 0, 10]);
-        x.command(X_CLIP, &[10, 50, 50, 60, 60]);
+        x.command(WINDOW_SYSTEM_FOUR_WORD_DATA_PRELOAD_BYTE_FORM, &[2, 0, 0, 10]);
+        x.command(WINDOW_SYSTEM_CLIP_LOAD, &[10, 50, 50, 60, 60]);
         assert_eq!(x.clip_rects(), [[0, 0, 10, 10], [50, 50, 60, 60]]);
         assert_eq!(x.bounds(100, 100), Bounds { x1: 0, y1: 0, x2: 60, y2: 60 });
         assert!(x.clip_contains(5, 5) && x.clip_contains(55, 55));
@@ -287,12 +282,12 @@ mod tests {
     #[test]
     fn a_clip_list_that_does_not_match_its_count_clips_to_the_screen() {
         let mut x = XState::default();
-        x.command(X_CLIP, &[1, 5, 5, 9, 9]);
+        x.command(WINDOW_SYSTEM_CLIP_LOAD, &[1, 5, 5, 9, 9]);
         assert_eq!(x.clip_rects().len(), 1);
-        x.command(X_CLIP, &[0, 0, 0, 0, 0]);
+        x.command(WINDOW_SYSTEM_CLIP_LOAD, &[0, 0, 0, 0, 0]);
         assert!(x.clip_rects().is_empty());
         assert_eq!(x.bounds(8, 8), Bounds { x1: 0, y1: 0, x2: 8, y2: 8 });
-        x.command(X_CLIP, &[3, 0, 0, 1, 1]);
+        x.command(WINDOW_SYSTEM_CLIP_LOAD, &[3, 0, 0, 1, 1]);
         assert!(x.clip_rects().is_empty());
         assert_eq!(x.clips_refused, 2);
     }
@@ -300,11 +295,11 @@ mod tests {
     #[test]
     fn a_scissor_narrows_the_bounds_until_the_next_clip() {
         let mut x = XState::default();
-        x.command(X_SCISSOR, &[100, 200, 30, 40]);
+        x.command(WINDOW_SYSTEM_SCISSOR_LOAD, &[100, 200, 30, 40]);
         assert_eq!(x.bounds(1280, 1024), Bounds { x1: 100, y1: 200, x2: 130, y2: 240 });
-        x.command(X_CLIP, &[1, 0, 0, 1280, 1024]);
+        x.command(WINDOW_SYSTEM_CLIP_LOAD, &[1, 0, 0, 1280, 1024]);
         assert_eq!(x.scissor(), None);
-        x.command(X_SCISSOR, &[0, 0, 0, 0]);
+        x.command(WINDOW_SYSTEM_SCISSOR_LOAD, &[0, 0, 0, 0]);
         let b = x.bounds(16, 16);
         assert!(b.x1 >= b.x2, "a scissor of no width clips everything");
     }
@@ -313,12 +308,12 @@ mod tests {
     #[test]
     fn another_command_ends_a_waiting_clip_list() {
         let mut x = XState::default();
-        x.command(X_BDATA4, &[2, 0, 0, 10]);
-        x.command(X_BDATA4, &[10, 1, 1, 2]);
+        x.command(WINDOW_SYSTEM_FOUR_WORD_DATA_PRELOAD_BYTE_FORM, &[2, 0, 0, 10]);
+        x.command(WINDOW_SYSTEM_FOUR_WORD_DATA_PRELOAD_BYTE_FORM, &[10, 1, 1, 2]);
         assert_eq!(x.runs_dropped, 0);
-        x.command(X_POSITION, &[1, 2, 3, 4]);
+        x.command(WINDOW_SYSTEM_DRAWABLE_ORIGIN_AND_SIZE_LOAD, &[1, 2, 3, 4]);
         assert_eq!(x.runs_dropped, 1);
-        x.command(X_CLIP, &[1, 0, 0, 4, 4]);
+        x.command(WINDOW_SYSTEM_CLIP_LOAD, &[1, 0, 0, 4, 4]);
         assert_eq!(x.clip_rects(), [[0, 0, 4, 4]], "the dropped words are not in the list");
     }
 
@@ -327,7 +322,7 @@ mod tests {
     fn a_clip_list_is_bounded() {
         let mut x = XState::default();
         for _ in 0..CLIP_LIST_WORDS / BDATA4_WORDS + 1 {
-            x.command(X_BDATA4, &[0; 4]);
+            x.command(WINDOW_SYSTEM_FOUR_WORD_DATA_PRELOAD_BYTE_FORM, &[0; 4]);
         }
         assert_eq!(x.runs_dropped, 1);
     }
@@ -336,8 +331,8 @@ mod tests {
     #[test]
     fn a_clip_of_the_wrong_length_is_refused() {
         let mut x = XState::default();
-        x.command(X_CLIP, &[]);
-        x.command(X_CLIP, &[1, 2]);
+        x.command(WINDOW_SYSTEM_CLIP_LOAD, &[]);
+        x.command(WINDOW_SYSTEM_CLIP_LOAD, &[1, 2]);
         assert_eq!(x.clips_refused, 2);
         assert!(x.clip_rects().is_empty());
     }
@@ -346,14 +341,14 @@ mod tests {
     fn state_loads_keep_their_words() {
         let mut x = XState::default();
         let gc = [0x5a000, 0x1ffe, 0xa5000, 0x1ffe, 0xf00fff, 0, 0x180c, 0x40001, 1, 6, 5, 1, 1];
-        assert!(x.command(X_GC, &gc));
+        assert!(x.command(WINDOW_SYSTEM_GRAPHICS_CONTEXT_LOAD, &gc));
         assert_eq!(x.gc_words(), &gc);
         assert_eq!(x.gc().unwrap().foreground, 0x5a00);
-        x.command(X_POSITION, &[(-3i32) as u32, 7, 100, 50]);
+        x.command(WINDOW_SYSTEM_DRAWABLE_ORIGIN_AND_SIZE_LOAD, &[(-3i32) as u32, 7, 100, 50]);
         assert_eq!(x.origin(), (-3, 7));
         assert!(!x.command(0x1, &[]));
         // A load of the wrong length is ignored.
-        x.command(X_GC, &gc[..5]);
+        x.command(WINDOW_SYSTEM_GRAPHICS_CONTEXT_LOAD, &gc[..5]);
         assert_eq!(x.gc_words(), &gc);
         x.reset();
         assert_eq!(x.origin(), (0, 0));
