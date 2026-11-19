@@ -225,6 +225,21 @@ fn a_read_of_a_register_the_stream_changes_waits_for_the_stream() {
 }
 
 #[test]
+fn the_credit_register_is_the_words_waiting_shifted_left_one() {
+    let mut e = engine();
+    assert_eq!(e.read(CREDIT, 32), Read::Value(0));
+    for w in [1, 9] {
+        store(&mut e, COMMAND_PAGE, w, A);
+    }
+    assert_eq!(e.read(CREDIT, 32), Read::Value(4), "two words queued");
+    e.run(usize::MAX);
+    assert_eq!(e.read(CREDIT, 32), Read::Value(2), "the open command holds its selector");
+    store(&mut e, COMMAND_PAGE, 0, A);
+    e.run(usize::MAX);
+    assert_eq!(e.read(CREDIT, 32), Read::Value(0));
+}
+
+#[test]
 fn a_full_stream_answers_busy_and_takes_the_retry() {
     let opts = Options { queue: 4, ..Options::default() };
     let mut e = Engine::new(KonaConfig::ir2(1).unwrap().with_pool(0, 32), Ram::default(), opts, None).unwrap();

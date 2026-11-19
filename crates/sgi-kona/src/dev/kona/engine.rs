@@ -286,12 +286,11 @@ impl<M: HostMem> KonaEngine<M> {
             ACTIVITY => return if self.host.activity.load(Relaxed) || pending { ACTIVITY_BUS } else { 0 },
             _ => {}
         }
-        // The credit register is the FIFO's fill: the words the framers hold and the stores
-        // waiting, rounded up to two. It reads full while a display list runs.
+        // The FIFO's fill is a word count in bits 10:1. It reads full while a display list runs.
         let credit = if self.host.list_running.load(Relaxed) {
             CREDIT_MASK
         } else {
-            ((self.core.held_words() + self.stream.len() as u32 + 1) & !1).min(CREDIT_MASK)
+            ((self.core.held_words() + self.stream.len() as u32) << 1).min(CREDIT_MASK)
         };
         self.host.front.lock().read(off, credit).unwrap_or(0)
     }
