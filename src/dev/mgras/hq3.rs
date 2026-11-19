@@ -903,13 +903,13 @@ impl Hq3Engine {
     /// enabled, bits 0-3, and kept inside, 4-7), screen masks 1-4 as (x, y)
     /// ranges `min << 16 | max`, the buffer page pointers, and the PP1
     /// window mode (the clip ID to match).
-    fn apply_window(&mut self, origin: u32, mode: u32, masks: [[u32; 2]; 4], drb: u32, pp1winmode: u32, sink: &mut dyn Hq3Sink) {
+    fn apply_window(&mut self, origin: u32, mode: u32, masks: [[u32; 2]; 4], drb: u32, reg_f17b: u32, sink: &mut dyn Hq3Sink) {
         if sink.tracing() {
             sink.trace(format!(
-                "GL window: origin {origin:#x} mode {mode:#x} masks {masks:x?} DRBpointers {drb:#x} pp1winmode {pp1winmode:#x}"
+                "GL window: origin {origin:#x} mode {mode:#x} masks {masks:x?} DRBpointers {drb:#x} reg_f17b {reg_f17b:#x}"
             ));
         }
-        self.gl.window = super::gl::Window { valid: 1, origin, mode, masks, drb, pp1winmode };
+        self.gl.window = super::gl::Window { valid: 1, origin, mode, masks, drb, reg_f17b };
     }
 
     /// The current context's GL state and the parked contexts, for the

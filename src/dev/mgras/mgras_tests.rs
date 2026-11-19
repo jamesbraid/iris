@@ -838,7 +838,7 @@ fn switch_to_gl_context(m: &Mgras, id: u32, x: u32, y: u32, w: u32, h: u32) {
 }
 
 /// The same, the window's PP1 window mode (image word 4) `reg_f17b`.
-fn switch_to_gl_context_cid(m: &Mgras, id: u32, x: u32, y: u32, w: u32, h: u32, pp1winmode: u32) {
+fn switch_to_gl_context_cid(m: &Mgras, id: u32, x: u32, y: u32, w: u32, h: u32, reg_f17b: u32) {
     // Clear the switch-done flag first: left set by the last switch, the
     // wait below would return before this one ran (and a test's next
     // register write would race the HQ thread; seen on CI).
@@ -848,7 +848,7 @@ fn switch_to_gl_context_cid(m: &Mgras, id: u32, x: u32, y: u32, w: u32, h: u32, 
     img[0] = id;
     img[2] = x | y << 16;
     img[3] = 0x11;
-    img[4] = pp1winmode;
+    img[4] = reg_f17b;
     img[11] = x << 16 | (x + w - 1);
     img[12] = y << 16 | (y + h - 1);
     img[13] = 0x240;
@@ -2476,18 +2476,18 @@ fn gl_tex_level(m: &Mgras, level: u32, n: u32, dest: u32, texels: &[u32]) {
 
 /// `gl_tex_level` for host elements `elem` (pixel state 0xDBB: 1 bytes, 3
 /// 16-bit, 4 32-bit) with component scale `scale` (0xD0A; 0 leaves it).
-fn gl_tex_level_as(m: &Mgras, level: u32, n: u32, dest: u32, texels: &[u32], elem: u32, scale: f32, tl_mode: u32) {
-    gl_tex_level_tm(m, level, n, dest, texels, elem, scale, tl_mode, 0x40858);
+fn gl_tex_level_as(m: &Mgras, level: u32, n: u32, dest: u32, texels: &[u32], elem: u32, scale: f32, texture_loader_mode: u32) {
+    gl_tex_level_tm(m, level, n, dest, texels, elem, scale, texture_loader_mode, 0x40858);
 }
 
 /// `gl_tex_level_as` with texture_mode_first `texture_mode_first` in the context while the
 /// level loads (libGLcore leaves whatever texture was bound before).
 #[allow(clippy::too_many_arguments)]
-fn gl_tex_level_tm(m: &Mgras, level: u32, n: u32, dest: u32, texels: &[u32], elem: u32, scale: f32, tl_mode: u32, texmode1: u32) {
+fn gl_tex_level_tm(m: &Mgras, level: u32, n: u32, dest: u32, texels: &[u32], elem: u32, scale: f32, texture_loader_mode: u32, texture_mode_first: u32) {
     let log = n.trailing_zeros();
     fifo_token(m, 0x0C, &[]);
-    rss_shadow_list(m, &[(0x1A0, 0), (0x18B, 0), (0x111, texmode1)]);
-    rss_shadow_list(m, &[(0x1A1, tl_mode)]);
+    rss_shadow_list(m, &[(0x1A0, 0), (0x18B, 0), (0x111, texture_mode_first)]);
+    rss_shadow_list(m, &[(0x1A1, texture_loader_mode)]);
     rss_shadow_list(m, &[(0x1A2, log << 8 | log << 4 | level)]);
     fifo_token(m, 0xD2, &[0xFFFF_FFFF, 0x0140_0000, 0, 0, 3]);
     fifo_token(m, 0xCD, &[1, 1, 0x14, 0xDA8, 0, 2, 5, 0, 0, n, n, n << 16 | n, 0]);
@@ -2510,10 +2510,10 @@ fn gl_tex_image_4x4(m: &Mgras) {
 
 /// Texturing on for what follows, as for a draw (traced): token_00b, the
 /// sampler registers, level 0 at page 0 through token_0ec.
-fn gl_tex_bind_4x4(m: &Mgras, texmode2: u32, texmode1: u32) {
+fn gl_tex_bind_4x4(m: &Mgras, texture_mode_drawn: u32, texture_mode_first: u32) {
     fifo_token(m, 0x0B, &[]);
-    rss_shadow_list(m, &[(0x180, texmode2)]);
-    rss_shadow_list(m, &[(0x111, texmode1)]);
+    rss_shadow_list(m, &[(0x180, texture_mode_drawn)]);
+    rss_shadow_list(m, &[(0x111, texture_mode_first)]);
     rss_shadow_list(m, &[(0x184, 0), (0x185, 0), (0x190, 0)]);
     fifo_token(m, 0xEC, &[0xBC6, 0xBC7, 0x191, 0]);
     rss_shadow_list(m, &[(0x181, 0x2222), (0x183, 1), (0x18C, 0x8004)]);
@@ -2666,9 +2666,9 @@ fn gl_texture_select_slots_share_a_page() {
 #[test]
 fn gl_texture_one_component_bytes_are_the_texels() {
     // texture_mode_first at load: alpha, luminance and RGBA classes.
-    for texmode1 in [0x40246, 0x40440, 0x40858] {
+    for texture_mode_first in [0x40246, 0x40440, 0x40858] {
         let m = gl_board([0.0, 0.0, 0.0]);
-        gl_tex_level_tm(&m, 0, 4, 0, &[0x00FF_40C0; 4], 1, 0.0, 0x34020, texmode1);
+        gl_tex_level_tm(&m, 0, 4, 0, &[0x00FF_40C0; 4], 1, 0.0, 0x34020, texture_mode_first);
         let _sub = m.submit.lock();
         m.wait_idle();
         let rss = unsafe { &*m.rss.get() };
@@ -2679,7 +2679,7 @@ fn gl_texture_one_component_bytes_are_the_texels() {
             let h: Vec<char> = rss.te.nibbles_hex((off + s) * 8, 2).chars().collect();
             u32::from_str_radix(&format!("{}{}", h[1], h[0]), 16).unwrap()
         };
-        assert_eq!([texel(0), texel(1), texel(2), texel(3)], [0x00, 0xFF, 0x40, 0xC0], "texture_mode_first {texmode1:#x} at load");
+        assert_eq!([texel(0), texel(1), texel(2), texel(3)], [0x00, 0xFF, 0x40, 0xC0], "texture_mode_first {texture_mode_first:#x} at load");
         drop(_sub);
         m.stop_engines();
     }
@@ -3148,9 +3148,9 @@ fn gl_texture_save_and_restore_rgb8() {
 
 fn texture_save_and_restore(nc: u32) {
     let m = gl_board([0.0, 0.0, 0.0]);
-    let tl_mode = (nc - 1) << 1 | 1 << 5;
+    let texture_loader_mode = (nc - 1) << 1 | 1 << 5;
     let texels: Vec<u32> = (0..16).map(|i| (i % 4) * 0x40 << 24 | (i / 4) * 0x40 << 16 | 0xA5FF).collect();
-    gl_tex_level_as(&m, 0, 4, 0, &texels, 1, 0.0, 0x34E00 | tl_mode);
+    gl_tex_level_as(&m, 0, 4, 0, &texels, 1, 0.0, 0x34E00 | texture_loader_mode);
     // Save page 0 (the texture's components and depth): 64 rows of 256
     // bytes into host pages 2..5.
     rss_shadow_list(&m, &[(0x181, 0xD6D6), (0x183, 0), (0x111, (nc - 1) << 3), (0x180, 0x11804), (0x190, 0)]);
@@ -3167,7 +3167,7 @@ fn texture_save_and_restore(nc: u32) {
     // Page 0 gets another texture.
     gl_tex_level(&m, 0, 4, 0, &[0; 16]);
     // Restore to page 3 from the four host pages, listed.
-    rss_shadow_list(&m, &[(0x1A1, 0x4000 | tl_mode), (0x1A2, 0xD60), (0x1A3, 0), (0x1A4, 3)]);
+    rss_shadow_list(&m, &[(0x1A1, 0x4000 | texture_loader_mode), (0x1A2, 0xD60), (0x1A3, 0), (0x1A4, 3)]);
     fifo_token(&m, 0xD2, &[0xFFFF_FFFF, 0x0140_0000, 0, 0, 3]);
     fifo_token(&m, 0x7F, &[1, 2]);
     fifo_pixel_data(&m, &[0x159, xfrmode]);

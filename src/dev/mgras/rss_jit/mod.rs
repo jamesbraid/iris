@@ -359,9 +359,9 @@ fn common(rss: &mut Rss) -> PipeKey {
         4..=7 => Pix::Ci12,
         _ => Pix::Plain,
     };
-    let winmode = rss.reg(reg::MGRAS_PP1_REG_F17B);
-    c.cidmatch = rss::cid_match(winmode);
-    c.cidwmask = rss::cid_write_mask(winmode) as u32;
+    let window_mode = rss.reg(reg::MGRAS_PP1_REG_F17B);
+    c.cidmatch = rss::cid_match(window_mode);
+    c.cidwmask = rss::cid_write_mask(window_mode) as u32;
     let mode = rss.reg(reg::CLIP_MODE);
     let mut nclip = 0;
     c.clip = [ClipRect::default(); 4];
