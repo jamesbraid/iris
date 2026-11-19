@@ -264,8 +264,9 @@ pub trait BoardEngine {
     /// `write` with the shell's time (ns, its time base) at the store, for a
     /// register whose effect starts a timer at the moment of the write (a
     /// scan-out mode: the retrace phase restarts then, not at the next
-    /// `advance`). The default is `write`. A store queued behind other work
-    /// takes effect when it runs, with the time of the latest `write_at`.
+    /// `advance`). The default is `write`. Only a store the board takes inside
+    /// the call has the time; one queued behind other work takes effect when
+    /// it runs, and anchors at the next `advance`.
     fn write_at(&mut self, _now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
         self.write(off, bits, val)
     }

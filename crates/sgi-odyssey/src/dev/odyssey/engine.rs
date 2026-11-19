@@ -423,6 +423,15 @@ impl BoardEngine for VproEngine {
     /// A box of pixels; every plane under it is brought current.
     type Region = Rect;
 
+    fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
+        // A store the board takes inside this call (every one in inline mode) restarts the retrace at `now_ns`.
+        let shared = self.locks.shared.clone();
+        shared.write_ns.store(now_ns.min(i64::MAX as u64) as i64, Ordering::Relaxed);
+        let done = self.write(off, bits, val);
+        shared.write_ns.store(-1, Ordering::Relaxed);
+        done
+    }
+
     fn write(&mut self, off: u32, bits: u32, val: u64) -> Write {
         let Some(size) = Self::size_of(bits) else { return Write::Fault };
         if self.faulted() {
