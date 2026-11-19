@@ -2188,6 +2188,28 @@ fn draw_pixels_lands_at_the_raster_position_and_zooms() {
     assert!(run(&mut b, &["gl"]).1.contains("1 with no valid raster position"));
 }
 
+/// A zoom that is not a number or is far beyond the window draws nothing or only what lies in the
+/// window, and finishes: a spin over each zoomed pixel's span once took 2^63 steps.
+#[test]
+fn a_nonfinite_or_huge_zoom_cannot_spin_a_draw() {
+    use crate::dev::kona::defs::pixel::*;
+    let mut b = pixel_window();
+    for zoom in [f32::INFINITY, f32::NAN, f32::NEG_INFINITY] {
+        command(&mut b, Grammar::Gl, SET_PIXEL_ZOOM_FACTORS, &[zoom.to_bits(), 1.0f32.to_bits()]);
+        at(&mut b, 10, 10);
+        draw_pixels(&mut b, 2, 2, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, &[0xffff_ffff; 4]);
+        assert_eq!(colour_at(&mut b, 10, 10), 0, "a zoom of {zoom} draws nothing");
+    }
+    command(&mut b, Grammar::Gl, SET_PIXEL_ZOOM_FACTORS, &[1.0e9f32.to_bits(), 1.0e9f32.to_bits()]);
+    at(&mut b, 0, 0);
+    draw_pixels(&mut b, 1, 1, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, &[0xff00_00ff]);
+    assert_eq!(colour_at(&mut b, 63, 63), 0xffff_0000, "the window is filled and no more");
+    command(&mut b, Grammar::Gl, SET_PIXEL_ZOOM_FACTORS, &[1.0f32.to_bits(), 1.0f32.to_bits()]);
+    at(&mut b, 10, 10);
+    draw_pixels(&mut b, 1, 1, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, &[0x1020_30ff]);
+    assert_eq!(colour_at(&mut b, 10, 10), 0xff10_2030, "a finite zoom draws again");
+}
+
 /// The pixel-store tokens set the unpack record that sizes the next draw; the transfer scale
 /// and bias, and a pixel map under its flag, change what is drawn.
 #[test]
