@@ -31,6 +31,7 @@ pub mod back;
 
 pub mod api;
 pub mod engine;
+pub mod rig;
 
 // What iris's `snapshot` manifest names, as iris's `mod.rs` re-exports it.
 pub use back::snapshot::KonaChunk;
