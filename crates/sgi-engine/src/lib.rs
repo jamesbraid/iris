@@ -55,6 +55,7 @@
 pub mod conformance;
 pub mod engine;
 pub mod ffi;
+pub mod gpu_loss;
 pub mod inject;
 pub mod mem;
 #[cfg(feature = "mock")]
@@ -65,5 +66,6 @@ pub mod state;
 
 pub use engine::*;
 pub use mem::{DirtyBlocks, DirtyRun, HostMem, Lent, MemFault, Swap, DIRTY_BLOCK};
+pub use gpu_loss::GpuLoss;
 pub use outbox::Outbox;
 pub use state::{Chunk, StateSink, StateSource, VecSource};
