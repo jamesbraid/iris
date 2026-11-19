@@ -2888,17 +2888,19 @@ impl Gl {
         let perc = minor_y / major_y;
         let dxdy1 = if minor_y != 0.0 { (bw.x - cw.x) / minor_y } else { 0.0 };
         let dxdy2 = if bw.y - aw.y != 0.0 { (aw.x - bw.x) / (bw.y - aw.y) } else { 0.0 };
-        let (ymax, ymid) = (cw.y.floor(), bw.y.floor());
+        // The RE4 samples row j at y = j + 1, GL at j + 0.5: send y + 0.5, and
+        // colour planes at (x + 0.5, y - 0.5), to keep GL's pixel centres.
+        let (ymax, ymid) = ((cw.y + 0.5).floor(), (bw.y + 0.5).floor());
         let xmid = cw.x + perc * major_x;
         let ltor = xmid <= bw.x;
         let span_x = bw.x - xmid;
-        let dy = cw.y - ymax;
+        let dy = cw.y + 0.5 - ymax;
         let x0 = cw.x + dxdy0 * dy;
         let x1 = cw.x + dxdy1 * dy;
-        let x2 = bw.x + dxdy2 * (bw.y - ymid);
+        let x2 = bw.x + dxdy2 * (bw.y + 0.5 - ymid);
         let pos = |f: f32| (f + POS_BIAS).to_bits();
-        sink.rss_write(re::TRI_YMID, pos(bw.y), false);
-        sink.rss_write(re::TRI_YMID + 1, pos(aw.y), false);
+        sink.rss_write(re::TRI_YMID, pos(bw.y + 0.5), false);
+        sink.rss_write(re::TRI_YMID + 1, pos(aw.y + 0.5), false);
         for (reg, s) in [(re::TRI_DXDY0, dxdy0), (re::TRI_DXDY1, dxdy1), (re::TRI_DXDY2, dxdy2)] {
             let f = (s as f64 * (1u64 << 24) as f64) as i64 as u64;
             sink.rss_write(reg, (f >> 32) as u32, false);
@@ -2907,10 +2909,10 @@ impl Gl {
         sink.rss_write(re::TRI_X0, pos(x0), false);
         sink.rss_write(re::TRI_X0 + 1, pos(x1), false);
         sink.rss_write(re::TRI_X2, pos(x2), false);
-        sink.rss_write(re::TRI_X2 + 1, pos(cw.y), false);
+        sink.rss_write(re::TRI_X2 + 1, pos(cw.y + 0.5), false);
         // Colour: start value at the first pixel, steps along the span and
         // down the major edge.
-        let dx_x = (if ltor { x0.ceil() } else { x0.floor() }) - cw.x;
+        let dx_x = (if ltor { x0.ceil() } else { x0.floor() }) - cw.x + 0.5;
         let n1 = dxdy0.trunc();
         let fixc = |c: f32| (c as f64 * 0xFF_F000 as f64) as i32 as u32;
         for k in 0..4 {

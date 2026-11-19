@@ -142,6 +142,18 @@ fn the_triangles_cover_as_many_pixels_as_the_stored_tables() {
     }
 }
 
+/// Row r of a stored table is the triangle at y = r + 1: the right edge
+/// there gives these pixel counts (gr4 ide-raster-tests.md), 14 rows.
+#[test]
+fn the_triangles_have_the_stored_row_counts() {
+    const ROWS: [usize; 16] = [3, 7, 10, 13, 16, 20, 23, 20, 17, 14, 11, 9, 6, 3, 0, 0];
+    for (name, w, rows, cols, _) in scenes().into_iter().take(3) {
+        let px = readback(Board::High, Mode::Inline, None, &w, rows, cols);
+        let got: Vec<usize> = px.chunks(cols as usize).map(covered).collect();
+        assert_eq!(got, ROWS, "{name}");
+    }
+}
+
 /// Inline, threaded and JIT runs store the same scene.
 #[test]
 fn every_path_stores_the_same_scene() {

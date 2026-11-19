@@ -1357,12 +1357,12 @@ pub(super) fn pos_fixed(v: f64) -> i64 {
 
 /// An edge `x + s (yref - y)` (x in s.8, s.24 in units of x per row going
 /// down, from row `yref`) as the triangle walk takes it: (C, B) such that
-/// pixel i of row j is right of the edge's crossing at the row's centre,
-/// i + 0.5 >= x + s (yref - j - 0.5), exactly when i >= `edge_bound`.
-/// In units of 2^-25: (2i + 1) 2^24 >= x 2^17 + s (2 (yref - j) - 1).
-/// Wrapping: the model's edge arithmetic is 64-bit.
+/// pixel i of row j is right of the edge where the row samples it (y =
+/// j + 1, the diagnostic's stored images), i + 0.5 >= x + s (yref - j - 1),
+/// exactly when i >= `edge_bound`. In units of 2^-25: (2i + 1) 2^24 >=
+/// x 2^17 + s (2 (yref - j) - 2). Wrapping: the edge arithmetic is 64-bit.
 pub(super) fn edge_coeffs(x: i64, s: i64, yref: i64) -> [i64; 2] {
-    let c = (1i64 << 24).wrapping_sub(x.wrapping_shl(17)).wrapping_sub(s.wrapping_mul(yref.wrapping_mul(2).wrapping_sub(1)));
+    let c = (1i64 << 24).wrapping_sub(x.wrapping_shl(17)).wrapping_sub(s.wrapping_mul(yref.wrapping_mul(2).wrapping_sub(2)));
     [c, s.wrapping_mul(2)]
 }
 
@@ -1374,10 +1374,10 @@ pub(super) fn edge_bound(e: [i64; 2], j: i32) -> i32 {
     (-(v >> 25)).clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
-/// `ceil(v / 256 - 0.5)` of an s.8 value: the first pixel whose centre is
+/// `ceil(v / 256 - 1)` of an s.8 value: the first row sampled (at y = j + 1)
 /// at or past it.
-pub(super) fn first_centre(v: i64) -> i32 {
-    (-((128i64.wrapping_sub(v)) >> 8)).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+pub(super) fn first_row(v: i64) -> i32 {
+    (-((256i64.wrapping_sub(v)) >> 8)).clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 /// Words of the fog table (`reg::FOG_LUT`).
@@ -2324,9 +2324,10 @@ impl Rss {
     /// edge's integer step (de = dc/dy + trunc(dxdy0) * dx, less dx when the
     /// span direction and the slope's sign disagree).
     ///
-    /// Pixels are sampled at their centres with OpenGL's half-open rule
-    /// (bottom and left edges in). The real RE4's edge and tie rules are
-    /// not known; this is the GL rule.
+    /// Row j samples the edges at y = j + 1 and the colour plane at (i, j
+    /// + 1), pixel centres in x: the diagnostic's stored images show that
+    /// (a right-edge tie is out). Ties on the left, top and bottom edges
+    /// are not known; they follow the GL half-open rule.
     fn triangle(&mut self, ltor: bool) -> bool {
         let Some(t) = self.tri_setup(ltor) else { return true };
         #[cfg(feature = "wgpu")]
@@ -2463,10 +2464,10 @@ impl Rss {
             yref_i: yref as i32,
             zp: fixed::zplane(zplane),
             tp: tplanes.map(fixed::iter_plane),
-            j0: first_centre(pos_fixed(ymin)),
-            j1: first_centre(pos_fixed(ymax)),
+            j0: first_row(pos_fixed(ymin)),
+            j1: first_row(pos_fixed(ymax)),
             edges,
-            jmid: first_centre(pos_fixed(ymid)),
+            jmid: first_row(pos_fixed(ymid)),
             ltor: ltor as u32,
             tex: texture as u32,
             fog: fog as u32,
@@ -3423,7 +3424,7 @@ mod tests {
             let e = edge_coeffs(x, s, yref);
             for _ in 0..4 {
                 let j = (yref - (next() % 600) as i64) as i32;
-                let yc = j as f64 + 0.5;
+                let yc = j as f64 + 1.0;
                 let want = (x as f64 / 256.0 + s as f64 / (1u64 << 24) as f64 * (yref as f64 - yc) - 0.5).ceil() as i32;
                 assert_eq!(edge_bound(e, j), want, "x {x} s {s} yref {yref} row {j}");
             }

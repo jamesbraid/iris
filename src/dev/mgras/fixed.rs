@@ -72,13 +72,13 @@ pub fn to_index(c: i32) -> u32 {
     (clamp(c) >> 16) as u32
 }
 
-/// A plane (value, d/dx, d/(-y)) at pixel centres, as the triangle
-/// setup's planes are (value at (xs, yref), relative to centres x + 0.5,
-/// y + 0.5), in 12.16 by `conv`: the value at pixel (xs, yref) and the
-/// integer steps. Pixel (i, j) is then `p\[0\] + p\[1\] (i - xs) + p\[2\]
-/// (yref - j)`, wrapping.
+/// A plane (value, d/dx, d/(-y)) as the triangle registers iterate it:
+/// the start value is at pixel xs of the scanline yref, and row j holds
+/// the scanline below `yref - 1 - j` steps down (the diagnostic's stored
+/// images, ide-raster-tests.md). Pixel (i, j) is `p\[0\] + p\[1\] (i - xs) +
+/// p\[2\] (yref - j)`, wrapping, in 12.16 by `conv`.
 pub fn plane(p: [f64; 3], conv: fn(f64) -> i32) -> [i32; 3] {
-    [conv(p[0] + 0.5 * p[1] - 0.5 * p[2]), conv(p[1]), conv(p[2])]
+    [conv(p[0] - p[2]), conv(p[1]), conv(p[2])]
 }
 
 /// A fixed plane at pixel (i, j) of a triangle with origin (xs, yref).
@@ -93,7 +93,7 @@ pub const Z_FRAC: u32 = 12;
 /// A depth plane (window z units) in z.12, like `plane`.
 pub fn zplane(p: [f64; 3]) -> [i64; 3] {
     let c = |v: f64| (v * (1u64 << Z_FRAC) as f64).round() as i64;
-    [c(p[0] + 0.5 * p[1] - 0.5 * p[2]), c(p[1]), c(p[2])]
+    [c(p[0] - p[2]), c(p[1]), c(p[2])]
 }
 
 /// A depth plane at pixel (xs + di, yref - dj).
@@ -121,7 +121,7 @@ pub fn iter(v: f64) -> i64 {
 
 /// An iterator plane at pixels, like `plane`.
 pub fn iter_plane(p: [f64; 3]) -> [i64; 3] {
-    [iter(p[0] + 0.5 * p[1] - 0.5 * p[2]), iter(p[1]), iter(p[2])]
+    [iter(p[0] - p[2]), iter(p[1]), iter(p[2])]
 }
 
 /// An i64 plane at pixel (xs + di, yref - dj).
