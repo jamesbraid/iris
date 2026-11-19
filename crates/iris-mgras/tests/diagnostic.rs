@@ -179,30 +179,36 @@ fn the_engine_stores_what_the_diagnostic_stores() {
 }
 
 /// What gr4 reads from the stored lines table without keeping it: the
-/// steep red line moves one column every four rows, the stippled blue
-/// lines lie on row 5, and the purple vertical line at column 12
+/// steep red line moves one column every four rows, the smooth green line
+/// covers one or two pixels a row around column 5 + row / 4, the stippled
+/// blue lines lie on row 5, and the purple vertical line at column 12
 /// alternates 0x80 and 0x7f by row (127.5 dithered).
 #[test]
 fn the_lines_draw_the_stored_tables_steps() {
     let px = readback(Board::High, Mode::Inline, None, &scene(lines), 17, 14);
     let at = |r: usize, c: usize| px[r * 14 + c];
     // The two stippled blue lines share row 5 and cover some of its pixels.
-    let blue = (0..14).filter(|&c| at(5, c) == 0xffff_0000).count();
+    let blue = (0..14).filter(|&c| at(5, c) & 0xFFFF_00FF == 0xffff_0000).count();
     assert!((1..10).contains(&blue), "blue dots on row 5: {blue}");
     for r in (0..16).filter(|&r| r != 5) {
         assert_eq!(at(r, r / 4), 0xff00_00ff, "red, row {r}");
-        assert_eq!(at(r, 5 + r / 4), 0xff00_ff00, "green, row {r}");
+        // Green weights fall off with the pixel centre's distance from x = 5 + r / 4.
+        let green: Vec<usize> = (0..14).filter(|&c| at(r, c) != 0 && at(r, c) & 0x00FF_00FF == 0).collect();
+        let on_centre = r % 4 == 2;
+        assert_eq!(green.len(), if on_centre { 1 } else { 2 }, "green pixels, row {r}");
+        assert!(green.iter().all(|&c| (5 + r / 4 - 1..=5 + r / 4 + 1).contains(&c)), "green columns {green:?}, row {r}");
     }
+    assert_eq!(at(2, 5), 0xff00_ff00, "a line through a pixel centre is full weight");
     for r in 0..10 {
         let want = if r % 2 == 0 { 0x80 } else { 0x7f };
         assert_eq!(at(r, 12), 0xff00_0000 | want << 16 | want, "purple, row {r}");
     }
 }
 
-/// The lines' stored sum is not met: the stipple dots and the smooth line's
-/// weights differ from the stored table. Kept as the open acceptance.
+/// The lines' stored sum is not met: the blue lines' stipple dots and
+/// blend differ from the stored table. Kept as the open acceptance.
 #[test]
-#[ignore = "the lines' stipple dot order and smooth weights are not matched"]
+#[ignore = "the lines' stipple dot order and blend are not matched"]
 fn the_engine_stores_the_diagnostics_lines() {
     let got = sum(&readback(Board::High, Mode::Inline, None, &scene(lines), 17, 14));
     assert_eq!(got, 0xc584_ed6b, "five lines: sum {got:#010x}");
@@ -250,4 +256,5 @@ fn the_engine_matches_the_stored_tables_word_for_word() {
         }
     }
     assert_eq!(triangles, 0, "the triangles differ from the stored tables");
+
 }
