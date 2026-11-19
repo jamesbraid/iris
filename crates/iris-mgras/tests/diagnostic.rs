@@ -199,16 +199,19 @@ fn the_lines_draw_the_stored_tables_steps() {
         assert!(green.iter().all(|&c| (5 + r / 4 - 1..=5 + r / 4 + 1).contains(&c)), "green columns {green:?}, row {r}");
     }
     assert_eq!(at(2, 5), 0xff00_ff00, "a line through a pixel centre is full weight");
+    // The blue dot at (5, 5) blends over the green line's pixel: 63 * (255 - 16) / 255.
+    assert_eq!((at(5, 5) >> 8) & 0xFF, 0x3b, "blue over green");
     for r in 0..10 {
         let want = if r % 2 == 0 { 0x80 } else { 0x7f };
         assert_eq!(at(r, 12), 0xff00_0000 | want << 16 | want, "purple, row {r}");
     }
 }
 
-/// The lines' stored sum is not met: the stippled blue lines' dots differ
-/// from the stored table. Kept as the open acceptance.
+/// The lines' stored sum is not met: the purple line's last row (10) is
+/// missing. gr4 reads an integer-start setup flag for that line whose
+/// effect, a write outside the raster registers, is not modelled.
 #[test]
-#[ignore = "the lines' stipple dot order is not matched"]
+#[ignore = "the purple line's last row (the integer-start setup) is not modelled"]
 fn the_engine_stores_the_diagnostics_lines() {
     let got = sum(&readback(Board::High, Mode::Inline, None, &scene(lines), 17, 14));
     assert_eq!(got, 0xc584_ed6b, "five lines: sum {got:#010x}");
@@ -235,8 +238,8 @@ fn differing(name: &str, got: &[u32], want: &[u32], cols: usize) -> usize {
 }
 
 /// Word for word against the stored tables, when the shipped binary is
-/// available locally; the triangles must match exactly. The lines' count is
-/// reported only.
+/// available locally; the triangles must match exactly and the lines may
+/// miss only the purple line's last row.
 #[test]
 fn the_engine_matches_the_stored_tables_word_for_word() {
     let path = std::env::var(IDE_ENV).unwrap_or_else(|_| IDE_DEFAULT.into());
@@ -246,15 +249,17 @@ fn the_engine_matches_the_stored_tables_word_for_word() {
     };
     assert_eq!(ide.len() as u64, IDE_SIZE, "{path} is not the IRIX 6.4 Octane diagnostic");
     let tables = [(0x143380, 0), (0x143980, 1), (0x143f80, 2), (0x144b80, 3)];
-    let mut triangles = 0;
+    let (mut triangles, mut lines) = (0, 0);
     for (offset, i) in tables {
         let (name, w, rows, cols, _) = scenes().swap_remove(i);
         let got = readback(Board::High, Mode::Inline, None, &w, rows, cols);
         let n = differing(name, &got, &stored(&ide, offset, (rows * cols) as usize), cols as usize);
         if i < 3 {
             triangles += n;
+        } else {
+            lines = n;
         }
     }
     assert_eq!(triangles, 0, "the triangles differ from the stored tables");
-
+    assert!(lines <= 1, "{lines} of the lines' words differ from the stored table");
 }

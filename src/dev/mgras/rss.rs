@@ -331,6 +331,9 @@ const IR_SMOOTH: u32 = 0x60;
 /// them its lines blend as source alpha over one minus destination alpha
 /// (inferred from one stored pixel, see `diag_line`).
 const PP1_DIAG_BLEND: u32 = 0xB;
+/// The diagnostic's line stipple reads its pattern downward from this bit
+/// at the start vertex's pixel. Inferred: bit 5 read upward fits as well.
+const DIAG_STIPPLE_START: i32 = 11;
 
 /// The OpenGL per-fragment state our GE11 HLE programs into the PP1
 /// registers. The real layouts are not known (only GE11 microcode writes
@@ -1345,8 +1348,9 @@ pub(super) struct GlLineSetup {
     pub tbase: [i64; 3],
     pub tstep: [i64; 3],
     pub a0: f64,
-    /// The diagnostic line's flags (`DIAG_LINE`, `DIAG_SMOOTH`); the GPU
-    /// and JIT ignore them.
+    /// The far end's major coordinate, and the diagnostic line's flags
+    /// (`DIAG_LINE`, `DIAG_SMOOTH`); the GPU and JIT ignore both.
+    pub a1: f64,
     pub diag: u32,
     pub b0: f64,
     pub slope: f64,
@@ -2606,6 +2610,8 @@ impl Rss {
     /// then draws it as a plain GL line.
     ///
     /// Inferred from the diagnostic's stored table (gr4 ide-raster-tests):
+    /// - Stipple dots alternate from the start vertex's pixel (registers
+    ///   0xe/0xf), the pattern read downward from `DIAG_STIPPLE_START`.
     /// - A smooth line (IR 0x63) has weight a = 255 - 4 k at k = 64 d, d
     ///   the pixel centre's distance from the line sampled at the major
     ///   pixel, for d < 1; the loader's table is not read.
@@ -2619,15 +2625,12 @@ impl Rss {
         }
         let blend = self.reg(reg::PP1FILLMODE) & PP1_DIAG_BLEND == PP1_DIAG_BLEND;
         let smooth = l.diag & DIAG_SMOOTH != 0;
+        let start = l.a1.floor() as i32;
         let mut p = l.p0;
         let mut k = 0i32;
         while p != l.p1 {
-            let draw = l.stipple == 0 || {
-                let bit = (self.gl_line_stipple_pos / l.repeat) % 16;
-                self.gl_line_stipple_pos = self.gl_line_stipple_pos.wrapping_add(1);
-                (l.pattern >> (15 - bit)) & 1 != 0
-            };
-            if draw {
+            let idx = ((p - start).unsigned_abs() / l.repeat) as i32;
+            if l.stipple == 0 || (l.pattern >> (DIAG_STIPPLE_START - idx).rem_euclid(16)) & 1 != 0 {
                 let rgba = [0, 1, 2, 3].map(|c| l.cbase[c].wrapping_add(l.cstep[c].wrapping_mul(k)));
                 let z = l.zbase.wrapping_add(l.zstep.wrapping_mul(k as i64));
                 let frag = |s: &mut Self, q: i32, cover: u32| {
@@ -2732,6 +2735,7 @@ impl Rss {
             tbase: tq.map(|q| fixed::iter(q[0] + q[1] * t0)),
             tstep: tq.map(|q| fixed::iter(q[1])),
             a0,
+            a1,
             diag: if self.reg(reg::IR) & 0xF == OP_DIAG_LINE { DIAG_LINE | if self.reg(reg::IR) & IR_SMOOTH != 0 { DIAG_SMOOTH } else { 0 } } else { 0 },
             b0,
             slope: (b1 - b0) / (a1 - a0),
