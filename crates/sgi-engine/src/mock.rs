@@ -112,6 +112,8 @@ pub struct Mock<M: HostMem> {
     pub frames: u64,
     /// The times `write_at` was given, oldest first.
     pub write_times: Vec<u64>,
+    /// Moves with every store, CPU write, load and reset (`frame_generation`).
+    generation: u64,
 }
 
 impl<M: HostMem> Mock<M> {
@@ -140,6 +142,7 @@ impl<M: HostMem> Mock<M> {
             observed: Vec::new(),
             frames: 0,
             write_times: Vec::new(),
+            generation: 0,
         }
     }
 
@@ -275,6 +278,7 @@ impl<M: HostMem> BoardEngine for Mock<M> {
         if self.dead() || !matches!(bits, 32 | 64) {
             return Write::Fault;
         }
+        self.generation += 1;
         match off {
             reg::IRQ_SET | reg::IRQ_CLR => {
                 if off == reg::IRQ_SET {
@@ -329,6 +333,31 @@ impl<M: HostMem> BoardEngine for Mock<M> {
 
     fn heads(&self) -> u32 {
         2
+    }
+
+    fn frame_generation(&self, head: u32) -> u64 {
+        if head < 2 { self.generation } else { 0 }
+    }
+
+    /// `dst` is a `Mutex<Vec<u32>>` standing in for the GPU buffer.
+    fn compose_into(&mut self, head: u32, dst: &dyn std::any::Any, stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
+        if let Some(f) = self.fault() {
+            return Err(Fault(f));
+        }
+        if head >= 2 {
+            return Ok(None);
+        }
+        let Some(buf) = dst.downcast_ref::<Mutex<Vec<u32>>>() else { return Err(Fault("not a mock buffer".into())) };
+        let mut buf = buf.lock();
+        if stride_words < 4 || buf.len() < (stride_words * 2) as usize {
+            return Err(Fault("a buffer too small for the frame".into()));
+        }
+        for y in 0..2u32 {
+            for x in 0..4u32 {
+                buf[(y * stride_words + x) as usize] = (head + 1) << 16 | (y * 4 + x);
+            }
+        }
+        Ok(Some((4, 2)))
     }
 
     fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
@@ -456,6 +485,7 @@ impl<M: HostMem> BoardEngine for Mock<M> {
     }
 
     fn cpu_wrote(&mut self, off: u64, len: u64) {
+        self.generation += 1;
         let Some(l) = self.cfg.lent else { return };
         for w in self.words_of(off, len) {
             self.shadow[w] = l.load(w);
@@ -509,6 +539,7 @@ impl<M: HostMem> BoardEngine for Mock<M> {
     }
 
     fn load(&mut self, src: &mut dyn StateSource) -> Result<(), Refused> {
+        self.generation += 1;
         self.need_parked(true)?;
         let bad = |m: String| Refused::Mismatch(m);
         let mut first = true;
@@ -553,6 +584,7 @@ impl<M: HostMem> BoardEngine for Mock<M> {
         if !self.queue.is_empty() {
             return Err(Refused::NotQuiesced);
         }
+        self.generation += 1;
         self.held_swap = false;
         self.stopped = false;
         self.wait_until = None;

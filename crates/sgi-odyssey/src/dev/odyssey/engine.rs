@@ -34,7 +34,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use sgi_engine::inject::{hit, Point};
-use sgi_engine::{GpuLoss, BoardEngine, Chunk, DirtyRun, Event, Fault, HostMem, Idle, Interrupt, Lent, LentFrame, MemFault, Outbox, Pump, Read, Rect, Refused, Source, StateSink, StateSource, Swap, Write, DIRTY_BLOCK};
+use sgi_engine::{GpuLoss, BoardEngine, Chunk, DirtyRun, Event, Fault, HostMem, FrameWords, Idle, Interrupt, Lent, LentFrame, MemFault, Outbox, Pump, Read, Rect, Refused, Source, StateSink, StateSource, Swap, Write, DIRTY_BLOCK};
 
 use super::board::{Board, Params};
 use super::gpu_unit::{fail_gpu, Observation};
@@ -483,7 +483,7 @@ impl BoardEngine for VproEngine {
         }
         let r = &mut self.reader;
         r.attach(&self.locks.shared);
-        Ok(r.update_on_gpu().map(|(buffer, width, height)| LentFrame { width, height, buffer: Arc::new(buffer) }))
+        Ok(r.update_on_gpu().map(|(buffer, width, height)| LentFrame { width, height, stride: width, words: FrameWords::Abgr, generation: 0, buffer: Arc::new(buffer) }))
     }
 
     fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
