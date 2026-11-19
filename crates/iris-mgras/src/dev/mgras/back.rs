@@ -107,6 +107,30 @@ impl ImpactBack {
         self.rss[0].gpu_sync(Observation::Validation).map(|_| ())
     }
 
+    /// Bring a box of pixels of `bufs` current from the GPU; batches that
+    /// do not touch it are not waited for. A no-op on the CPU.
+    pub fn observe(&mut self, bufs: &[Buffer], b: (i32, i32, i32, i32)) -> Result<(), String> {
+        self.rss[0].gpu_flush();
+        self.rss[0].gpu_sync_box(bufs, b, Observation::HostComposite).map(|_| ())
+    }
+
+    pub fn planes(&self) -> &Planes {
+        &self.planes
+    }
+
+    pub fn planes_mut(&mut self) -> &mut Planes {
+        &mut self.planes
+    }
+
+    /// Point the GPU unit at the planes again after they were rewritten.
+    pub fn reattach_gpu(&mut self) {
+        if let Some(unit) = self.gpu.as_deref_mut() {
+            unit.attach(&self.planes.mem, &self.planes.cid, &mut self.planes.te);
+            self.rss[0].gpu = GpuLink::new(unit);
+            self.rss[0].gpu_fault = &*self.fault;
+        }
+    }
+
     /// The first failure the GPU unit reported.
     pub fn fault(&self) -> Option<String> {
         self.fault.lock().clone()
