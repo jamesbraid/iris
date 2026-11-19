@@ -47,6 +47,11 @@ pub(super) mod mem {
 
 // +0x100c, the low-level reset
 pub(super) const ODSY_RESET_CONTROL: u64 = 0x100c;
+/// The values the shipped kernels and PROMs store to the reset control register to reset the
+/// board: 0x200 on newer crossbar revisions and in the IP35 kernel, 0x16d on older ones.
+pub(super) fn reset_pulse(value: u64) -> bool {
+    matches!(value, 0x200 | 0x16d)
+}
 
 pub(super) mod intr {
     // The flag interrupt's registers, as the shipped guest OS kernel uses them

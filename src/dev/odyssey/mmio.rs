@@ -13,7 +13,7 @@ use super::consts::{
     backend, cmd, ctx, flctl, host, i2c, intr, mem, nic, route, stats, swap, ODSY_BUZZ_1,
     ODSY_BUZZ_2, ODSY_BUZZ_3, ODSY_BUZZ_4, ODSY_BUZZ_5, ODSY_BUZZ_6, ODSY_CONTROL,
     ODSY_DISPLAYED_BUFFER, ODSY_ERROR_ADDR_LOWER, ODSY_ERROR_ADDR_UPPER, ODSY_ERROR_COMMAND,
-    ODSY_IDENTITY, ODSY_INT_DEST_LOWER, ODSY_INT_DEST_UPPER, ODSY_RESET_CONTROL, ODSY_STATUS,
+    ODSY_IDENTITY, ODSY_INT_DEST_LOWER, ODSY_INT_DEST_UPPER, ODSY_RESET_CONTROL, ODSY_STATUS, reset_pulse,
     ODSY_STATUS0, ODSY_SW_TOKEN, ODSY_USER_CMD_FIFO, ODSY_XT_REQ_TIMEOUT, ODSY_BLOCK_END,
 };
 use super::display_fifo::{display_fifo_access, DisplayFifo};
@@ -63,6 +63,9 @@ impl Board {
         }
 
         match reg(addr, size) {
+            // The drivers pulse it to reset the board; what a pulse clears is the model's reading
+            // (a whole-board reset), which every shipped sequence tolerates.
+            Some(ODSY_RESET_CONTROL) if reset_pulse(value) => self.reset(),
             Some(ODSY_RESET_CONTROL) => {
                 crate::dlog!(
                     LogModule::Odyssey,

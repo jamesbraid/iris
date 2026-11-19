@@ -394,6 +394,41 @@ fn a_gpu_loss_posts_gpu_lost_faults_the_engine_and_wakes_the_shell() {
     assert!(e.fault().unwrap().contains("RTX 4090"));
 }
 
+/// A store of 0x200 or 0x16d to the reset control register resets the board from inside the write,
+/// posts an Irq and leaves the engine running; 0, 1 and other values change nothing.
+#[test]
+fn a_reset_control_pulse_resets_the_board_and_leaves_the_engine_running() {
+    const FLCTL_CONFIG: u32 = 0x1070;
+    const RESET_CONTROL: u32 = 0x100c;
+    for mode in [Mode::Inline, Mode::Threaded] {
+        let (mut e, _) = engine(mode);
+        let identity = get(&mut e, 0x4);
+        put(&mut e, FLCTL_CONFIG, 0x12345);
+        let reset = get(&mut e, FLCTL_CONFIG);
+        assert_eq!(reset, 0x12345);
+        drain(&mut e);
+        for value in [0, 1, 0x100] {
+            put(&mut e, RESET_CONTROL, value);
+            assert_eq!(get(&mut e, FLCTL_CONFIG), 0x12345, "a store of {value:#x} does nothing");
+        }
+        assert!(drain(&mut e).is_empty(), "nor does it post anything");
+        for value in [0x200, 0x16d] {
+            put(&mut e, FLCTL_CONFIG, 0x12345);
+            put(&mut e, RESET_CONTROL, value);
+            assert_eq!(get(&mut e, FLCTL_CONFIG), 0x1c000, "{mode:?}: a store of {value:#x} resets the board");
+            assert_eq!(get(&mut e, 0x4), identity, "its identity survives");
+            assert_eq!(drain(&mut e), vec![Event::Irq], "levels may have changed");
+            assert_eq!((e.fault(), e.write(CMD_FIFO, 32, 0)), (None, Write::Done), "and the engine runs on");
+        }
+        e.set_source(Source { id: 3, charged: true });
+        put(&mut e, CMD_FIFO, 0);
+        put(&mut e, RESET_CONTROL, 0x200);
+        assert_eq!(e.wait_idle(0, u64::MAX), Idle::Yes);
+        e.advance(0);
+        assert!(drain(&mut e).contains(&Event::Credits { source: 3, retired: 1 }), "credits owed are not dropped");
+    }
+}
+
 /// A handle moves between threads, one call at a time.
 #[test]
 fn an_engine_moves_between_threads() {
