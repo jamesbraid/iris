@@ -384,6 +384,11 @@ pub struct KonaConfig {
     pub display: Option<DisplayBoard>,
     pub pixel_depth: PixelDepth,
     pub host_board: HostBoard,
+    /// The pipe slot whose records the Ktown's serial follows, when this pipe shares a Ktown
+    /// with another's slot; None is its own slot.
+    pub shared_identity: Option<u8>,
+    /// The ROM serial of the geometry board's part, 48 bits; None is the synthetic one.
+    pub geometry_serial: Option<u64>,
 }
 
 impl KonaConfig {
@@ -411,6 +416,37 @@ impl KonaConfig {
     pub fn with_host_board(mut self, board: HostBoard) -> Self {
         self.host_board = board;
         self
+    }
+
+    /// The host board the one-wire parts a machine fits and its Ktown2 flag name: the Ktown's
+    /// part number fits the rack's record, and a Ktown2 alone shows the model none.
+    pub fn host_board_of(parts: &[&str], ktown2: bool) -> Result<HostBoard, String> {
+        let mut board = if ktown2 { HostBoard::Ktown2 } else { HostBoard::Deskside };
+        for &part in parts {
+            if part != KTOWN_PART {
+                return Err(format!("kona: one-wire part {part:?}: the chain can hold the Ktown, {KTOWN_PART}"));
+            }
+            board = HostBoard::Ktown;
+        }
+        Ok(board)
+    }
+
+    /// The pipe slot, 0 to 3, whose Ktown serial this pipe's Ktown record follows.
+    pub fn with_shared_identity(mut self, slot: u8) -> Result<Self, String> {
+        if slot >= 4 {
+            return Err(format!("kona: shared identity index {slot}: each pipe slot's records use sixteen serial instances, 0 to 3"));
+        }
+        self.shared_identity = Some(slot);
+        Ok(self)
+    }
+
+    /// The ROM serial of the geometry board's part (48 bits), in place of the synthetic one.
+    pub fn with_geometry_serial(mut self, serial: u64) -> Result<Self, String> {
+        if serial >> 48 != 0 {
+            return Err(format!("kona: geometry serial {serial:#x} is wider than the 48 bits of a one-wire serial"));
+        }
+        self.geometry_serial = Some(serial);
+        Ok(self)
     }
 
     /// Raster managers: 1, 2 or, behind a host board, 4. The pixel depth still has to fit.
@@ -572,7 +608,7 @@ impl KonaConfig {
 
 impl Default for KonaConfig {
     fn default() -> Self {
-        KonaConfig { product: Product::Ir2, rm_count: 2, identity_index: 0, host_widget: 0, widget: 0, probe: 0, managed: (1280, 1024), threads: 2, tile: 32, geometry: None, display: None, pixel_depth: PixelDepth::Small, host_board: HostBoard::Deskside }
+        KonaConfig { product: Product::Ir2, rm_count: 2, identity_index: 0, host_widget: 0, widget: 0, probe: 0, managed: (1280, 1024), threads: 2, tile: 32, geometry: None, display: None, pixel_depth: PixelDepth::Small, host_board: HostBoard::Deskside, shared_identity: None, geometry_serial: None }
     }
 }
 
@@ -598,23 +634,46 @@ fn barcode(letter: char, n: u32) -> String {
     format!("EMU{letter}{n:0w$}", w = width - 4)
 }
 
-/// The identity bus: the geometry board's record on a DS2502.
+/// The Ktown board's part number, which a machine names to fit its record on the chain.
+pub(super) const KTOWN_PART: &str = "030-1067-001";
+
+/// The marker of a synthetic serial and of the UniqueWare form a part's own serial may take.
+const SERIAL_PREFIX: u64 = 0x5145_4d55;
+const UNIQUEWARE_MARKER: u64 = 0x45_4d55;
+
+/// The barcode for the record on a part whose ROM serial is `serial`: the letter, then the
+/// part's instance, so the record and the part name one unit. An unmarked serial, such as an
+/// override, gives instance 0.
+fn barcode_of(letter: char, serial: u64) -> String {
+    let n = if serial >> 16 == SERIAL_PREFIX {
+        (serial & 0xff) as u32
+    } else if (serial >> 12) & 0xff_ffff == UNIQUEWARE_MARKER {
+        (serial & 0xfff) as u32
+    } else {
+        0
+    };
+    barcode(letter, n)
+}
+
+/// The identity bus: the geometry board's record on a DS2502, and a rack's Ktown record.
 pub(super) struct Identity {
     pub bus: Bus,
 }
 
 impl Identity {
     pub fn new(cfg: &KonaConfig) -> Self {
-        let n = cfg.base();
         let geometry = &cfg.geometry_spec().board;
-        let record = BoardRecord {
-            barcode: &barcode('G', n),
-            part: geometry.part,
-            revision: geometry.revision,
-            name: geometry.name,
-        };
+        let serial = cfg.geometry_serial.unwrap_or(synthetic_serial(b'G', cfg.base()));
+        let record = BoardRecord { barcode: &barcode_of('G', serial), part: geometry.part, revision: geometry.revision, name: geometry.name };
         let mut bus = Bus::new();
-        bus.add(Box::new(Ds2502::new(ONEWIRE_FAMILY, synthetic_serial(b'G', n), &record.image())));
+        bus.add(Box::new(Ds2502::new(ONEWIRE_FAMILY, serial, &record.image())));
+        if cfg.host_board == HostBoard::Ktown {
+            // The Ktown's serial follows its slot, the shared one when two pipes share it.
+            let slot = cfg.shared_identity.unwrap_or(cfg.identity_index) as u32;
+            let serial = synthetic_serial(b'G', 16 * slot + 1);
+            let record = BoardRecord { barcode: &barcode_of('G', serial), part: KTOWN_PART, revision: "F", name: "KTOWN" };
+            bus.add(Box::new(Ds2502::new(ONEWIRE_FAMILY, serial, &record.image())));
+        }
         Identity { bus }
     }
 

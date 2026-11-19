@@ -4,7 +4,8 @@
 
 use sgi_kona::dev::kona::back::textport::COLOUR_WORD;
 use sgi_kona::dev::kona::defs::*;
-use sgi_kona::dev::kona::engine::{KonaEngine, Options};
+use sgi_kona::dev::kona::engine::{FlashDrive, KonaEngine, Options};
+use sgi_kona::dev::kona::flash::{FlashSink, FLASH_SIZE};
 use sgi_kona::dev::kona::ident::KonaConfig;
 use parking_lot::Mutex;
 use sgi_engine::{shell, BoardEngine, Chunk, Event, HostMem, Idle, Interrupt, MemFault, Read, Refused, Source, StallOn, Swap, VecSource, Write};
@@ -400,4 +401,79 @@ fn a_snapshot_that_does_not_fit_is_refused_and_is_not_a_device_fault() {
     assert!(e.fault().is_none());
     e.resume();
     e.reset().unwrap();
+}
+
+/// Programs the flash records go to a shared list, as a shell's drive callback would take them.
+struct Drive(std::sync::Arc<Mutex<Vec<(usize, Vec<u8>)>>>);
+
+impl FlashSink for Drive {
+    fn write(&mut self, offset: usize, data: &[u8]) -> Result<(), String> {
+        self.0.lock().push((offset, data.to_vec()));
+        Ok(())
+    }
+}
+
+fn on_drive(image: Vec<u8>) -> (Engine, std::sync::Arc<Mutex<Vec<(usize, Vec<u8>)>>>) {
+    let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let opts = Options { flash: Some(FlashDrive { image, sink: Box::new(Drive(log.clone())) }), ..Options::default() };
+    (Engine::new(KonaConfig::ir2(1).unwrap().with_pool(0, 32), Ram::default(), opts, None).expect("engine"), log)
+}
+
+#[test]
+fn the_flash_starts_as_the_drive_and_what_the_pipe_programs_goes_back_to_it() {
+    let mut image = vec![0u8; FLASH_SIZE];
+    image[0x20000..0x20004].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    let (mut e, log) = on_drive(image.clone());
+    // The EEPROM read of op 2 answers from the drive's contents: the reply is on the return
+    // page, so read the flash through the indirect port instead (the PROM's way in).
+    store(&mut e, PORT_ADDR, 0x800000 + 0x20000, A);
+    e.run(usize::MAX);
+    assert_eq!(e.read(PORT_DATA, 32), Read::Value(0xdead_beef));
+    assert!(log.lock().is_empty(), "nothing is programmed by a read");
+    // Op 1, type 2: two words into the header at 0x7ff00.
+    feed(&mut e, &token(EEPROM_OPERATION, &[1, 2, 2, 0x1111_2222, 0x3333_4444]));
+    let log2 = log.lock().clone();
+    assert!(log2.iter().any(|(at, d)| *at == 0x7ff00 && d == &[0x11, 0x11, 0x22, 0x22]), "the first word reached the drive: {log2:?}");
+    assert!(log2.iter().all(|(_, d)| d.len() == 4));
+
+    // A snapshot load writes the whole image through, as the drive would otherwise miss it.
+    e.quiesce(u64::MAX).unwrap();
+    let mut chunks: Vec<Chunk> = Vec::new();
+    e.save(&mut chunks).unwrap();
+    let (mut f, flog) = on_drive(image);
+    f.quiesce(u64::MAX).unwrap();
+    f.load(&mut VecSource::new(chunks)).unwrap();
+    let all = flog.lock().clone();
+    assert_eq!(all.len(), 1);
+    assert_eq!((all[0].0, all[0].1.len()), (0, FLASH_SIZE));
+    assert_eq!(&all[0].1[0x7ff00..0x7ff04], &[0x11, 0x11, 0x22, 0x22]);
+    assert!(Engine::new(KonaConfig::ir2(1).unwrap(), Ram::default(), Options { flash: Some(FlashDrive { image: vec![0; 12], sink: Box::new(Drive(Default::default())) }), ..Options::default() }, None).is_err(), "a drive of the wrong size");
+}
+
+#[test]
+fn the_dma_widget_is_reported_at_start_and_at_each_change() {
+    let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let tell = seen.clone();
+    let opts = Options { dma_widget: Some(Box::new(move |w| tell.lock().push(w))), ..Options::default() };
+    let cfg = KonaConfig::ir2(1).unwrap().with_pool(0, 32).with_host_widget(9).unwrap();
+    let mut e = Engine::new(cfg, Ram::default(), opts, None).unwrap();
+    assert_eq!(*seen.lock(), [9], "told at start");
+    store(&mut e, WIDGET_CONTROL, 5 << 22, A);
+    e.run(usize::MAX);
+    assert_eq!(*seen.lock(), [9, 5]);
+    store(&mut e, WIDGET_CONTROL, 5 << 22 | 1, A);
+    e.run(usize::MAX);
+    assert_eq!(*seen.lock(), [9, 5], "a write that leaves the widget is not a change");
+    e.quiesce(u64::MAX).unwrap();
+    let mut chunks: Vec<Chunk> = Vec::new();
+    e.save(&mut chunks).unwrap();
+    e.resume();
+    store(&mut e, WIDGET_CONTROL, 7 << 22, A);
+    e.run(usize::MAX);
+    e.quiesce(u64::MAX).unwrap();
+    e.load(&mut VecSource::new(chunks)).unwrap();
+    assert_eq!(*seen.lock(), [9, 5, 7, 5], "a load brings the saved widget back");
+    e.resume();
+    e.reset().unwrap();
+    assert_eq!(*seen.lock(), [9, 5, 7, 5, 9], "and a reset the configured one");
 }

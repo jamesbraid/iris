@@ -2,14 +2,15 @@
 //! Everything else is `sgi_engine::ffi`. `include/sgi_kona.h` is the header, written by hand;
 //! `tools/check-header` compares it with cbindgen's.
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{c_char, c_int, c_void, CStr};
 
 use sgi_engine::ffi::{build, call, host_parts, read_config, CMem, IrisEngine, IrisEngineConfig, IrisEngineHost, IRIS_ENGINE_FAULT, IRIS_ENGINE_OK};
 use sgi_engine::inject::Point;
 use sgi_engine::{BoardEngine, GpuLoss, Rect};
 
-use crate::dev::kona::engine::{KonaEngine, Options, Region};
-use crate::dev::kona::ident::{HostBoard, KonaConfig, Product};
+use crate::dev::kona::engine::{FlashDrive, KonaEngine, Options, Region};
+use crate::dev::kona::flash::{fresh_image, FlashSink, FLASH_SIZE};
+use crate::dev::kona::ident::{KonaConfig, Product};
 use crate::wgpu::{Gpu, GpuOptions};
 
 /// The KONA configuration: the shared part, then the pipe's.
@@ -46,8 +47,51 @@ pub struct IrisKonaConfig {
     pub texture_mb: u32,
     /// 0 or the display generator's channel count.
     pub channels: u32,
-    /// The host board: 0 none (the Onyx2 deskside), 1 an Onyx2 rack's Ktown, 2 an Onyx 3400's Ktown2.
-    pub host_board: u32,
+    /// The Onyx 3400's Ktown2 is fitted: it allows four raster managers.
+    pub ktown2: u32,
+    /// The one-wire parts fitted besides the geometry board's, by part number (the Ktown's,
+    /// `030-1067-001`, for a rack), and how many. A part the chain cannot hold is refused.
+    pub parts: *const *const c_char,
+    pub num_parts: u32,
+    /// The pipe slot whose Ktown serial the record follows, plus one: 1 to 4, or 0 for the pipe's own.
+    pub shared_identity: u32,
+    /// The geometry board part's ROM serial, 48 bits; 0 is the synthetic one.
+    pub geometry_serial: u64,
+    /// The argument of the callbacks below.
+    pub user: *mut c_void,
+    /// The flash's contents, `flash_len` bytes (0, or exactly 0x80000); NULL is a new flash.
+    pub flash_image: *const u8,
+    pub flash_len: u32,
+    /// Called with every range of the flash the pipe programs, and with the whole image after a
+    /// snapshot loads. NULL keeps the flash in memory only.
+    pub flash_write: Option<unsafe extern "C" fn(user: *mut c_void, offset: u32, data: *const u8, len: usize)>,
+    /// Called with the widget the pipe's DMA goes to (0 to 15) before the engine returns from
+    /// the call that created it or changed it, so the shell's bus callbacks can name it.
+    pub dma_widget: Option<unsafe extern "C" fn(user: *mut c_void, widget: u32)>,
+}
+
+/// The shell's `user` pointer, for the callbacks the engine makes on its own threads' behalf.
+#[derive(Clone, Copy)]
+struct User(*mut c_void);
+
+// SAFETY: the contract of `IrisKonaConfig`: the callbacks may be called from any thread that calls
+// the engine, and `user` stays valid until `iris_engine_free`.
+unsafe impl Send for User {}
+
+impl User {
+    fn ptr(self) -> *mut c_void {
+        self.0
+    }
+}
+
+struct CFlash(User, unsafe extern "C" fn(*mut c_void, u32, *const u8, usize));
+
+impl FlashSink for CFlash {
+    fn write(&mut self, offset: usize, data: &[u8]) -> Result<(), String> {
+        // SAFETY: the callback's contract; `data` is valid for its length.
+        unsafe { (self.1)(self.0.ptr(), offset as u32, data.as_ptr(), data.len()) };
+        Ok(())
+    }
 }
 
 /// A box of pixels in one word position of the store.
@@ -74,12 +118,8 @@ fn pipe_config(c: &IrisKonaConfig) -> Result<KonaConfig, String> {
         // SAFETY: the caller's contract: NUL-terminated.
         unsafe { CStr::from_ptr(p) }.to_str().map_err(|e| e.to_string())
     };
-    let host_board = match c.host_board {
-        0 => HostBoard::Deskside,
-        1 => HostBoard::Ktown,
-        2 => HostBoard::Ktown2,
-        n => return Err(format!("host board {n}: 0 none, 1 Ktown, 2 Ktown2")),
-    };
+    let parts: Vec<&str> = (0..c.num_parts as usize).map(|i| if c.parts.is_null() { Ok("") } else { text(unsafe { *c.parts.add(i) }) }).collect::<Result<_, _>>()?;
+    let host_board = KonaConfig::host_board_of(&parts, c.ktown2 != 0)?;
     let mut cfg = KonaConfig::new(Product::from_name(name)?, 1)?
         .with_host_board(host_board)
         .with_rm_count(c.rm_count)?
@@ -92,6 +132,12 @@ fn pipe_config(c: &IrisKonaConfig) -> Result<KonaConfig, String> {
         .with_host_widget(byte(c.host_widget, "host widget")?)?
         .with_widget(byte(c.widget, "widget")?)?
         .with_pool(c.pool_threads as usize, c.pool_tile);
+    if c.shared_identity != 0 {
+        cfg = cfg.with_shared_identity(byte(c.shared_identity - 1, "shared identity")?)?;
+    }
+    if c.geometry_serial != 0 {
+        cfg = cfg.with_geometry_serial(c.geometry_serial)?;
+    }
     cfg.probe = c.probe;
     if c.managed_width != 0 && c.managed_height != 0 {
         cfg.managed = (c.managed_width, c.managed_height);
@@ -132,6 +178,23 @@ pub unsafe extern "C" fn sgi_kona_new(cfg: *const IrisKonaConfig, host: *const I
             },
         };
         let mut opts = Options { gpu, ..Options::default() };
+        let user = User(c.user);
+        if !c.flash_image.is_null() && c.flash_len as usize != FLASH_SIZE {
+            log::error!("sgi_kona_new: the flash image is {} bytes, not {FLASH_SIZE}", c.flash_len);
+            return None;
+        }
+        if let Some(write) = c.flash_write {
+            // SAFETY: `flash_image` holds `flash_len` bytes, which is the whole flash when not NULL.
+            let image = if c.flash_image.is_null() { fresh_image() } else { unsafe { std::slice::from_raw_parts(c.flash_image, FLASH_SIZE) }.to_vec() };
+            opts.flash = Some(FlashDrive { image, sink: Box::new(CFlash(user, write)) });
+        } else if !c.flash_image.is_null() {
+            log::error!("sgi_kona_new: a flash image with no write callback would be read-only; give the callback or no image");
+            return None;
+        }
+        if let Some(f) = c.dma_widget {
+            // SAFETY: the callback's contract.
+            opts.dma_widget = Some(Box::new(move |w| unsafe { f(user.ptr(), w as u32) }));
+        }
         if c.common.queue_ops != 0 {
             opts.queue = c.common.queue_ops as usize;
         }

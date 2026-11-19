@@ -39,7 +39,22 @@ typedef struct IrisKonaConfig {
     const char *pixel_depth;    /* "small" or "medium"; NULL is small */
     uint32_t texture_mb;        /* 0 or the product's texture per raster manager, in MB */
     uint32_t channels;          /* 0 or the display generator's channel count */
-    uint32_t host_board;        /* 0 none (Onyx2 deskside), 1 Ktown (rack), 2 Ktown2 (Onyx 3400) */
+    uint32_t ktown2;            /* the Onyx 3400's Ktown2 is fitted: it allows four raster managers */
+    /* The one-wire parts fitted besides the geometry board's, by part number: "030-1067-001"
+     * is the Ktown of a rack, whose record joins the chain. Any other part is refused. */
+    const char *const *parts;
+    uint32_t num_parts;
+    uint32_t shared_identity;   /* the slot whose Ktown serial the record follows, plus one (1 to 4); 0: own */
+    uint64_t geometry_serial;   /* the geometry board part's 48-bit ROM serial; 0: the synthetic one */
+    void *user;                 /* the argument of the callbacks */
+    const uint8_t *flash_image; /* the flash's contents, flash_len bytes; NULL: a new flash */
+    uint32_t flash_len;         /* 0, or exactly 0x80000 */
+    /* Every range the pipe programs, and the whole image after a snapshot loads. A NULL callback
+     * keeps the flash in memory; an image needs it. */
+    void (*flash_write)(void *user, uint32_t offset, const uint8_t *data, size_t len);
+    /* The widget the pipe's DMA goes to (0 to 15), before the engine returns from the call that
+     * created it or changed it: the shell's bus callbacks name it. */
+    void (*dma_widget)(void *user, uint32_t widget);
 } IrisKonaConfig;
 
 /* A box of pixels in one word position of the store. */
