@@ -155,8 +155,8 @@ pub const DAMAGE_ANY: u64 = u64::MAX;
 
 /// What the board signals. `Irq` and `Credits` coalesce, `Damage` joins,
 /// `Note` and `BusFault` repeat once only: `Outbox` keeps the queue bounded.
-/// `Interrupt` packets are kept in order and never dropped. Engines add
-/// variants, hence `non_exhaustive`.
+/// `Interrupt` packets for one line (widget, address, vector) collapse to the
+/// newest. Engines add variants, hence `non_exhaustive`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Event {
@@ -177,7 +177,10 @@ pub enum Event {
     /// on without it or stops with a `DeviceFault`; the text names the
     /// adapter, for the shell's error.
     GpuLost(String),
-    /// An interrupt packet for the shell to deliver.
+    /// An interrupt packet for the shell to deliver. A packet replaces the
+    /// queued one for the same line, so the queue holds at most one per line.
+    /// The receiver sets or clears a pending bit, and nothing runs between
+    /// two packets delivered in one batch, so only the last state is seen.
     Interrupt(Interrupt),
     /// Retired stores, by the source `set_source` named when they were
     /// written: the shell returns that many flow-control credits to it. One
