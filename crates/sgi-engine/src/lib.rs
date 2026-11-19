@@ -38,8 +38,15 @@
 //! save. Read `drain_dirty` after the quiesce.
 //!
 //! **Pump order.** An event that follows from a write-back (a fence's
-//! interrupt) is produced by `advance` after the write-back, never by a
-//! worker, so the guest cannot take the interrupt and read a stale fence.
+//! interrupt) is posted only after the write-back is complete and visible:
+//! by `advance`, or by the worker that did the write once its `ram_write`
+//! has returned. The guest cannot take the interrupt and read a stale fence.
+//! A worker that retires stores (and so owes credits) calls `Outbox::wake`,
+//! so the shell pumps to return them.
+//!
+//! **Conformance.** The clauses that do not depend on a board's registers are
+//! `conformance` (feature `conformance`): every board's tests implement its
+//! `Subject` and run them.
 //!
 //! **Time.** Passed in on `advance`, `frame` and `wait_idle`; the engine reads
 //! no host clock but for the host-time `budget_ns` the shell gives.
