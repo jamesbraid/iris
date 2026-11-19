@@ -31,6 +31,13 @@ pub trait BusDevice: Send + Sync {
     fn write8(&self, _addr: u64, _val: u8) -> u32 {
         BUS_ERR
     }
+    /// A whole big-endian 16-bit or 32-bit word at an aligned `addr`, in one access.
+    fn write16(&self, _addr: u64, _val: u16) -> u32 {
+        BUS_ERR
+    }
+    fn write32(&self, _addr: u64, _val: u32) -> u32 {
+        BUS_ERR
+    }
     /// Whole big-endian qwords at a qword-aligned `addr`.
     fn read_block(&self, _addr: u64, _buf: &mut [u64]) -> u32 {
         BUS_ERR

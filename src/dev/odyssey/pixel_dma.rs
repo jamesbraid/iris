@@ -42,9 +42,18 @@ pub(super) fn put_guest_value(v: u64, out: &mut [u8]) {
     }
 }
 
-/// Write `buf` to guest memory at `addr`; false as for [`read_guest`].
+/// Write `buf` to guest memory at `addr`; false as for [`read_guest`]. An aligned 2 or 4 byte
+/// scalar (a fence token, a query's completion word, a shadow word) is one bus write, so the shell
+/// can refuse or store it whole; `write_bytes` would split it into byte writes.
 pub(super) fn write_guest(mem: &GuestMemory, addr: u64, buf: &[u8]) -> bool {
-    mem.as_deref().is_some_and(|m| crate::physical::write_bytes(m, addr, buf) == BUS_OK)
+    mem.as_deref().is_some_and(|m| {
+        let st = match buf.len() {
+            2 if addr & 1 == 0 => m.write16(addr, u16::from_be_bytes([buf[0], buf[1]])),
+            4 if addr & 3 == 0 => m.write32(addr, u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]])),
+            _ => crate::physical::write_bytes(m, addr, buf),
+        };
+        st == BUS_OK
+    })
 }
 
 /// Which way a mapped transfer moves bytes.

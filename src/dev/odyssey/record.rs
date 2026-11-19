@@ -202,6 +202,12 @@ impl BusDevice for RecordingMem {
         }
         st
     }
+    fn write16(&self, addr: u64, val: u16) -> u32 {
+        self.inner.write16(addr, val)
+    }
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        self.inner.write32(addr, val)
+    }
     fn write_block(&self, addr: u64, buf: &[u64]) -> u32 {
         self.inner.write_block(addr, buf)
     }

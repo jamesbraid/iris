@@ -124,6 +124,20 @@ impl<M: HostMem> BusDevice for Guest<M> {
         }
     }
 
+    fn write16(&self, addr: u64, val: u16) -> u32 {
+        match self.mem.ram_write(addr, &val.to_be_bytes(), Swap::None) {
+            Ok(()) => BUS_OK,
+            Err(MemFault) => self.fail(addr, true),
+        }
+    }
+
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        match self.mem.ram_write(addr, &val.to_be_bytes(), Swap::None) {
+            Ok(()) => BUS_OK,
+            Err(MemFault) => self.fail(addr, true),
+        }
+    }
+
     fn read_block(&self, addr: u64, buf: &mut [u64]) -> u32 {
         let mut bytes = [0u8; BLOCK_WORDS * 8];
         for (i, words) in buf.chunks_mut(BLOCK_WORDS).enumerate() {
