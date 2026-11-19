@@ -265,6 +265,31 @@ impl GlPath {
         self.screen
     }
 
+    /// The primitive open, as the stream module reads and writes it: the clip planes it began
+    /// under, its vertices and how many it has taken. Follows `Gl::visit_open`, whose flag says
+    /// whether a primitive is open at all.
+    pub fn visit_open<S: crate::dev::kona::stream::Stream>(&mut self, s: &mut S) {
+        for p in self.clip.user.iter_mut() {
+            s.f32s(p);
+        }
+        s.u32(&mut self.clip.user_on);
+        s.u32(&mut self.seen);
+        s.bool(&mut self.texgen);
+        s.bool(&mut self.texgen_normal);
+        let n = s.len(self.prim.len());
+        if s.loading() {
+            self.prim.clear();
+            self.prim.resize(n, KVertex::default());
+        }
+        for v in self.prim.iter_mut() {
+            for a in [&mut v.h, &mut v.e, &mut v.c, &mut v.cb, &mut v.t] {
+                s.f32s(a);
+            }
+            s.u32(&mut v.oc);
+            s.bool(&mut v.edge);
+        }
+    }
+
     /// A path for a managed area of `screen` pixels, width and height.
     pub fn new(screen: (u32, u32)) -> GlPath {
         GlPath { counts: GlCounts::default(), #[cfg(test)] census: false, screen: Rect { x0: 0, y0: 0, x1: screen.0 as i32, y1: screen.1 as i32 }, clip: Clip::default(), prim: Vec::with_capacity(64), seen: 0, texgen: false, texgen_normal: false }

@@ -412,6 +412,12 @@ impl Gl {
         self.in_begin
     }
 
+    /// Whether a primitive is open, as the stream module reads and writes it. Follows `visit`,
+    /// which closes it; the vertices so far are the GL path's (`GlPath::visit_open`).
+    pub fn visit_open<S: Stream>(&mut self, s: &mut S) {
+        s.bool(&mut self.in_begin);
+    }
+
     /// The context's GL state, as the stream module reads and writes it. The draw state
     /// is made again (`dirty`) on a load.
     pub fn visit<S: Stream>(&mut self, s: &mut S) {

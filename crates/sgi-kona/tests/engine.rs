@@ -262,13 +262,110 @@ fn a_snapshot_taken_after_quiescing_loads_into_a_new_engine() {
     f.quiesce(u64::MAX).unwrap();
     f.save(&mut again).unwrap();
     assert_eq!(again, chunks, "save, load, save");
+}
 
-    // Mid-command, a snapshot is refused as Midway.
-    store(&mut e, COMMAND_PAGE, 1, A);
-    store(&mut e, COMMAND_PAGE, 9, A);
-    e.run(usize::MAX);
-    e.quiesce(u64::MAX).unwrap();
-    assert!(matches!(e.save(&mut Vec::<Chunk>::new()), Err(Refused::Midway(_))));
+/// One store of a stream: the register and the word.
+type Stores = Vec<(u32, u32)>;
+
+fn plain(words: &[u32]) -> Stores {
+    words.iter().map(|&w| (COMMAND_PAGE, w)).collect()
+}
+
+/// A kernel command: its token by a slot store with the first word, then the rest.
+fn token(token: u32, words: &[u32]) -> Stores {
+    let mut s = vec![(COMMAND_PAGE + (token << COMMAND_SLOT_SHIFT) + COMMAND_DATA_SLOT, words[0])];
+    s.extend(plain(&words[1..]));
+    s
+}
+
+fn feed(e: &mut Engine, stores: &[(u32, u32)]) {
+    for &(off, val) in stores {
+        store(e, off, val, A);
+        e.run(usize::MAX);
+    }
+}
+
+fn credit_totals(events: &[Event]) -> std::collections::BTreeMap<u32, u32> {
+    let mut t = std::collections::BTreeMap::new();
+    for (source, retired) in credits(events) {
+        *t.entry(source).or_default() += retired;
+    }
+    t
+}
+
+/// A snapshot taken after every prefix of `stream` loads into a new engine that, given the rest,
+/// ends where an engine that never stopped does: the same frame, the same saved state and the
+/// same credits owed to the Hubs.
+fn cut_everywhere(stream: &[(u32, u32)]) {
+    let mut whole = engine();
+    feed(&mut whole, stream);
+    whole.quiesce(u64::MAX).unwrap();
+    let mut want: Vec<Chunk> = Vec::new();
+    whole.save(&mut want).unwrap();
+    let owed = credit_totals(&drain(&mut whole));
+    for k in 0..=stream.len() {
+        let mut a = engine();
+        feed(&mut a, &stream[..k]);
+        a.quiesce(u64::MAX).unwrap();
+        let mut chunks: Vec<Chunk> = Vec::new();
+        a.save(&mut chunks).unwrap_or_else(|e| panic!("cut at {k}: {e:?}"));
+        let mut before = credit_totals(&drain(&mut a));
+
+        let mut b = engine();
+        b.quiesce(u64::MAX).unwrap();
+        b.load(&mut VecSource::new(chunks)).unwrap_or_else(|e| panic!("cut at {k}: {e:?}"));
+        b.resume();
+        feed(&mut b, &stream[k..]);
+        b.quiesce(u64::MAX).unwrap();
+        let mut got: Vec<Chunk> = Vec::new();
+        b.save(&mut got).unwrap();
+        assert_eq!(got, want, "cut at {k}: the state differs");
+        assert_eq!(b.compose().2, whole.compose().2, "cut at {k}: the frame differs");
+        for (hub, retired) in credit_totals(&drain(&mut b)) {
+            *before.entry(hub).or_default() += retired;
+        }
+        assert_eq!(before, owed, "cut at {k}: the credits differ");
+    }
+}
+
+#[test]
+fn a_snapshot_mid_command_resumes_the_textport_commands() {
+    // Colour 9 and a box, then a bitmap blit: its header, then its two payload words.
+    let mut s = plain(&[1, 2, 9, 1, 5, 2, 3, 20, 21]);
+    s.extend(plain(&[1, BITMAP_SELECTOR, 32, 2, 0, 0, 0, 0, 0xffff_0000, 0x0f0f_0f0f]));
+    cut_everywhere(&s);
+}
+
+#[test]
+fn a_snapshot_mid_command_resumes_a_kernel_command_and_the_words_behind_it() {
+    // A colour map load takes its entries as a data run; a video request its data and a checksum.
+    let mut s = token(LOAD_COLOUR_MAP_ENTRIES, &[0, 3, 0x111, 0x222, 0x333]);
+    s.extend(token(DISPLAY_GENERATOR_REQUEST_CARRIER, &[VIDEO_TEMP_BLANK, 1, VIDEO_TEMP_BLANK + 1]));
+    cut_everywhere(&s);
+}
+
+#[test]
+fn a_snapshot_mid_command_resumes_a_flash_write_and_a_swap_in() {
+    // Flash op 1, type 2 (the header), two words; then a swap-in of nothing: six words, a mode, a reason.
+    let mut s = token(EEPROM_OPERATION, &[1, 2, 2, 0xaaaa_5555, 0x5555_aaaa]);
+    s.extend(token(PIPE_MEMORY_SWAP_IN, &[0, 0, 0, 1, 1, 0]));
+    s.extend(plain(&[DMA_ADDR_TAG, REASON_SWAP]));
+    cut_everywhere(&s);
+}
+
+#[test]
+fn a_snapshot_mid_command_resumes_a_list_call_and_an_open_primitive() {
+    // 0x170 takes its ranges as a run: one range of two zero words in the list memory. The GL
+    // grammar's early tokens open a primitive: begin, a colour, two vertices.
+    let mut s = vec![(DMA_FIFO_PUSH, EXECUTE_LIST_BY_LIST_DMA_REPEATED), (DMA_FIFO_PUSH, 1)];
+    s.extend(plain(&[0x2000, 2]));
+    let f = |v: f32| v.to_bits();
+    s.extend(plain(&[BEGIN_PRIMITIVE_INDEPENDENT_TRIANGLES, SET_CURRENT_COLOUR_3_COMPONENTS_SINGLE_FLOAT, f(1.0), f(0.0), f(0.0)]));
+    for (x, y) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)] {
+        s.extend(plain(&[SUBMIT_VERTEX_2_COMPONENTS_SINGLE_FLOAT, f(x), f(y)]));
+    }
+    s.extend(plain(&[END_OPEN_PRIMITIVE]));
+    cut_everywhere(&s);
 }
 
 #[test]

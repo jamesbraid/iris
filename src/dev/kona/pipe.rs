@@ -19,7 +19,7 @@
 use super::defs::*;
 use super::dma::Dma;
 use super::flash::{Action as FlashAction, Flash, FlashOp};
-use super::frame::{tables, Packet, Port, Step, FrameTables};
+use super::frame::{tables, Packet, Port, Step, FrameTables, MAX_ARGS};
 use super::front::Host;
 use super::ident::{self, KonaConfig};
 use super::back::KonaBackend;
@@ -45,6 +45,78 @@ pub(super) enum Run {
     Calls { token: u32, need: usize, words: Vec<u32> },
 }
 
+impl Run {
+    /// The run open, as the stream module reads and writes it. A saved run that no command
+    /// could have opened is refused and left closed.
+    fn visit<S: super::stream::Stream>(&mut self, s: &mut S) {
+        let mut tag = match self {
+            Run::None => 0u32,
+            Run::Words { .. } => 1,
+            Run::Video { .. } => 2,
+            Run::Flash(_) => 3,
+            Run::Calls { .. } => 4,
+        };
+        s.u32(&mut tag);
+        if s.loading() {
+            *self = match tag {
+                0 => Run::None,
+                1 => Run::Words { grammar: Grammar::Textport, selector: 0, args: Vec::new(), words: Vec::new(), remaining: 0 },
+                2 => Run::Video { command: 0, data: Vec::new(), sum: 0 },
+                3 => Run::Flash(FlashOp::default()),
+                4 => Run::Calls { token: 0, need: 0, words: Vec::new() },
+                _ => {
+                    s.fail("a saved run is of a kind the pipe has not got");
+                    Run::None
+                }
+            };
+        }
+        let bad = match self {
+            Run::None => false,
+            Run::Words { grammar, selector, args, words, remaining } => {
+                let mut g = match grammar {
+                    Grammar::Textport => 0u32,
+                    Grammar::Kernel => 1,
+                    Grammar::Gl => 2,
+                };
+                s.u32(&mut g);
+                s.u32(selector);
+                s.vec_u32(args);
+                s.vec_u32(words);
+                s.u32(remaining);
+                if s.loading() {
+                    *grammar = match g {
+                        1 => Grammar::Kernel,
+                        2 => Grammar::Gl,
+                        _ => Grammar::Textport,
+                    };
+                }
+                g > 2 || args.len() > MAX_ARGS || *remaining == 0
+            }
+            Run::Video { command, data, sum } => {
+                s.u32(command);
+                s.vec_u32(data);
+                s.u32(sum);
+                data.len() >= VIDEO_SEARCH_MAX_WORDS
+            }
+            Run::Flash(op) => {
+                op.visit(s);
+                false
+            }
+            Run::Calls { token, need, words } => {
+                s.u32(token);
+                s.usize(need);
+                s.vec_u32(words);
+                let max = 2 * LIST_CALLS_MAX.max(LIST_CALLS_POOL_MAX) as usize;
+                !matches!(*token, EXECUTE_LIST_BY_LIST_DMA_REPEATED | EXECUTE_LIST_BY_INPUT_DMA_REPEATED) || *need == 0 || *need > max || words.len() >= *need
+            }
+        };
+        if s.loading() && bad {
+            s.fail("a saved run does not fit the command that opens it");
+            *self = Run::None;
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BitmapState {
     Idle,
@@ -65,6 +137,31 @@ struct Bitmap {
 impl Bitmap {
     fn idle() -> Self {
         Bitmap { state: BitmapState::Idle, header: Vec::new(), payload: Vec::new(), expected: 0 }
+    }
+
+    /// The blit in progress, as the stream module reads and writes it.
+    fn visit<S: super::stream::Stream>(&mut self, s: &mut S) {
+        let mut state = self.state as u32;
+        s.u32(&mut state);
+        s.vec_u32(&mut self.header);
+        s.vec_u32(&mut self.payload);
+        s.usize(&mut self.expected);
+        if s.loading() {
+            self.state = match state {
+                1 => BitmapState::Header,
+                2 => BitmapState::Payload,
+                _ => BitmapState::Idle,
+            };
+            let fits = match self.state {
+                BitmapState::Idle => self.header.is_empty() && self.payload.is_empty() && state == 0,
+                BitmapState::Header => self.header.len() < BITMAP_HEADER_WORDS && self.payload.is_empty(),
+                BitmapState::Payload => self.header.len() == BITMAP_HEADER_WORDS && self.expected as u64 <= BITMAP_MAX_PAYLOAD_WORDS && self.payload.len() < self.expected,
+            };
+            if !fits {
+                s.fail("a saved bitmap blit is not one the pipe could be taking");
+                *self = Bitmap::idle();
+            }
+        }
     }
 }
 
@@ -112,6 +209,16 @@ impl Input {
             self.bitmap = Bitmap::idle();
             self.run = Run::None;
         }
+    }
+
+    /// The commands the stream has open, as the stream module reads and writes them: the
+    /// framers, the textport's blit and the run taking words. `visit` sets these idle.
+    fn visit_open<S: super::stream::Stream>(&mut self, s: &mut S) {
+        self.textport.visit(s);
+        self.gl.visit(s);
+        self.kernel_suspended.visit(s);
+        self.bitmap.visit(s);
+        self.run.visit(s);
     }
 
     fn new(t: &'static FrameTables) -> Self {
@@ -272,6 +379,36 @@ impl Core {
         let idle = |i: &Input| !i.textport.framing() && !i.gl.framing() && !i.kernel_suspended.framing() && matches!(i.run, Run::None) && i.bitmap.state == BitmapState::Idle;
         let still = idle(&self.input) && self.saved.iter().flatten().all(|i| idle(i)) && !self.kernel.framing() && !self.dma_fifo.framing() && self.swapin.stage == SwapStage::Idle && !self.dma.running();
         if still { Ok(()) } else { Err("the command stream is in the middle of a command".into()) }
+    }
+
+    /// The commands the stream has open: every framer, run, swap-in and set-aside input.
+    /// Follows `visit`, which sets them all idle.
+    pub(super) fn visit_open<S: super::stream::Stream>(&mut self, s: &mut S) {
+        self.input.visit_open(s);
+        for i in self.saved.iter_mut().flatten() {
+            i.visit_open(s);
+        }
+        self.kernel.visit(s);
+        self.dma_fifo.visit(s);
+        let w = &mut self.swapin;
+        let mut stage = w.stage as u32;
+        s.u32(&mut stage);
+        s.u32s(&mut w.header);
+        s.u32(&mut w.mode);
+        s.u64(&mut w.data_left);
+        if s.loading() {
+            w.stage = match stage {
+                1 => SwapStage::Mode,
+                2 => SwapStage::Data,
+                3 => SwapStage::Reason,
+                _ => SwapStage::Idle,
+            };
+            if stage > 3 || (w.stage == SwapStage::Data && w.data_left == 0) || (w.stage != SwapStage::Data && w.data_left != 0) {
+                s.fail("a saved swap-in is not one the pipe could be taking");
+                w.stage = SwapStage::Idle;
+                w.data_left = 0;
+            }
+        }
     }
 
     /// The pipe's registers, pages, contexts and memories, as the stream module reads
