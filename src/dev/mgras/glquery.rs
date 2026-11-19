@@ -1,5 +1,5 @@
 //! GL state queries: what the GE answers when libGLcore reads its state back
-//! (`__MGR_RETURN_MODE` 0x0A2 and `SPIN_AND_RETURN` 0x0A1 at a GE address;
+//! (`cfifo_cmd_query` 0x0A2 and `token_0a1` 0x0A1 at a GE address;
 //! `GET_LIGHTFV` 0x0EF and `GET_MATERIALFV` 0x0EE, which copy a parameter
 //! into the scratch words at 0x32E..0x331 first).
 //!
@@ -212,7 +212,7 @@ impl Gl {
         let f = |v: f32| Some(v.to_bits());
         let on = |b: bool| b as u32;
         match addr {
-            // Current normal, texture coordinates (SPIN_AND_RETURN).
+            // Current normal, texture coordinates (token_0a1).
             8..=10 => f(self.normal[(addr - 8) as usize]),
             11..=14 => f(self.texcoord[(addr - 11) as usize]),
             // Enables, PP1 fill-mode style (probed): polygon stipple bit 0,

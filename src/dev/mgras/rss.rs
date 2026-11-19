@@ -72,7 +72,7 @@ pub mod reg {
     pub const ZST_STENCIL: u32 = 0x3F8;
     /// Model-private: the window depth pixel transfers take, z.8 (the
     /// current raster position's; our GE HLE loads it on
-    /// LOAD_RASTER_POS_INFO, which libGLcore sends before each
+    /// token_0d7, which libGLcore sends before each
     /// glDrawPixels / glCopyPixels draw: no depth crosses the bus).
     pub const XFER_Z: u32 = 0x3F9;
     pub const FILLMODE: u32 = 0x110;
@@ -548,7 +548,7 @@ pub(super) fn rgb_pixtype(pp1fillmode: u32) -> bool {
 /// 23:16) and the low nibbles in planes 35:24 (red 27:24, green 31:28,
 /// blue 35:32; their order is our guess). The X server draws its 24-bit
 /// windows in this type (fill mode 0xC006304) through plane mask 0xFFFFFF,
-/// the 8-bit parts; GL's RGBA 12,12,12 visual (INIT_FORMAT_VALUES 0x2300)
+/// the 8-bit parts; GL's RGBA 12,12,12 visual (token_09a 0x2300)
 /// writes all 36 planes (libGLcore: LSB masks all ones, MSBs 0xF), and its
 /// window's XMAP format is 0x19, not 24-bit's 0x15. Double buffered like
 /// 24-bit: a second page (DRAW_BUFFER [4, 1]).
@@ -577,7 +577,7 @@ pub(super) fn rgb36_from8(v: u32) -> u64 {
 /// the plane mask picks which are written. The X server draws A with
 /// draw field 1 and mask 0xFFF, B with field 2 and 0xFFF000, both with
 /// field 3 and 0xFFFFFF (traced, 6.5.22 TrueColor). GL's 12-bit
-/// double-buffered visual (INIT_FORMAT_VALUES 0x100, DRAW_BUFFER [2, 1])
+/// double-buffered visual (token_09a 0x100, DRAW_BUFFER [2, 1])
 /// draws that way on a HighImpact at 1280x1024, where DRBpointers and
 /// the XMAP DIB name the same page for A and B (0x90240), there being no
 /// room for a second 24-bit buffer.

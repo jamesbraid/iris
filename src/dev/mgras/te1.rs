@@ -8,7 +8,7 @@
 //!   raster engine's transfer engine with `XFRCONTROL` pointing at the
 //!   texture side. The texture loader registers (`TL_*`) place them: page,
 //!   level size, sub-image origin, components and depth. libGLcore sends the
-//!   texels through the GE pixel pipeline (SEND_PIXELS routine 0x511A); our
+//!   texels through the GE pixel pipeline (token_08d routine 0x511A); our
 //!   GE HLE turns that into the transfer (`gl.rs`).
 //! - **Sampling.** Per fragment the RE hands the TE S/W, T/W and 1/W. The TE
 //!   divides out W, picks a level of detail from the derivatives, then
