@@ -48,9 +48,6 @@ pub(super) struct HostInterface {
     pub intr_enable: u32,
     /// The flag source's transition state, for the packet edge.
     pub interrupt_asserted: bool,
-    /// The flag level rose with no destination programmed and its set
-    /// packet waits for one (`HostInterface::deliver_held_flag`).
-    pub flag_held: bool,
     pub sw_token: u32,
     /// The flow-control target word (+0x1074), as last written. Stored, not
     /// routed: nothing consumes it, so it is a front register that neither
@@ -97,7 +94,6 @@ impl Default for HostInterface {
             intr_flags: 0,
             intr_enable: 0,
             interrupt_asserted: false,
-            flag_held: false,
             sw_token: 0,
             flctl_target: 0,
             flctl_target_reported: false,
@@ -262,7 +258,6 @@ impl HostInterface {
         self.swap_after = stream_pos;
         self.stream_pos = stream_pos;
         self.interrupt_asserted = false;
-        self.flag_held = false;
         self.update_irq();
         Ok(())
     }
@@ -335,28 +330,10 @@ impl HostInterface {
 
         if level != self.interrupt_asserted {
             self.interrupt_asserted = level;
-            self.flag_held = level && !self.routed();
-            if self.flag_held {
-                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: flag interrupt raised with no destination programmed; held until one is");
-            } else {
-                // A level that falls while held was never sent, and with no
-                // routing programmed there is no packet for its clear.
-                self.deliver_routed(route::VECTOR_FLAG_SHIFT, "flag", level);
-            }
-        }
-    }
-
-    /// A routing write: send the flag level that rose before the destination
-    /// was programmed, if it is still raised. MODEL CHOICE: the kernel enables
-    /// flow control, and so can raise low water, before its interrupt set-up
-    /// programs 0x1044, 0x104c and 0x1054, so the model holds the level
-    /// pending and sends it once the destination is written. What the board
-    /// does with such a flag (drop it, hold it, or send it to address zero)
-    /// is unknown.
-    fn deliver_held_flag(&mut self) {
-        if self.flag_held && self.routed() {
-            self.flag_held = false;
-            self.deliver_routed(route::VECTOR_FLAG_SHIFT, "held flag", true);
+            // With no routing programmed the packet has nowhere to go and is not sent, nor
+            // sent later: what the board does with such a flag is unknown, and the kernel
+            // enables the flags (the last store of its interrupt set-up) after the routing.
+            self.deliver_routed(route::VECTOR_FLAG_SHIFT, "flag", level);
         }
     }
 
@@ -514,18 +491,9 @@ impl HostInterface {
                 self.displayed_buffer = value as u32;
                 self.displayed_written = true;
             }
-            Some(route::DEST_UPPER) => {
-                self.route_dest_upper = value as u32;
-                self.deliver_held_flag();
-            }
-            Some(route::DEST_LOWER) => {
-                self.route_dest_lower = value as u32;
-                self.deliver_held_flag();
-            }
-            Some(route::VECTORS) => {
-                self.route_vectors = value as u32;
-                self.deliver_held_flag();
-            }
+            Some(route::DEST_UPPER) => self.route_dest_upper = value as u32,
+            Some(route::DEST_LOWER) => self.route_dest_lower = value as u32,
+            Some(route::VECTORS) => self.route_vectors = value as u32,
             Some(ODSY_IDENTITY | ODSY_STATUS | ODSY_ERROR_ADDR_UPPER | ODSY_ERROR_ADDR_LOWER) => {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: write of {:#x} to the read-only register at {:#x}", value, addr);
             }
