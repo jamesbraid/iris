@@ -115,6 +115,44 @@ pub unsafe extern "C" fn sgi_odyssey_new(cfg: *const IrisVproConfig, host: *cons
     })
 }
 
+/// What the GPU unit has done, for a shell that asserts a GPU run executed GPU records.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct IrisVproGpuCounters {
+    pub records: u64,
+    pub batches: u64,
+    pub copies: u64,
+    pub readbacks: u64,
+    pub rejections: u64,
+    pub faults: u64,
+}
+
+/// Fill `*out` with the GPU unit's counters. OK; ERROR when the engine has no GPU unit (or `out`
+/// is NULL); FAULT on a faulted engine.
+///
+/// # Safety
+/// `h` is a live VPro handle and `out` points to an `IrisVproGpuCounters`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_odyssey_gpu_counters(h: *mut IrisEngine, out: *mut IrisVproGpuCounters) -> c_int {
+    unsafe {
+        call::<VproEngine, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| {
+            if out.is_null() {
+                return IRIS_ENGINE_ERROR;
+            }
+            if e.fault().is_some() {
+                return IRIS_ENGINE_FAULT;
+            }
+            match e.gpu_counters() {
+                Some([records, batches, copies, readbacks, rejections, faults]) => {
+                    *out = IrisVproGpuCounters { records, batches, copies, readbacks, rejections, faults };
+                    IRIS_ENGINE_OK
+                }
+                None => IRIS_ENGINE_ERROR,
+            }
+        })
+    }
+}
+
 /// Bring the pixels of a box (corners included, every plane under it) current for a CPU reader.
 ///
 /// # Safety

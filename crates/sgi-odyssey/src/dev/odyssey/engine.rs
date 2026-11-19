@@ -371,6 +371,13 @@ impl VproEngine {
         self.quiescent().then_some(()).ok_or(Refused::NotQuiesced)
     }
 
+    /// The GPU unit's records, batches, copies, readbacks, rejections and faults; None without a
+    /// GPU unit or once the engine has stopped.
+    pub fn gpu_counters(&self) -> Option<[u64; 6]> {
+        let g = self.settle().ok()?;
+        g.raster.run_now(|ctx| ctx.gpu.as_ref().map(|u| u.counters()))
+    }
+
     /// The GPU unit's counters (batches, records, waits, readbacks) as
     /// text; None without a GPU unit or once the engine has stopped.
     pub fn gpu_report(&self) -> Option<String> {

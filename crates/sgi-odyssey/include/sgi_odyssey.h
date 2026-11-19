@@ -54,6 +54,23 @@ uint64_t sgi_odyssey_memory_bytes(const IrisVproConfig *cfg);
 IrisEngine *sgi_odyssey_new(const IrisVproConfig *cfg,
                           const IrisEngineHost *host);
 
+/* What the GPU unit has done. */
+typedef struct IrisVproGpuCounters {
+    uint64_t records;
+    uint64_t batches;
+    uint64_t copies;
+    uint64_t readbacks;
+    uint64_t rejections;
+    uint64_t faults;
+} IrisVproGpuCounters;
+
+/*
+ * Fill *out with the GPU unit's counters, so a shell can assert that a GPU
+ * run executed GPU records. ERROR when the engine has no GPU unit; FAULT on a
+ * faulted engine.
+ */
+int sgi_odyssey_gpu_counters(IrisEngine *h, IrisVproGpuCounters *out);
+
 /*
  * Bring the pixels of a box (corners included, every plane under it) current
  * for a CPU reader. Waits for queued CPU work, then only for GPU work that
