@@ -787,6 +787,23 @@ impl KonaBackend {
         Ok(Some((sc.output().clone(), self.store.cpu().width(), self.store.cpu().height())))
     }
 
+    /// As `lend_frame`, composed into `dst` as 0x00RRGGBB words of `stride_words` a row; the size.
+    #[cfg(feature = "wgpu")]
+    pub fn compose_into(&mut self, dst: &dyn std::any::Any, stride_words: u32) -> Result<Option<(u32, u32)>, String> {
+        let shared = self.scanout.clone();
+        let mut guard = shared.lock();
+        let Some(sc) = guard.as_mut() else { return Ok(None) };
+        let dst = match (dst.downcast_ref::<wgpu::Buffer>(), dst.downcast_ref::<std::sync::Arc<wgpu::Buffer>>()) {
+            (Some(b), _) => b,
+            (None, Some(b)) => b.as_ref(),
+            (None, None) => return Err("compose_into: the destination is not a wgpu buffer".into()),
+        };
+        self.drain();
+        let map = self.map.lock().clone();
+        let tables = self.tables.lock().snapshot();
+        sc.compose_into(&self.store, textport::COLOUR_WORD, &map, &tables, dst, stride_words).inspect_err(|e| sc.fail(e)).map(Some)
+    }
+
     /// Hold each swap until the next `frame`, as a pipe that changes the displayed buffer at a
     /// retrace does, instead of showing it when the command is reached.
     pub fn latch_swaps(&mut self, on: bool) {

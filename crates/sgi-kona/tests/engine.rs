@@ -551,3 +551,22 @@ fn a_swap_latched_for_the_next_frame_is_saved_and_shown_by_the_loaded_engine() {
     assert!(!f.swap_waiting() && !e.swap_waiting());
     assert_eq!(f.compose().2, e.compose().2, "the swap shows the same frame");
 }
+
+/// The generation moves when stores are written and again when they run (the picture follows the
+/// run, not the write), and holds while the pipe is idle.
+#[test]
+fn the_frame_generation_moves_with_stores_and_runs_and_holds_when_idle() {
+    let mut e = engine();
+    let g = BoardEngine::frame_generation(&e, 0);
+    assert_ne!(g, 0);
+    assert_eq!((BoardEngine::frame_generation(&e, 0), BoardEngine::frame_generation(&e, 1)), (g, 0), "nothing happened; no second head");
+    store(&mut e, COMMAND_PAGE, 1, A);
+    let written = BoardEngine::frame_generation(&e, 0);
+    assert_ne!(written, g, "a store");
+    e.run(usize::MAX);
+    let ran = BoardEngine::frame_generation(&e, 0);
+    assert_ne!(ran, written, "and its run");
+    assert_eq!(e.run(usize::MAX), 0);
+    assert_eq!(BoardEngine::frame_generation(&e, 0), ran, "an idle pipe holds");
+    assert_eq!(BoardEngine::compose_into(&mut e, 0, &0u8, 1280), Ok(None), "no GPU scan-out, nothing to compose into");
+}
