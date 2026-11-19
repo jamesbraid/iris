@@ -87,6 +87,13 @@ impl BusDevice for ReplayMem {
         }
         BUS_OK
     }
+    /// Hashed as the bytes it replaces, so a recording's digest does not depend on the width.
+    fn write16(&self, addr: u64, val: u16) -> u32 {
+        val.to_be_bytes().iter().enumerate().map(|(i, b)| self.write8(addr + i as u64, *b)).find(|s| *s != BUS_OK).unwrap_or(BUS_OK)
+    }
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        val.to_be_bytes().iter().enumerate().map(|(i, b)| self.write8(addr + i as u64, *b)).find(|s| *s != BUS_OK).unwrap_or(BUS_OK)
+    }
     fn read_block(&self, addr: u64, buf: &mut [u64]) -> u32 {
         match self.take() {
             Some(Rec::DmaBlock { addr: a, words }) if *a == addr && words.len() == buf.len() => {

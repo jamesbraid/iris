@@ -132,6 +132,15 @@ impl BusDevice for Ram {
             None => crate::traits::BUS_ERR,
         }
     }
+    fn write16(&self, addr: u64, val: u16) -> u32 {
+        match self.0.lock().get_mut(addr as usize..addr as usize + 2) {
+            Some(b) => {
+                b.copy_from_slice(&val.to_be_bytes());
+                crate::traits::BUS_OK
+            }
+            None => crate::traits::BUS_ERR,
+        }
+    }
     fn read32(&self, addr: u64) -> crate::traits::BusRead32 {
         match self.0.lock().get(addr as usize..addr as usize + 4) {
             Some(b) => crate::traits::BusRead32 {

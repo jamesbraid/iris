@@ -161,3 +161,31 @@ fn the_edge_flag_words_set_the_flag_vertices_carry() {
     cmd(&mut s, gl_cmd::EDGE_FLAG_TRUE);
     assert_eq!(s.assembly.edge, 1);
 }
+
+/// A bus that takes scalars whole and refuses single bytes, as a shell that must store or refuse a
+/// word atomically does.
+struct WholeOnly(Arc<Ram>);
+
+impl crate::traits::BusDevice for WholeOnly {
+    fn write8(&self, _: u64, _: u8) -> u32 {
+        crate::traits::BUS_ERR
+    }
+    fn write16(&self, addr: u64, val: u16) -> u32 {
+        self.0.write16(addr, val)
+    }
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        self.0.write32(addr, val)
+    }
+}
+
+/// A query's record words, counter and sync half-word reach the bus as whole 4 and 2 byte writes,
+/// never as bytes: with single bytes refused the query still completes.
+#[test]
+fn a_querys_completion_words_are_whole_bus_writes() {
+    let (mut s, ram) = query_board();
+    s.guest = Some(Arc::new(WholeOnly(ram.clone())));
+    query(&mut s, query::KIND_RASTER);
+    assert_eq!(ram.half(SYNC + 6), 0x5a5a, "the sync half-word landed");
+    let at = SHADOW + query::RASTER_COLOUR as u64;
+    assert_ne!(word(&ram, at), 0, "and a record word");
+}
