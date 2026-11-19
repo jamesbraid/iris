@@ -432,6 +432,26 @@ fn a_read_across_two_windows_decodes_each_pixel_by_its_own_display_mode() {
     assert_eq!(got[..3], [0x2a, red, 0xa5], "by the read sentinel");
 }
 
+/// A header that places a 4-byte field at byte 6 of the pixel, across two 8-byte words, is a guest
+/// error and must not panic the engine. No odsy evidence places a field there (every named layout has
+/// each field whole inside its word), so the model does not guess: the field reads 0 and a store to
+/// it is dropped, whatever the build. A debug build used to panic on the shift, a release one to
+/// read bytes of the wrong word.
+#[test]
+fn a_field_that_straddles_two_words_reads_zero_and_drops_its_stores() {
+    let (mut s, ram) = read_window();
+    // Colour at unit 6, 4-byte fields at unit 3 (byte 6), for the A and B fields.
+    let word4 = with_fields(read_word4(2, 2), 3, 3);
+    let got = dma_read(&mut s, &ram, (30, 40, 1), word4, 4);
+    assert_eq!(got[..5], [0, 0, 0, 0, 0xa5], "a field across two words reads 0");
+
+    // The board memory itself: a field across two words reads 0 and a store to it changes nothing.
+    let mem = s.vram_ptr();
+    mem.store(0x1000, 8, 0x1122_3344_5566_7788);
+    mem.store(0x1006, 4, 0xdead_beef);
+    assert_eq!((mem.load(0x1006, 4), mem.load(0x1000, 8)), (0, 0x1122_3344_5566_7788));
+}
+
 /// A GL image write by DMA to the draw drawable: the table at
 /// `TABLE` names
 /// `payload` for a `w` x 1 box at (x, y) under word 4 `word4` and word 7's

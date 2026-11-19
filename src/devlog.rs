@@ -529,6 +529,15 @@ macro_rules! dlog_unconditional {
     };
 }
 
+/// A guest's own error (a header or mode the board cannot have), for the board models'
+/// cold paths: the module's log, as `dlog!`; the engine crates log it as a warning.
+#[macro_export]
+macro_rules! dlog_guest {
+    ($mod:expr, $($arg:tt)*) => {
+        $crate::dlog!($mod, $($arg)*)
+    };
+}
+
 /// Hot-path log. Compiles to nothing in non-developer (release) builds.
 #[macro_export]
 macro_rules! dlog_dev {
