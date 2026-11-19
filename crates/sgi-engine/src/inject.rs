@@ -47,6 +47,12 @@ pub fn arm(p: Point) {
     ARMED.store(p as u32, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Forget an armed point that no call reached.
+#[cfg(feature = "fault-injection")]
+pub fn disarm() {
+    ARMED.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
 #[inline(always)]
 pub fn hit(p: Point) {
     #[cfg(feature = "fault-injection")]
