@@ -64,6 +64,11 @@ const BLUE: &[(u32, u32)] = &[(0x5e, 0x007f_f800), (0x5f, 0x00ff_f000), (0x64, 0
 /// One line of the five: end then start vertex, the increments, and a colour.
 /// Stippled lines write the repeat word to 0x15b and the pattern to 0x15a.
 fn line(w: &mut Vec<u32>, end: (f64, f64), start: (f64, f64), inc: (u32, u32), colour: &[(u32, u32)], stipple: bool, smooth: bool) {
+    line_with(w, end, start, inc, colour, stipple, smooth, &|i| 0xff - 4 * i);
+}
+
+/// `line` with the smooth line's filter table (weight at index i) as given.
+fn line_with(w: &mut Vec<u32>, end: (f64, f64), start: (f64, f64), inc: (u32, u32), colour: &[(u32, u32)], stipple: bool, smooth: bool, filter: &dyn Fn(u32) -> u32) {
     regs(w, &[(0xc, coord(end.0)), (0xd, coord(end.1)), (0xe, coord(start.0)), (0xf, coord(start.1)), (0x10, inc.0), (0x11, inc.1), (0x12, 0)]);
     reg(w, 0x110, 0x7000);
     if stipple {
@@ -74,7 +79,7 @@ fn line(w: &mut Vec<u32>, end: (f64, f64), start: (f64, f64), inc: (u32, u32), c
     reg(w, 0x116, 0);
     if smooth {
         reg(w, 0x15c, 0xb000_0000);
-        (0..2).for_each(|_| (0..64).for_each(|i| reg(w, 0x15d, 0xff - 4 * i)));
+        (0..2).for_each(|_| (0..64).for_each(|i| reg(w, 0x15d, filter(i))));
         reg(w, 0x15c, 0xb000_0080);
         (0..32).for_each(|_| reg(w, 0x15d, 0x100));
         // The fill mode's written bits are 1:0 and 3; the rest is the register's
@@ -279,6 +284,20 @@ fn the_lines_draw_the_stored_tables_steps() {
         let want = if r % 2 == 0 { 0x80 } else { 0x7f };
         assert_eq!(at(r, 12), 0xff00_0000 | want << 16 | want, "purple, row {r}");
     }
+}
+
+/// The smooth line's weights come from the table the loader writes through
+/// the stepping indirect address: halved weights halve the green of a pixel
+/// the line passes through the centre of.
+#[test]
+fn the_smooth_line_reads_the_loaded_table() {
+    let at_centre = |filter: &dyn Fn(u32) -> u32| {
+        let w = scene(|w| line_with(w, (5.0, 0.0), (9.0, 16.0), (0x40_0000, 0x100_0000), &[(0x5d, 0xff_f000), (0x5f, 0xff_f000)], false, true, filter));
+        readback(Board::High, Mode::Inline, None, &w, 3, 8)[2 * 8 + 5]
+    };
+    assert_eq!(at_centre(&|i| 0xff - 4 * i), 0xff00_ff00);
+    let half = at_centre(&|i| (0xff - 4 * i) / 2);
+    assert!((0x7d..=0x7f).contains(&((half >> 8) & 0xFF)), "green {half:#010x}");
 }
 
 /// The lines' stored sum is not met: the purple line's last row (10) is

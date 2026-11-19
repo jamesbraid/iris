@@ -334,6 +334,9 @@ const PP1_DIAG_BLEND: u32 = 0xB;
 /// The diagnostic's line stipple reads its pattern downward from this bit
 /// at the start vertex's pixel. Inferred: bit 5 read upward fits as well.
 const DIAG_STIPPLE_START: i32 = 11;
+/// Where the diagnostic's loader writes the smooth line's filter table in
+/// the indirect device space: 64 weights, 0xff down in steps of 4.
+const FILTER_TABLE: u32 = 0xB000_0000;
 
 /// The OpenGL per-fragment state our GE11 HLE programs into the PP1
 /// registers. The real layouts are not known (only GE11 microcode writes
@@ -1744,10 +1747,15 @@ impl Rss {
         }
         match r {
             reg::INDIRECT_DATA => {
-                self.device.insert(self.regs[reg::INDIRECT_ADDR as usize], val);
+                // The address steps after each write (inferred: the
+                // diagnostic's loader sets it once, then writes 64 distinct
+                // weights).
+                let addr = self.regs[reg::INDIRECT_ADDR as usize];
+                self.regs[reg::INDIRECT_ADDR as usize] = addr.wrapping_add(1);
+                self.device.insert(addr, val);
                 if self.device.overflowed {
                     self.device.overflowed = false;
-                    log::warn!("mgras: raster device space full, write to {:#x} dropped", self.regs[reg::INDIRECT_ADDR as usize]);
+                    log::warn!("mgras: raster device space full, write to {addr:#x} dropped");
                 }
             }
             reg::IR_ALIAS => self.regs[reg::IR as usize] = val,
@@ -2578,9 +2586,10 @@ impl Rss {
     /// Inferred from the diagnostic's stored table (gr4 ide-raster-tests):
     /// - Stipple dots alternate from the start vertex's pixel (registers
     ///   0xe/0xf), the pattern read downward from `DIAG_STIPPLE_START`.
-    /// - A smooth line (IR 0x63) has weight a = 255 - 4 k, k = 64 d for d
-    ///   the pixel centre's distance from the line sampled at the major
-    ///   pixel (k < 64); the loader's table is not read.
+    /// - A smooth line (IR 0x63) has weight a = T[k], k = 64 d for d the
+    ///   pixel centre's distance from the line sampled at the major
+    ///   pixel (k < 64), T the filter table the loader writes at
+    ///   `FILTER_TABLE` (0xff down in steps of 4).
     /// - With `PP1_DIAG_BLEND` set a fragment blends as source alpha over
     ///   one minus destination alpha, and its coverage scales its alpha.
     fn diag_run(&mut self, draw: impl FnOnce(&mut Self) -> Option<(i32, i32)>) {
@@ -2632,7 +2641,7 @@ impl Rss {
                     let c = (b - 0.5).round() as i32;
                     for q in c - 1..=c + 1 {
                         let w = (((q as f64 + 0.5) - b).abs() * 64.0).round() as u32;
-                        let a = if w < 64 { 255 - 4 * w } else { 0 };
+                        let a = if w < 64 { self.device.get(FILTER_TABLE + w).min(255) } else { 0 };
                         if a > 0 {
                             self.diag_frag(at(q), rgba, z, a + (a >> 7), &mut rows);
                         }
