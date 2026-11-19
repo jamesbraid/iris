@@ -532,7 +532,7 @@ mod block {
 
 /// Whether the pixel processors' pixel type (PP1 fill mode bits 10:8) is an
 /// RGB one: 0 4:4:4 pairs, 1 5:5:5 pairs, 2 RGBA8888
-/// (SGI's diagnostics: "32-bit rgba"), 3 RGB121212 (also the X server's
+/// (8 bits a component), 3 RGB121212 (also the X server's
 /// 24-bit windows, fill mode 0xC006304). 4-7 are colour index (`ci_pixtype`).
 /// The pixel type alone says which; the plane masks do not.
 pub(super) fn rgb_pixtype(pp1fillmode: u32) -> bool {
@@ -793,7 +793,7 @@ fn to_host(format: (u32, u32), v: u32) -> u64 {
 /// 5 blue, 6 alpha, 7 RGB, 8 RGBA (2 depth, 1 stencil, 0 colour index);
 /// types 0 / 4 unsigned / signed bytes, 1 / 5 shorts, 3 / 7 32-bit (8 and
 /// 10 the X server's packed 4-4-4-4 and 5-5-5). rgb_order 1 sends red
-/// first, 0 alpha first (SGI: "rgb_order = 0; /* ABGR */"); RGB formats
+/// first, 0 alpha first (the diagnostics' ABGR order); RGB formats
 /// are red first either way.
 pub(crate) fn xfer_format(mode: u32) -> (u32, u32) {
     let (f, t) = ((mode >> 4) & 0xF, mode & 0xF);
