@@ -161,11 +161,15 @@ pub struct RasterPos {
     pub y: f32,
     pub z: u32,
     pub colour: [f32; 4],
+    /// The colour index and texture coordinates current when the position was set. Not saved (the
+    /// layout is shared with version 1 states), so a load resets them.
+    pub index: f32,
+    pub texture: [f32; 4],
 }
 
 impl Default for RasterPos {
     fn default() -> Self {
-        RasterPos { valid: true, x: 0.0, y: 0.0, z: 0, colour: [1.0; 4] }
+        RasterPos { valid: true, x: 0.0, y: 0.0, z: 0, colour: [1.0; 4], index: 0.0, texture: [0.0, 0.0, 0.0, 1.0] }
     }
 }
 
@@ -273,6 +277,9 @@ impl Pixels {
         s.f32(&mut self.pos.y);
         s.u32(&mut self.pos.z);
         s.f32s(&mut self.pos.colour);
+        if s.loading() {
+            (self.pos.index, self.pos.texture) = (RasterPos::default().index, RasterPos::default().texture);
+        }
         s.f32s(&mut self.accum_clear);
         let mut has = self.pending.is_some();
         s.bool(&mut has);
@@ -495,7 +502,7 @@ fn raster_position(gl: &mut Gl, p: [f32; 4]) -> bool {
     let [vx, vy, vw, vh] = gl.raster.viewport;
     let [dn, df] = gl.raster.depth_range;
     let (nx, ny, nz) = if w > 0.0 { (h[0] / w, h[1] / w, h[2] / w) } else { (0.0, 0.0, 0.0) };
-    gl.pix.pos = RasterPos { valid, x: vx + (nx + 1.0) * 0.5 * vw, y: vy + (ny + 1.0) * 0.5 * vh, z: depth32(dn + (nz * 0.5 + 0.5) * (df - dn)), colour: gl.draw_colour() };
+    gl.pix.pos = RasterPos { valid, x: vx + (nx + 1.0) * 0.5 * vw, y: vy + (ny + 1.0) * 0.5 * vh, z: depth32(dn + (nz * 0.5 + 0.5) * (df - dn)), colour: gl.draw_colour(), index: gl.index, texture: gl.texcoord };
     true
 }
 
@@ -1724,6 +1731,16 @@ mod tests {
         }
     }
 
+    /// The raster position keeps the colour index and texture coordinates current when it was set.
+    #[test]
+    fn the_raster_position_keeps_the_index_and_texture_it_was_set_under() {
+        let mut gl = Gl::default();
+        (gl.index, gl.texcoord) = (7.0, [0.1, 0.2, 0.3, 0.4]);
+        raster_position(&mut gl, [0.0, 0.0, 0.0, 1.0]);
+        (gl.index, gl.texcoord) = (9.0, [1.0; 4]);
+        assert_eq!((gl.pix.pos.index, gl.pix.pos.texture), (7.0, [0.1, 0.2, 0.3, 0.4]));
+    }
+
     /// What the context keeps of the pixel operations is saved and restored.
     #[test]
     fn the_pixel_state_round_trips_through_a_stream() {
@@ -1734,7 +1751,7 @@ mod tests {
         p.zoom = [2.0, -1.0];
         p.maps.insert(MAP_INDEX_TO_RED, Map { max: 65535.0, values: vec![1.0, 2.0, 3.0] });
         p.read = Some(2);
-        p.pos = RasterPos { valid: false, x: 3.5, y: 4.5, z: 9, colour: [0.1, 0.2, 0.3, 0.4] };
+        p.pos = RasterPos { valid: false, x: 3.5, y: 4.5, z: 9, colour: [0.1, 0.2, 0.3, 0.4], ..RasterPos::default() };
         p.pending = Some([1, 2, 3, 4, 5, 6, 7, 8]);
         let mut w = Writer::default();
         p.visit(&mut w);
