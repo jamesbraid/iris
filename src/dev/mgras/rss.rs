@@ -1886,6 +1886,17 @@ impl Rss {
         true
     }
 
+    /// The window coordinates (x0, x1, y0, y1, inclusive) whose framebuffer pixel is on the
+    /// screen: nothing outside them is stored (`visible`), so a primitive's loops may stop
+    /// there, however far its registers say it reaches.
+    pub(super) fn window_span(&self) -> (i32, i32, i32, i32) {
+        let win = self.reg(reg::XYWIN);
+        let (ox, oy) = (signed16(win), signed16(win >> 16));
+        let (w, h) = (WIDTH as i32 - 1, HEIGHT as i32 - 1);
+        let (y0, y1) = if self.reg(reg::CONFIG) & CONFIG_YFLIP != 0 { (oy - h, oy) } else { (-oy, h - oy) };
+        (-ox, w - ox, y0, y1)
+    }
+
     /// The box every enabled keep-inside screen mask leaves of the
     /// framebuffer: no primitive stores outside it (`visible`).
     fn clip_box(&self) -> crate::display::Rect {
@@ -2372,7 +2383,10 @@ impl Rss {
             return true;
         }
         let smp = (t.tex != 0).then(|| self.te.sampler(&self.regs));
-        for j in t.j0..t.j1 {
+        // A triangle's reach is the guest's (registers of 16 bits and slopes of s.24): only the
+        // framebuffer's pixels are stored, so rows and columns off it are not walked.
+        let (sx0, sx1, sy0, sy1) = self.window_span();
+        for j in t.j0.max(sy0)..t.j1.min(sy1.saturating_add(1)) {
             if self.own_mask != 0 && !self.owns_row(self.to_fb(0, j).1) {
                 continue;
             }
@@ -2383,7 +2397,7 @@ impl Rss {
             // Polygon stipple: 32 rows in the device space, window y mod 32,
             // the most significant bit at window x mod 32 = 0.
             let stip_row = (t.stipple != 0).then(|| self.device.get(POLY_STIPPLE_RAM + (j & 31) as u32));
-            for i in i0..i1 {
+            for i in i0.max(sx0)..i1.min(sx1.saturating_add(1)) {
                 if let Some(row) = stip_row {
                     if (row >> (31 - (i & 31))) & 1 == 0 {
                         continue;
