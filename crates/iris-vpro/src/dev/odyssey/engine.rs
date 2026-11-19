@@ -1,22 +1,47 @@
-//! The VPro engine as a caller drives it: aperture accesses in, events and
+//! The VPro engine behind `BoardEngine`: aperture accesses in, events and
 //! frames out, time and memory passed in, no emulator behind it.
 //!
 //! Everything below the register file is iris's own board code, mounted
-//! unchanged; this file is the handle around it. Time is an argument
-//! (`advance`), never read here. The board's host-side threads run only in
-//! `Mode::Threaded`; `Mode::Inline` runs every store, draw and DMA on the
-//! caller's thread inside `write`, which is what replays and parity tests
-//! use.
+//! unchanged; this file is the handle around it. The call contract is in the
+//! `sgi_engine` crate docs. What is VPro's own:
+//!
+//! - The board is state plus locks (`BoardLocks`) that its threads and the
+//!   caller share. The trait's `&mut self` only makes the shell serialise its
+//!   calls, which it does anyway; each method reaches the board through
+//!   `&BoardLocks`.
+//! - `Mode::Inline` runs every store, draw and DMA on the caller's thread
+//!   inside `write`, so `run` has nothing to do. `Mode::Threaded` runs the
+//!   front end and the raster unit on threads of their own behind the stores.
+//! - Interrupts are crosstalk packets (set and clear for the flag source, a
+//!   set for retrace, DMA and fence), never a level the shell reads, so
+//!   `irq_levels` is 0. A packet goes to the outbox from whichever thread
+//!   raised it; the outbox keeps the newest per line.
+//! - A fence's write-back is done by the raster unit through `ram_write`
+//!   before it raises the fence's interrupt, so the guest cannot take the
+//!   interrupt and read a stale fence.
+//! - Every command-FIFO store is charged to the source `set_source` named and
+//!   returned as `Event::Credits` by the pump once the board has retired it.
+//! - The stream never waits on the shell: the board times its own retrace
+//!   from `advance`, so `Idle` is `Yes`, `Working` or `Faulted`.
+//! - A panic on the board's own threads is not caught. The GPU unit's
+//!   failure is the engine's fault.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
-use parking_lot::Mutex;
+use sgi_engine::{BoardEngine, Chunk, DirtyRun, Event, Fault, HostMem, Idle, Interrupt, Lent, MemFault, Outbox, Pump, Read, Rect, Refused, Source, StateSink, StateSource, Swap, Write, DIRTY_BLOCK};
 
 use super::board::Board;
-use super::mmio::BoardLocks;
+use super::gpu_unit::Observation;
+use super::mmio::{access_waits, command_store, fifo_port, level_word, BoardGuard, BoardLocks};
 use super::reader::{DisplayShared, ScanoutReader};
-use crate::traits::BusDevice;
+use super::state::ODYSSEY_SNAPSHOT_VERSION;
+use super::vram::{VramPtr, DIRTY_BLOCK_SHIFT};
+use crate::traits::{BusDevice, BusRead8, BUS_ERR, BUS_OK};
+
+const _: () = assert!(DIRTY_BLOCK == 1 << DIRTY_BLOCK_SHIFT);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -38,68 +63,6 @@ pub struct Config {
     pub gpu: Option<String>,
 }
 
-/// What the engine says to the shell. Drained under the shell's own lock.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Event {
-    /// A crosstalk interrupt packet: the destination widget and address,
-    /// the vector, and whether the source rose or fell.
-    Interrupt { widget: u8, addr: u64, vector: u8, level: bool },
-    /// The GPU unit failed; every access answers an error from now on.
-    Fault(String),
-}
-
-/// Board memory the shell lends, as an aligned region it keeps alive for
-/// the engine's life.
-#[derive(Clone, Copy)]
-pub struct Lent {
-    pub ptr: *mut u64,
-    pub bytes: u64,
-}
-
-// SAFETY: a lend is a promise about the region, not a borrow of it.
-unsafe impl Send for Lent {}
-unsafe impl Sync for Lent {}
-
-/// A rectangle of board pixels, corners included.
-#[derive(Clone, Copy, Debug)]
-pub struct Box2 {
-    pub x0: i32,
-    pub y0: i32,
-    pub x1: i32,
-    pub y1: i32,
-}
-
-type Notify = Box<dyn Fn() + Send + Sync>;
-
-/// Where engine threads post. The hook only schedules; it is called once
-/// per batch of events (the flag clears when the shell drains).
-struct Outbox {
-    events: Mutex<Vec<Event>>,
-    notified: AtomicBool,
-    notify: Mutex<Option<Notify>>,
-}
-
-impl Outbox {
-    fn post(&self, e: Event) {
-        self.events.lock().push(e);
-        if !self.notified.swap(true, Ordering::AcqRel) {
-            if let Some(n) = &*self.notify.lock() {
-                n();
-            }
-        }
-    }
-}
-
-pub struct Engine {
-    locks: BoardLocks,
-    out: Arc<Outbox>,
-    /// The display's side of the scan-out: retrace clock and composed frame.
-    reader: Mutex<ScanoutReader>,
-    mode: Mode,
-    now: AtomicI64,
-    fault_sent: AtomicBool,
-}
-
 /// Board memory the product carries, in bytes, for a shell that lends it.
 pub fn memory_bytes(product: &str) -> Result<u64, String> {
     let mut b = Box::new(Board::default());
@@ -113,18 +76,149 @@ pub fn memory_bytes(product: &str) -> Result<u64, String> {
     Ok((b.widget.memory_size.max(32) as u64) << 20)
 }
 
-impl Engine {
-    /// A board of `config.product`. `memory` is the region the shell lends
-    /// for board memory (`memory_bytes` long) or None for one the engine
-    /// allocates; `guest` is host memory the board's DMA reaches.
-    ///
-    /// # Safety
-    /// A lent region is 8-byte aligned, valid for reads and writes for the
-    /// engine's life, and written by nothing but the engine.
-    pub unsafe fn new(config: Config, memory: Option<Lent>, guest: Arc<dyn BusDevice>) -> Result<Engine, String> {
-        let lent = memory.map(|m| (m.ptr, m.bytes));
-        // SAFETY: the caller's contract.
-        let mut b = unsafe { Board::new_lent(&config.product, config.widget, lent)? };
+/// Guest memory as the board's DMA sees it: big-endian qwords over the shell's
+/// `ram_*` path, which the board's threads may call. An access that reaches no
+/// RAM answers a bus error and is reported once a page.
+struct Guest<M> {
+    mem: Arc<M>,
+    out: Arc<Outbox>,
+}
+
+/// Words moved per call to the shell's memory.
+const BLOCK_WORDS: usize = 512;
+
+impl<M: HostMem> Guest<M> {
+    fn fail(&self, addr: u64, write: bool) -> u32 {
+        self.out.post(Event::BusFault { addr, write });
+        BUS_ERR
+    }
+}
+
+impl<M: HostMem> BusDevice for Guest<M> {
+    fn read8(&self, addr: u64) -> BusRead8 {
+        let mut b = [0u8];
+        match self.mem.ram_read(addr, &mut b, Swap::None) {
+            Ok(()) => BusRead8::ok(b[0]),
+            Err(MemFault) => {
+                self.fail(addr, false);
+                BusRead8::err()
+            }
+        }
+    }
+
+    fn write8(&self, addr: u64, val: u8) -> u32 {
+        match self.mem.ram_write(addr, &[val], Swap::None) {
+            Ok(()) => BUS_OK,
+            Err(MemFault) => self.fail(addr, true),
+        }
+    }
+
+    fn read_block(&self, addr: u64, buf: &mut [u64]) -> u32 {
+        let mut bytes = [0u8; BLOCK_WORDS * 8];
+        for (i, words) in buf.chunks_mut(BLOCK_WORDS).enumerate() {
+            let at = addr + (i * BLOCK_WORDS * 8) as u64;
+            let bytes = &mut bytes[..words.len() * 8];
+            if self.mem.ram_read(at, bytes, Swap::None).is_err() {
+                return self.fail(at, false);
+            }
+            for (w, b) in words.iter_mut().zip(bytes.chunks_exact(8)) {
+                *w = u64::from_be_bytes(b.try_into().unwrap());
+            }
+        }
+        BUS_OK
+    }
+
+    fn write_block(&self, addr: u64, buf: &[u64]) -> u32 {
+        let mut bytes = [0u8; BLOCK_WORDS * 8];
+        for (i, words) in buf.chunks(BLOCK_WORDS).enumerate() {
+            let at = addr + (i * BLOCK_WORDS * 8) as u64;
+            let bytes = &mut bytes[..words.len() * 8];
+            for (b, w) in bytes.chunks_exact_mut(8).zip(words) {
+                b.copy_from_slice(&w.to_be_bytes());
+            }
+            if self.mem.ram_write(at, bytes, Swap::None).is_err() {
+                return self.fail(at, true);
+            }
+        }
+        BUS_OK
+    }
+}
+
+/// Command-FIFO stores accepted and the sources they are charged to, in
+/// order, so the credits a retired store frees go back to its source.
+#[derive(Default)]
+struct Credits {
+    accepted: u64,
+    returned: u64,
+    runs: VecDeque<(Source, u64)>,
+}
+
+impl Credits {
+    fn store(&mut self, src: Source) {
+        self.accepted += 1;
+        match self.runs.back_mut() {
+            Some((s, c)) if *s == src => *c += 1,
+            _ => self.runs.push_back((src, 1)),
+        }
+    }
+
+    /// Of the `retired` stores accepted so far, hand each source the count
+    /// since the last call, oldest first, for those that took a credit.
+    fn retire(&mut self, retired: u64, mut give: impl FnMut(u32, u32)) {
+        let mut n = retired.saturating_sub(self.returned);
+        self.returned += n;
+        while n > 0 {
+            let Some((src, c)) = self.runs.front_mut() else { break };
+            let take = n.min(*c);
+            if src.charged {
+                give(src.id, take as u32);
+            }
+            *c -= take;
+            n -= take;
+            if *c == 0 {
+                self.runs.pop_front();
+            }
+        }
+    }
+}
+
+/// How long one wait on the board lasts before the engine looks for a fault.
+const SLICE: Duration = Duration::from_millis(50);
+/// A budget no host clock overflows on (one year, in ns).
+const FOREVER_NS: u64 = 31_536_000_000_000_000;
+/// Bytes of board memory a `vram` chunk holds.
+const PIECE_BYTES: u64 = 64 << 10;
+
+/// The VPro engine.
+pub struct VproEngine {
+    locks: BoardLocks,
+    out: Arc<Outbox>,
+    /// The display's side of the scan-out: retrace clock and composed frame.
+    reader: ScanoutReader,
+    mode: Mode,
+    gpu: bool,
+    /// The size of the board memory the shell lent, if it did.
+    lent: Option<u64>,
+    vram: VramPtr,
+    /// The board's threads are stopped (`quiesce`) until `resume`.
+    parked: bool,
+    source: Source,
+    credits: Credits,
+    failed: OnceLock<String>,
+    fault_sent: AtomicBool,
+}
+
+impl VproEngine {
+    /// A board of `config.product`, reset to power-on. `lent` is the region
+    /// the shell lends for board memory (`memory_bytes` long) or None for one
+    /// the engine allocates; `mem` is the guest memory the board's DMA
+    /// reaches, from the board's threads, so `ram_*` must be lock-free.
+    /// `notify` only schedules the shell's pump.
+    pub fn new<M: HostMem>(config: Config, lent: Option<Lent>, mem: M, notify: Option<Box<dyn Fn() + Send + Sync>>) -> Result<Self, String> {
+        let region = lent.map(|l| (l.as_ptr(), l.len()));
+        // SAFETY: `Lent`'s contract: aligned, valid until the engine drops,
+        // and touched by nothing but the engine and the shell's `cpu_wrote` protocol.
+        let mut b = unsafe { Board::new_lent(&config.product, config.widget, region)? };
         b.raster.set_pool(config.pool.0, config.pool.1);
         if let Some(backend) = &config.gpu {
             #[cfg(feature = "wgpu")]
@@ -136,127 +230,98 @@ impl Engine {
             #[cfg(not(feature = "wgpu"))]
             return Err(format!("the GPU unit {backend:?} needs the wgpu feature"));
         }
-        b.guest = Some(guest);
-        let out = Arc::new(Outbox { events: Mutex::new(Vec::new()), notified: AtomicBool::new(false), notify: Mutex::new(None) });
+        let out = Arc::new(Outbox::new(notify));
+        b.guest = Some(Arc::new(Guest { mem: Arc::new(mem), out: out.clone() }));
         let sink = out.clone();
         b.front.lock().packets = Some(Arc::new(move |widget, addr, vector, level| {
-            sink.post(Event::Interrupt { widget, addr, vector, level });
+            sink.post(Event::Interrupt(Interrupt { widget, addr, vector, level }));
             true
         }));
+        // Retired stores free credits, which only the pump returns.
+        let wake = out.clone();
+        b.fifo.on_retire(Box::new(move || wake.wake()));
+        b.reset();
+        let vram = b.vram.ptr_shared();
         let locks = BoardLocks::new(b);
         let mut reader = ScanoutReader::default();
         reader.attach(&locks.shared);
-        let e = Engine { locks, out, reader: Mutex::new(reader), mode: config.mode, now: AtomicI64::new(0), fault_sent: AtomicBool::new(false) };
+        let e = VproEngine {
+            locks,
+            out,
+            reader,
+            mode: config.mode,
+            gpu: config.gpu.is_some(),
+            lent: region.map(|r| r.1),
+            vram,
+            parked: false,
+            source: Source::default(),
+            credits: Credits::default(),
+            failed: OnceLock::new(),
+            fault_sent: AtomicBool::new(false),
+        };
         if config.mode == Mode::Threaded {
             e.locks.work_start();
         }
         Ok(e)
     }
 
-    /// Power-on: reset the board. Before the first access.
-    pub fn reset(&self) {
-        // SAFETY: nothing else touches the board before the first access.
-        let b = unsafe { &mut *self.locks.board.get() };
-        b.reset();
+    fn faulted(&self) -> bool {
+        self.failed.get().is_some() || self.locks.shared.gpu_fault.lock().is_some()
     }
 
-    /// Call `f` when events wait. It only schedules (a bottom half); it
-    /// must not call back into the engine.
-    pub fn set_notify(&self, f: Notify) {
-        *self.out.notify.lock() = Some(f);
+    fn size_of(bits: u32) -> Option<u32> {
+        matches!(bits, 8 | 16 | 32 | 64).then_some(bits / 8)
     }
 
-    /// A store at aperture offset `off`. False when the bus would answer
-    /// busy (threaded mode, FIFO full or a store that waits): retry after
-    /// `advance`.
-    #[inline]
-    pub fn write(&self, off: u64, size: u32, val: u64) -> bool {
-        self.locks.bus_write(off, val, size)
+    /// Nothing runs on the board's threads and nothing waits for them.
+    fn quiescent(&self) -> bool {
+        let l = &self.locks;
+        !l.fifo.running.load(Ordering::SeqCst) && !l.fifo.pending() && l.raster.pending() == 0
     }
 
-    /// A load at `off`. None when it must wait for queued work (threaded
-    /// mode): retry, or `quiesce` first. Inline mode never answers None.
-    #[inline]
-    pub fn read(&self, off: u64, size: u32) -> Option<u64> {
-        self.locks.bus_read(off, size)
-    }
-
-    /// Run the retrace for every frame period due at `now_ns` (the
-    /// caller's clock): swaps latch and the retrace interrupt is posted.
-    /// Returns the time of the next retrace, if the mode has one.
-    pub fn advance(&self, now_ns: i64) -> Option<i64> {
-        self.now.store(now_ns, Ordering::Relaxed);
-        if self.mode == Mode::Inline {
-            // The GPU unit sends its mirror's changes up and submits its
-            // open batch at the end of a run of stores; inline there is
-            // no such end but this call. A board with no GPU unit does
-            // nothing.
-            // SAFETY: inline, the caller's thread is the board's only one.
-            unsafe { &*self.locks.board.get() }.gpu_upload_tick(true);
+    fn idle(&self) -> Idle {
+        let l = &self.locks;
+        if self.faulted() {
+            Idle::Faulted
+        } else if l.fifo.pending() || l.raster.pending() != 0 || l.fifo.slice.load(Ordering::SeqCst) {
+            Idle::Working
+        } else {
+            Idle::Yes
         }
-        let mut r = self.reader.lock();
-        r.attach(&self.locks.shared);
-        r.poll(now_ns);
-        (r.clock.deadline >= 0).then_some(r.clock.deadline)
     }
 
-    /// Whether nothing is queued: the FIFO and the raster queue are empty.
-    pub fn idle(&self) -> bool {
-        !self.locks.fifo.pending() && self.locks.raster.pending() == 0
-    }
-
-    /// Finish all queued work, as before a snapshot or reset. False if the
-    /// board is still busy after `timeout`.
-    pub fn quiesce(&self, timeout: std::time::Duration) -> bool {
-        self.locks.quiesce(timeout).is_some()
-    }
-
-    /// Make the pixels of `b` readable in board memory: the raster queue
-    /// drains, and on the GPU unit only the blocks drawn under `b` come
-    /// back. False if the board stays busy.
-    pub fn observe(&self, b: Box2) -> bool {
-        match self.locks.quiesce(std::time::Duration::from_secs(5)) {
-            Some(g) => {
-                let _ = g.planes_in(b.x0 as i64, b.y0 as i64, b.x1 as i64, b.y1 as i64);
-                true
+    /// The board with its threads idle and the processors held off, waiting
+    /// for the board's own work however long that takes: it waits on nothing
+    /// the shell gives. Fails once the engine has stopped.
+    fn settle(&self) -> Result<BoardGuard<'_>, Fault> {
+        loop {
+            if let Some(f) = self.fault() {
+                return Err(Fault(f));
             }
-            None => false,
-        }
-    }
-
-    /// Move the events waiting into `out`.
-    pub fn drain_events(&self, out: &mut Vec<Event>) {
-        out.append(&mut self.out.events.lock());
-        self.out.notified.store(false, Ordering::Release);
-        if let Some(f) = self.locks.gpu_fault() {
-            if !self.fault_sent.swap(true, Ordering::AcqRel) {
-                out.push(Event::Fault(f));
+            if let Some(g) = self.locks.quiesce(SLICE) {
+                return Ok(g);
             }
         }
     }
 
-    /// The scan-out composed from board memory as the registers describe
-    /// it, 0x00RRGGBB, `(width, height, pixels)`; None with no mode or a
-    /// board that stays busy. Drains the board first, and with the GPU
-    /// unit brings all of its memory back to the host's copy.
-    pub fn frame(&self) -> Option<(u32, u32, Vec<u32>)> {
-        let g = self.locks.quiesce(std::time::Duration::from_secs(5))?;
-        g.gpu_upload_tick(true);
-        g.gpu_sync();
-        drop(g);
-        let mut r = self.reader.lock();
-        r.attach(&self.locks.shared);
-        r.recompose();
-        r.update_to(None);
-        // The reader composes 0xAABBGGRR; this API hands out 0x00RRGGBB.
-        let rgb = |p: &u32| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16) & 0xff;
-        (r.frame_width != 0).then(|| (r.frame_width, r.frame_height, r.frame.iter().map(rgb).collect()))
+    fn park(&mut self) {
+        if self.mode == Mode::Threaded && !self.parked {
+            self.locks.work_stop();
+            self.parked = true;
+        }
+    }
+
+    fn need_quiescent(&self) -> Result<(), Refused> {
+        if let Some(f) = self.fault() {
+            return Err(Refused::Faulted(f));
+        }
+        self.quiescent().then_some(()).ok_or(Refused::NotQuiesced)
     }
 
     /// The GPU unit's counters (batches, records, waits, readbacks) as
-    /// text; None without a GPU unit or while the board is busy.
+    /// text; None without a GPU unit or once the engine has stopped.
     pub fn gpu_report(&self) -> Option<String> {
-        let g = self.locks.quiesce(std::time::Duration::from_secs(5))?;
+        let g = self.settle().ok()?;
         g.raster.run_now(|ctx| ctx.gpu.as_ref().map(|u| u.report()))
     }
 
@@ -268,9 +333,273 @@ impl Engine {
     pub fn shared(&self) -> &Arc<DisplayShared> {
         &self.locks.shared
     }
+
+    /// The scan-out composed from board memory as the registers describe
+    /// it, 0x00RRGGBB, `(width, height, pixels)`; None with no mode or once
+    /// the engine has stopped. Drains the board first, and with the GPU unit
+    /// brings all of its memory back to the host's copy.
+    pub fn scanout(&mut self) -> Option<(u32, u32, Vec<u32>)> {
+        let g = self.settle().ok()?;
+        g.gpu_upload_tick(true);
+        g.gpu_sync();
+        drop(g);
+        let r = &mut self.reader;
+        r.attach(&self.locks.shared);
+        r.recompose();
+        r.update_to(None);
+        // The reader composes 0xAABBGGRR; this API hands out 0x00RRGGBB.
+        let rgb = |p: &u32| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16) & 0xff;
+        (r.frame_width != 0).then(|| (r.frame_width, r.frame_height, r.frame.iter().map(rgb).collect()))
+    }
 }
 
-impl Drop for Engine {
+impl BoardEngine for VproEngine {
+    /// A box of pixels; every plane under it is brought current.
+    type Region = Rect;
+
+    fn write(&mut self, off: u32, bits: u32, val: u64) -> Write {
+        let Some(size) = Self::size_of(bits) else { return Write::Fault };
+        if self.faulted() {
+            return Write::Fault;
+        }
+        if !self.locks.bus_write(off as u64, val, size) {
+            return Write::Busy;
+        }
+        if command_store(off as u64, size) {
+            self.credits.store(self.source);
+        }
+        Write::Done
+    }
+
+    fn push_words(&mut self, port: u32, words: &[u32]) -> usize {
+        if !fifo_port(port as u64) {
+            return 0;
+        }
+        words.iter().take_while(|&&w| self.write(port, 32, w as u64) == Write::Done).count()
+    }
+
+    fn read(&mut self, off: u32, bits: u32) -> Read {
+        let Some(size) = Self::size_of(bits) else { return Read::Fault };
+        if self.faulted() {
+            return Read::Fault;
+        }
+        match self.locks.bus_read(off as u64, size) {
+            Some(_) if self.faulted() => Read::Fault,
+            Some(v) => Read::Value(v),
+            None => Read::Busy,
+        }
+    }
+
+    fn set_source(&mut self, source: Source) {
+        self.source = source;
+    }
+
+    fn access_waits(&self, off: u32, bits: u32, write: bool) -> bool {
+        let Some(size) = Self::size_of(bits) else { return false };
+        if self.faulted() {
+            return false;
+        }
+        let (a, l) = (off as u64, &self.locks);
+        if write && command_store(a, size) {
+            return l.fifo.full_for(size);
+        }
+        if !access_waits(a, size, write) || (!write && level_word(a, size)) || !l.fifo.running.load(Ordering::SeqCst) {
+            return false;
+        }
+        l.fifo.pending() || (!write && l.raster.pending() != 0)
+    }
+
+    fn run(&mut self, _max_ops: usize) -> usize {
+        // Inline, a store runs in the call that made it, so nothing waits.
+        0
+    }
+
+    fn advance(&mut self, now_ns: u64) -> Pump {
+        if !self.locks.fifo.running.load(Ordering::SeqCst) {
+            // The GPU unit sends the mirror's changes up and submits its open
+            // batch at the end of a run of stores; with no board thread to end
+            // one, this call does.
+            // SAFETY: no board thread runs, and the caller is the only thread using the board.
+            unsafe { &*self.locks.board.get() }.gpu_upload_tick(true);
+        }
+        let r = &mut self.reader;
+        r.attach(&self.locks.shared);
+        r.poll(now_ns.min(i64::MAX as u64) as i64);
+        let next_deadline = (r.clock.deadline >= 0).then_some(r.clock.deadline as u64);
+        let retired = self.credits.accepted.saturating_sub(self.locks.fifo.stores() as u64);
+        let out = &self.out;
+        self.credits.retire(retired, |source, retired| out.post(Event::Credits { source, retired }));
+        out.rearm();
+        Pump { idle: self.idle(), events: out.pending(), next_deadline, irq_levels: 0 }
+    }
+
+    fn wait_idle(&mut self, _now_ns: u64, budget_ns: u64) -> Idle {
+        if self.faulted() {
+            return Idle::Faulted;
+        }
+        let done = self.locks.quiesce(Duration::from_nanos(budget_ns.min(FOREVER_NS))).is_some();
+        match self.idle() {
+            Idle::Faulted => Idle::Faulted,
+            _ if done => Idle::Yes,
+            _ => Idle::Working,
+        }
+    }
+
+    fn irq_levels(&self) -> u64 {
+        0
+    }
+
+    fn drain_events(&mut self, out: &mut Vec<Event>, max: usize) {
+        if let Some(f) = self.fault() {
+            if !self.fault_sent.swap(true, Ordering::AcqRel) {
+                self.out.post(Event::DeviceFault(f));
+            }
+        }
+        self.out.drain(out, max);
+    }
+
+    fn drain_dirty(&mut self, out: &mut Vec<DirtyRun>) {
+        let running = self.locks.fifo.running.load(Ordering::SeqCst);
+        out.extend(self.vram.take_reported(running).into_iter().map(|(offset, len)| DirtyRun { offset, len }));
+    }
+
+    fn trapped(&self, out: &mut Vec<DirtyRun>) {
+        // With the GPU unit the memory holds what the unit last read back.
+        if let (true, Some(len)) = (self.gpu, self.lent) {
+            out.push(DirtyRun { offset: 0, len });
+        }
+    }
+
+    fn observe_lent(&mut self, _off: u64, _len: u64) -> Result<(), Fault> {
+        if let Some(f) = self.fault() {
+            return Err(Fault(f));
+        }
+        if !self.gpu || self.lent.is_none() {
+            return Ok(());
+        }
+        let g = self.settle()?;
+        g.gpu_sync_result(Observation::Frontend).map_err(Fault)
+    }
+
+    fn cpu_wrote(&mut self, off: u64, len: u64) {
+        self.vram.mark_for_upload(off, len);
+    }
+
+    fn observe(&mut self, r: &Rect) -> Result<(), Fault> {
+        let g = self.settle()?;
+        let _ = g.planes_in(r.x0 as i64, r.y0 as i64, r.x1 as i64, r.y1 as i64);
+        Ok(())
+    }
+
+    fn observe_all(&mut self) -> Result<(), Refused> {
+        self.need_quiescent()?;
+        let g = self.settle().map_err(|f| Refused::Faulted(f.0))?;
+        g.gpu_upload_tick(true);
+        g.gpu_sync_result(Observation::Validation).map_err(Refused::Faulted)
+    }
+
+    fn quiesce(&mut self, budget_ns: u64) -> Result<(), Refused> {
+        if !self.faulted() && self.locks.quiesce(Duration::from_nanos(budget_ns.min(FOREVER_NS))).is_none() && !self.faulted() {
+            return Err(Refused::Midway("the board was still drawing at the budget".into()));
+        }
+        self.park();
+        self.fault().map_or(Ok(()), |f| Err(Refused::Faulted(f)))
+    }
+
+    fn resume(&mut self) {
+        if self.parked {
+            self.parked = false;
+            self.locks.work_start();
+        }
+    }
+
+    fn save(&mut self, sink: &mut dyn StateSink) -> Result<(), Refused> {
+        self.need_quiescent()?;
+        let put = |sink: &mut dyn StateSink, name: &str, index: u64, bytes: Vec<u8>| sink.put(Chunk { name: name.into(), index, bytes }).map_err(|e| Refused::Faulted(e.0));
+        let (meta, state) = self.locks.snapshot_state(self.lent.is_some()).map_err(|e| self.fault().map_or_else(|| Refused::Midway(e), Refused::Faulted))?;
+        put(sink, "meta", 0, meta.into_bytes())?;
+        put(sink, "state", 0, state)?;
+        if self.lent.is_none() {
+            // The engine's own memory, a piece a chunk, the zero pieces left out.
+            let size = self.vram.size();
+            for i in 0..size.div_ceil(PIECE_BYTES) {
+                let words = self.vram.words_at(i * PIECE_BYTES, PIECE_BYTES.min(size - i * PIECE_BYTES));
+                if words.iter().any(|&w| w != 0) {
+                    put(sink, "vram", i, words.iter().flat_map(|w| w.to_le_bytes()).collect())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn load(&mut self, src: &mut dyn StateSource) -> Result<(), Refused> {
+        self.need_quiescent()?;
+        let bad = |m: String| Refused::Mismatch(m);
+        let lent = self.lent.is_some();
+        let (mut meta, mut state) = (false, None);
+        while let Some(c) = src.next().map_err(|e| bad(e.0))? {
+            match c.name.as_str() {
+                "meta" if !meta => {
+                    let text = String::from_utf8(c.bytes).map_err(|e| bad(e.to_string()))?;
+                    self.locks.check_metadata(&text, lent).map_err(bad)?;
+                    meta = true;
+                    if !lent {
+                        // The pieces that are all zero are not in the stream.
+                        for off in (0..self.vram.size()).step_by(PIECE_BYTES as usize) {
+                            self.vram.write_words_untracked(off, &vec![0u64; (PIECE_BYTES.min(self.vram.size() - off) / 8) as usize]);
+                        }
+                    }
+                }
+                _ if !meta => return Err(bad(format!("the state's first chunk is {}, not meta", c.name))),
+                "state" if state.is_none() => state = Some(c.bytes),
+                "vram" if !lent => {
+                    let off = c.index.saturating_mul(PIECE_BYTES);
+                    if c.bytes.len() % 8 != 0 || off.saturating_add(c.bytes.len() as u64) > self.vram.size() {
+                        return Err(bad(format!("memory piece {} has {} bytes", c.index, c.bytes.len())));
+                    }
+                    let words: Vec<u64> = c.bytes.chunks_exact(8).map(|b| u64::from_le_bytes(b.try_into().unwrap())).collect();
+                    self.vram.write_words_untracked(off, &words);
+                }
+                other => return Err(bad(format!("unexpected state chunk {other}"))),
+            }
+        }
+        let Some(state) = state else { return Err(bad("the state has no board state".into())) };
+        // The memory is whole before the state that reads it (the GPU unit
+        // reseeds from it).
+        let vram = self.vram;
+        self.locks.restore_state(&state, |_| vram.mark_written()).map_err(bad)?;
+        self.credits = Credits::default();
+        Ok(())
+    }
+
+    fn state_version(&self) -> u32 {
+        ODYSSEY_SNAPSHOT_VERSION
+    }
+
+    fn reset(&mut self) -> Result<(), Refused> {
+        if !self.quiescent() {
+            return Err(Refused::NotQuiesced);
+        }
+        self.locks.with_stopped_board(|b| b.reset());
+        self.out.clear();
+        // The stores the reset abandoned take their credits with them, as the
+        // events that would have returned them.
+        self.credits = Credits::default();
+        self.failed.take();
+        self.fault_sent.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    fn fault(&self) -> Option<String> {
+        self.failed.get().cloned().or_else(|| self.locks.gpu_fault())
+    }
+
+    fn fail(&self, why: &str) {
+        let _ = self.failed.set(why.to_string());
+    }
+}
+
+impl Drop for VproEngine {
     fn drop(&mut self) {
         if self.mode == Mode::Threaded {
             self.locks.work_stop();
