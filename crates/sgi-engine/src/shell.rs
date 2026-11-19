@@ -5,7 +5,7 @@ use crate::engine::{BoardEngine, Idle, Refused, StallOn};
 /// Give a stalled engine what it waits for: `frame(now)` for a frame, an
 /// `advance` at the time for a time. `now` moves up to a stall's time. Waits
 /// `slice_ns` of host time at a turn, for at most `rounds` turns; returns
-/// `Yes` or `Faulted`, or `Working` when the rounds ran out. A shell that
+/// `Yes`, `Stopped` or `Faulted`, or `Working` when the rounds ran out. A shell that
 /// cannot refuse a read passes `usize::MAX`.
 pub fn drain_stalls<E: BoardEngine>(e: &mut E, now: &mut u64, slice_ns: u64, rounds: usize) -> Idle {
     for _ in 0..rounds {

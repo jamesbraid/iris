@@ -87,6 +87,13 @@ pub enum Idle {
     Stalled(StallOn),
     /// The engine stopped (`fault()`).
     Faulted,
+    /// The command stream stopped for good, as a fetch fault stops a command
+    /// processor, and no queued work will run: only the guest's own reset
+    /// of the stream, or `reset`, starts it again. Not a device fault: the
+    /// engine still answers every call, `quiesce` parks it, and `save`,
+    /// `observe_all` and the events work. A board whose streams do not stop
+    /// never answers it.
+    Stopped,
 }
 
 /// What `advance` tells the shell's pump.
@@ -96,7 +103,9 @@ pub struct Pump {
     /// Events wait in the outbox.
     pub events: bool,
     /// When the engine next needs `advance`, in the shell's time base (ns,
-    /// `u64`); `None` for a board with no timers of its own.
+    /// `u64`); `None` for a board with no timers of its own. A board with
+    /// several timers answers the earliest; `head_deadline` gives each
+    /// scan-out head's own.
     pub next_deadline: Option<u64>,
     /// `irq_levels()` as of this call.
     pub irq_levels: u64,
@@ -202,6 +211,26 @@ pub enum Event {
     Credits { source: u32, retired: u32 },
 }
 
+/// A composed frame left on the GPU for a scan-out on the same device to
+/// read in place, with no readback.
+///
+/// `buffer` holds the board's `wgpu::Buffer` (an `Arc<wgpu::Buffer>`, as a
+/// `dyn Any`, since this crate has no GPU dependency): the shell downcasts
+/// it. The words are `0xAABBGGRR`, rows from the top, `width` by `height`.
+/// The buffer is valid until the next `lend_frame` of the same head.
+#[derive(Clone)]
+pub struct LentFrame {
+    pub width: u32,
+    pub height: u32,
+    pub buffer: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+}
+
+impl fmt::Debug for LentFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LentFrame").field("width", &self.width).field("height", &self.height).finish_non_exhaustive()
+    }
+}
+
 /// The calls every board engine has. A board's constructor is not in the
 /// trait: each board takes its own configuration. The rules every call
 /// keeps are in the crate docs.
@@ -219,6 +248,10 @@ pub trait BoardEngine {
     /// number taken (all, or what the queue had room for). A charged source
     /// earns one credit for each word the board retires, so a shell with
     /// 8-byte stores that wants one credit for the pair uses `write`.
+    ///
+    /// Only the ports a board's FIFOs have: a board whose guest pushes
+    /// through register apertures inside the window (a push mode) has no
+    /// port, answers 0 and notes it, and takes those words through `write`.
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize;
     fn read(&mut self, off: u32, bits: u32) -> Read;
     /// Name where the stores that follow come from, for flow control: the
@@ -228,6 +261,14 @@ pub trait BoardEngine {
     /// that releases them, which goes to that writer. Boards without
     /// credits ignore it.
     fn set_source(&mut self, _source: Source) {}
+    /// `write` with the shell's time (ns, its time base) at the store, for a
+    /// register whose effect starts a timer at the moment of the write (a
+    /// scan-out mode: the retrace phase restarts then, not at the next
+    /// `advance`). The default is `write`. A store queued behind other work
+    /// takes effect when it runs, with the time of the latest `write_at`.
+    fn write_at(&mut self, _now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
+        self.write(off, bits, val)
+    }
     /// Whether `write` or `read` of `off` would wait or be refused now: a
     /// write when the queue is full, a read that depends on queued work.
     /// False on a faulted engine: the call answers `Fault` at once.
@@ -247,6 +288,28 @@ pub trait BoardEngine {
     /// (KONA's per pipe); a board that times its own retrace names it in
     /// `Pump::next_deadline` and ignores this. MGRAS ignores it.
     fn frame(&mut self, _now_ns: u64) {}
+    /// The number of scan-out heads (CRTCs) `scanout` and `lend_frame` take;
+    /// 0 for a board that composes no picture through the trait.
+    fn heads(&self) -> u32 {
+        0
+    }
+    /// The composed picture of `head`, `0x00RRGGBB` a pixel, rows from the
+    /// top, copied into `out` (cleared first); `(width, height)`, or `None`
+    /// while the head has no mode, or no such head. Brings the pixels it shows
+    /// current as `observe` does.
+    fn scanout(&mut self, _head: u32, _out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
+        Ok(None)
+    }
+    /// The same picture left on the GPU (`LentFrame`) instead of copied to the
+    /// host; `None` where the board has no GPU scan-out (use `scanout`).
+    fn lend_frame(&mut self, _head: u32) -> Result<Option<LentFrame>, Fault> {
+        Ok(None)
+    }
+    /// When `head` next needs `advance` (its next retrace), `None` for a board
+    /// whose head has no timer of its own.
+    fn head_deadline(&self, _head: u32) -> Option<u64> {
+        None
+    }
     /// The pump: `now_ns` is the shell's time. Hands queued work to the
     /// worker, ends the run of work so far (an engine with a GPU unit submits
     /// what it has recorded), completes what is due at `now_ns` (a stall on

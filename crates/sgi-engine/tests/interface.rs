@@ -472,3 +472,46 @@ fn lent_refuses_a_bad_region() {
         assert!(Lent::new(std::ptr::null_mut(), 8).is_none());
     }
 }
+
+#[test]
+fn a_stopped_stream_is_idle_stopped_and_not_a_fault() {
+    let (mut e, _) = mock(MockConfig::default());
+    e.write(reg::DATA, 32, 5);
+    e.write(reg::STOP, 32, 0);
+    e.write(reg::DATA, 32, 7);
+    assert_eq!(drain_stalls(&mut e, &mut 0, 0, usize::MAX), Idle::Stopped, "the shell's loop ends on it");
+    assert_eq!((e.fault(), e.advance(1).idle), (None, Idle::Stopped));
+    assert_eq!(e.write(reg::DATA, 32, 9), Write::Done, "a stopped stream takes no work but answers");
+    assert_eq!(sum(&mut e), Read::Value(5), "the work after the stop never ran");
+    assert_eq!(quiesce(&mut e, &mut 0, 0, 4), Ok(()));
+    assert_eq!(e.save(&mut Vec::new()), Ok(()));
+    e.resume();
+    e.write(reg::STREAM_RESET, 32, 0);
+    e.write(reg::DATA, 32, 1);
+    assert_eq!(drain_stalls(&mut e, &mut 0, 0, usize::MAX), Idle::Yes, "the guest's reset starts it again");
+    assert_eq!(sum(&mut e), Read::Value(6));
+}
+
+#[test]
+fn a_write_at_gives_the_engine_the_shells_time_and_defaults_to_a_write() {
+    let (mut e, _) = mock(MockConfig::default());
+    assert_eq!(e.write_at(123, reg::DATA, 32, 4), Write::Done);
+    assert_eq!(e.write_at(456, reg::DATA, 32, 5), Write::Done);
+    e.run(usize::MAX);
+    assert_eq!(sum(&mut e), Read::Value(9));
+}
+
+#[test]
+fn heads_scan_out_and_each_has_its_own_deadline() {
+    let (mut e, _) = mock(MockConfig::default());
+    assert_eq!(e.heads(), 2);
+    let mut px = vec![99; 3];
+    assert_eq!(e.scanout(1, &mut px), Ok(Some((4, 2))));
+    assert_eq!((px.len(), px[0] >> 16), (8, 2));
+    assert_eq!(e.scanout(2, &mut px), Ok(None), "no such head");
+    assert!(px.is_empty());
+    assert_eq!((e.head_deadline(0), e.head_deadline(1), e.head_deadline(2)), (Some(1_000), Some(2_000), None));
+    assert!(e.lend_frame(0).unwrap().is_none(), "no GPU scan-out");
+    e.fail("gone");
+    assert_eq!(e.scanout(0, &mut px), Err(Fault("gone".into())));
+}

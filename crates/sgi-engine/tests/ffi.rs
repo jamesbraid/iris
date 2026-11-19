@@ -485,3 +485,24 @@ fn bad_arguments_answer_without_touching_the_engine() {
     assert_eq!(unsafe { iris_engine_read(h, reg::IRQ, 32, null_mut()) }, IRIS_ENGINE_OK);
     unsafe { iris_engine_free(null_mut()) };
 }
+
+#[test]
+fn a_c_shell_takes_a_timed_write_a_head_s_picture_and_a_stopped_stream() {
+    let f = Fixture::new(false);
+    let h = f.h;
+    assert_eq!(unsafe { iris_engine_write_at(h, 77, reg::DATA, 32, 3) }, IRIS_ENGINE_OK);
+    assert_eq!(unsafe { iris_engine_heads(h) }, 2);
+    let (mut w, mut hgt, mut buf) = (0u32, 0u32, [0u32; 8]);
+    assert_eq!(unsafe { iris_engine_scanout(h, 1, buf.as_mut_ptr(), buf.len(), &mut w, &mut hgt) }, IRIS_ENGINE_OK);
+    assert_eq!((w, hgt, buf[0] >> 16), (4, 2, 2));
+    assert_eq!(unsafe { iris_engine_scanout(h, 1, buf.as_mut_ptr(), 3, &mut w, &mut hgt) }, IRIS_ENGINE_ERROR, "too small: the size comes back");
+    assert_eq!((w, hgt), (4, 2));
+    assert_eq!(unsafe { iris_engine_scanout(h, 5, buf.as_mut_ptr(), buf.len(), &mut w, &mut hgt) }, IRIS_ENGINE_OK);
+    assert_eq!((w, hgt), (0, 0), "no such head: no frame");
+    let mut when = 0u64;
+    assert_eq!((unsafe { iris_engine_head_deadline(h, 1, &mut when) }, when), (1, 2_000));
+    assert_eq!(unsafe { iris_engine_head_deadline(h, 2, &mut when) }, 0);
+    assert_eq!(wr(h, reg::STOP, 0), IRIS_ENGINE_OK);
+    let (code, i) = idle(h, 1);
+    assert_eq!((code, i.state), (IRIS_ENGINE_OK, IRIS_ENGINE_STOPPED), "stopped is not a fault");
+}
