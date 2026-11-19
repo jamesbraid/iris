@@ -13,6 +13,8 @@ doctest = false
 [features]
 default = ["wgpu"]
 wgpu = []
+# Panic injection points for the tests (`inject`).
+fault-injection = []
 gr4-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]
 
 [dependencies]

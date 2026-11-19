@@ -1,0 +1,152 @@
+//! The call contract: writes queue and answer `Busy` when the queue is full,
+//! reads answer `Busy` while queued work could change them, status values
+//! never wait, the pump never runs work, and quiescence drains and parks.
+
+mod support;
+
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
+use iris_mgras::dev::mgras::engine::{Board, Config, MgrasEngine, Mode};
+use iris_mgras::dev::mgras::hq3::host;
+use iris_mgras::interface::{BoardEngine, Event, Read, Refused, Write};
+use support::*;
+
+fn engine(mode: Mode, queue_ops: usize, notes: Option<Arc<AtomicU32>>) -> (MgrasEngine<Mem>, Mem) {
+    let mem = Mem::default();
+    let mut cfg = Config::new(Board::High, mode);
+    cfg.queue_ops = queue_ops;
+    let notify = notes.map(|n| Box::new(move || drop(n.fetch_add(1, Ordering::SeqCst))) as Box<dyn Fn() + Send + Sync>);
+    (MgrasEngine::new(cfg, mem.clone(), None, notify).unwrap(), mem)
+}
+
+/// A raster register write that changes nothing the status shows.
+const REG: u32 = host::RASTER + 4 * 0x10;
+
+#[test]
+fn a_full_queue_refuses_a_write_and_a_run_makes_room() {
+    let (mut e, _) = engine(Mode::Inline, 8, None);
+    for i in 0..8 {
+        assert_eq!(e.write(REG, 32, i), Write::Done, "write {i}");
+    }
+    assert_eq!(e.write(REG, 32, 99), Write::Busy);
+    assert_eq!(e.push_words(0, &[0; 4]), 0, "a batch takes what fits, here nothing");
+    assert_eq!(e.run(usize::MAX), 8);
+    assert_eq!(e.write(REG, 32, 9), Write::Done);
+    assert_eq!(e.push_words(0, &[0; 20]), 7, "a batch takes what fits");
+}
+
+#[test]
+fn status_never_waits_and_reads_wait_for_queued_work() {
+    let (mut e, _) = engine(Mode::Inline, 1024, None);
+    let idle = host::STATUS_HQ_IDLE | host::STATUS_BOARD_IDLE;
+    assert_eq!(e.read(host::STATUS, 32), Read::Value((idle | host::STATUS_FIXED | host::STATUS_CFIFO_LOW) as u64));
+    e.write(REG, 32, 0x1234);
+    e.push_words(0, &[0; 5]);
+    // Queued: status answers at once, not idle, with the FIFO level.
+    let Read::Value(s) = e.read(host::STATUS, 32) else { panic!("status waited") };
+    assert_eq!(s as u32 & idle, 0);
+    assert_eq!(e.read(host::FIFOSTATUS, 32), Read::Value(5));
+    // A register read depends on the queue.
+    assert_eq!(e.read(REG, 32), Read::Busy);
+    // The pump hands work over and never runs it.
+    let p = e.advance(1_000);
+    assert!(!p.idle);
+    assert_eq!(e.read(REG, 32), Read::Busy);
+    assert_eq!(e.now(), 1_000);
+    e.run(usize::MAX);
+    assert!(e.advance(2_000).idle);
+    assert_eq!(e.read(REG, 32), Read::Value(0x1234));
+    assert_eq!(e.read(host::FIFOSTATUS, 32), Read::Value(0));
+}
+
+#[test]
+fn the_notify_hook_only_says_that_something_waits() {
+    let n = Arc::new(AtomicU32::new(0));
+    let (mut e, _) = engine(Mode::Inline, 1024, Some(n.clone()));
+    for _ in 0..10 {
+        e.write(REG, 32, 1);
+    }
+    assert_eq!(n.load(Ordering::SeqCst), 1, "once for a batch of waiting work");
+    e.advance(0);
+    e.write(REG, 32, 1);
+    assert_eq!(n.load(Ordering::SeqCst), 2, "again after the pump");
+    e.run(usize::MAX);
+    e.write(host::SET_FLAGS, 32, 1 << 20);
+    let mut ev = Vec::new();
+    e.drain_events(&mut ev);
+    assert_eq!(ev, vec![Event::Flags]);
+}
+
+#[test]
+fn a_worker_runs_the_queue_and_quiescence_parks_it() {
+    let rep = parse(REPLAYS.iter().find(|r| r.0 == "gl-swap-tmesh-sphere").unwrap().1);
+    let mut p = Player::new(config(&rep.head, Mode::Threaded, None), Drive::Lazy);
+    let main = std::thread::current().id();
+    rep.cmds.iter().for_each(|c| p.apply(c));
+    // Running means saving is refused.
+    assert_eq!(p.e.save(&mut Vec::new()), Err(Refused::NotQuiesced));
+    assert_eq!(p.e.observe_all(), Err(Refused::NotQuiesced));
+    p.e.quiesce().unwrap();
+    assert!(p.e.advance(0).idle, "quiescence drained the queue");
+    let hash = p.e.state_hash().unwrap();
+    p.e.observe_all().unwrap();
+    p.e.save(&mut Vec::new()).unwrap();
+    // The worker, not this thread, used host memory, and only the RAM path.
+    let threads = p.mem.0.ram_threads.lock().clone();
+    assert!(threads.len() <= 1 && !threads.contains(&main), "{threads:?}");
+    assert_eq!(p.mem.0.bus_calls.load(Ordering::Relaxed), 0);
+
+    // Parked, a write waits in the queue; a resume runs it.
+    p.e.write(REG, 32, 0x77);
+    assert_eq!(p.e.read(REG, 32), Read::Busy);
+    p.e.resume();
+    assert!(p.e.wait_idle(0, 10_000_000_000));
+    assert_eq!(p.e.read(REG, 32), Read::Value(0x77));
+    assert_eq!(p.e.state_hash().unwrap(), hash);
+}
+
+#[test]
+fn reset_returns_to_power_on() {
+    let rep = parse(REPLAYS.iter().find(|r| r.0 == "gl-swap-tmesh-sphere").unwrap().1);
+    let mut p = Player::new(config(&rep.head, Mode::Inline, None), Drive::Each);
+    let empty = p.e.state_hash().unwrap();
+    rep.cmds.iter().for_each(|c| p.apply(c));
+    assert_ne!(p.e.state_hash().unwrap(), empty);
+    p.e.quiesce().unwrap();
+    p.e.reset().unwrap();
+    assert_eq!(p.e.state_hash().unwrap(), empty);
+    assert_eq!(p.e.flags(), 0);
+    let mut ev = Vec::new();
+    p.e.drain_events(&mut ev);
+    assert!(ev.is_empty());
+}
+
+/// DMA that reaches no RAM is reported, not guessed.
+#[test]
+fn dma_outside_ram_is_a_bus_fault_event() {
+    let rep = parse(REPLAYS.iter().find(|r| r.0 == "gl-eviction-i3dm").unwrap().1);
+    let mut p = Player::new(config(&rep.head, Mode::Inline, None), Drive::Each);
+    p.mem.0.fail_writes.store(true, Ordering::Relaxed);
+    rep.cmds.iter().for_each(|c| p.apply(c));
+    drive(&mut p.e);
+    p.finish();
+    assert!(p.bus_faults.iter().any(|f| f.1), "{:?}", p.bus_faults);
+}
+
+/// A shell can ask before it calls.
+#[test]
+fn access_waits_says_what_a_call_would_do() {
+    let (mut e, _) = engine(Mode::Inline, 4, None);
+    assert!(!e.access_waits(REG, 32, true));
+    assert!(!e.access_waits(REG, 32, false), "idle: a read answers");
+    for i in 0..4 {
+        assert_eq!(e.write(REG, 32, i), Write::Done);
+    }
+    assert!(e.access_waits(REG, 32, true), "the queue is full");
+    assert!(!e.access_waits(host::SET_FLAGS, 32, true), "flags are not queued");
+    assert!(e.access_waits(REG, 32, false), "a read waits for queued work");
+    assert!(!e.access_waits(host::STATUS, 32, false), "status never waits");
+    e.run(usize::MAX);
+    assert!(!e.access_waits(REG, 32, true) && !e.access_waits(REG, 32, false));
+}
