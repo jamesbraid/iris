@@ -24,7 +24,7 @@ use std::time::Instant;
 
 use super::hq3::host;
 use super::rss::{self, Rss, REG_NAMES};
-use super::{dcb, disp, tag, te1, Mgras, MGRAS_SLOT_GFX_BASE};
+use super::{dcb, disp, tag, te1, Mgras, GFX_SLOT_BASE};
 
 pub const TRACE_HQ: u32 = 1;
 pub const TRACE_RSS: u32 = 2;
@@ -470,7 +470,7 @@ impl Mgras {
         let f = self.front();
         let microcode = self.microcode_fingerprints();
         let flags = self.all_flags(&f);
-        writeln!(w, "IMPACT {:?} at {:#010x}", self.kind, MGRAS_SLOT_GFX_BASE)?;
+        writeln!(w, "IMPACT {:?} at {:#010x}", self.kind, GFX_SLOT_BASE)?;
         writeln!(w, "  microcode: {microcode}")?;
         writeln!(w, "  flags {flags:#010x} [{}]  interrupt enable {:#010x}", flag_names(flags), f.hq.interrupt_enable)?;
         writeln!(w, "  fifo: hq {} rss {}  idle={}", self.hq_fifo.len(), self.rss_fifo.len(), self.idle())?;

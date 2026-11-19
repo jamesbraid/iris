@@ -93,8 +93,8 @@ pub use hq3::Hq3Board;
 use rss::{Entry, Rss};
 
 /// The graphics slot the board decodes.
-pub const MGRAS_SLOT_GFX_BASE: u32 = 0x1F00_0000;
-pub const MGRAS_SLOT_GFX_SIZE: u32 = 0x0040_0000;
+pub const GFX_SLOT_BASE: u32 = 0x1F00_0000;
+pub const GFX_SLOT_SIZE: u32 = 0x0040_0000;
 /// The board's register window within the slot.
 const MAP_SIZE: u32 = 0x10_0000;
 
@@ -1421,7 +1421,7 @@ impl Mgras {
     }
 
     fn offset(&self, addr: u64) -> Option<u32> {
-        let off = addr.wrapping_sub(MGRAS_SLOT_GFX_BASE as u64);
+        let off = addr.wrapping_sub(GFX_SLOT_BASE as u64);
         (off < MAP_SIZE as u64).then_some(off as u32)
     }
 

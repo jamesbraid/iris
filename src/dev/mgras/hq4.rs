@@ -59,7 +59,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use super::quirks::Hq4Quirks;
-use super::{Gl, Hq3Board, Mgras, MGRAS_SLOT_GFX_BASE};
+use super::{Gl, Hq3Board, Mgras, GFX_SLOT_BASE};
 use crate::config::GraphicsBoard;
 use crate::dev::w1;
 use crate::dev::w1::sgi::{board_record_part, BoardRecord};
@@ -973,7 +973,7 @@ impl ImpactXio {
     }
 
     fn board_read(&self, bits: u32, off: u32) -> (u32, u64) {
-        let a = (MGRAS_SLOT_GFX_BASE + off) as u64;
+        let a = (GFX_SLOT_BASE + off) as u64;
         let m = &*self.mgras;
         match bits {
             8 => { let r = m.read8(a); (r.status, r.data as u64) }
@@ -984,7 +984,7 @@ impl ImpactXio {
     }
 
     fn board_write(&self, bits: u32, off: u32, val: u64) -> u32 {
-        let a = (MGRAS_SLOT_GFX_BASE + off) as u64;
+        let a = (GFX_SLOT_BASE + off) as u64;
         let m = &*self.mgras;
         match bits {
             8 => m.write8(a, val as u8),
