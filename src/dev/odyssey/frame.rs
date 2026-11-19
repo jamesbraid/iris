@@ -164,12 +164,15 @@ const KINDS: usize = 9;
 
 /// The value of the n bytes at byte offset b of `words`: `VramPtr::load`
 /// on words already in hand, the lowest address highest. A field that runs
-/// past its word reads as the board-memory load does in a release build.
+/// past its word reads 0, as the board-memory load does.
 #[inline(always)]
 fn value(words: &[u64], b: u64, n: u32) -> u64 {
+    if super::vram::straddles(b, n) {
+        return 0;
+    }
     let w = words[(b >> 3) as usize];
-    let shift = 64u32.wrapping_sub(8 * ((b & 7) as u32 + n));
-    if n == 8 { w } else { w.wrapping_shr(shift) & ((1u64 << (8 * n)) - 1) }
+    let shift = 64 - 8 * ((b & 7) as u32 + n);
+    if n == 8 { w } else { (w >> shift) & ((1u64 << (8 * n)) - 1) }
 }
 
 /// The colour of pixel i of a tile row whose pixels are 1 << LOG2 bytes

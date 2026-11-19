@@ -380,6 +380,28 @@ pub(super) struct VramPtr {
     written: *const AtomicBool,
 }
 
+/// Whether the n bytes at byte address a do not lie in one aligned 8-byte word. Every field the
+/// library and the display modes name in the evidence is whole inside its word; a header or
+/// mode that places one across two is a guest error, which the model does not guess at: it
+/// reads 0 and its stores are dropped, in every build, reported once.
+#[inline(always)]
+pub(super) fn straddles(a: u64, n: u32) -> bool {
+    let bad = (a & 7) as u32 + n > 8;
+    if bad {
+        straddle_reported(a, n);
+    }
+    bad
+}
+
+#[cold]
+#[inline(never)]
+fn straddle_reported(a: u64, n: u32) {
+    static SEEN: AtomicBool = AtomicBool::new(false);
+    if !SEEN.swap(true, Ordering::Relaxed) {
+        crate::dlog_guest!(crate::devlog::LogModule::Odyssey, "sgi-odyssey: a {n}-byte field at byte {:#x} runs past its 8-byte word; it reads 0 and its stores are dropped", a);
+    }
+}
+
 /// Where a null view's stores, which never happen, would mark.
 static NOWHERE: AtomicBool = AtomicBool::new(false);
 
@@ -410,9 +432,14 @@ impl VramPtr {
     }
 
     /// The value of the n bytes (1 to 8) at byte address a, which lie in
-    /// one word: the bits of it they are, the lowest address highest.
+    /// one word: the bits of it they are, the lowest address highest. Bytes
+    /// that run past their word (a field a guest's header or display mode
+    /// places across two) read as 0: see `straddles`.
     #[inline(always)]
     pub fn load(&self, a: u64, n: u32) -> u64 {
+        if straddles(a, n) {
+            return 0;
+        }
         // SAFETY: the word is in the memory; readers and writers race as
         // the board's units do (see the type).
         let w = unsafe { *self.word(a) };
@@ -432,6 +459,9 @@ impl VramPtr {
     /// once after its last store, so the loop stays free of an atomic.
     #[inline(always)]
     pub fn store_quiet(&self, a: u64, n: u32, v: u64) {
+        if straddles(a, n) {
+            return;
+        }
         let p = self.word(a);
         // SAFETY: as load().
         unsafe {
