@@ -16,11 +16,13 @@ pub enum Prim {
     Xfer,
     Tri,
     GlLine,
+    /// The diagnostic's line (IR opcode 3), which only the interpreter draws.
+    DiagLine,
 }
 
 impl Prim {
     pub fn is_gl(self) -> bool {
-        matches!(self, Prim::Tri | Prim::GlLine)
+        matches!(self, Prim::Tri | Prim::GlLine | Prim::DiagLine)
     }
 }
 
@@ -321,6 +323,17 @@ pub fn mode_regs(rng: &mut Rng, prim: Prim, tex_bias: f64) -> Regs {
             gl_regs(rng, &mut regs, tex_bias);
             rng.u32() & !rss::FILL_LINE_STIPPLE | if rng.chance(0.4) { rss::FILL_LINE_STIPPLE } else { 0 }
         }
+        Prim::DiagLine => {
+            gl_regs(rng, &mut regs, tex_bias);
+            // The blend bits the diagnostic sets, and its smooth filter table
+            // (the loader writes it at 0xB000_0000, one address write).
+            if let Some(v) = regs.iter_mut().find(|r| r.0 == reg::PP1FILLMODE) {
+                v.1 = if rng.chance(0.5) { v.1 | 0xB } else { v.1 & !0xB };
+            }
+            regs.push((reg::INDIRECT_ADDR, 0xB000_0000));
+            (0..64).for_each(|i| regs.push((reg::INDIRECT_DATA, 0xFF - 4 * i)));
+            rng.u32() & !rss::FILL_LINE_STIPPLE | if rng.chance(0.4) { rss::FILL_LINE_STIPPLE } else { 0 }
+        }
     };
     regs.push((reg::FILLMODE, fm));
     regs
@@ -353,6 +366,10 @@ pub fn data_regs(rng: &mut Rng, prim: Prim) -> (Regs, u32) {
         }
         Prim::Tri => triangle_regs(rng, &mut regs),
         Prim::GlLine => gl_line_regs(rng, &mut regs),
+        Prim::DiagLine => {
+            gl_line_regs(rng, &mut regs);
+            rss::OP_DIAG_LINE | if rng.chance(0.5) { 0x60 } else { 0 }
+        }
     };
     (regs, op)
 }

@@ -22,7 +22,10 @@ use crate::wgpu::{Gpu, GpuOptions};
 
 fn gpu() -> Option<Arc<Gpu>> {
     match Gpu::new(&GpuOptions::default(), Box::new(|_| {})) {
-        Ok(g) => Some(g),
+        Ok(g) => {
+            eprintln!("GPU unit on {} ({:?}, {:?})", g.caps.adapter, g.caps.backend, g.caps.device_type);
+            Some(g)
+        }
         Err(e) => {
             if std::env::var_os("IRIS_REQUIRE_GPU").is_some_and(|v| v == "1") { panic!("no GPU: {e}") }
             eprintln!("skipped: {e}");
@@ -221,7 +224,7 @@ impl Pair {
     /// One primitive with the registers as they stand (`op` for the IR).
     fn draw(&mut self, prim: Prim, op: u32) {
         match prim {
-            Prim::Fill | Prim::Line | Prim::Tri | Prim::GlLine => self.exec(reg::IR, op),
+            Prim::Fill | Prim::Line | Prim::Tri | Prim::GlLine | Prim::DiagLine => self.exec(reg::IR, op),
             Prim::Stipple => {
                 self.exec(reg::IR, op);
                 for _ in 0..self.rng.range(1, 16) {
@@ -332,7 +335,12 @@ fn sweep(prim: Prim, salt: u64, steps: usize, tex_bias: f64, loads: bool) {
     p.check(&format!("{prim:?} at the end"), true);
     let (batches, records) = p.unit.counts();
     eprintln!("{prim:?}: {steps} steps, {prims} primitives, {records} records in {batches} batches, {} dropped, {:.1}s", p.unit.dropped, t0.elapsed().as_secs_f64());
-    assert!(records > 0, "{prim:?}: no records reached the unit");
+    if prim == Prim::DiagLine {
+        let syncs = p.unit.observation_counts().find(|o| o.0 == "diag-line").map_or(0, |o| o.1);
+        assert!(syncs > 0, "{prim:?}: no line reached the unit's mirror");
+    } else {
+        assert!(records > 0, "{prim:?}: no records reached the unit");
+    }
 }
 
 #[test]
@@ -368,6 +376,13 @@ fn textured_triangles_match_the_interpreter() {
 #[test]
 fn gl_lines_match_the_interpreter() {
     sweep(Prim::GlLine, 7, 160, 0.5, true);
+}
+
+/// The diagnostic's lines (smooth, stippled, blended) shade on the CPU and
+/// go up as rows, so the unit's words match the interpreter's.
+#[test]
+fn diagnostic_lines_match_the_interpreter() {
+    sweep(Prim::DiagLine, 11, 160, 0.0, false);
 }
 
 /// Triangles whose edges the f64 walk rounds: steep slopes, positions
