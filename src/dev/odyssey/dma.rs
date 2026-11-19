@@ -72,6 +72,8 @@ pub(super) struct DmaSource {
     pub stencil: Rows,
     /// Word 0 names the read drawable, not an address.
     pub drawable: bool,
+    /// Word 0 is the address of the colour buffer the screen shows: an X server's GetImage.
+    pub screen: bool,
     pub front: bool,
     pub x: i64,
     pub y: i64,
@@ -891,6 +893,7 @@ impl Board {
         src.depth = depth_at(Kind::Z24, 0);
         src.stencil = depth_at(Kind::Byte, 3);
         src.drawable = drawable;
+        src.screen = !drawable && (base & ADDR_MASK) == self.pbj(super::frame::pbj::PIXEL_BASE);
         src.front = fmt & dma::FMT_FRONT != 0;
         src.x = (hdr[dma::HDR_ORIGIN] & 0xffff) as i64;
         src.y = (hdr[dma::HDR_ORIGIN] >> 16) as i64;
@@ -987,7 +990,9 @@ impl Board {
     /// drawable's display mode is an index group, with a word that fits eight
     /// bits. Anything else refuses the whole read, reported once. A colour
     /// layout over an index-mode pixel returns the raw index word's bytes as
-    /// colour and is reported once: no inverse colormap is applied.
+    /// colour and is reported once: no inverse colormap is applied. A read at the
+    /// screen's own address (the X server's GetImage) takes the display mode of the
+    /// pixel's window id as a drawable read does.
     pub fn dma_read_pack(&mut self, src: &DmaSource, l: &DmaLayout, w: u32, h: u32, bottom_up: bool, out: &mut [u8]) -> bool {
         let packed = l.fields[0].width != 0;
         let first = l.from[0] as u32;
@@ -996,7 +1001,7 @@ impl Board {
         let index_max: u32 = if first == dma::BYTE_INDEX_HIGH { 0xfff } else { 0xff };
         let mut o: usize = 0;
 
-        if index_read && !src.drawable {
+        if index_read && !src.drawable && !src.screen {
             if self.dma_report(dma::REPORT_INDEX_OBJECT) {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA index read of board memory, which records no display mode");
             }
@@ -1025,7 +1030,7 @@ impl Board {
                 let word = self.dma_read_pixel(src, x, y);
                 let mut group = ODSY_GAMMA_GROUP;
 
-                if src.drawable {
+                if src.drawable || src.screen {
                     let id = self.main_id(x as u32, y as u32);
                     group = self.display_group(id);
                 }

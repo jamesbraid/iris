@@ -224,13 +224,18 @@ fn read_word4(class: u32, code: u32) -> u32 {
 /// `word4` at `bytes` bytes a pixel, into a guest page pre-filled with
 /// 0xa5 guard bytes. Returns the 64 bytes at the start of the page.
 fn dma_read(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: u32, bytes: u32) -> Vec<u8> {
+    dma_read_from(s, ram, dma::SENTINEL_READ, (x, y, w), word4, bytes)
+}
+
+/// The same from the source word 0 `from` names: a sentinel, or a board address.
+fn dma_read_from(s: &mut Board, ram: &Ram, from: u32, (x, y, w): (u32, u32, u32), word4: u32, bytes: u32) -> Vec<u8> {
     let bpp_code = DMA_BPP.iter().position(|&b| b as u32 == bytes).expect("a size the header can name") as u32;
 
     ram.put(PAGE_A, &[0xa5; 64]);
     put_table(
         ram,
         TABLE,
-        [dma::SENTINEL_READ, y << 16 | x, 0x50, 1 << 16 | w, word4, 0, w * bytes, dma::TO_HOST | bpp_code << 16],
+        [from, y << 16 | x, 0x50, 1 << 16 | w, word4, 0, w * bytes, dma::TO_HOST | bpp_code << 16],
         &[pte(PAGE_A, w * bytes)],
     );
     descriptor(s, TABLE);
@@ -352,6 +357,20 @@ fn a_colour_index_read_returns_the_index() {
     s.regs().set_dispmode((0) as usize, ODSY_GAMMA_GROUP << dispmode::GROUP_SHIFT);
     let got = dma_read(&mut s, &ram, (30, 40, 1), read_word4(0, 1), 1);
     assert_eq!(got[..2], [0xa5, 0xa5], "the red byte of 0xa55a3cff");
+}
+
+/// The X server's GetImage reads the window's frame buffer by address, not by the read sentinel
+/// (odsy software/xsgi/odyssey-so-reads.md, odsyReadImage, established), and a colour-index window
+/// has to give its indices: the read takes the display mode of the pixel's window id, as a drawable
+/// read does, instead of being refused for naming board memory.
+#[test]
+fn an_index_read_at_the_screens_address_returns_the_index() {
+    let (mut s, ram) = read_window();
+    let screen = s.pbj(crate::dev::odyssey::frame::pbj::PIXEL_BASE);
+    pixel_write(&mut s, 31, 40, 0x2a);
+    s.regs().set_dispmode((0) as usize, 0);
+    let got = dma_read_from(&mut s, &ram, screen, (31, 40, 1), read_word4(0, 1), 1);
+    assert_eq!(got[..2], [0x2a, 0xa5], "an index window gives its index");
 }
 
 /// A GL image write by DMA to the draw drawable: the table at `TABLE` names
