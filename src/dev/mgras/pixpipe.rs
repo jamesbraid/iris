@@ -1,7 +1,7 @@
 //! The GE11's pixel pipeline (glDrawPixels, glCopyPixels' draw half, and
 //! their transfer modes), high-level.
 //!
-//! libGLcore (mgras_pxpipe.c, `__glMgrAddModule`) builds the pipeline as a
+//! libGLcore's pixel-pipeline module builder builds the pipeline as a
 //! program in GE memory at 0x13B: a list of (microcode entry, state address)
 //! pairs, module k's state address sitting in pair k + 1 (the first pair's
 //! is 0). Each module is a microcode routine named after its source file in

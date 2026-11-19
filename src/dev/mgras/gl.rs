@@ -94,20 +94,20 @@ pub(super) mod tok {
     /// glTexCoord (s [, t [, r [, q]]]).
     pub const TEX_COORD: u32 = 0x008;
     /// Texturing on / off for the primitives that follow (libGLcore
-    /// mgrTM_SendTexmode1: on when the bound texture is complete).
+    /// the texture manager's mode send: on when the bound texture is complete).
     pub const TOKEN_00B: u32 = 0x00B;
     pub const TOKEN_00C: u32 = 0x00C;
     /// glEnable / glDisable(GL_POINT_SMOOTH): [1] / [0] (libGLcore's
-    /// __glMgrim_Enable; traced).
+    /// glEnable path; traced).
     pub const POINT_SMOOTH: u32 = 0x06C;
     /// Pixel operations and texture loads come between these (libGLcore's
-    /// __glMgrSaveTexmode(1, 0, 0, 0) / __glMgrRestoreTexmode, traced
+    /// texture-mode save (1, 0, 0, 0) and restore, traced
     /// around glDrawPixels, glCopyPixels, glTexImage and glCopyTexImage):
     /// the GE keeps the texture mode aside and draws the operation
     /// untextured.
     pub const TOKEN_0E9: u32 = 0x0E9;
     pub const TOKEN_0EA: u32 = 0x0EA;
-    /// A texture load's lookup table: none (mgrTM_DoTexLoad sends this
+    /// A texture load's lookup table: none (the texture manager's load routine sends this
     /// where it would send the TL table), and the end of each sub-load
     /// (after every token_08d of the load).
     pub const TOKEN_09B: u32 = 0x09B;
@@ -132,8 +132,8 @@ pub(super) mod tok {
     /// centres), transfer mode, the raster interface start word]; the host
     /// starts the read itself (raster interface register 5).
     pub const TOKEN_0F0: u32 = 0x0F0;
-    /// The texture manager's save/restore of TRAM pages (mgrTM_SR_TexRead
-    /// / mgrTM_SR_TexLoad): a raw read of the sampler's level [rows,
+    /// The texture manager's save/restore of TRAM pages (its read
+    /// / load halves): a raw read of the sampler's level [rows,
     /// xfrmode, 0x400D], and the GE set up for texels by host DMA [?, ?,
     /// ?, GE routine].
     pub const MGRAS_HQ3_TOKEN_TEX_READ_SETUP: u32 = 0x0E5;
@@ -149,7 +149,7 @@ pub(super) mod tok {
     pub const TOKEN_090: u32 = 0x090;
     pub const TOKEN_092: u32 = 0x092;
     /// glDrawPixels through the GE's pixel path (libGLcore
-    /// __glMgrSendPixels), 8 words: data words per row, two skips, the
+    /// pixel send path), 8 words: data words per row, two skips, the
     /// pixel-state counts, rows (provisional), the GE routine (0x49D0 for
     /// host to raster), flags; the rows follow as FIFO pixel data.
     pub const TOKEN_08D: u32 = 0x08D;
@@ -165,7 +165,7 @@ pub(super) mod tok {
     /// End of a pixel operation: the raster registers saved by token_0d2
     /// come back.
     pub const TOKEN_0D3: u32 = 0x0D3;
-    /// Start of a pixel operation (libGLcore __glMgrSaveRSS, 5 words).
+    /// Start of a pixel operation (libGLcore's raster-state save sequence, 5 words).
     pub const TOKEN_0D2: u32 = 0x0D2;
     /// glNormal3f (other forms through the HQ's conversion field).
     pub const NORMAL: u32 = 0x007;
@@ -214,11 +214,11 @@ pub(super) mod tok {
     /// glDrawBuffer: buffer bits (1 front left, 2 front right, 4 back
     /// left, 8 back right; 0 none), then 2 words not decoded (1, 0 seen).
     pub const DRAW_BUFFER: u32 = 0x049;
-    /// Kernel token (MgrasValidateBanks, at every swap and window
+    /// Kernel token (the draw-bank validation, at every swap and window
     /// validation): the bank GL draws into from now on, main buffers then
     /// the second set (see `Gl::set_draw_bank`).
     pub const TOKEN_098: u32 = 0x098;
-    /// IRIS GL through IGLOO (libGLcore mgras_igloo.c): swaptmesh,
+    /// IRIS GL through IGLOO (libGLcore's IRIS GL source): swaptmesh,
     /// lmcolor(LMC_COLOR) on / off, n3f (a normal, 3 floats).
     pub const SWAPTMESH: u32 = 0x0DC;
     pub const LMC_COLOR_ON: u32 = 0x0DD;
@@ -903,7 +903,7 @@ impl Gl {
             0xBB2 => Some(self.line_width.to_bits()),
             // Scissor box 0 (window coordinates inclusive: xmin, xmax, ymin, ymax):
             // 0x200 returns (xmax << 16) | xmin, 0x202 returns (ymax << 16) | ymin.
-            // Read by libGLcore __glMgrim_DrawPixels for scissor box clipping.
+            // Read by libGLcore's glDrawPixels path for scissor box clipping.
             0x200 => Some(((self.scissor[1] as u32) << 16) | (self.scissor[0] as u32 & 0xFFFF)),
             0x202 => Some(((self.scissor[3] as u32) << 16) | (self.scissor[2] as u32 & 0xFFFF)),
             // The current raster position, window x, y, z (floats), and
@@ -926,7 +926,7 @@ impl Gl {
             // trip that waits for the pipeline. What the word holds is not
             // known.
             3 => Some(0),
-            // Bit 2 (0x4) is the valid flag tested by libGLcore (__glMgrDoGet);
+            // Bit 2 (0x4) is the valid flag tested by libGLcore's state query path;
             // bit 0 (0x1) is tested by other callers. Return 0x7 when valid.
             0x2D0 => Some(if self.raster_valid != 0 { 0x7 } else { 0 }),
             0x3A..=0x49 => {
@@ -2561,7 +2561,7 @@ impl Gl {
         }
     }
 
-    /// The bank GL draws into, as the kernel tracks it (MgrasValidateBanks:
+    /// The bank GL draws into, as the kernel tracks it (the kernel's draw-bank validation:
     /// the window's displayed bank xor 1, sent as token_098 before
     /// each token_037 for the frame after it, or stored in a parked
     /// context's image, words 16-17). 1 is B (DRBpointers bits 19:10),
@@ -2578,7 +2578,7 @@ impl Gl {
     }
 
     /// The buffers drawn into, from DRAW_BUFFER (libGLcore's
-    /// __glMgrasDrawBuffer always sends three words): the first word
+    /// draw-buffer path always sends three words): the first word
     /// before an odd number of swaps, the second after. 1 is buffer A; B is
     /// 2 in 12-bit visuals and 4 in 24-bit ones (GL_FRONT [1, 2] or [1, 4],
     /// GL_BACK [2, 1] or [4, 1], both [3, 3] or [5, 5], traced: every

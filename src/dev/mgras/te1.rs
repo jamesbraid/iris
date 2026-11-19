@@ -139,7 +139,7 @@ pub(crate) const TM2_MIP_LINEAR: u32 = 1 << 6;
 /// GL_CLAMP's coordinate clamp to [0, 1] (linear filtering at the edge is
 /// half border), without it GL_CLAMP_TO_BORDER_SGIS (coordinates may pass
 /// the edge, so samples there are all border). libGLcore
-/// __glMgrim_TexParameter: GL_CLAMP sets axis bit | 0x4000, clamp to border
+/// libGLcore's texture parameter path: GL_CLAMP sets axis bit | 0x4000, clamp to border
 /// the axis bit alone.
 pub(crate) const TM2_CLAMP_S: u32 = 1 << 11;
 pub(crate) const TM2_CLAMP_T: u32 = 1 << 12;
