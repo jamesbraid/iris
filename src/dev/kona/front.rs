@@ -529,7 +529,8 @@ impl Host {
     }
 
     /// Send `p` to the interrupt controller, with no board lock held. A packet
-    /// for a widget other than the host's is counted, and logged once.
+    /// for a widget other than the host's goes to `foreign_packet`, and is
+    /// counted and logged once when nothing takes it.
     pub fn deliver(&self, p: InterruptPacket) {
         let host_widget = self.dma_widget.load(Relaxed);
         if p.widget == host_widget {
@@ -539,7 +540,7 @@ impl Host {
             if !self.irq.packet(self.widget, p.address, p.vector as u32, true) {
                 crate::dlog!(LogModule::Kona, "kona: interrupt packet to {:#x}, vector {:#x}: the host refused it", p.address, p.vector);
             }
-        } else if self.unrouted.fetch_add(1, Relaxed) == 0 {
+        } else if !self.irq.foreign_packet(p.widget, p.address, p.vector as u32, true) && self.unrouted.fetch_add(1, Relaxed) == 0 {
             crate::dlog!(LogModule::Kona, "kona: interrupt packet for widget {} (host widget {host_widget}), vector {:#x}: no receiver; not delivered", p.widget, p.vector);
         }
     }

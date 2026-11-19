@@ -27,6 +27,12 @@ pub trait InterruptController: Send + Sync {
         self.set_line(line, level);
         true
     }
+
+    /// A packet for widget `widget`, which is not the host: whether something routes it.
+    /// None does by default, and the packet is counted and dropped.
+    fn foreign_packet(&self, _widget: u8, _address: u64, _line: u32, _level: bool) -> bool {
+        false
+    }
 }
 
 /// One input of one controller, as a device sees it.
