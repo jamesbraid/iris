@@ -34,8 +34,9 @@ use crate::traits::{BusDevice, BUS_ERR, BUS_OK};
 use crate::SharedGpu;
 
 /// The version of the state `save` writes. Version 1 held only a stream between commands;
-/// 2 adds the commands a guest has part way and the credits they owe. A load takes both.
-pub const STATE_VERSION: u32 = 2;
+/// 2 adds the commands a guest has part way and the credits they owe; 3 the swaps latched for
+/// the next frame. A load takes all three.
+pub const STATE_VERSION: u32 = 3;
 
 /// Stores `quiesce` and `wait_idle` run between looks at the clock.
 const SLICE: usize = 1 << 12;
@@ -640,15 +641,13 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
 
     fn save(&mut self, sink: &mut dyn StateSink) -> Result<(), Refused> {
         self.need_parked()?;
-        if self.back.swaps_waiting() {
-            return Err(Refused::Midway("a swap waits for its retrace".into()));
-        }
         let mut w = stream::Writer::default();
         self.host.front.lock().visit(&mut w);
         self.core.visit(&mut w);
         self.back.visit_small_open(&mut w).map_err(Refused::Midway)?;
         self.core.visit_open(&mut w);
         self.credits.visit(&mut w);
+        self.back.visit_swaps(&mut w);
         let meta = Meta { version: STATE_VERSION, state_len: w.out.len() as u32, bulk: self.back.bulk_layout() };
         let put = |sink: &mut dyn StateSink, name: &str, index: u64, bytes: Vec<u8>| sink.put(Chunk { name: name.into(), index, bytes }).map_err(|e| e.0);
         let sent = (|| {
@@ -674,6 +673,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
             return Err(bad(format!("state version {} is not 1 to {STATE_VERSION}", meta.version)));
         }
         let open = meta.version >= 2;
+        let swaps = meta.version >= 3;
         if meta.state_len as usize > 1 << 28 {
             return Err(bad(format!("a state blob of {} bytes", meta.state_len)));
         }
@@ -702,6 +702,9 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
                 KonaBackend::check_small_open(&mut r);
                 core.visit_open(&mut r);
                 Credits::default().visit(&mut r);
+                if swaps {
+                    KonaBackend::check_swaps(&mut r);
+                }
             } else {
                 KonaBackend::check_small(&mut r);
             }
@@ -715,6 +718,11 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
             self.back.visit_small_open(&mut r).map_err(bad)?;
             self.core.visit_open(&mut r);
             credits.visit(&mut r);
+            if swaps {
+                self.back.visit_swaps(&mut r);
+            } else {
+                self.back.clear_swaps();
+            }
         } else {
             self.back.visit_small(&mut r).map_err(bad)?;
         }

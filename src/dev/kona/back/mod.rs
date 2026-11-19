@@ -436,16 +436,36 @@ impl KonaBackend {
         if !s.loading() && self.contexts.busy() {
             return Err("a context is in the middle of a primitive or a pixel transfer".into());
         }
-        self.visit_tables(s)
+        self.visit_tables(s, false)
     }
 
     /// `visit_small`, then the primitives and pixel transfers contexts have part way, which
     /// `visit_small` refuses to save.
     pub fn visit_small_open<S: stream::Stream>(&mut self, s: &mut S) -> Result<(), String> {
-        self.visit_tables(s)?;
+        self.visit_tables(s, true)?;
         self.contexts.visit_open(s);
         self.gl.visit_open(s);
         Ok(())
+    }
+
+    /// The swaps latched for the next frame (id, buffer), in order: what a state of version 3 adds, so
+    /// a save between a swap and its retrace keeps the swap instead of refusing.
+    pub fn visit_swaps<S: stream::Stream>(&mut self, s: &mut S) {
+        let mut flat: Vec<u32> = self.swaps.iter().flat_map(|&(id, bank)| [id, bank as u32]).collect();
+        s.vec_u32(&mut flat);
+        if s.loading() {
+            self.swaps = flat.chunks_exact(2).map(|c| (c[0], (c[1] & 1) as u8)).collect();
+        }
+    }
+
+    /// No swap waits (a load of a state that carries none).
+    pub fn clear_swaps(&mut self) {
+        self.swaps.clear();
+    }
+
+    /// `visit_swaps` over a throwaway list, to read past it.
+    pub fn check_swaps<S: stream::Stream>(s: &mut S) {
+        s.vec_u32(&mut Vec::new());
     }
 
     /// `check_small` and `visit_small_open`'s share of it, over throwaway objects.
@@ -459,10 +479,12 @@ impl KonaBackend {
         gl::GlPath::new((0, 0)).visit_open(s);
     }
 
-    fn visit_tables<S: stream::Stream>(&mut self, s: &mut S) -> Result<(), String> {
+    /// `swaps_ok`: a swap latched for the next frame is carried by the state (`visit_swaps`); without
+    /// it a save refuses one.
+    fn visit_tables<S: stream::Stream>(&mut self, s: &mut S, swaps_ok: bool) -> Result<(), String> {
         if !s.loading() {
             self.drain();
-            if !self.swaps.is_empty() {
+            if !swaps_ok && !self.swaps.is_empty() {
                 return Err("a swap waits for its retrace".into());
             }
         }

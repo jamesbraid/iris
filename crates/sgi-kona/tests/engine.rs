@@ -524,3 +524,30 @@ fn the_pipe_has_one_head_whose_picture_is_copied_as_rgb_and_not_lent_without_a_g
     e.fail("gone");
     assert_eq!(BoardEngine::scanout(&mut e, 0, &mut px), Err(sgi_engine::Fault("gone".into())));
 }
+
+/// A swap latched for the next frame is part of the saved state: a save between the swap and its
+/// retrace (the VM stops there and nothing releases it) keeps it, and the loaded engine shows it at
+/// its next frame as the saved one would. It was refused before, so savevm and migration failed.
+#[test]
+fn a_swap_latched_for_the_next_frame_is_saved_and_shown_by_the_loaded_engine() {
+    let mut e = engine();
+    kernel(&mut e, DISPLAY_MODE_BYTE, &SWAP);
+    assert!(e.swap_waiting());
+    assert_eq!(e.quiesce(u64::MAX), Ok(()), "nothing is queued behind the swap");
+    let mut chunks: Vec<Chunk> = Vec::new();
+    e.save(&mut chunks).expect("a save with a swap waiting");
+
+    let mut f = engine();
+    f.quiesce(u64::MAX).unwrap();
+    f.load(&mut VecSource::new(chunks.clone())).expect("load");
+    assert!(f.swap_waiting(), "the swap waits in the loaded engine too");
+    let mut again: Vec<Chunk> = Vec::new();
+    f.save(&mut again).unwrap();
+    assert_eq!(again, chunks, "save, load, save");
+    f.resume();
+    e.resume();
+    f.frame(0);
+    e.frame(0);
+    assert!(!f.swap_waiting() && !e.swap_waiting());
+    assert_eq!(f.compose().2, e.compose().2, "the swap shows the same frame");
+}
