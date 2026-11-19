@@ -502,11 +502,11 @@ pub(super) const DRAW_CID: u32 = 0x50;
 /// that X gave clip ID n, else 0. Bits 11:10 (CIDmask, our reading) write
 /// enable the two clip-ID planes: the X server (mgrasDrawCID) sets 0xC00
 /// to draw clip IDs and leaves it set.
-pub(super) fn cid_match(pp1winmode: u32) -> u32 {
-    (pp1winmode >> 4) & 0xF
+pub(super) fn cid_match(reg_f17b: u32) -> u32 {
+    (reg_f17b >> 4) & 0xF
 }
-pub(super) fn cid_write_mask(pp1winmode: u32) -> u8 {
-    ((pp1winmode >> 10) & 3) as u8
+pub(super) fn cid_write_mask(reg_f17b: u32) -> u8 {
+    ((reg_f17b >> 10) & 3) as u8
 }
 
 /// PP1 fill mode read-buffer field (bits 25:21), whatever the draw field:
@@ -2487,7 +2487,7 @@ impl Rss {
     /// A GL line (our GE11 HLE, IR `OP_GL_LINE`): from aaline_x_start/ystartf
     /// to aaline_x_end/yendf (biased floats, as the triangle positions);
     /// colours (red..alpha) and Z (depth_hi/low) at the start, their steps per
-    /// pixel along the major axis in dre/dge/dbe/dae and dze. Pixels whose
+    /// pixel along the major axis in color_red_edge/dge/dbe/dae and dze. Pixels whose
     /// far edge along the major axis lies in (start, end] in the direction
     /// of travel (`gl_line_setup`; OpenGL's diamond exit near the pixel
     /// centres, as a real High IMPACT draws), `aaline_config` + 1

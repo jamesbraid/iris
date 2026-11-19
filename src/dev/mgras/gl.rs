@@ -420,7 +420,7 @@ pub struct Window {
     pub drb: u32,
     /// PP1 window mode: the origin's low bits and the clip ID the window's
     /// pixels must carry (see rss.rs `cid_match`).
-    pub pp1winmode: u32,
+    pub reg_f17b: u32,
 }
 
 /// The GE's name stack, at most this deep (GL_MAX_NAME_STACK_DEPTH;
@@ -673,7 +673,7 @@ impl Gl {
              draw buffer bits {:#x}, swapped {}, colour mask {:#x}\n  \
              viewport x {}..{} y {}..{}, scissor {} {:?}\n  \
              colour {:?}, clear colour {:?}, lighting {} (lights {:#x}), depth test {}",
-            w.valid, w.origin, w.mode, w.pp1winmode, w.drb, w.masks, self.draw_bits, self.swapped, self.color_mask,
+            w.valid, w.origin, w.mode, w.reg_f17b, w.drb, w.masks, self.draw_bits, self.swapped, self.color_mask,
             self.vp.x0, self.vp.x1, self.vp.y0, self.vp.y1, self.scissor_test, self.scissor,
             self.color, self.clear_color, self.lt.on, self.lights_on, self.depth_test)
     }
@@ -1275,7 +1275,7 @@ impl Gl {
                 let size = self.te[te1::CONTEXT_REGS.iter().position(|&r| r == te_reg::MGRAS_TE1_TEXTURE_SIZE).unwrap_or(0)];
                 if sink.tracing_tex() {
                     sink.trace(format!(
-                        "TEX save {} rows x {} page {:#x} txsize {size:#x} xfrmode {:#x}",
+                        "TEX save {} rows x {} page {:#x} texture_size {size:#x} xfrmode {:#x}",
                         d[0], 1u32 << (size & 0xF), self.te_tables[0][0], d[1]
                     ));
                 }
@@ -1366,7 +1366,7 @@ impl Gl {
             tok::TOKEN_00B | tok::TOKEN_00C => {
                 self.tex_on = (cmd == tok::TOKEN_00B) as u32;
                 if self.raster_loaded != 0 {
-                    sink.rss_write(te_reg::MGRAS_RE4_TEXTURE_MODE_FIRST, self.texmode1(), false);
+                    sink.rss_write(te_reg::MGRAS_RE4_TEXTURE_MODE_FIRST, self.texture_mode_first(), false);
                 }
             }
             tok::TOKEN_0EC if d.len() >= 4 => {
@@ -2633,7 +2633,7 @@ impl Gl {
                 sink.rss_write(re::MGRAS_RE4_SCREEN_MASK1_X + 2 * n as u32 + 1, *y, false);
             }
             sink.rss_write(re::MGRAS_RE4_WINDOW_MODE, w.mode, false);
-            sink.rss_write(re::MGRAS_PP1_REG_F17B, w.pp1winmode, false);
+            sink.rss_write(re::MGRAS_PP1_REG_F17B, w.reg_f17b, false);
             sink.rss_write(re::DRBPOINTERS, self.draw_pointers(), false);
         }
         self.fill_loaded = 0;
@@ -2903,25 +2903,25 @@ impl Gl {
         let n1 = dxdy0.trunc();
         let fixc = |c: f32| (c as f64 * 0xFF_F000 as f64) as i32 as u32;
         for k in 0..4 {
-            let (start, dre, drx) = match flat {
+            let (start, color_red_edge, color_red_span) = match flat {
                 Some(c) => (c[k], 0.0, 0.0),
                 None => {
                     let (a, b, c) = (aw.c[k], bw.c[k], cw.c[k]);
                     let mid = c + perc * (a - c);
-                    let drx = if span_x != 0.0 { (b - mid) / span_x } else { 0.0 };
-                    let drdy = (a - c - drx * major_x) / major_y;
-                    let start = c + drdy * dy + drx * dx_x;
-                    let mut dre = drdy + n1 * drx;
-                    let drx_out = if ltor { drx } else { -drx };
+                    let color_red_span = if span_x != 0.0 { (b - mid) / span_x } else { 0.0 };
+                    let drdy = (a - c - color_red_span * major_x) / major_y;
+                    let start = c + drdy * dy + color_red_span * dx_x;
+                    let mut color_red_edge = drdy + n1 * color_red_span;
+                    let drx_out = if ltor { color_red_span } else { -color_red_span };
                     if ltor ^ (dxdy0 >= 0.0) {
-                        dre -= drx_out;
+                        color_red_edge -= drx_out;
                     }
-                    (start, dre, drx_out)
+                    (start, color_red_edge, drx_out)
                 }
             };
             sink.rss_write(re::RED + k as u32, fixc(start), false);
-            sink.rss_write(re::MGRAS_RE4_COLOR_RED_EDGE + 2 * k as u32, fixc(dre), false);
-            sink.rss_write(re::MGRAS_RE4_COLOR_RED_EDGE + 2 * k as u32 + 1, fixc(drx), false);
+            sink.rss_write(re::MGRAS_RE4_COLOR_RED_EDGE + 2 * k as u32, fixc(color_red_edge), false);
+            sink.rss_write(re::MGRAS_RE4_COLOR_RED_EDGE + 2 * k as u32 + 1, fixc(color_red_span), false);
         }
         // Fog is looked up from the window depth: its plane too.
         if self.depth_test != 0 || self.fog_per_pixel() {
@@ -2980,7 +2980,7 @@ impl Gl {
 
     /// Texturing is on for the primitives that follow (GE on, TE enabled).
     fn texturing(&self) -> bool {
-        self.tex_on != 0 && self.texmode1() & te1::TEXMODE1_ENABLE != 0
+        self.tex_on != 0 && self.texture_mode_first() & te1::TEXMODE1_ENABLE != 0
     }
 
     /// RGBA fog is applied per fragment, after the texture environment
@@ -3094,7 +3094,7 @@ impl Gl {
 
     /// texture_mode_first as the TE gets it: the shadow's, with texturing off while
     /// the GE has it off.
-    fn texmode1(&self) -> u32 {
+    fn texture_mode_first(&self) -> u32 {
         let m = self.te[0];
         if self.tex_on != 0 { m } else { m & !te1::TEXMODE1_ENABLE }
     }
@@ -3127,7 +3127,7 @@ impl Gl {
             return false;
         }
         if self.raster_loaded != 0 {
-            sink.rss_write(r, if r == te_reg::MGRAS_RE4_TEXTURE_MODE_FIRST { self.texmode1() } else { v }, false);
+            sink.rss_write(r, if r == te_reg::MGRAS_RE4_TEXTURE_MODE_FIRST { self.texture_mode_first() } else { v }, false);
         } else {
             self.te_dirty = 1;
         }
@@ -3138,12 +3138,12 @@ impl Gl {
     /// another context may have used the TE, else texture_mode_first alone).
     fn load_te(&mut self, sink: &mut dyn Hq3Sink) {
         if self.te_dirty == 0 {
-            sink.rss_write(te_reg::MGRAS_RE4_TEXTURE_MODE_FIRST, self.texmode1(), false);
+            sink.rss_write(te_reg::MGRAS_RE4_TEXTURE_MODE_FIRST, self.texture_mode_first(), false);
             return;
         }
         self.te_dirty = 0;
         for (i, &r) in te1::CONTEXT_REGS.iter().enumerate() {
-            sink.rss_write(r, if i == 0 { self.texmode1() } else { self.te[i] }, false);
+            sink.rss_write(r, if i == 0 { self.texture_mode_first() } else { self.te[i] }, false);
         }
         for (k, &r) in te1::TABLE_REGS.iter().enumerate() {
             sink.rss_write(te_reg::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX, 0, false);
@@ -3219,14 +3219,14 @@ impl Gl {
             (1, false)
         };
         let n_ext = (bpt / comp).clamp(1, 4);
-        let tl_mode = self.te[te1::CONTEXT_REGS.iter().position(|&r| r == te_reg::MGRAS_TE1_TEXTURE_LOADER_MODE).unwrap_or(0)];
-        let nc = ((tl_mode >> 1) & 3) as usize + 1;
+        let texture_loader_mode = self.te[te1::CONTEXT_REGS.iter().position(|&r| r == te_reg::MGRAS_TE1_TEXTURE_LOADER_MODE).unwrap_or(0)];
+        let nc = ((texture_loader_mode >> 1) & 3) as usize + 1;
         let alpha_class = !raw && (self.te[0] >> 9) & 7 == 1;
         if sink.tracing_tex() {
             let spec = self.te[te1::CONTEXT_REGS.iter().position(|&r| r == te_reg::MGRAS_TE1_TEXTURE_LOADER_LEVEL_SPEC).unwrap_or(0)];
             sink.trace(format!(
                 "TEX load rect {:?} dest {:?} scale {scale} elem {} hdr {:x?} bytes {} pitch {pitch} bpt {bpt} n_ext {n_ext} \
-                 tl_mode {tl_mode:#x} tl_spec {spec:#x} texmode1 {:#x} tl_mipmap {:#x}",
+                 texture_loader_mode {texture_loader_mode:#x} texture_loader_level_spec {spec:#x} texture_mode_first {:#x} texture_loader_mipmap_block {:#x}",
                 self.tl_rect.map(|v| v as i32), self.tl_dest, self.tl_elem, &self.send_pixels[..6], bytes.len(), self.te[0],
                 self.te[te1::CONTEXT_REGS.iter().position(|&r| r == te_reg::MGRAS_TE1_TEXTURE_LOADER_MIPMAP_BLOCK).unwrap_or(0)]
             ));
