@@ -75,7 +75,9 @@ fn line(w: &mut Vec<u32>, end: (f64, f64), start: (f64, f64), inc: (u32, u32), c
         (0..2).for_each(|_| (0..64).for_each(|i| reg(w, 0x15d, 0xff - 4 * i)));
         reg(w, 0x15c, 0xb000_0080);
         (0..32).for_each(|_| reg(w, 0x15d, 0x100));
-        regs(w, &[(0x110, 0x7100), (0x165, 0x8000_0074), (0x165, 0x7880_c8c4), (0x161, 0x0c00_000b), (0x116, 1), (0x116, 1)]);
+        // gr4 logs 0x161 as 0x0c00000b from a zero shadow; the stored words are
+        // 8-8-8-8, so the pixel type bits of the earlier 0x4200 stay (inferred).
+        regs(w, &[(0x110, 0x7100), (0x165, 0x8000_0074), (0x165, 0x7880_c8c4), (0x161, 0x0c00_420b), (0x116, 1), (0x116, 1)]);
         reg(w, 0x445, 0x63);
     } else {
         reg(w, 0x445, 3);
@@ -157,7 +159,7 @@ fn the_triangles_have_the_stored_row_counts() {
 /// Inline, threaded and JIT runs store the same scene.
 #[test]
 fn every_path_stores_the_same_scene() {
-    for (name, w, rows, cols, _) in scenes().into_iter().take(3) {
+    for (name, w, rows, cols, _) in scenes() {
         let want = readback(Board::High, Mode::Inline, None, &w, rows, cols);
         assert_eq!(readback(Board::High, Mode::Threaded, None, &w, rows, cols), want, "{name}: threaded");
         #[cfg(feature = "gr4-jit")]
@@ -175,4 +177,33 @@ fn the_engine_stores_what_the_diagnostic_stores() {
         let got = sum(&readback(Board::High, Mode::Inline, None, &w, rows, cols));
         assert_eq!(got, want, "{name}: sum {got:#010x}, stored {want:#010x}");
     }
+}
+
+/// What gr4 reads from the stored lines table without keeping it: the
+/// steep red line moves one column every four rows, and the purple
+/// vertical line at column 12 alternates 0x80 and 0x7f by row (127.5
+/// dithered). The diagnostic's opcode 3 draws both.
+#[test]
+fn the_lines_draw_the_stored_tables_steps() {
+    let px = readback(Board::High, Mode::Inline, None, &scene(lines), 17, 14);
+    let at = |r: usize, c: usize| px[r * 14 + c];
+    for r in 0..16 {
+        assert_eq!(at(r, r / 4), 0xff00_00ff, "red, row {r}");
+        assert_eq!(at(r, 5 + r / 4), 0xff00_ff00, "green, row {r}");
+    }
+    for r in 0..10 {
+        let want = if r % 2 == 0 { 0x80 } else { 0x7f };
+        assert_eq!(at(r, 12), 0xff00_0000 | want << 16 | want, "purple, row {r}");
+    }
+}
+
+/// The lines' stored sum is not met: the stipple register the diagnostic's
+/// decode names (0x15b) is the scroll register in a real 6.5.30 recording,
+/// so lines 3 and 4 draw nothing, and the table's green weights are not in
+/// any captured write. Kept as the open acceptance.
+#[test]
+#[ignore = "the lines' stipple and green weights are not decoded"]
+fn the_engine_stores_the_diagnostics_lines() {
+    let got = sum(&readback(Board::High, Mode::Inline, None, &scene(lines), 17, 14));
+    assert_eq!(got, 0xc584_ed6b, "five lines: sum {got:#010x}");
 }
