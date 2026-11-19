@@ -1164,6 +1164,10 @@ fn emit(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, img: &Image) {
 /// answer anyway (`MAX_PACK_BYTES`).
 pub const MAX_CAPTURE_PIXELS: u64 = 1 << 24;
 
+/// The zeros a read past the largest drawable is answered with: the return page after its first
+/// eight bytes, as the old device wrote them.
+const REFUSED_READ_REPLY: usize = 0x4000 - 8;
+
 /// The rectangle of the read buffer, as an image of `kind`. Pixels outside the window read zero.
 /// None for a rectangle of more than `MAX_CAPTURE_PIXELS`.
 fn capture(gl: &Gl, canvas: &Canvas<'_>, x: i32, y: i32, w: usize, h: usize, kind: u32) -> Option<Image> {
@@ -1356,6 +1360,11 @@ pub fn plane_command(gl: &mut Gl, c: &mut Counts, env: &Env<'_>, selector: u32, 
         }
         (READ_PIXEL_RECTANGLE_BACK_TO_HOST, &[x, y, w, h, format, ty, low]) => {
             c.reads += 1;
+            if w as u64 * h as u64 > MAX_CAPTURE_PIXELS {
+                // Answered with zeros the size of the return page's data, not built.
+                c.refused += 1;
+                return Out::Reply(vec![0; REFUSED_READ_REPLY]);
+            }
             let Some(img) = read_image(gl, c, &canvas, [x, y, w, h], format) else {
                 return Out::Nothing;
             };
