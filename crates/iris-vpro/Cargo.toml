@@ -22,11 +22,12 @@ postcard = { version = "1", features = ["alloc"] }
 crossbeam-queue = "0.3"
 crossbeam-utils = "0.8"
 blake3 = "1"
+toml = "1.0.3"
+flate2 = "1"
 
 [features]
 default = ["wgpu"]
-wgpu = []
-# The scan-out compose needs the board's display side; the mounted files only warn about it.
+wgpu = ["scanout"]
 scanout = []
 
 [dev-dependencies]
