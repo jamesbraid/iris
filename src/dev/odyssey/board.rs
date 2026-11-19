@@ -1301,6 +1301,31 @@ pub(super) fn synthetic_onewire_serial(letter: char, index: u32) -> u64 {
     0x51454d55u64 << 16 | (letter as u64) << 8 | index as u64
 }
 
+/// The board properties a host sets. A product (`Board::new_params`) overrides the
+/// revision, memory size, banks and back-end version, as its row of `PRODUCTS` says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Params {
+    pub revision: u32,
+    /// megabytes: 32, 64 or 128
+    pub memory_size: u32,
+    /// 2 or 4
+    pub memory_banks: u32,
+    /// 2 or 3
+    pub cas_latency: u32,
+    /// bits 2:0 of the back end's version register
+    pub backend_version: u32,
+    /// The one-wire NIC's serial, 48 bits.
+    pub nic_serial: u64,
+    /// The NIC's record text; empty for the product's.
+    pub nic_record: String,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Params { revision: 0xa, memory_size: 128, memory_banks: 4, cas_latency: 3, backend_version: 1, nic_serial: synthetic_onewire_serial('G', 0), nic_record: String::new() }
+    }
+}
+
 impl Board {
     /// A board of `product` (v12, v10, v8 or v6) in crosstalk widget
     /// `slot`: board revision A with a synthetic serial number in its
@@ -1318,14 +1343,24 @@ impl Board {
     /// For a `lent` region: 8-byte aligned, valid for reads and writes of
     /// its size until the board is dropped, written by nothing else.
     pub unsafe fn new_lent(product: &str, slot: u32, lent: Option<(*mut u64, u64)>) -> Result<Box<Board>, String> {
+        // SAFETY: as this function's.
+        unsafe { Board::new_params(product, slot, &Params::default(), lent) }
+    }
+
+    /// `new_lent` with the board properties a host sets. An empty `product` leaves them as given.
+    ///
+    /// # Safety
+    /// As `new_lent`.
+    pub unsafe fn new_params(product: &str, slot: u32, p: &Params, lent: Option<(*mut u64, u64)>) -> Result<Box<Board>, String> {
         let mut s = Box::new(Board::default());
 
-        s.widget.revision = 0xa;
-        s.widget.memory_size = 128;
-        s.widget.memory_banks = 4;
-        s.widget.cas_latency = 3;
-        s.widget.backend_version = 1;
-        s.widget.nic_serial = synthetic_onewire_serial('G', 0);
+        s.widget.revision = p.revision;
+        s.widget.memory_size = p.memory_size;
+        s.widget.memory_banks = p.memory_banks;
+        s.widget.cas_latency = p.cas_latency;
+        s.widget.backend_version = p.backend_version;
+        s.widget.nic_serial = p.nic_serial;
+        s.widget.nic_record = p.nic_record.clone();
         s.widget.product = product.to_string();
         s.slot = slot;
         s.configure()?;

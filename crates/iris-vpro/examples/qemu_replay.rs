@@ -167,7 +167,7 @@ fn main() {
     // SAFETY: board_mem outlives the engine (dropped after it) and nothing else touches it.
     let lent = unsafe { Lent::new(board_mem.as_mut_ptr().cast(), bytes as usize) }.unwrap();
     let mut engine = VproEngine::new(
-        Config { product: product.into(), widget: 11, mode: if threaded { Mode::Threaded } else { Mode::Inline }, pool: (0, 0), gpu },
+        Config { product: product.into(), widget: 11, mode: if threaded { Mode::Threaded } else { Mode::Inline }, pool: (0, 0), params: Default::default(), gpu },
         Some(lent),
         Guest(guest.clone()),
         None,

@@ -21,17 +21,29 @@ extern "C" {
 /* The VPro configuration: the shared part, then the board's. */
 typedef struct IrisVproConfig {
     IrisEngineConfig common;
-    const char *product;    /* "v12", "v10", "v8" or "v6"; NULL is refused */
+    /*
+     * "v12", "v10", "v8" or "v6". A product overrides revision, memory_size,
+     * memory_banks and backend_version. NULL or "": the properties below are
+     * used as given and checked.
+     */
+    const char *product;
+    const char *nic_record; /* the NIC's record text; NULL or "": the product's */
+    uint64_t nic_serial;    /* the NIC's serial, 48 bits; 0: a synthetic one */
     uint32_t widget;        /* the widget number the board answers as */
+    uint32_t revision;      /* 0 to 15 */
+    uint32_t memory_size;   /* megabytes: 32, 64 or 128 */
+    uint32_t memory_banks;  /* 2 or 4 */
+    uint32_t cas_latency;   /* 2 or 3 */
+    uint32_t backend_version;
     uint32_t pool_threads;  /* the fragment pool's workers; 0: a default */
     uint32_t pool_tile;     /* its tile size in pixels; 0: a default */
 } IrisVproConfig;
 
 /*
- * Bytes of board memory the product carries: the lent_len to give in the
- * shared configuration. 0 for a product that does not exist.
+ * Bytes of board memory the configuration has: the lent_len to give in the
+ * shared configuration. 0 for a configuration the board cannot have.
  */
-uint64_t iris_vpro_memory_bytes(const char *product);
+uint64_t iris_vpro_memory_bytes(const IrisVproConfig *cfg);
 
 /*
  * Start an engine. Free it with iris_engine_free. NULL on bad arguments or
