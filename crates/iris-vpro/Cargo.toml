@@ -25,11 +25,18 @@ crossbeam-utils = "0.8"
 blake3 = "1"
 toml = "1.0.3"
 flate2 = "1"
+cbindgen = { version = "0.29", optional = true, default-features = false }
 
 [features]
 default = ["wgpu"]
 wgpu = ["scanout"]
 scanout = []
+# `tools/check-header`: cbindgen compares the C header with src/ffi.rs.
+header-check = ["dep:cbindgen"]
 
 [dev-dependencies]
 sgi-engine = { path = "../sgi-engine", features = ["conformance", "fault-injection"] }
+
+[[example]]
+name = "cbindgen_header"
+required-features = ["header-check"]

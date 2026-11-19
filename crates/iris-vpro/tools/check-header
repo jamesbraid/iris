@@ -1,0 +1,43 @@
+#!/bin/sh
+# Fails if include/iris_vpro.h has drifted from src/ffi.rs: cbindgen's
+# declarations must equal the header's, and the header must compile as C and
+# C++. Run it where cargo and cbindgen's crate are available, e.g.
+#   iris-build --src TREE --update-lock -- crates/iris-vpro/tools/check-header
+set -eu
+cd "$(dirname "$0")/.."
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+cargo run -q -p iris-vpro --features header-check --example cbindgen_header > "$tmp/generated.h"
+python3 - include/iris_vpro.h "$tmp/generated.h" <<'PY'
+import re, sys
+
+def decls(path):
+    s = open(path).read()
+    s = re.sub(r'/\*.*?\*/', '', s, flags=re.S)
+    s = re.sub(r'//[^\n]*', '', s)
+    s = re.sub(r'#ifdef __cplusplus.*?#endif[^\n]*', '', s, flags=re.S)
+    out = set()
+    for m in re.finditer(r'^#define[ \t]+(\w+)[ \t]+(\S+)', s, flags=re.M):
+        out.add('#define %s %s' % m.groups())
+    s = re.sub(r'^#[^\n]*', '', s, flags=re.M)
+    s = s.replace('uintptr_t', 'size_t').replace('extern "C"', '')
+    # cbindgen's structs and unions carry no tag; the header's do.
+    s = re.sub(r'typedef (struct|union) \w+\s*\{', r'typedef \1 {', s)
+    for stmt in re.split(r';', s):
+        stmt = re.sub(r'\s+', ' ', stmt).strip()
+        stmt = re.sub(r'\s*([*(),{}\[\]])\s*', r'\1', stmt)
+        if stmt:
+            out.add(stmt)
+    return out
+
+want, got = decls(sys.argv[1]), decls(sys.argv[2])
+bad = sorted(want ^ got)
+for d in bad:
+    print(('header only: ' if d in want else 'cbindgen only: ') + d)
+sys.exit(1 if bad else 0)
+PY
+${CC:-cc} -std=gnu11 -Wall -Wextra -Werror -I ../sgi-engine/include -fsyntax-only -x c include/iris_vpro.h
+if command -v "${CXX:-c++}" >/dev/null; then
+    ${CXX:-c++} -Wall -Wextra -Werror -I ../sgi-engine/include -fsyntax-only -x c++ include/iris_vpro.h
+fi
+echo "include/iris_vpro.h matches src/ffi.rs"

@@ -112,6 +112,19 @@ impl IrisEngineConfig {
     pub fn threaded(&self) -> bool {
         self.mode == 1
     }
+
+    /// The GPU the shell asked for: the backend name (`auto` when NULL) and whether to
+    /// prefer a software adapter. None for `IRIS_ENGINE_GPU_NONE`.
+    ///
+    /// # Safety
+    /// `gpu_backend` is NULL or a NUL-terminated string.
+    pub unsafe fn gpu_request(&self) -> Option<(String, bool)> {
+        if self.gpu == IRIS_ENGINE_GPU_NONE {
+            return None;
+        }
+        let backend = if self.gpu_backend.is_null() { "auto".to_string() } else { unsafe { CStr::from_ptr(self.gpu_backend) }.to_string_lossy().into_owned() };
+        Some((backend, self.gpu == IRIS_ENGINE_GPU_SOFTWARE))
+    }
 }
 
 #[repr(C)]
