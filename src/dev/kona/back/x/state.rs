@@ -5,14 +5,14 @@
 //! raster state the GL path uses. These commands load the state that fills
 //! then draw under:
 //!
-//! - 0x129 (`x_gc`) the thirteen words of the graphics context, decoded by
+//! - 0x129 (`WINDOW_SYSTEM_GRAPHICS_CONTEXT_LOAD`) the thirteen words of the graphics context, decoded by
 //!   `gc` when a fill needs them;
-//! - 0x12a (`x_position`) the drawable's x, y, width and height, the origin of
+//! - 0x12a (`WINDOW_SYSTEM_DRAWABLE_ORIGIN_AND_SIZE_LOAD`) the drawable's x, y, width and height, the origin of
 //!   rectangle coordinates;
-//! - 0x145 (`x_bdata4`) the leading words of a clip list longer than one
-//!   rectangle, kept until the 0x12b (`x_clip`) that ends it: a count `n` and
+//! - 0x145 (`WINDOW_SYSTEM_FOUR_WORD_DATA_PRELOAD_BYTE_FORM`) the leading words of a clip list longer than one
+//!   rectangle, kept until the 0x12b (`WINDOW_SYSTEM_CLIP_LOAD`) that ends it: a count `n` and
 //!   `n` rectangles `x1, y1, x2, y2`;
-//! - 0x12d (`x_scissor`) a clip box (x1, y1, width, height);
+//! - 0x12d (`WINDOW_SYSTEM_SCISSOR_LOAD`) a clip box (x1, y1, width, height);
 //! - 0x13c, 0x13d, 0x13e the stipple cache (see `stipple`).
 //!
 //! Grades. The word layouts are software expectations from the senders. That

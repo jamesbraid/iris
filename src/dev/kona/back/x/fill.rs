@@ -1,7 +1,7 @@
 //! The X server's fills: boxes and rectangles, and the data tokens that carry
 //! their words.
 //!
-//! A box (0x154, `x_box`; 0x155 with six) is two words, `x1 << 16 | y1` and
+//! A box (0x154, `FILL_BOXES_TWO_CORNERS`; 0x155 with six) is two words, `x1 << 16 | y1` and
 //! `x2 << 16 | y2` with signed halves, far corner exclusive, both corners added
 //! to the drawable's position like a rectangle's origin and a point. That the pipe
 //! adds the position to a box is inferred: the senders in the recordings zero the
@@ -509,7 +509,7 @@ impl XState {
         // The check reads the destination words. A store that keeps them elsewhere answers it from
         // what its writers could have stored where the boxes lie, or brings those words up to date first.
         let proven = plan.needs && store.settle(&plan, back.as_ref(), boxes.clone().filter_map(|b| plan.clip(b)));
-        if plan.needs && !proven && !boxes.clone().all(|b| plan.destination_fits(b, spans) && back.as_ref().is_none_or(|p| p.destination_fits(b, spans))) {
+        if plan.needs && !proven && !boxes.clone().all(|b| plan.destination_in_range(b, spans) && back.as_ref().is_none_or(|p| p.destination_in_range(b, spans))) {
             return Outcome { drawn: 0, refused: Some(Refused::Destination) };
         }
         let mut drawn = 0;

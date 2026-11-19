@@ -3,11 +3,11 @@
 //! Stippled fills are masked by a pattern the X server stores once and then
 //! names:
 //!
-//! - 0x13d (`x_store_stipple`): an entry, the pattern's width and height, then
+//! - 0x13d (`STORE_WINDOW_SYSTEM_STIPPLE`): an entry, the pattern's width and height, then
 //!   `height` rows, one word each, most significant bit leftmost (the rows come
 //!   behind the command, as a data run the back end asks for);
-//! - 0x13e (`x_rotate_stipple`): an entry, then the pattern origin x, y;
-//! - 0x13c (`x_load_stipple`): an entry whose pattern masks the box, rectangle,
+//! - 0x13e (`ROTATE_WINDOW_SYSTEM_STIPPLE`): an entry, then the pattern origin x, y;
+//! - 0x13c (`LOAD_WINDOW_SYSTEM_STIPPLE`): an entry whose pattern masks the box, rectangle,
 //!   span and point fills that follow, or all ones to end the masking.
 //!
 //! Grades. The command meanings and the row order are software expectations

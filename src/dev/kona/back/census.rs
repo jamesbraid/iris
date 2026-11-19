@@ -286,7 +286,7 @@ mod tests {
             b.hook = Some(super::super::null_hook());
         });
         let store = |w: u32| assert_eq!(kona.test_write(0xc10000, 4, w as u64), crate::traits::BUS_OK);
-        // A kernel x_position (0x12a, four arguments), then data nothing frames:
+        // A kernel drawable origin and size load (0x12a, four arguments), then data nothing frames:
         // a textport sync word, then words no table has.
         at.store(7, Relaxed);
         for w in [0x12a, 0, 0, 0x500, 0x400] {
