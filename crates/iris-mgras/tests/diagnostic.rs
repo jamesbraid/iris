@@ -63,13 +63,21 @@ const BLUE: &[(u32, u32)] = &[(0x5e, 0x007f_f800), (0x5f, 0x00ff_f000), (0x64, 0
 
 /// One line of the five: end then start vertex, the increments, and a colour.
 /// Stippled lines write the repeat word to 0x15b and the pattern to 0x15a.
-fn line(w: &mut Vec<u32>, end: (f64, f64), start: (f64, f64), inc: (u32, u32), colour: &[(u32, u32)], stipple: bool, smooth: bool) {
-    line_with(w, end, start, inc, colour, stipple, smooth, &|i| 0xff - 4 * i);
+/// An integer line (the diagnostic's argument 7) skips the float endpoints
+/// and the step registers 0x10 and 0x12 and writes the truncated start and
+/// end to 0x40 and 0x41, x in the high half.
+fn line(w: &mut Vec<u32>, end: (f64, f64), start: (f64, f64), inc: (u32, u32), colour: &[(u32, u32)], stipple: bool, smooth: bool, int: bool) {
+    line_with(w, end, start, inc, colour, stipple, smooth, int, &|i| 0xff - 4 * i);
 }
 
 /// `line` with the smooth line's filter table (weight at index i) as given.
-fn line_with(w: &mut Vec<u32>, end: (f64, f64), start: (f64, f64), inc: (u32, u32), colour: &[(u32, u32)], stipple: bool, smooth: bool, filter: &dyn Fn(u32) -> u32) {
-    regs(w, &[(0xc, coord(end.0)), (0xd, coord(end.1)), (0xe, coord(start.0)), (0xf, coord(start.1)), (0x10, inc.0), (0x11, inc.1), (0x12, 0)]);
+fn line_with(w: &mut Vec<u32>, end: (f64, f64), start: (f64, f64), inc: (u32, u32), colour: &[(u32, u32)], stipple: bool, smooth: bool, int: bool, filter: &dyn Fn(u32) -> u32) {
+    if int {
+        let pack = |p: (f64, f64)| (p.0 as u32) << 16 | p.1 as u32;
+        regs(w, &[(0x11, inc.1), (0x40, pack(start)), (0x41, pack(end))]);
+    } else {
+        regs(w, &[(0xc, coord(end.0)), (0xd, coord(end.1)), (0xe, coord(start.0)), (0xf, coord(start.1)), (0x10, inc.0), (0x11, inc.1), (0x12, 0)]);
+    }
     reg(w, 0x110, 0x7000);
     if stipple {
         regs(w, &[(0x110, 0x70a0), (0x15b, 0x000f_0000), (0x15a, 0xa987_6543)]);
@@ -93,11 +101,11 @@ fn line_with(w: &mut Vec<u32>, end: (f64, f64), start: (f64, f64), inc: (u32, u3
 
 fn lines(w: &mut Vec<u32>) {
     let (a, b) = ((0x40_0000, 0x100_0000), (0x100_0000, 0));
-    line(w, (0.0, 0.0), (4.0, 16.0), a, &[(0x5c, 0xff_f000), (0x5f, 0xff_f000)], false, false);
-    line(w, (5.0, 0.0), (9.0, 16.0), a, &[(0x5d, 0xff_f000), (0x5f, 0xff_f000)], false, true);
-    line(w, (0.0, 5.0), (5.0, 5.0), b, &[(0x5e, 0xff_f000), (0x5f, 0xff_f000)], true, false);
-    line(w, (5.0, 5.0), (10.0, 5.0), b, &[(0x5e, 0xff_f000), (0x5f, 0xff_f000)], true, false);
-    line(w, (12.0, 0.0), (12.0, 10.0), (0, 0x100_0000), &[(0x5c, 0x7f_f800), (0x5e, 0x7f_f800), (0x5f, 0xff_f000)], false, false);
+    line(w, (0.0, 0.0), (4.0, 16.0), a, &[(0x5c, 0xff_f000), (0x5f, 0xff_f000)], false, false, false);
+    line(w, (5.0, 0.0), (9.0, 16.0), a, &[(0x5d, 0xff_f000), (0x5f, 0xff_f000)], false, true, false);
+    line(w, (0.0, 5.0), (5.0, 5.0), b, &[(0x5e, 0xff_f000), (0x5f, 0xff_f000)], true, false, false);
+    line(w, (5.0, 5.0), (10.0, 5.0), b, &[(0x5e, 0xff_f000), (0x5f, 0xff_f000)], true, false, false);
+    line(w, (12.0, 0.0), (12.0, 10.0), (0, 0x100_0000), &[(0x5c, 0x7f_f800), (0x5e, 0x7f_f800), (0x5f, 0xff_f000)], false, false, true);
 }
 
 /// Send the words, then read `rows` by `cols` back from (0, 0) of the draw page.
@@ -226,11 +234,13 @@ fn random_lines(w: &mut Vec<u32>) {
     for _ in 0..60 {
         let p = |n: &mut dyn FnMut(u64) -> u64| (n(46) as f64 + 1.0 + n(4) as f64 / 4.0, n(38) as f64 + 1.0 + n(4) as f64 / 4.0);
         let (a, b) = (p(&mut next), p(&mut next));
+        let int = next(4) == 0;
+        let (a, b) = if int { ((a.0.trunc(), a.1.trunc()), (b.0.trunc(), b.1.trunc())) } else { (a, b) };
         let (dx, dy) = ((b.0 - a.0).abs(), (b.1 - a.1).abs());
         let inc = if dy >= dx { ((dx / dy.max(1e-6) * 16_777_216.0) as u32, 0x100_0000) } else { (0x100_0000, (dy / dx.max(1e-6) * 16_777_216.0) as u32) };
         let stipple = next(3) == 0;
         let smooth = next(2) == 0;
-        line(w, a, b, inc, colours[next(3) as usize], stipple, smooth);
+        line(w, a, b, inc, colours[next(3) as usize], stipple, smooth, int);
     }
 }
 
@@ -280,7 +290,7 @@ fn the_lines_draw_the_stored_tables_steps() {
     assert_eq!(at(2, 5), 0xff00_ff00, "a line through a pixel centre is full weight");
     // The blue dot at (5, 5) blends over the green line's pixel: 63 * (255 - 16) / 255.
     assert_eq!((at(5, 5) >> 8) & 0xFF, 0x3b, "blue over green");
-    for r in 0..10 {
+    for r in 0..=10 {
         let want = if r % 2 == 0 { 0x80 } else { 0x7f };
         assert_eq!(at(r, 12), 0xff00_0000 | want << 16 | want, "purple, row {r}");
     }
@@ -292,7 +302,7 @@ fn the_lines_draw_the_stored_tables_steps() {
 #[test]
 fn the_smooth_line_reads_the_loaded_table() {
     let at_centre = |filter: &dyn Fn(u32) -> u32| {
-        let w = scene(|w| line_with(w, (5.0, 0.0), (9.0, 16.0), (0x40_0000, 0x100_0000), &[(0x5d, 0xff_f000), (0x5f, 0xff_f000)], false, true, filter));
+        let w = scene(|w| line_with(w, (5.0, 0.0), (9.0, 16.0), (0x40_0000, 0x100_0000), &[(0x5d, 0xff_f000), (0x5f, 0xff_f000)], false, true, false, filter));
         readback(Board::High, Mode::Inline, None, &w, 3, 8)[2 * 8 + 5]
     };
     assert_eq!(at_centre(&|i| 0xff - 4 * i), 0xff00_ff00);
@@ -300,11 +310,8 @@ fn the_smooth_line_reads_the_loaded_table() {
     assert!((0x7d..=0x7f).contains(&((half >> 8) & 0xFF)), "green {half:#010x}");
 }
 
-/// The lines' stored sum is not met: the purple line's last row (10) is
-/// missing. gr4 reads an integer-start setup flag for that line whose
-/// effect, a write outside the raster registers, is not modelled.
+/// The lines meet the stored sum.
 #[test]
-#[ignore = "the purple line's last row (the integer-start setup) is not modelled"]
 fn the_engine_stores_the_diagnostics_lines() {
     let got = sum(&readback(Board::High, Mode::Inline, None, &scene(lines), 17, 14));
     assert_eq!(got, 0xc584_ed6b, "five lines: sum {got:#010x}");
@@ -332,8 +339,7 @@ fn differing(name: &str, got: &[u32], want: &[u32], cols: usize) -> usize {
 
 /// Word for word against the stored tables, when the shipped binary is
 /// available locally, on every path: the interpreter, the threaded engine,
-/// the JIT and the GPU unit must each match the triangles exactly and the
-/// lines but for the purple line's last row.
+/// the JIT and the GPU unit must each match all four tables exactly.
 #[test]
 fn the_engine_matches_the_stored_tables_word_for_word() {
     let path = std::env::var(IDE_ENV).unwrap_or_else(|_| IDE_DEFAULT.into());
@@ -352,6 +358,5 @@ fn the_engine_matches_the_stored_tables_word_for_word() {
             bad += differing(&format!("{name}, {path}"), &got, &want, cols as usize);
         }
     }
-    // The lines miss one word on each of the four paths.
-    assert!(bad <= 4, "{bad} words differ from the stored tables");
+    assert_eq!(bad, 0, "{bad} words differ from the stored tables");
 }

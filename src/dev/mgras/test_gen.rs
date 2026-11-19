@@ -374,6 +374,12 @@ pub fn data_regs(rng: &mut Rng, prim: Prim) -> (Regs, u32) {
         Prim::GlLine => gl_line_regs(rng, &mut regs),
         Prim::DiagLine => {
             gl_line_regs(rng, &mut regs);
+            // Sometimes the integer endpoints, written after the float ones.
+            if rng.chance(0.3) {
+                let p = |rng: &mut Rng| (rng.range(-20, 380) as u32 & 0xFFFF) << 16 | (rng.range(-20, 130) as u32 & 0xFFFF);
+                regs.push((reg::LINE_START, p(rng)));
+                regs.push((reg::LINE_END, p(rng)));
+            }
             rss::OP_DIAG_LINE | if rng.chance(0.5) { 0x60 } else { 0 }
         }
     };

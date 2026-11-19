@@ -1208,7 +1208,9 @@ pub struct Rss {
     /// 0 none) and whether it blends (`diag_run`). Not state.
     diag_cover: u32,
     diag_blend: u32,
-
+    /// Whether the diagnostic's line endpoints were last written as the
+    /// integer registers 0x40/0x41 (set) or the float ones 0xc..0xf.
+    diag_int: u32,
     /// The raster registers as `gl_enter` found them.
     gl_stash: [u32; 0x400],
     /// Fill modes seen with a block, for bring-up logging.
@@ -1788,6 +1790,8 @@ impl Rss {
                 }
             }
             reg::IR_ALIAS => self.regs[reg::IR as usize] = val,
+            reg::LINE_START | reg::LINE_END => self.diag_int = 1,
+            0x00C..=0x00F => self.diag_int = 0,
             reg::MGRAS_RE4_LINE_STIPPLE_REPEAT => self.gl_line_stipple_pos = 0,
             reg::XFRCONTROL if val == 0 => {
                 self.xfer.set(None);
@@ -2559,6 +2563,10 @@ impl Rss {
     /// the repeat count less one; the position carries on until line_stipple_repeat is
     /// written again.
     fn gl_line(&mut self) -> bool {
+        if self.reg(reg::IR) & 0xF == OP_DIAG_LINE && self.diag_int != 0 {
+            self.diag_run(|s| s.diag_int_draw());
+            return true;
+        }
         let Some(l) = self.gl_line_setup() else { return true };
         if l.diag & DIAG_LINE != 0 {
             self.diag_run(|s| s.diag_draw(&l));
@@ -2654,6 +2662,42 @@ impl Rss {
         (self.diag_cover, self.diag_blend) = if blend || cover < 256 { (cover, blend as u32) } else { (0, 0) };
         self.gl_fragment(w.0, w.1, rgba, z);
         (self.diag_cover, self.diag_blend) = (0, 0);
+    }
+
+    /// The diagnostic's integer line (registers 0x40 and 0x41, set by its
+    /// argument 7): the X line's walk, both end pixels unless fill mode bit
+    /// 10 skips the last (inferred, gr4 ide-raster-tests), in the colour
+    /// registers' colour. The stipple is not modelled for it.
+    fn diag_int_draw(&mut self) -> Option<(i32, i32)> {
+        let (s, e) = (self.reg(reg::LINE_START), self.reg(reg::LINE_END));
+        let (mut x, mut y) = (signed16(s >> 16), signed16(s));
+        let (x1, y1) = (signed16(e >> 16), signed16(e));
+        let rgba = [0x05C, 0x05D, 0x05E, 0x05F].map(|n| fixed::colour(self.reg(n) as i32 as f64 / 0xFF_F000 as f64));
+        let z = (((self.reg(0x068) as u64) << 32 | self.reg(0x069) as u64) as i64 as f64 / 4096.0 * (1u64 << fixed::Z_FRAC) as f64).round() as i64;
+        let skip_last = self.reg(reg::FILLMODE) & FILL_LINE_SKIP_LAST != 0;
+        let (dx, dy) = ((x1 - x).abs(), -(y1 - y).abs());
+        let (sx, sy) = (if x < x1 { 1 } else { -1 }, if y < y1 { 1 } else { -1 });
+        let mut err = dx + dy;
+        let mut rows = None;
+        loop {
+            if skip_last && x == x1 && y == y1 {
+                break;
+            }
+            self.diag_frag((x, y), rgba, z, 256, &mut rows);
+            if x == x1 && y == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+        rows
     }
 
     /// `diag_run`'s drawing: the framebuffer rows it reached, if any.
