@@ -3,7 +3,9 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(feature = "present")]
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -15,11 +17,18 @@ use parking_lot::Mutex;
 /// present, so a board's device could never draw the window. Vulkan, Metal
 /// and DX12 ignore it. Headless and windowless CI runs never set it, and
 /// their instances open without one, as before.
+#[cfg(feature = "present")]
 static DISPLAY: OnceLock<winit::event_loop::OwnedDisplayHandle> = OnceLock::new();
+
+#[cfg(feature = "present")]
+type Display = winit::event_loop::OwnedDisplayHandle;
+#[cfg(not(feature = "present"))]
+type Display = ();
 
 /// Bind every instance opened from now on to `display`: the event loop's,
 /// so the window's surface is on the same connection. Set it before the
 /// machine is built, so a board's device can present. The first call wins.
+#[cfg(feature = "present")]
 pub fn set_display(display: winit::event_loop::OwnedDisplayHandle) {
     let _ = DISPLAY.set(display);
 }
@@ -340,7 +349,11 @@ impl Gpu {
             // With the window's display first; without, should the backend
             // refuse it (an EGL with no X11 or Wayland platform), the device
             // still computes and its frames are read back for the window.
-            for display in DISPLAY.get().map(Some).into_iter().chain([None]) {
+            #[cfg(feature = "present")]
+            let displays = DISPLAY.get().map(Some).into_iter().chain([None]);
+            #[cfg(not(feature = "present"))]
+            let displays = [None];
+            for display in displays {
                 match Self::open(backends, opts, display, Arc::clone(&fatal)) {
                     Ok(gpu) => {
                         log::info!("wgpu: {}", gpu.caps);
@@ -356,14 +369,18 @@ impl Gpu {
         Err(format!("no usable GPU for backend={}: {}", opts.backend, failures.join("; ")))
     }
 
-    fn open(backends: wgpu::Backends, opts: &GpuOptions, display: Option<&winit::event_loop::OwnedDisplayHandle>, fatal: Arc<dyn Fn(&str) + Send + Sync>) -> Result<Arc<Gpu>, String> {
+    #[cfg_attr(not(feature = "present"), allow(unused_variables))]
+    fn open(backends: wgpu::Backends, opts: &GpuOptions, display: Option<&Display>, fatal: Arc<dyn Fn(&str) + Send + Sync>) -> Result<Arc<Gpu>, String> {
         // The rest of wgpu's environment applies as well: the instance flags
         // (WGPU_DEBUG, WGPU_VALIDATION, ...) and the backend options
         // (WGPU_GL_FENCE_BEHAVIOR, WGPU_GLES_MINOR_VERSION, WGPU_DX12_COMPILER, ...).
+        #[cfg(feature = "present")]
         let desc = match display {
             Some(d) => wgpu::InstanceDescriptor::new_with_display_handle(Box::new(d.clone())),
             None => wgpu::InstanceDescriptor::new_without_display_handle(),
         };
+        #[cfg(not(feature = "present"))]
+        let desc = wgpu::InstanceDescriptor::new_without_display_handle();
         let mut desc = desc.with_env();
         desc.backends = backends;
         let instance = wgpu::Instance::new(desc);

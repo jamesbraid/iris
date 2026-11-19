@@ -476,6 +476,7 @@ fn reads_are_ranged_counted_and_share_one_staging_buffer() {
 
 /// The presenter's unpack kernel reads a scan-out frame's 0xAABBGGRR words
 /// as the texture's R, G, B and A.
+#[cfg(feature = "present")]
 #[test]
 fn the_unpack_kernel_reads_abgr_words() {
     let Some(gpu) = gpu() else { return };

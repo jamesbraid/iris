@@ -30,12 +30,14 @@
 //! from the files on disk (`include_str!`, with `#include`); `tiles` is the
 //! tile geometry and the buffer layouts both sides agree on; `memory` is a
 //! board's memory on the GPU with uploads and readbacks; `batch` is the
-//! recorder and the two dispatches.
+//! recorder and the two dispatches. `present` (a window's surface, behind
+//! the `present` feature) is the one part that needs a window system.
 
 pub mod batch;
 pub mod device;
 pub mod host;
 pub mod memory;
+#[cfg(feature = "present")]
 pub mod present;
 pub mod scanout;
 pub mod shader;
@@ -63,8 +65,11 @@ pub mod library {
 }
 
 pub use batch::{ArchShaders, Batch, BatchPipelines, Full};
-pub use device::{set_display, Gpu, GpuOptions};
+#[cfg(feature = "present")]
+pub use device::set_display;
+pub use device::{Gpu, GpuOptions};
 pub use memory::GpuMemory;
+#[cfg(feature = "present")]
 pub use present::{Frame, Placement, Presenter};
 pub(crate) use scanout::defines;
 pub use scanout::{storage_layout, Scanout, ScanoutPipeline, ScanoutShaders};
