@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use crate::gfx_display::ScanoutShow;
 use crate::wgpu::{defines, storage_layout, Fragment, Gpu, Scanout, ScanoutPipeline, ScanoutShaders};
 
 use super::bt457::Bt457;

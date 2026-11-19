@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::dev::crime_mem::O2Memory;
 use crate::dev::o2gfx::{Gbe, ScanRegs};
-use crate::gfx_display::{Frame, Need};
+use crate::gfx_display::{Frame, Need, ScanoutShow};
 use crate::traits::{BusDevice, BUS_OK};
 use crate::wgpu::{defines, storage_layout, Fragment, Gpu, Scanout, ScanoutPipeline, ScanoutShaders};
 

@@ -342,6 +342,30 @@ impl Need {
     }
 }
 
+/// `Scanout::show`, which lives here because the scan-out driver is in a
+/// crate that knows no `Frame`.
+#[cfg(feature = "wgpu")]
+pub trait ScanoutShow {
+    /// Hand the composed `width` x `height` frame to this tick's consumer:
+    /// the output buffer when a presenter on this device takes it
+    /// (`need.gpu`), else its words, read back into `frame.words`.
+    fn show(&mut self, width: u32, height: u32, need: Need, frame: &mut Frame) -> Result<(), String>;
+}
+
+#[cfg(feature = "wgpu")]
+impl ScanoutShow for crate::wgpu::Scanout {
+    fn show(&mut self, width: u32, height: u32, need: Need, frame: &mut Frame) -> Result<(), String> {
+        frame.width = width;
+        frame.height = height;
+        if need.gpu {
+            frame.gpu = Some(self.output().clone());
+            return Ok(());
+        }
+        frame.words.resize(width as usize * height as usize, 0);
+        self.read_output(width, height, &mut frame.words)
+    }
+}
+
 /// A screen's renderer slot; a cycling window's renderer moves between slots
 /// on the thread giving it up (a GL context is bound to a thread).
 #[derive(Default)]

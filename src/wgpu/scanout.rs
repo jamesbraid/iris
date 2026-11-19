@@ -175,20 +175,6 @@ impl Scanout {
         self.gpu.read(&self.out_buf, &[(0, pixels * 4)], bytemuck::cast_slice_mut(&mut out[..pixels as usize]))
     }
 
-    /// Hand the composed `width` x `height` frame to this tick's consumer:
-    /// the output buffer when a presenter on this device takes it
-    /// (`need.gpu`), else its words, read back into `frame.words`.
-    pub fn show(&mut self, width: u32, height: u32, need: crate::gfx_display::Need, frame: &mut crate::gfx_display::Frame) -> Result<(), String> {
-        frame.width = width;
-        frame.height = height;
-        if need.gpu {
-            frame.gpu = Some(self.out_buf.clone());
-            return Ok(());
-        }
-        frame.words.resize(width as usize * height as usize, 0);
-        self.read_output(width, height, &mut frame.words)
-    }
-
     /// The buffer frames are composed into: 0xAABBGGRR words, rows of the
     /// last frame's width.
     pub fn output(&self) -> &wgpu::Buffer {

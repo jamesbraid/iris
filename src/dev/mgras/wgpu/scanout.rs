@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use crate::gfx_display::ScanoutShow;
 use crate::wgpu::{Fragment, Gpu, Scanout, ScanoutPipeline, ScanoutShaders};
 
 use super::super::dcb::Dcb;
