@@ -209,18 +209,18 @@ fn convert(conv: u32, bytes: u32, data: &[u32]) -> Vec<u32> {
 /// Command FIFO command numbers.
 mod cmd {
     /// Command-processor token: schedule a buffer swap for the next retrace.
-    pub const CP_SCHEDULE_SWAP: u32 = 0x37;
+    pub const TOKEN_037: u32 = 0x37;
     /// Command-processor token: return the state word at a GE address
     /// (`__Mgr_ReturnMode(addr, 1, 1)`: glGet*, glIsEnabled, and glFinish,
     /// which is a glGetBooleanv(GL_DITHER) round trip). The host clears
     /// FLAG_GE_DATA, sends this, polls for the flag, then reads the answer
     /// at GE_READBACK_LO.
-    pub const CP_RETURN_MODE: u32 = 0xA2;
+    pub const MGRAS_HQ3_CFIFO_CMD_QUERY: u32 = 0xA2;
     /// Command-processor token: wait for the pipeline, then return the
     /// state word at the argument's GE address (same readback protocol as
-    /// CP_RETURN_MODE). Native IRIS GL getcolor() and clear() request address
+    /// cfifo_cmd_query). Native IRIS GL getcolor() and clear() request address
     /// 4: the current index as a float, not the address itself.
-    pub const CP_SPIN_AND_RETURN: u32 = 0xA1;
+    pub const TOKEN_0A1: u32 = 0xA1;
     /// Kernel token (MgrasValidateClip, current context): a GL window's
     /// raster state, 15 words: origin, window mode, PP1 window mode (the
     /// kernel stores them as one doubleword, window mode high),
@@ -228,24 +228,24 @@ mod cmd {
     /// origin and pointers for the second buffer set.
     /// The kernel's and X server's way into GE11 ERAM (MgrasEramRead /
     /// MgrasEramWrite; SGI's diagnostic names CP_PASS_THROUGH_GE_*). Write:
-    /// ERAM_WRITE (word count, rounded up to even), the words (FIFO pixel
-    /// data, or a host to board DMA), ERAM_WRITE_AT (address, count), and
-    /// ERAM_WRITE_END after the last chunk. Read: a board to host DMA armed
-    /// first, then ERAM_READ (address, count) feeds it.
+    /// cfifo_cmd_ge_memory_write_chunk (word count, rounded up to even), the words (FIFO pixel
+    /// data, or a host to board DMA), cfifo_cmd_ge_memory_write_addr (address, count), and
+    /// cfifo_cmd_ge_memory_write_end after the last chunk. Read: a board to host DMA armed
+    /// first, then cfifo_cmd_ge_memory_read (address, count) feeds it.
     /// With two GE11s (Maximum Impact) every transfer comes once per GE,
     /// GE0 first (traced eviction, IRIX 6.5.22): reads of 0x17C8 words at
     /// slot S, then at S - 1, each DMAing 0x17C7 words to consecutive
     /// halves of one host buffer; the restore writes the first half to S,
-    /// ERAM_WRITE_END, the second half to S, ERAM_WRITE_END. Nothing
+    /// cfifo_cmd_ge_memory_write_end, the second half to S, cfifo_cmd_ge_memory_write_end. Nothing
     /// selects the GE; the kernel's offset says GE1's read output runs a
     /// word late.
-    pub const CP_ERAM_WRITE: u32 = 0x0FD;
-    pub const CP_ERAM_WRITE_AT: u32 = 0x0FB;
-    pub const CP_ERAM_WRITE_END: u32 = 0x0FA;
-    pub const CP_ERAM_READ: u32 = 0x0FC;
+    pub const MGRAS_HQ3_CFIFO_CMD_GE_MEMORY_WRITE_CHUNK: u32 = 0x0FD;
+    pub const MGRAS_HQ3_CFIFO_CMD_GE_MEMORY_WRITE_ADDR: u32 = 0x0FB;
+    pub const MGRAS_HQ3_CFIFO_CMD_GE_MEMORY_WRITE_END: u32 = 0x0FA;
+    pub const MGRAS_HQ3_CFIFO_CMD_GE_MEMORY_READ: u32 = 0x0FC;
     /// Kernel, switching to its own context: skip the next GE save.
-    pub const CP_GE_NOSAVE_NEXT_SWITCH: u32 = 0x0F4;
-    pub const CP_WINDOW: u32 = 0xE4;
+    pub const TOKEN_0F4: u32 = 0x0F4;
+    pub const MGRAS_HQ3_CFIFO_CMD_WINDOW_CLIP_PACKET: u32 = 0xE4;
     pub const SET_DONE_FLAG: u32 = 0xE04;
     pub const RASTER_BASE: u32 = 0x1000;
     pub const RASTER_EXECUTE: u32 = 0x400;
@@ -253,7 +253,7 @@ mod cmd {
     pub const RASTER_IF_BASE: u32 = 0xA00;
     pub const FORMATTER: u32 = 0xC00;
     /// Below this, commands are command-processor microcode tokens.
-    pub const CP_LIMIT: u32 = 0x200;
+    pub const TOKEN_LIMIT: u32 = 0x200;
 }
 
 /// Host DMA engine registers.
@@ -331,7 +331,7 @@ pub trait Hq3Board: Send + Sync {
     /// Whether the raster command `cmd` is dropped instead of executed; the
     /// reason is reported.
     fn drop_raster_write(&self, cmd: u32) -> Option<String>;
-    /// A pixel-state address (PIXEL_STATE, INIT_PIXEL_STATE_ERAM, and the
+    /// A pixel-state address (token_080, token_0cd, and the
     /// module state addresses in the pipeline program) in the Indigo2
     /// microcode's layout, which the pixel HLE is written for.
     fn pixel_state_address(&self, addr: u32) -> u32 {
@@ -417,8 +417,8 @@ pub struct Hq3Stats {
     pub words: u64,
     pub raster_writes: u64,
     pub raster_execs: u64,
-    /// Command-processor tokens by number (below `CP_LIMIT`).
-    pub cp_tokens: [u64; cmd::CP_LIMIT as usize],
+    /// Command-processor tokens by number (below `token_limit`).
+    pub cp_tokens: [u64; cmd::TOKEN_LIMIT as usize],
     pub set_done: u64,
     pub swaps: u64,
     pub dma_reg_writes: u64,
@@ -437,7 +437,7 @@ pub struct Hq3Stats {
 
 impl Hq3Stats {
     const ZERO: Hq3Stats = Hq3Stats {
-        words: 0, raster_writes: 0, raster_execs: 0, cp_tokens: [0; cmd::CP_LIMIT as usize], set_done: 0, swaps: 0,
+        words: 0, raster_writes: 0, raster_execs: 0, cp_tokens: [0; cmd::TOKEN_LIMIT as usize], set_done: 0, swaps: 0,
         dma_reg_writes: 0, dma_writes: 0, dma_reads: 0, dma_bytes: 0, formatter_writes: 0, raster_if_writes: 0,
         pixel_cmds: 0, other_cmds: 0, context_switches: 0, dl_calls: 0, dl_segments: 0,
     };
@@ -562,16 +562,16 @@ pub struct Hq3Engine {
     /// The loaded context's ERAM slot (image word 0); none before the
     /// first context load.
     slot: Option<u32>,
-    /// CP_GE_NOSAVE_NEXT_SWITCH seen: the next save skips the GE state.
+    /// token_0f4 seen: the next save skips the GE state.
     nosave_next: bool,
-    /// An ERAM write in progress (CP_PASS_THROUGH_GE_WRAM): the words
+    /// An ERAM write in progress (cfifo_cmd_ge_memory_write_chunk): the words
     /// that came for it so far, by FIFO pixel data or host DMA, until
-    /// CP_PASS_THROUGH_GE_FIFO_3 says where they go.
+    /// cfifo_cmd_ge_memory_write_addr says where they go.
     eram_in: Option<Vec<u32>>,
     /// The GE's colour tables, shared by every context (`pixpipe::Lut`).
     lut: super::pixpipe::Lut,
     /// GE11s on the board (2 on Maximum Impact): ERAM transfers come once
-    /// per GE (`cmd::CP_ERAM_WRITE`). The GE HLE keeps its state in GE0's.
+    /// per GE (`cmd::cfifo_cmd_ge_memory_write_chunk`). The GE HLE keeps its state in GE0's.
     ges: usize,
     /// The ERAM write set in progress goes to this GE; none between sets.
     eram_write_ge: Option<usize>,
@@ -588,8 +588,8 @@ pub struct Hq3Engine {
     /// The words of an unaligned pixel data command so far.
     pix_unaligned: Vec<u32>,
     /// A token whose data comes as the next pixel data command (a GE
-    /// pixel state block too big for the token, PIXEL_STATE / 0x0CD with
-    /// no words; INIT_COLOR_TABLE's table), and that data so far.
+    /// pixel state block too big for the token, token_080 / 0x0CD with
+    /// no words; token_089's table), and that data so far.
     payload_for: Option<u32>,
     payload: Vec<u32>,
     /// Switched-out contexts' readback state, by slot: their GE_DATA flag
@@ -599,7 +599,7 @@ pub struct Hq3Engine {
     readback_parked: Vec<(u32, u32, Option<[u32; 2]>)>,
     pub eram: Box<Eram>,
     /// The geometry engine's last answer to a state readback
-    /// (`__MGR_RETURN_MODE`), read at the GE readback registers once set.
+    /// (`cfifo_cmd_query`), read at the GE readback registers once set.
     pub ge_return: Option<[u32; 2]>,
     last_token: Option<u32>,
     pub stats: Hq3Stats,
@@ -804,7 +804,7 @@ impl Hq3Engine {
     /// user-port parser go to its ERAM slot, as the HQ microcode saves them
     /// on the board: a switch can preempt a process halfway through a
     /// command, whose remaining words come when it runs again (otherwise
-    /// the next context's first words, such as the kernel's SCHEDULE_SWAP,
+    /// the next context's first words, such as the kernel's token_037,
     /// were swallowed as the old command's data). The incoming context
     /// follows through the FIFO as raw words (see `push`).
     pub fn begin_context_switch(&mut self, sink: &mut dyn Hq3Sink) {
@@ -899,7 +899,7 @@ impl Hq3Engine {
     }
 
     /// Load a GL window's raster state (from a context image or
-    /// CP_WINDOW): origin (x | y << 16, y bottom-up), window mode (masks
+    /// cfifo_cmd_window_clip_packet): origin (x | y << 16, y bottom-up), window mode (masks
     /// enabled, bits 0-3, and kept inside, 4-7), screen masks 1-4 as (x, y)
     /// ranges `min << 16 | max`, the buffer page pointers, and the PP1
     /// window mode (the clip ID to match).
@@ -1074,8 +1074,8 @@ impl Hq3Engine {
                     self.gl.bitmap_rows(&rows, &self.lut.0[..], sink);
                 }
             } else if self.eram_in.is_none() {
-                // libGLcore __glMgrFlushImageRegs: RSS_REG_SET (0x07F)
-                // carries (raster register, value) pairs, RSS_REG_SHADOW
+                // libGLcore __glMgrFlushImageRegs: cfifo_cmd_raster_pairs (0x07F)
+                // carries (raster register, value) pairs, cfifo_cmd_raster_triples
                 // (0x07C, __glMgrRSSRegShadow) (register, value, GE shadow
                 // address) triples, padded to whole doublewords.
                 let group = match self.last_token {
@@ -1084,7 +1084,7 @@ impl Hq3Engine {
                     _ => 0,
                 };
                 if group != 0 {
-                    // Inside a GL pixel operation (SAVE_RSS .. RESTORE_RSS)
+                    // Inside a GL pixel operation (token_0d2 .. token_0d3)
                     // the registers are written, within the GL raster
                     // bracket. Outside one they are the GE's shadow of a GL
                     // context's raster state (libGLcore sends 33 triples at
@@ -1192,7 +1192,7 @@ impl Hq3Engine {
                     _ => {}
                 }
             }
-        } else if cmd == cmd::CP_SCHEDULE_SWAP {
+        } else if cmd == cmd::TOKEN_037 {
             // No retrace wait: the swap is reported as soon as the frame
             // before it is drawn. The GE's front and back trade places for
             // the drawing that follows.
@@ -1208,27 +1208,27 @@ impl Hq3Engine {
             self.stats.swaps += 1;
             self.stats.cp_tokens[cmd as usize] += 1;
             sink.set_flags(host::FLAG_CP0);
-        } else if cmd == cmd::CP_WINDOW && data.len() >= 12 {
+        } else if cmd == cmd::MGRAS_HQ3_CFIFO_CMD_WINDOW_CLIP_PACKET && data.len() >= 12 {
             self.stats.cp_tokens[cmd as usize] += 1;
             let d = data;
             let masks = [[d[9], d[10]], [d[7], d[8]], [d[5], d[6]], [d[3], d[4]]];
             self.apply_window(d[0], d[1], masks, d[11], d[2], sink);
-        } else if matches!(cmd, cmd::CP_ERAM_WRITE | cmd::CP_ERAM_WRITE_AT | cmd::CP_ERAM_WRITE_END | cmd::CP_ERAM_READ) {
+        } else if matches!(cmd, cmd::MGRAS_HQ3_CFIFO_CMD_GE_MEMORY_WRITE_CHUNK | cmd::MGRAS_HQ3_CFIFO_CMD_GE_MEMORY_WRITE_ADDR | cmd::MGRAS_HQ3_CFIFO_CMD_GE_MEMORY_WRITE_END | cmd::MGRAS_HQ3_CFIFO_CMD_GE_MEMORY_READ) {
             self.stats.cp_tokens[cmd as usize] += 1;
             self.eram_pass_through(cmd, data, sink);
-        } else if cmd == cmd::CP_GE_NOSAVE_NEXT_SWITCH {
+        } else if cmd == cmd::TOKEN_0F4 {
             // The kernel, on switching to its own context: it changes no GE
             // state, so the next switch away need not save it.
             self.stats.cp_tokens[cmd as usize] += 1;
             self.nosave_next = true;
-        } else if cmd == cmd::CP_SPIN_AND_RETURN {
+        } else if cmd == cmd::TOKEN_0A1 {
             self.stats.cp_tokens[cmd as usize] += 1;
             self.gl.end_raster(sink);
             let addr = data.first().copied().unwrap_or(0);
             let v = sink.readback_probe(addr).or_else(|| self.ge_state(addr)).unwrap_or(addr);
             self.ge_return = Some([0, v]);
             sink.set_flags(host::FLAG_GE_DATA);
-        } else if cmd == cmd::CP_RETURN_MODE {
+        } else if cmd == cmd::MGRAS_HQ3_CFIFO_CMD_QUERY {
             self.stats.cp_tokens[cmd as usize] += 1;
             // Addresses the GE HLE knows answer from its state; others read
             // 0 and are reported once each, so the layout can be mapped.
@@ -1242,7 +1242,7 @@ impl Hq3Engine {
             self.gl.end_raster(sink);
             self.ge_return = Some([0, v]);
             sink.set_flags(host::FLAG_GE_DATA);
-        } else if cmd < cmd::CP_LIMIT && {
+        } else if cmd < cmd::TOKEN_LIMIT && {
             let conv = f.conv;
             if conv & (CONV_ON | CONV_PAD) != 0 && f.bytes > 0 {
                 let floats = convert(conv, f.bytes, data);
@@ -1250,7 +1250,7 @@ impl Hq3Engine {
                     sink.trace(format!("  converted ({conv:#x}): {:?}", floats.iter().map(|w| f32::from_bits(*w)).collect::<Vec<_>>()));
                 }
                 self.gl.token(cmd, &floats, sink)
-            } else if matches!(cmd, super::gl::tok::PIXEL_STATE | super::gl::tok::INIT_PIXEL_STATE_ERAM) {
+            } else if matches!(cmd, super::gl::tok::TOKEN_080 | super::gl::tok::TOKEN_0CD) {
                 let data = self.canonical_pixel_state(data);
                 self.gl.token(cmd, &data, sink)
             } else {
@@ -1258,7 +1258,7 @@ impl Hq3Engine {
             }
         } {
             self.stats.cp_tokens[cmd as usize] += 1;
-        } else if cmd < cmd::CP_LIMIT {
+        } else if cmd < cmd::TOKEN_LIMIT {
             self.stats.cp_tokens[cmd as usize] += 1;
             // The kernel's GE11 plumbing (diagnostic CP_* tokens, the HQ DMA
             // setup, its own tokens) changes nothing this model draws; the
@@ -1329,7 +1329,7 @@ impl Hq3Engine {
             return;
         }
         if self.gl.wants_bitmap_rows() {
-            // SEND_PIXELS whose rows come by host DMA (snoop's zoomed
+            // token_08d whose rows come by host DMA (snoop's zoomed
             // image, distort's textures) rather than as FIFO pixel data;
             // possibly in several DMAs.
             let mut buf = std::mem::take(&mut self.bitmap_in);
@@ -1354,8 +1354,8 @@ impl Hq3Engine {
     fn eram_pass_through(&mut self, cmd: u32, data: &[u32], sink: &mut dyn Hq3Sink) {
         let arg = |i: usize| data.get(i).copied().unwrap_or(0) as usize;
         match cmd {
-            cmd::CP_ERAM_WRITE => self.eram_in = Some(Vec::with_capacity(arg(0))),
-            cmd::CP_ERAM_WRITE_AT => {
+            cmd::MGRAS_HQ3_CFIFO_CMD_GE_MEMORY_WRITE_CHUNK => self.eram_in = Some(Vec::with_capacity(arg(0))),
+            cmd::MGRAS_HQ3_CFIFO_CMD_GE_MEMORY_WRITE_ADDR => {
                 let (addr, n) = (arg(0), arg(1));
                 let ge = *self.eram_write_ge.get_or_insert_with(|| {
                     let ge = (self.ges > 1 && self.eram_write_ge0 == Some(addr)) as usize;
@@ -1369,7 +1369,7 @@ impl Hq3Engine {
                     sink.trace(format!("ERAM write GE{ge} {n} words at {addr:#x} ({} came)", buf.len()));
                 }
             }
-            cmd::CP_ERAM_WRITE_END => {
+            cmd::MGRAS_HQ3_CFIFO_CMD_GE_MEMORY_WRITE_END => {
                 self.eram_in = None;
                 self.eram_write_ge = None;
             }
@@ -1377,7 +1377,7 @@ impl Hq3Engine {
                 let (addr, n) = (arg(0).min(ERAM_WORDS), arg(1));
                 let ge = (self.ges > 1 && self.eram_read_ge0 == Some((addr + 1, n))) as usize;
                 self.eram_read_ge0 = (ge == 0).then_some((addr, n));
-                // GE1's output runs a word late (see `cmd::CP_ERAM_WRITE`).
+                // GE1's output runs a word late (see `cmd::cfifo_cmd_ge_memory_write_chunk`).
                 let addr = (addr + ge).min(ERAM_WORDS);
                 let n = n.min(ERAM_WORDS - addr);
                 let Some(word) = self.dma_read_pending.take() else {
@@ -1755,8 +1755,8 @@ fn describe_cmd(port: usize, pixel: bool, cmd: u32, data: &[u32]) -> String {
             let n = (c & 0x7F) as usize;
             format!("{p} dma[{n:#x}] {} = {}", dma_reg_name(n), words(data))
         }
-        cmd::CP_SCHEDULE_SWAP => format!("{p} CP SCHEDULE_SWAP {}", words(data)),
-        c if c < cmd::CP_LIMIT => format!("{p} CP {} [{c:#x}] ({} words) {}", token_name(c).unwrap_or("token"), data.len(), words(data)),
+        cmd::TOKEN_037 => format!("{p} CP TOKEN_037 {}", words(data)),
+        c if c < cmd::TOKEN_LIMIT => format!("{p} CP {} [{c:#x}] ({} words) {}", token_name(c).unwrap_or("token"), data.len(), words(data)),
         c => format!("{p} command {c:#x} ({} words) {}", data.len(), words(data)),
     }
 }
@@ -1767,10 +1767,10 @@ pub fn token_name(t: u32) -> Option<&'static str> {
     Some(match t {
         0x000 => "VERTEX4F",
         0x002 => "COLOR4F",
-        0x005 => "SIM_OPEN_GRAPHICS",
-        0x006 => "MAKE_CURRENT_READ",
+        0x005 => "TOKEN_005",
+        0x006 => "CFIFO_CMD_CONTEXT_OPEN",
         0x008 => "TEX_COORD4F",
-        0x009 => "INIT_RGB",
+        0x009 => "TOKEN_009",
         0x00D => "ENABLE_LIGHTING",
         0x00E => "DISABLE_LIGHTING",
         0x00F => "EDGE_FLAG_ENABLE",
@@ -1811,7 +1811,7 @@ pub fn token_name(t: u32) -> Option<&'static str> {
         0x034 => "FRUSTUM",
         0x035 => "ORTHO",
         0x036 => "FLUSH",
-        0x037 => "SCHEDULE_SWAP",
+        0x037 => "TOKEN_037",
         0x038 => "RASTER_POS4F",
         0x039 => "SCISSOR",
         0x03A => "STENCIL_MASK",
@@ -1830,18 +1830,18 @@ pub fn token_name(t: u32) -> Option<&'static str> {
         0x047 => "SHADE_MODEL",
         0x048 => "DEPTH_RANGE",
         0x049 => "DRAW_BUFFER",
-        0x098 => "VALIDATE_BANKS",
+        0x098 => "TOKEN_098",
         0x04A => "CLEAR_DEPTH_BUFFER",
         0x04C => "CLEAR_STENCIL_BUFFER",
         0x04D => "POINT_SIZE",
-        0x04E => "LOAD_POLYGON_STIPPLE_RAM",
+        0x04E => "TOKEN_CLIENT_POLYGON_STIPPLE_LOAD",
         0x055 => "LIGHT_QUADRATIC_ATTENUATION",
         0x056 => "FRONT_FACE",
         0x057 => "LIGHT_MODEL_AMBIENT",
         0x059 => "LIGHT_MODEL_TWO_SIDE",
         0x05A => "TEX_GENIV",
-        0x05B => "TEX_GEN_PLANE_HEADER",
-        0x05C => "TEX_GEN_PLANE_DATA",
+        0x05B => "TOKEN_05B",
+        0x05C => "TOKEN_05C",
         0x05D => "PASS_THROUGH",
         0x05F => "DISABLE",
         0x060 => "BLEND_EQUATION_EXT",
@@ -1850,44 +1850,44 @@ pub fn token_name(t: u32) -> Option<&'static str> {
         0x066 => "DEPTH_TEST_ENABLE",
         0x067 => "DITHER_ENABLE",
         0x06C => "POINT_SMOOTH",
-        0x06E => "SOFT_DISABLE",
+        0x06E => "TOKEN_06E",
         0x072 => "CULL_FACE_ENABLE",
         0x073 => "CULL_FACE_DISABLE",
         0x071 => "ENABLE_LIGHT_SOURCE",
         0x074 => "CULL_FACE",
-        0x07C => "RSS_REG_SHADOW",
-        0x07F => "RSS_REG_SET",
-        0x082 => "INIT_TABLES",
-        0x083 => "RESET_HISTOGRAM_MEMORY",
-        0x085 => "INIT_CONVOLVE2_DSTATE",
-        0x086 => "FAST_COPY_PIXELS",
-        0x088 => "NEW_INIT_FAST_PATH",
-        0x089 => "INIT_COLOR_TABLE",
-        0x08B => "__MGR_RETURN_HIST_PIO",
-        0x08C => "KERN_8C",
-        0x08E => "COPY_TILE",
-        0x091 => "GENERAL_BITMAP",
+        0x07C => "CFIFO_CMD_RASTER_TRIPLES",
+        0x07F => "CFIFO_CMD_RASTER_PAIRS",
+        0x082 => "CFIFO_CMD_GE_TABLE_LOAD",
+        0x083 => "TOKEN_083",
+        0x085 => "TOKEN_085",
+        0x086 => "TOKEN_086",
+        0x088 => "TOKEN_088",
+        0x089 => "TOKEN_089",
+        0x08B => "TOKEN_08B",
+        0x08C => "CFIFO_CMD_CONTEXT_CONFIG",
+        0x08E => "TOKEN_08E",
+        0x091 => "TOKEN_091",
         0x094 => "BITMAP",
         0x096 => "COPY_COLOR_TABLE_SGI",
-        0x09A => "INIT_FORMAT_VALUES",
-        0x09B => "TL_NO_TABLE",
-        0x09C => "TL_SUBLOAD_END",
-        0x09D => "_WRITE_DMAGESETUP",
+        0x09A => "TOKEN_09A",
+        0x09B => "TOKEN_09B",
+        0x09C => "TOKEN_09C",
+        0x09D => "TOKEN_CLIENT_GE_DMA_SETUP",
         0x0A0 => "DISABLE_LIGHT_SOURCE",
-        0x0A1 => "SPIN_AND_RETURN",
-        0x0A2 => "__MGR_RETURN_MODE",
+        0x0A1 => "TOKEN_0A1",
+        0x0A2 => "CFIFO_CMD_QUERY",
         0x0A5 => "CLIP_PLANE",
         0x0A8 => "POLYGON_MODE",
-        0x0A9 => "EVAL_MESH1_DGE11",
-        0x0AA => "EVAL_MESH2_DGE11",
-        0x0AB => "EVAL_COORD1_DGE11",
-        0x0AC => "EVAL_COORD2_DGE11",
+        0x0A9 => "TOKEN_0A9",
+        0x0AA => "TOKEN_0AA",
+        0x0AB => "TOKEN_0AB",
+        0x0AC => "TOKEN_0AC",
         0x0AE => "MAP_GRID1D",
         0x0AF => "MAP_GRID2D",
-        0x0B0 => "CLEAN_UP1_D",
-        0x0B1 => "CLEAN_UP2_D",
-        0x0B2 => "SEND_MAP_DATA1_D",
-        0x0B3 => "SEND_MAP_DATA2_D",
+        0x0B0 => "TOKEN_0B0",
+        0x0B1 => "TOKEN_0B1",
+        0x0B2 => "TOKEN_0B2",
+        0x0B3 => "TOKEN_0B3",
         0x0B7 => "FOG_DENSITY",
         0x0B9 => "FOG_MODE",
         0x0BA => "CLEAR_COLOR",
@@ -1901,41 +1901,41 @@ pub fn token_name(t: u32) -> Option<&'static str> {
         0x0C6 => "POP_NAME",
         0x0C7 => "PUSH_NAME",
         0x0C9 => "RENDER_MODE",
-        0x0CC => "END_GENERIC",
-        0x0D2 => "SAVE_RSS",
-        0x0D3 => "RESTORE_RSS",
-        0x0D4 => "SEND_HISTOGRAM_FILLS",
-        0x0D5 => "SEND_MINMAX_FILLS",
-        0x0D6 => "UPDATE_RASTER_POS",
-        0x0D7 => "LOAD_RASTER_POS_INFO",
+        0x0CC => "TOKEN_0CC",
+        0x0D2 => "TOKEN_0D2",
+        0x0D3 => "TOKEN_0D3",
+        0x0D4 => "TOKEN_0D4",
+        0x0D5 => "TOKEN_0D5",
+        0x0D6 => "TOKEN_0D6",
+        0x0D7 => "TOKEN_0D7",
         0x0D9 => "BLEND_COLOR_EXT",
-        0x0DB => "GET_PIXELS_BITMAP_PIO",
+        0x0DB => "TOKEN_0DB",
         0x0DC => "SWAPTMESH",
-        0x0E4 => "KERN_WINDOW",
+        0x0E4 => "CFIFO_CMD_WINDOW_CLIP_PACKET",
         0x0DE => "LMCOLOR",
-        0x0E0 => "DRAW_DUMB_POINT",
+        0x0E0 => "TOKEN_0E0",
         0x0E7 => "POLYGON_OFFSET",
-        0x0E9 => "SAVE_TEXMODE",
-        0x0EA => "RESTORE_TEXMODE",
-        0x0EC => "RSS_REG_SHADOW_IDX",
-        0x0ED => "SET_DATA",
+        0x0E9 => "TOKEN_0E9",
+        0x0EA => "TOKEN_0EA",
+        0x0EC => "TOKEN_0EC",
+        0x0ED => "TOKEN_0ED",
         0x0EE => "GET_MATERIALFV",
         0x0EF => "GET_LIGHTFV",
         0x0F2 => "GET_HISTOGRAM_EXT",
-        0x0F0 => "READ_TEXTURE",
-        0x0F3 => "CP_DUMP_FOREVER",
-        0x0F4 => "CP_GE_NOSAVE_NEXT_SWITCH",
-        0x0F5 => "CP_GE_FTOF",
-        0x0F6 => "CP_GE_DMA_HEADER_SIZE",
-        0x0F7 => "CP_DELAY",
-        0x0F8 => "CP_SET_CP_FLAGS",
-        0x0F9 => "CP_PASS_THROUGH_GE_WRAM_5",
-        0x0FA => "CP_PASS_THROUGH_GE_WRAM_4",
-        0x0FB => "CP_PASS_THROUGH_GE_FIFO_3",
-        0x0FC => "CP_PASS_THROUGH_GE_WRAM_DELAYED",
-        0x0FD => "CP_PASS_THROUGH_GE_WRAM",
-        0x0FE => "CP_PASS_THROUGH_GE_FIFO",
-        0x0FF => "CP_GE_SAVE_IDLE_HQ_STATE",
+        0x0F0 => "TOKEN_0F0",
+        0x0F3 => "TOKEN_0F3",
+        0x0F4 => "TOKEN_0F4",
+        0x0F5 => "TOKEN_0F5",
+        0x0F6 => "TOKEN_0F6",
+        0x0F7 => "TOKEN_0F7",
+        0x0F8 => "TOKEN_0F8",
+        0x0F9 => "TOKEN_0F9",
+        0x0FA => "CFIFO_CMD_GE_MEMORY_WRITE_END",
+        0x0FB => "CFIFO_CMD_GE_MEMORY_WRITE_ADDR",
+        0x0FC => "CFIFO_CMD_GE_MEMORY_READ",
+        0x0FD => "CFIFO_CMD_GE_MEMORY_WRITE_CHUNK",
+        0x0FE => "TOKEN_0FE",
+        0x0FF => "TOKEN_0FF",
         0x100 => "COPY_PIXELS",
         0x007 => "NORMAL3F",
         0x013 => "LIGHT_DIFFUSE",

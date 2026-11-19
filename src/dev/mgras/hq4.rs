@@ -1909,7 +1909,7 @@ mod tests {
         r.w32(0x011040, 0x400);
         assert_eq!(r.packets(), []);
         for _ in 0..2 {
-            r.w32(COMMAND, 0x37 << 8); // SCHEDULE_SWAP
+            r.w32(COMMAND, 0x37 << 8); // token_037
             // The HQ thread raises the source, then sends the packet.
             let got = poll_until(|| Some(r.packets()).filter(|g| !g.is_empty())).expect("swap packet never arrived");
             assert_eq!(got, [(18, true)]);
@@ -2002,7 +2002,7 @@ mod tests {
             r.w32(0x011068, 0x80);
             r.w32(0x011070, 18 << 8);
             r.w32(0x011040, 0x400);
-            r.w32(COMMAND, 0x37 << 8); // SCHEDULE_SWAP
+            r.w32(COMMAND, 0x37 << 8); // token_037
             let got = poll_until(|| Some(r.packets()).filter(|g| !g.is_empty())).expect("swap packet never arrived");
             assert_eq!(got, [(18, true)], "round {round}");
             // Not acknowledged: the board is reset instead.

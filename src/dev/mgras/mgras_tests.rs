@@ -1204,9 +1204,9 @@ fn gl_stencil_masks_a_later_draw() {
     m.stop_engines();
 }
 
-/// One pixel through glReadPixels as libGLcore sends it (traced): SAVE_RSS
-/// with the planes word, the block and transfer through RSS_REG_SHADOW /
-/// SET, GET_PIXELS, the host DMA, RESTORE_RSS. The first `n` bytes.
+/// One pixel through glReadPixels as libGLcore sends it (traced): token_0d2
+/// with the planes word, the block and transfer through cfifo_cmd_raster_triples /
+/// SET, token_0db, the host DMA, token_0d3. The first `n` bytes.
 fn gl_read_one(m: &Mgras, x: u64, y: u64, planes: u32, xfrmode: u64, n: u32) -> Vec<u8> {
     fifo_token(m, 0xD2, &[0x11E2_3929, 0x100_0000, if planes != 0 { 0x1E0_00FF } else { 0xFF }, planes, 2]);
     fifo_token(m, 0x7C, &[1, 4]);
@@ -1235,7 +1235,7 @@ fn gl_read_one(m: &Mgras, x: u64, y: u64, planes: u32, xfrmode: u64, n: u32) -> 
 }
 
 /// glReadPixels of GL_STENCIL_INDEX (traced, glprim --scene quadrants):
-/// SAVE_RSS's fourth word 0x1800000 names the stencil planes, the transfer
+/// token_0d2's fourth word 0x1800000 names the stencil planes, the transfer
 /// is one byte a pixel (format 1, type 0), and the bytes are the ZST
 /// buffer's top byte, not the colour buffer's red.
 #[test]
@@ -1531,7 +1531,7 @@ fn gl_tstrip_winding_and_swaptmesh() {
 /// A context switch can preempt a process halfway through a command: the
 /// rest of its words come when it runs again. The parser state belongs to
 /// the context, so the next context's commands parse from a clean start
-/// (the kernel's SCHEDULE_SWAP was swallowed as the old command's data, a
+/// (the kernel's token_037 was swallowed as the old command's data, a
 /// swap timeout that killed the X server when a GL window was resized).
 #[test]
 fn gl_partial_command_survives_a_context_switch() {
@@ -1656,7 +1656,7 @@ fn gl_context_survives_eviction_to_another_slot() {
 /// Maximum Impact's eviction (traced, IRIX 6.5.22): every ERAM transfer
 /// once per GE11, GE0 first. The slot goes to two halves of one host
 /// buffer, GE1's read starting a word early, and both halves come back to
-/// the new slot, each set closed by ERAM_WRITE_END. GE1's half must not
+/// the new slot, each set closed by cfifo_cmd_ge_memory_write_end. GE1's half must not
 /// land over GE0's (it did, a word off: Matador came back from being
 /// iconified with its GL state shifted by a register).
 #[test]
@@ -1778,7 +1778,7 @@ fn gl_bitmap_draws_set_bits_at_the_raster_position() {
     m.stop_engines();
 }
 
-/// StudioTools uses GENERAL_BITMAP for text: rows padded to 64 bits,
+/// StudioTools uses token_091 for text: rows padded to 64 bits,
 /// split across pixel commands, with a separate raster advance at the end.
 #[test]
 fn gl_general_bitmap_batches_and_raster_advance() {
@@ -1804,7 +1804,7 @@ fn gl_general_bitmap_batches_and_raster_advance() {
     m.stop_engines();
 }
 
-/// A colour-index GL context (INIT_CI, as gr_osview's IRIS GL window
+/// A colour-index GL context (token_00a, as gr_osview's IRIS GL window
 /// sends): colours are indices and land in the pixels as 12-bit indices,
 /// for the colour-index visual's colormap; the clear uses the clear index.
 #[test]
@@ -1827,7 +1827,7 @@ fn gl_colour_index_context_draws_indices() {
 }
 
 
-/// Query GE state via __MGR_RETURN_MODE (token 0x0A2) and wait for the answer.
+/// Query GE state via cfifo_cmd_query (token 0x0A2) and wait for the answer.
 fn gl_return_mode(m: &Mgras, addr: u32) -> u32 {
     write(m, 32, 0x7000C, 1 << 17); // clear FLAG_GE_DATA
     fifo_token(m, 0x0A2, &[addr, 1, 1]);
@@ -1836,8 +1836,8 @@ fn gl_return_mode(m: &Mgras, addr: u32) -> u32 {
 }
 
 /// Pixel pipeline memory reads back as loaded (test/gltest/gepeek.c's
-/// ge:ADDR): a PIXEL_STATE block at 0x1D6 (libGLcore's colour-index host
-/// draw, traced), then __MGR_RETURN_MODE of each word; a word never loaded
+/// ge:ADDR): a token_080 block at 0x1D6 (libGLcore's colour-index host
+/// draw, traced), then cfifo_cmd_query of each word; a word never loaded
 /// answers 0.
 #[test]
 fn pixel_state_reads_back_as_loaded() {
@@ -1933,14 +1933,14 @@ fn gl_raster_position_queries_valid_bias_and_update() {
     assert_eq!(cr, 0.5);
     assert_eq!(cg, 0.25);
 
-    // UPDATE_RASTER_POS (0x0D6) advances raster by (dx, dy)
+    // token_0d6 (0x0D6) advances raster by (dx, dy)
     fifo_token(&m, 0x0D6, &[f(15.0), f(25.0)]);
     let rx2 = f32::from_bits(gl_return_mode(&m, 0x2CD));
     let ry2 = f32::from_bits(gl_return_mode(&m, 0x2CE));
     assert_eq!(rx2, 65.0 + 49151.5);
     assert_eq!(ry2, 85.0 + 49151.5);
 
-    // LOAD_RASTER_POS_INFO (0x0D7) restores current color to raster_color
+    // token_0d7 (0x0D7) restores current color to raster_color
     fifo_token(&m, 0x02, &[f(0.0), f(0.0), f(1.0), f(1.0)]); // blue
     fifo_token(&m, 0x0D7, &[]); // restore to raster color (red/green)
 
@@ -2031,8 +2031,8 @@ fn gl_colour_index_mask_applies_to_clear() {
 }
 
 /// glDrawPixels as mandel sends it (traced, colour index, GL_UNSIGNED_SHORT):
-/// the transfer mode through RSS_REG_SET (0x07F, register/value pairs as
-/// pixel data), the raster position, then SEND_PIXELS (0x08D) with the rows
+/// the transfer mode through cfifo_cmd_raster_pairs (0x07F, register/value pairs as
+/// pixel data), the raster position, then token_08d (0x08D) with the rows
 /// as pixel data. The pixels land at the raster position, left to right.
 #[test]
 fn gl_draw_pixels_colour_index_shorts() {
@@ -2056,7 +2056,7 @@ fn gl_draw_pixels_colour_index_shorts() {
     m.stop_engines();
 }
 
-/// glDrawPixels can split a row's words between SEND_PIXELS words 0 and 1
+/// glDrawPixels can split a row's words between token_08d words 0 and 1
 /// (traced, Advanced Visualizer restoring its window from 156-pixel RGBA
 /// strips: [0x4E, 0x4E, ..], 624-byte rows), as texture loads do. Taking
 /// word 0 alone made the 0xDA8 image width read as 2-byte pixels, and
@@ -2161,7 +2161,7 @@ fn gl_draw_pixels_float_through_the_pipeline() {
 
 /// Pixel zoom (snoop's magnifier): the GE pixel state at 0x192 holds
 /// 1 / zoom (token 0x080, traced: 1/6 at zoom 6); each pixel and row of a
-/// SEND_PIXELS image is repeated.
+/// token_08d image is repeated.
 #[test]
 fn gl_draw_pixels_zoomed() {
     let m = live_board();
@@ -2187,8 +2187,8 @@ fn gl_draw_pixels_zoomed() {
 }
 
 /// glReadPixels as snoop sends it (traced, one pixel): the read block and
-/// transfer size through RSS_REG_SHADOW (0x07C triples), the transfer
-/// counters and mode through RSS_REG_SET, GET_PIXELS (0x0DB), then the
+/// transfer size through cfifo_cmd_raster_triples (0x07C triples), the transfer
+/// counters and mode through cfifo_cmd_raster_pairs, token_0db (0x0DB), then the
 /// host arms a board-to-host DMA and starts the raster side through raster
 /// interface register 5 (0x4009).
 #[test]
@@ -2245,7 +2245,7 @@ fn gl_read_pixels_component_order(rgba: bool) {
     m.stop_engines();
 }
 
-/// SEND_PIXELS honours the scissor box (the desks overview draws each
+/// token_08d honours the scissor box (the desks overview draws each
 /// miniature under its own) and shrinking zooms (nearest source pixel).
 #[test]
 fn gl_draw_pixels_scissored_and_shrunk() {
@@ -2281,9 +2281,9 @@ fn gl_draw_pixels_scissored_and_shrunk() {
     m.stop_engines();
 }
 
-/// A GL client's pixel operation sets raster registers through RSS_REG_SET
+/// A GL client's pixel operation sets raster registers through cfifo_cmd_raster_pairs
 /// (CONFIG among them, Y-flip off); the X server's must come back after
-/// RESTORE_RSS. They leaked: 4Dwm drew snoop's frame with Y-flip off.
+/// token_0d3. They leaked: 4Dwm drew snoop's frame with Y-flip off.
 #[test]
 fn gl_pixel_op_registers_do_not_leak_to_x() {
     let m = gl_board([0.0, 0.0, 0.0]);
@@ -2369,7 +2369,7 @@ fn gl_root_painter_respects_clipping_ids_after_iconify() {
     assert_eq!(m.fb_pixel(150, 820), 0x77, "other X window protected");
 
     // Expose the console rectangle, then validate the current context with
-    // CP_WINDOW (window mode in word 1, the same PP1 word in word 2: the
+    // cfifo_cmd_window_clip_packet (window mode in word 1, the same PP1 word in word 2: the
     // kernel stores them as one doubleword, window mode high) and draw a
     // quad.
     paint_cid(40, 800, 79, 839, 1);
@@ -2413,7 +2413,7 @@ fn fifo_pixel_data(m: &Mgras, words: &[u32]) {
     }
 }
 
-/// An RSS_REG_SHADOW list (0x07C): (register, value) with a GE shadow
+/// A cfifo_cmd_raster_triples list (0x07C): (register, value) with a GE shadow
 /// address each, padded to whole doublewords, as libGLcore sends them.
 fn rss_shadow_list(m: &Mgras, regs: &[(u32, u32)]) {
     let mut words: Vec<u32> = regs.iter().flat_map(|&(r, v)| [r, v, 0x200 + r]).collect();
@@ -2425,9 +2425,9 @@ fn rss_shadow_list(m: &Mgras, regs: &[(u32, u32)]) {
 }
 
 /// glTexImage2D of one level of a square RGBA8 texture as libGLcore sends
-/// it (traced, IRIX 6.5.22, 4 TRAMs): loader registers, SAVE_RSS, the
+/// it (traced, IRIX 6.5.22, 4 TRAMs): loader registers, token_0d2, the
 /// sub-image (0xDA8) and destination (0xDB1: width, ?, level, page | bank
-/// << 8) pixel state, SEND_PIXELS routine 0x511A and the texels.
+/// << 8) pixel state, token_08d routine 0x511A and the texels.
 fn gl_tex_level(m: &Mgras, level: u32, n: u32, dest: u32, texels: &[u32]) {
     gl_tex_level_as(m, level, n, dest, texels, 1, 0.0, 0x34E26);
 }
@@ -2466,8 +2466,8 @@ fn gl_tex_image_4x4(m: &Mgras) {
     gl_tex_level(m, 0, 4, 0, &texels);
 }
 
-/// Texturing on for what follows, as for a draw (traced): TEX_ON, the
-/// sampler registers, level 0 at page 0 through RSS_REG_SHADOW_IDX.
+/// Texturing on for what follows, as for a draw (traced): token_00b, the
+/// sampler registers, level 0 at page 0 through token_0ec.
 fn gl_tex_bind_4x4(m: &Mgras, texmode2: u32, texmode1: u32) {
     fifo_token(m, 0x0B, &[]);
     rss_shadow_list(m, &[(0x180, texmode2)]);
@@ -2555,7 +2555,7 @@ fn gl_texture_far_quad_maps_as_near() {
 }
 
 /// A luminance-alpha texture sent as libGLcore sends a direct load
-/// (traced, glprim 64x64 GL_LUMINANCE_ALPHA): SEND_PIXELS words 0 and 1
+/// (traced, glprim 64x64 GL_LUMINANCE_ALPHA): token_08d words 0 and 1
 /// both half a row's words, the rows as words 3 + 3 * 4. Each texel is
 /// its own luminance (s * 0x20), not texel s / 2's.
 #[test]
@@ -2695,7 +2695,7 @@ fn gl_texture_packed_4444() {
     m.stop_engines();
 }
 
-/// Modulate with a coloured fragment, and texturing off again: TEX_OFF
+/// Modulate with a coloured fragment, and texturing off again: token_00c
 /// draws plain colour even with the texture still bound.
 #[test]
 fn gl_texture_modulate_and_off() {
@@ -2782,7 +2782,7 @@ fn gl_texture_mipmap_levels_from_their_pages() {
 
 /// distort's texture load (traced): 16-bit components (pixel format scale
 /// 1/65535 at ERAM 0xD0A), a one-texel border, the sub-image starting at
-/// (-1, -1), rows SEND_PIXELS' words-per-row apart. The interior lands in
+/// (-1, -1), rows token_08d' words-per-row apart. The interior lands in
 /// the level, the border is dropped, the top byte of each component kept.
 #[test]
 fn gl_texture_rgba16_with_border() {
@@ -3049,8 +3049,8 @@ fn gl_texgen_repeats_past_one() {
     m.stop_engines();
 }
 
-/// glGetTexImage as libGLcore sends it (traced): SAVE_RSS, the sampler at
-/// the level (texture_size, reg_f191), READ_TEXTURE (0x0F0), the host DMA armed,
+/// glGetTexImage as libGLcore sends it (traced): token_0d2, the sampler at
+/// the level (texture_size, reg_f191), token_0f0 (0x0F0), the host DMA armed,
 /// then raster interface register 5 = 0x400D starts the read. The texels
 /// reach host memory as RGBA bytes, row by row.
 #[test]
@@ -3226,7 +3226,7 @@ fn gl_texture_clamp_to_border() {
     m.stop_engines();
 }
 
-/// SEND_PIXELS receives RGBA components after HQ formatting, whereas X
+/// token_08d receives RGBA components after HQ formatting, whereas X
 /// transfers use packed ABGR. Opaque black must not turn into red.
 #[test]
 fn gl_draw_pixels_rgba8_component_order() {
@@ -3289,7 +3289,7 @@ fn gl_fifo_abgr_rows_ignore_doubleword_padding() {
 /// glCopyPixels' write half by host DMA (Maya copies the front buffer to
 /// the back after a full redraw, then redraws only what changes): the
 /// image size from pixel state 0xDA8, the transfer mode from the RSS
-/// register list, _WRITE_DMAGESETUP with glDrawPixels' routine (0x49D0),
+/// register list, token_client_ge_dma_setup with glDrawPixels' routine (0x49D0),
 /// then one DMA line with every row. Without it the back buffer keeps
 /// whatever it held, and every other frame shows that.
 #[test]
@@ -3406,7 +3406,7 @@ fn gl_back_buffer_alternates_with_swaps() {
         let (drawn, other) = if k % 2 == 0 { (0x140, 0x240) } else { (0x240, 0x140) };
         assert_eq!(page(&m, drawn), want, "frame {k} draws the back buffer");
         assert_ne!(page(&m, other), want, "frame {k} leaves the front alone");
-        // The kernel's swap: the next frame's bank, then SCHEDULE_SWAP.
+        // The kernel's swap: the next frame's bank, then token_037.
         let next = (k as u32 + 1) % 2 ^ 1;
         fifo_token(&m, 0x98, &[next, next]);
         write(&m, 32, CFIFO, ((0x37 << 8) | 0) as u64);
@@ -3415,7 +3415,7 @@ fn gl_back_buffer_alternates_with_swaps() {
 }
 
 /// GL's 12-bit double-buffered visuals on a HighImpact at 1280x1024
-/// (traced): octahedra (INIT_FORMAT_VALUES 0x100) and electropaint (0),
+/// (traced): octahedra (token_09a 0x100) and electropaint (0),
 /// both DRAW_BUFFER [2, 1], in a window whose DRBpointers name one page
 /// for A and B (0x90240). Each frame goes to the half of the word the
 /// screen is not showing.
@@ -3487,7 +3487,7 @@ fn gl_12bit_pairs_read_from_their_halves() {
     m.stop_engines();
 }
 
-/// GL's RGBA 12,12,12 visual (INIT_FORMAT_VALUES 0x2300, traced with
+/// GL's RGBA 12,12,12 visual (token_09a 0x2300, traced with
 /// gltest --visual 12,12,12): 36-bit pixels that keep twelve bits a
 /// component, drawn to the second page as GL_BACK [4, 1] like 24-bit.
 #[test]
@@ -3533,7 +3533,7 @@ fn gl_12_12_12_reads_alpha_as_full_scale() {
     m.stop_engines();
 }
 
-/// The bank comes from the kernel (VALIDATE_BANKS), not from counting
+/// The bank comes from the kernel (token_098), not from counting
 /// swaps: a swap the kernel did not pair with a bank (or one the GE never
 /// saw) leaves the drawing where the kernel last said.
 #[test]
@@ -3561,7 +3561,7 @@ fn gl_draw_bank_follows_the_kernel_not_the_swap_count() {
     m.stop_engines();
 }
 
-/// Native IRIS GL clear() reads the current index with SPIN_AND_RETURN,
+/// Native IRIS GL clear() reads the current index with token_0a1,
 /// then uses the returned float for CLEAR_INDEX. Echoing address 4 reads
 /// as a denormal/zero and erases Softimage's background and grid planes.
 #[test]
@@ -3647,8 +3647,8 @@ fn a_new_busy_stretch_is_timed_from_its_first_store() {
 }
 
 /// glRenderMode(GL_SELECT) as libGLcore drives the GE (traced, glstate):
-/// SELECT_MODE, the name stack tokens, primitives (which draw nothing),
-/// RENDER_MODE, then the hit records read back with __MGR_RETURN_MODE's
+/// cfifo_cmd_select_enter, the name stack tokens, primitives (which draw nothing),
+/// RENDER_MODE, then the hit records read back with cfifo_cmd_query's
 /// second word 0xFFFFFFFF. GL_NAME_STACK_DEPTH reads GE word 0xC59 and the
 /// records' length 0xC60. A record is [epoch, names, z min, z max, names].
 #[test]

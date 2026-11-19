@@ -83,7 +83,7 @@ pub const GE_WORDS: usize = 0x100;
 /// ERAM 0xC00..0xE00 (the other module states, 0xDA8 / 0xDB7 blocks).
 pub const ERAM_BASE: u32 = 0xC00;
 pub const ERAM_WORDS: usize = 0x200;
-/// Lookup table RAM (INIT_COLOR_TABLE), words of two 16-bit entries.
+/// Lookup table RAM (token_089), words of two 16-bit entries.
 /// LUT memory in words: four 256-entry colour maps, or one 4096-entry
 /// I_TO_I map on a 12-bit colour-index visual (sent as 16 blocks of 256).
 pub const LUT_WORDS: usize = 0x1000;
@@ -119,7 +119,7 @@ pub struct PixMem {
 /// leftovers.
 pub const FRESH: [(u32, u32); 4] = [(ELEMENT_TYPE, 4), (0xDBE, 2), (0xDBF, 0x3F), (0xDC0, 0xFFF)];
 
-/// The GE's colour-table memory (glPixelMap tables, INIT_COLOR_TABLE
+/// The GE's colour-table memory (glPixelMap tables, token_089
 /// 0x089). It belongs to the board, not to a context: a 12-bit visual's
 /// 4096-entry I_TO_I map is too big for the kernel's per-context ERAM
 /// slot, and libGLcore sends the tables before each pixel operation that
@@ -133,7 +133,7 @@ impl Default for Lut {
 }
 
 impl Lut {
-    /// An INIT_COLOR_TABLE payload: [?, bytes, table id, ?, offset,
+    /// A token_089 payload: [?, bytes, table id, ?, offset,
     /// count, entries...], each entry word a pair of 16-bit values.
     pub fn load_table(&mut self, payload: &[u32]) {
         if payload.len() < 6 {
@@ -156,7 +156,7 @@ impl PixMem {
         }
     }
 
-    /// A pixel state word (PIXEL_STATE 0x080 for GE memory, 0x0CD for
+    /// A pixel state word (token_080 0x080 for GE memory, 0x0CD for
     /// ERAM; the address ranges do not overlap).
     pub fn write(&mut self, addr: u32, v: u32) {
         if let Some(w) = self.word_mut(addr) {
@@ -207,7 +207,7 @@ impl PixMem {
         (0..n as u32).map(|k| self.read(addr + k)).collect()
     }
 
-    /// INIT_COLOR_TABLE's payload: [0, bytes, table id, 0, offset, count,
+    /// token_089's payload: [0, bytes, table id, 0, offset, count,
     /// words].
 
     /// A block write starting at `addr`, `n` words (the program's length

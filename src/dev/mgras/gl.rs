@@ -36,7 +36,7 @@
 //! TE's iterator registers (`te1.rs`). The context's TE registers arrive in
 //! libGLcore's register lists; the GE keeps a shadow of them and loads the
 //! TE when a batch starts, so contexts do not see each other's textures.
-//! Texture images arrive as SEND_PIXELS with routine 0x511A and go to the
+//! Texture images arrive as token_08d with routine 0x511A and go to the
 //! texture loader (`tex_load`).
 //!
 //! Not yet: point size, textured lines and points, texgen, 1D/3D textures.
@@ -78,25 +78,25 @@ pub(super) mod tok {
     pub const VERTEX4F: u32 = 0x000;
     /// Context set-up for an RGB visual, or a colour-index one (one word:
     /// 8 or 12, presumably the index bits).
-    pub const INIT_RGB: u32 = 0x009;
-    pub const INIT_CI: u32 = 0x00A;
-    pub const INIT_FORMAT_VALUES: u32 = 0x09A;
+    pub const TOKEN_009: u32 = 0x009;
+    pub const TOKEN_00A: u32 = 0x00A;
+    pub const TOKEN_09A: u32 = 0x09A;
     /// glClearIndex.
     pub const CLEAR_INDEX: u32 = 0x0BD;
     /// glRasterPos (object x, y [, z [, w]]).
     pub const RASTER_POS4F: u32 = 0x038;
     /// glRasterPos / glBitmap raster position update (floats dx, dy).
-    pub const UPDATE_RASTER_POS: u32 = 0x0D6;
+    pub const TOKEN_0D6: u32 = 0x0D6;
     /// Latch raster position attributes to current attributes.
-    pub const LOAD_RASTER_POS_INFO: u32 = 0x0D7;
+    pub const TOKEN_0D7: u32 = 0x0D7;
     /// glIndexMask.
     pub const INDEX_MASK: u32 = 0x03D;
     /// glTexCoord (s [, t [, r [, q]]]).
     pub const TEX_COORD: u32 = 0x008;
     /// Texturing on / off for the primitives that follow (libGLcore
     /// mgrTM_SendTexmode1: on when the bound texture is complete).
-    pub const TEX_ON: u32 = 0x00B;
-    pub const TEX_OFF: u32 = 0x00C;
+    pub const TOKEN_00B: u32 = 0x00B;
+    pub const TOKEN_00C: u32 = 0x00C;
     /// glEnable / glDisable(GL_POINT_SMOOTH): [1] / [0] (libGLcore's
     /// __glMgrim_Enable; traced).
     pub const POINT_SMOOTH: u32 = 0x06C;
@@ -105,68 +105,68 @@ pub(super) mod tok {
     /// around glDrawPixels, glCopyPixels, glTexImage and glCopyTexImage):
     /// the GE keeps the texture mode aside and draws the operation
     /// untextured.
-    pub const SAVE_TEXMODE: u32 = 0x0E9;
-    pub const RESTORE_TEXMODE: u32 = 0x0EA;
+    pub const TOKEN_0E9: u32 = 0x0E9;
+    pub const TOKEN_0EA: u32 = 0x0EA;
     /// A texture load's lookup table: none (mgrTM_DoTexLoad sends this
     /// where it would send the TL table), and the end of each sub-load
-    /// (after every SEND_PIXELS of the load).
-    pub const TL_NO_TABLE: u32 = 0x09B;
-    pub const TL_SUBLOAD_END: u32 = 0x09C;
+    /// (after every token_08d of the load).
+    pub const TOKEN_09B: u32 = 0x09B;
+    pub const TOKEN_09C: u32 = 0x09C;
     /// GE pixel state (ERAM) writes: [?, ?, bytes, address, 0, 2, count,
-    /// values]; the layout PIXEL_STATE also has.
-    pub const INIT_PIXEL_STATE_ERAM: u32 = 0x0CD;
+    /// values]; the layout token_080 also has.
+    pub const TOKEN_0CD: u32 = 0x0CD;
     /// One register written through an indexed GE shadow table: [index
     /// shadow, table shadow, register, value] (reg_f191, texture_border_block and
     /// detailscale, indexed by texture_level_table_index).
-    pub const RSS_REG_SHADOW_IDX: u32 = 0x0EC;
+    pub const TOKEN_0EC: u32 = 0x0EC;
     /// glTexGen: [coordinate 0x2000 + i (S T R Q), GL_TEXTURE_GEN_MODE,
     /// mode]; a plane's header [coordinate, GL_OBJECT_PLANE / EYE_PLANE],
     /// then its data (4 floats).
     pub const TEX_GENIV: u32 = 0x05A;
-    pub const TEX_GEN_PLANE_HEADER: u32 = 0x05B;
-    pub const TEX_GEN_PLANE_DATA: u32 = 0x05C;
+    pub const TOKEN_05B: u32 = 0x05B;
+    pub const TOKEN_05C: u32 = 0x05C;
     /// glEnable / glDisable of a capability the GE keeps (GL enum; seen:
     /// GL_TEXTURE_GEN_S..Q).
-    pub const ENABLE_CAP: u32 = 0x075;
+    pub const TOKEN_075: u32 = 0x075;
     /// glGetTexImage: [width, height, s and t offsets (floats, 0.5: texel
     /// centres), transfer mode, the raster interface start word]; the host
     /// starts the read itself (raster interface register 5).
-    pub const READ_TEXTURE: u32 = 0x0F0;
+    pub const TOKEN_0F0: u32 = 0x0F0;
     /// The texture manager's save/restore of TRAM pages (mgrTM_SR_TexRead
     /// / mgrTM_SR_TexLoad): a raw read of the sampler's level [rows,
     /// xfrmode, 0x400D], and the GE set up for texels by host DMA [?, ?,
     /// ?, GE routine].
-    pub const READ_TEXTURE_RAW: u32 = 0x0E5;
-    pub const WRITE_DMAGESETUP: u32 = 0x09D;
+    pub const MGRAS_HQ3_TOKEN_TEX_READ_SETUP: u32 = 0x0E5;
+    pub const MGRAS_HQ3_TOKEN_CLIENT_GE_DMA_SETUP: u32 = 0x09D;
     /// glPointSize (float).
     pub const POINT_SIZE: u32 = 0x04D;
-    pub const DISABLE_CAP: u32 = 0x076;
+    pub const TOKEN_076: u32 = 0x076;
     /// glBitmap: format, row length in bits, rows, x / y origin and x / y
     /// move (floats), data words; the rows follow as FIFO pixel data.
     pub const BITMAP: u32 = 0x094;
     /// Large glBitmap images: header, row batches, then raster advance.
-    pub const GENERAL_BITMAP: u32 = 0x091;
-    pub const BITMAP_ROWS: u32 = 0x090;
-    pub const BITMAP_MOVE: u32 = 0x092;
+    pub const TOKEN_091: u32 = 0x091;
+    pub const TOKEN_090: u32 = 0x090;
+    pub const TOKEN_092: u32 = 0x092;
     /// glDrawPixels through the GE's pixel path (libGLcore
     /// __glMgrSendPixels), 8 words: data words per row, two skips, the
     /// pixel-state counts, rows (provisional), the GE routine (0x49D0 for
     /// host to raster), flags; the rows follow as FIFO pixel data.
-    pub const SEND_PIXELS: u32 = 0x08D;
+    pub const TOKEN_08D: u32 = 0x08D;
     /// A write of GE pixel-path state (libGLcore): words 3 the GE address,
     /// 6 the count, then the values. Address 0x192 holds 1 / pixel zoom
     /// (1.0 in mandel, 1/6 in snoop at zoom 6).
-    pub const PIXEL_STATE: u32 = 0x080;
+    pub const TOKEN_080: u32 = 0x080;
     /// glReadPixels into host memory (libGLcore GetPixels*): 1 word; the
-    /// read block comes from RSS_REG_SHADOW, the host DMA follows.
-    pub const GET_PIXELS: u32 = 0x0DB;
+    /// read block comes from cfifo_cmd_raster_triples, the host DMA follows.
+    pub const TOKEN_0DB: u32 = 0x0DB;
     /// glReadBuffer: words, the third the GL enum (0x404 front, 0x405 back).
     pub const READ_BUFFER: u32 = 0x044;
-    /// End of a pixel operation: the raster registers saved by SAVE_RSS
+    /// End of a pixel operation: the raster registers saved by token_0d2
     /// come back.
-    pub const RESTORE_RSS: u32 = 0x0D3;
+    pub const TOKEN_0D3: u32 = 0x0D3;
     /// Start of a pixel operation (libGLcore __glMgrSaveRSS, 5 words).
-    pub const SAVE_RSS: u32 = 0x0D2;
+    pub const TOKEN_0D2: u32 = 0x0D2;
     /// glNormal3f (other forms through the HQ's conversion field).
     pub const NORMAL: u32 = 0x007;
     pub const LIGHTING_ON: u32 = 0x00D;
@@ -217,13 +217,13 @@ pub(super) mod tok {
     /// Kernel token (MgrasValidateBanks, at every swap and window
     /// validation): the bank GL draws into from now on, main buffers then
     /// the second set (see `Gl::set_draw_bank`).
-    pub const VALIDATE_BANKS: u32 = 0x098;
+    pub const TOKEN_098: u32 = 0x098;
     /// IRIS GL through IGLOO (libGLcore mgras_igloo.c): swaptmesh,
     /// lmcolor(LMC_COLOR) on / off, n3f (a normal, 3 floats).
     pub const SWAPTMESH: u32 = 0x0DC;
     pub const LMC_COLOR_ON: u32 = 0x0DD;
     pub const LMC_COLOR_OFF: u32 = 0x0DE;
-    pub const IRIS_NORMAL: u32 = 0x0DF;
+    pub const TOKEN_0DF: u32 = 0x0DF;
     pub const COLOR4F: u32 = 0x002;
     pub const CLEAR: u32 = 0x015;
     pub const BEGIN_POINTS: u32 = 0x016;
@@ -261,7 +261,7 @@ pub(super) mod tok {
     /// buffer).
     pub const CLEAR_DEPTH_BUFFER: u32 = 0x04A;
     pub const CLEAR_STENCIL_BUFFER: u32 = 0x04C;
-    pub const LOAD_POLYGON_STIPPLE: u32 = 0x04E;
+    pub const MGRAS_HQ3_TOKEN_CLIENT_POLYGON_STIPPLE_LOAD: u32 = 0x04E;
     pub const FRONT_FACE: u32 = 0x056;
     /// glEnable / glDisable, 1 / 0 (3 / 0 for dither).
     pub const ALPHA_TEST: u32 = 0x064;
@@ -284,7 +284,7 @@ pub(super) mod tok {
     pub const LINE_STIPPLE_ON: u32 = 0x06A;
     pub const LOGIC_OP_ON: u32 = 0x06B;
     pub const POLYGON_STIPPLE_ON: u32 = 0x06D;
-    pub const SCISSOR_TEST: u32 = 0x06E;
+    pub const TOKEN_06E: u32 = 0x06E;
     pub const STENCIL_TEST: u32 = 0x06F;
     /// glEnable / glDisable(GL_CULL_FACE), no data.
     pub const CULL_ON: u32 = 0x072;
@@ -295,19 +295,19 @@ pub(super) mod tok {
     pub const CLEAR_DEPTH: u32 = 0x0BC;
     pub const CLEAR_STENCIL: u32 = 0x0BE;
     /// Selection (glRenderMode(GL_SELECT)), as libGLcore drives the GE:
-    /// enter with SELECT_MODE (1 word), the name stack operations, leave
+    /// enter with cfifo_cmd_select_enter (1 word), the name stack operations, leave
     /// with RENDER_MODE, then read the hit records back word by word
-    /// (__MGR_RETURN_MODE with 0xFFFFFFFF as its second word). SELECT_NEXT
+    /// (cfifo_cmd_query with 0xFFFFFFFF as its second word). SELECT_NEXT
     /// turns the reads to the second GE's records on a two-GE board,
-    /// SELECT_DONE ends a read and empties the records.
+    /// cfifo_cmd_result_end ends a read and empties the records.
     pub const INIT_NAMES: u32 = 0x0C4;
     pub const LOAD_NAME: u32 = 0x0C5;
     pub const POP_NAME: u32 = 0x0C6;
     pub const PUSH_NAME: u32 = 0x0C7;
     pub const RENDER_MODE: u32 = 0x0C9;
-    pub const SELECT_MODE: u32 = 0x0CB;
+    pub const MGRAS_HQ3_CFIFO_CMD_SELECT_ENTER: u32 = 0x0CB;
     pub const SELECT_NEXT: u32 = 0x061;
-    pub const SELECT_DONE: u32 = 0x062;
+    pub const MGRAS_HQ3_CFIFO_CMD_RESULT_END: u32 = 0x062;
 }
 
 /// Primitive kinds, BEGIN_* minus BEGIN_POINTS (GL_POINTS .. GL_POLYGON).
@@ -374,7 +374,7 @@ mod re {
 const FILL_FAST: u32 = 1 << 20;
 /// Fill mode: block type 5, a DMA write transfer (the X server's value).
 const FILL_DMA_WRITE: u32 = 0x1140_0000;
-/// Fill mode: block type 4, a DMA read transfer (SAVE_RSS's value).
+/// Fill mode: block type 4, a DMA read transfer (token_0d2's value).
 const FILL_DMA_READ: u32 = 0x0100_0000;
 /// Fill mode: block type 2, a PIO read transfer.
 const FILL_PIO_READ: u32 = 0x0080_0000;
@@ -385,13 +385,13 @@ const FILL_LINE_STIPPLE: u32 = 1 << 5;
 /// server's TrueColor value: pixel type 2, logic op copy enabled, draw
 /// buffer 0x01); bits 29:26 hold the logic op.
 const PP1_RGB24_BUFFER_A: u32 = 0x0C00_6204;
-/// `Gl::pixel_format`: INIT_FORMAT_VALUES has come (0 is a format).
+/// `Gl::pixel_format`: token_09a has come (0 is a format).
 const PIXEL_FORMAT_SENT: u32 = 1 << 31;
 /// Area / GL line IR opcodes (provisional numbers, see rss.rs).
 const IR_AREA_LTOR: u32 = super::rss::OP_AREA_LTOR;
 const IR_AREA_RTOL: u32 = super::rss::OP_AREA_RTOL;
 const IR_GL_LINE: u32 = super::rss::OP_GL_LINE;
-/// SEND_PIXELS' routine for a texture image, and glDrawPixels'.
+/// token_08d' routine for a texture image, and glDrawPixels'.
 const SEND_PIXELS_TEXTURE: u32 = 0x511A;
 const SEND_PIXELS_DRAW: u32 = 0x49D0;
 /// XFRCONTROL: start a DMA transfer to the texture side (te1.rs, rss.rs).
@@ -503,7 +503,7 @@ pub struct Gl {
     draw_words: u32,
     buffer_count: u32,
     /// The driver's PP1 pixel-format and buffer-size fields
-    /// (INIT_FORMAT_VALUES), with `PIXEL_FORMAT_SENT` once it has sent them.
+    /// (token_09a), with `PIXEL_FORMAT_SENT` once it has sent them.
     pixel_format: u32,
     swapped: u32,
     /// The kernel has named the bank drawn into (`set_draw_bank`): swaps
@@ -565,7 +565,7 @@ pub struct Gl {
     raster: [f32; 3],
     raster_color: [f32; 4],
     raster_valid: u32,
-    /// Colour-index context (INIT_CI): colours are indices (red / 4095 in
+    /// Colour-index context (token_00a): colours are indices (red / 4095 in
     /// `color`), drawn as 12-bit colour index pixels; and the clear index.
     ci: u32,
     /// Unnormalized current index for GE state readback.
@@ -575,10 +575,10 @@ pub struct Gl {
     /// A glBitmap header waiting for its rows (pixel data).
     bitmap: [u32; 8],
     bitmap_pending: u32,
-    /// GENERAL_BITMAP rows are padded to 64 bits and arrive in batches.
+    /// token_091 rows are padded to 64 bits and arrive in batches.
     bitmap_general: u32,
     bitmap_row: u32,
-    /// A SEND_PIXELS header waiting for its rows, and the raster engine's
+    /// A token_08d header waiting for its rows, and the raster engine's
     /// transfer mode as the driver last set it (host pixel format).
     send_pixels: [u32; 8],
     send_pixels_pending: u32,
@@ -586,10 +586,10 @@ pub struct Gl {
     /// 1 / the pixel zoom (GE pixel state 0x192); 0 when never set.
     zoom_inv: f32,
     /// The pixel block (block_xystarti / endi, window coordinates) the
-    /// driver last set through RSS_REG_SHADOW / SET, and glReadBuffer back.
+    /// driver last set through cfifo_cmd_raster_triples / SET, and glReadBuffer back.
     pub pixel_block: [u32; 2],
     read_back: u32,
-    /// Between SAVE_RSS and RESTORE_RSS: a GL pixel operation, whose
+    /// Between token_0d2 and token_0d3: a GL pixel operation, whose
     /// register lists belong inside the raster bracket. 2 denotes a
     /// framebuffer read, whose DMA bytes need GE component ordering.
     pub pixel_op: u32,
@@ -603,7 +603,7 @@ pub struct Gl {
     /// mode last written in it.
     raster_loaded: u32,
     fill_loaded: u32,
-    /// Texturing: the current texture coordinates; on (TEX_ON / TEX_OFF);
+    /// Texturing: the current texture coordinates; on (token_00b / token_00c);
     /// the GE's shadow of the context's TE registers (`te1::CONTEXT_REGS`
     /// order), texture_level_table_index and the tables it indexes; the TE must be loaded from
     /// the shadow at the next batch.
@@ -628,7 +628,7 @@ pub struct Gl {
     /// Texture coordinate generation, per coordinate S T R Q: on (bits),
     /// mode (0 object linear, 1 eye linear, 2 sphere map), object and eye
     /// planes (eye planes in eye space), and the plane the next
-    /// TEX_GEN_PLANE_DATA is for (coordinate | eye << 2).
+    /// token_05c is for (coordinate | eye << 2).
     texgen_on: u32,
     texgen_mode: [u32; 4],
     texgen_obj: [[f32; 4]; 4],
@@ -645,11 +645,11 @@ pub struct Gl {
     /// The line stipple's position along antialiased lines, which the GE
     /// draws pixel by pixel (`smooth_line_window`).
     aa_stipple_pos: u32,
-    /// A texture read transfer is armed (READ_TEXTURE .. RESTORE_RSS).
+    /// A texture read transfer is armed (token_0f0 .. token_0d3).
     tex_reading: u32,
     /// glRenderMode(GL_SELECT): the name stack and the hit records.
     sel: Select,
-    /// SAVE_RSS's fourth word: the planes the pixel operation transfers
+    /// token_0d2's fourth word: the planes the pixel operation transfers
     /// (traced, glReadPixels: 0 colour, 0x1C00000 depth, 0x1800000 stencil).
     pixel_planes: u32,
     pub stats_triangles: u64,
@@ -851,7 +851,7 @@ impl Gl {
         self.mvp
     }
 
-    /// A GE state word for a readback (`__MGR_RETURN_MODE` address), where
+    /// A GE state word for a readback (`cfifo_cmd_query` address), where
     /// the HLE knows the layout: 0x1FC the dither enable (glFinish asks for
     /// it); 0x3A-0x49 the current matrix mode's top matrix, 16 floats in
     /// OpenGL's memory order (IRIS GL getmatrix under IGLOO reads them).
@@ -939,7 +939,7 @@ impl Gl {
             }
             0x4A..=0x59 => Some(self.proj.get()[(addr - 0x4A) as usize].to_bits()),
             0x6A..=0x79 => Some(self.tex.get()[(addr - 0x6A) as usize].to_bits()),
-            // Pixel pipeline memory (PIXEL_STATE / INIT_PIXEL_STATE_ERAM
+            // Pixel pipeline memory (token_080 / token_0cd
             // words) as loaded; test/gltest/gepeek.c reads it this way.
             _ => self.query_word(addr).or_else(|| self.pix.loaded(raw).then(|| self.pix.read(raw))),
         }
@@ -951,7 +951,7 @@ impl Gl {
         let w0 = d.first().copied().unwrap_or(0);
         let on = (w0 != 0) as u32;
         match cmd {
-            tok::SELECT_MODE => {
+            tok::MGRAS_HQ3_CFIFO_CMD_SELECT_ENTER => {
                 self.sel.on = 1;
                 self.sel.depth = 0;
                 self.sel.hit = 0;
@@ -984,7 +984,7 @@ impl Gl {
                 self.sel.depth = self.sel.depth.saturating_sub(1);
             }
             tok::SELECT_NEXT => self.sel.second = 1,
-            tok::SELECT_DONE => {
+            tok::MGRAS_HQ3_CFIFO_CMD_RESULT_END => {
                 self.sel.len = 0;
                 self.sel.second = 0;
             }
@@ -1048,14 +1048,14 @@ impl Gl {
                 // set a colour between bitmaps without a new raster
                 // position, and libGLcore sends no colour for glBitmap.
                 // Our reading; OpenGL's latch at glRasterPos would then be
-                // libGLcore's business (UPDATE_RASTER_POS and friends).
+                // libGLcore's business (token_0d6 and friends).
                 self.raster_color = self.color;
                 self.lt.track_color(self.color);
                 if self.lmc_color != 0 && self.lt.cmat_on == 0 {
                     self.unlit = 1;
                 }
             }
-            tok::NORMAL | tok::IRIS_NORMAL => {
+            tok::NORMAL | tok::TOKEN_0DF => {
                 let a = args_f32(d);
                 self.normal = [a[0], a[1], a[2]];
                 self.unlit = 0;
@@ -1178,7 +1178,7 @@ impl Gl {
             tok::STENCIL_MASK => self.set_state(|g| g.st_wmask = w0 & 0xFF, sink),
             tok::COLOR_MASK => self.set_state(|g| g.color_mask = w0 & 0xF, sink),
             tok::DITHER => self.dither = on,
-            tok::SCISSOR_TEST => self.scissor_test = on,
+            tok::TOKEN_06E => self.scissor_test = on,
             tok::SCISSOR if d.len() >= 4 => self.scissor = [d[0] as i32, d[1] as i32, d[2] as i32, d[3] as i32],
             tok::CULL_ON => self.cull = 1,
             tok::CULL_OFF => self.cull = 0,
@@ -1196,13 +1196,13 @@ impl Gl {
             tok::LINE_STIPPLE_ON => self.set_state(|g| g.line_stipple = on, sink),
             tok::LINE_STIPPLE if d.len() >= 2 => self.set_state(|g| (g.line_repeat, g.line_pattern) = (w0 & 0xFF, d[1] & 0xFFFF), sink),
             tok::POLYGON_STIPPLE_ON => self.set_state(|g| g.poly_stipple = on, sink),
-            tok::LOAD_POLYGON_STIPPLE if d.len() >= 32 => {
+            tok::MGRAS_HQ3_TOKEN_CLIENT_POLYGON_STIPPLE_LOAD if d.len() >= 32 => {
                 let mut rows = [0u32; 32];
                 rows.copy_from_slice(&d[..32]);
                 self.set_state(|g| g.stipple_rows = rows, sink);
             }
             tok::FLUSH => self.end_raster(sink),
-            tok::VALIDATE_BANKS => self.set_draw_bank(w0, sink),
+            tok::TOKEN_098 => self.set_draw_bank(w0, sink),
             tok::DRAW_BUFFER => {
                 self.end_raster(sink);
                 self.draw_bits = w0;
@@ -1220,9 +1220,9 @@ impl Gl {
                 self.end_raster(sink);
             }
             tok::VERTEX4F => self.vertex(args_f32(d), sink),
-            tok::INIT_FORMAT_VALUES => self.set_state(|g| g.pixel_format = PIXEL_FORMAT_SENT | w0 & 0x2700, sink),
-            tok::INIT_RGB => self.ci = 0,
-            tok::INIT_CI => self.ci = 1,
+            tok::TOKEN_09A => self.set_state(|g| g.pixel_format = PIXEL_FORMAT_SENT | w0 & 0x2700, sink),
+            tok::TOKEN_009 => self.ci = 0,
+            tok::TOKEN_00A => self.ci = 1,
             tok::CLEAR_INDEX => self.clear_index = if w0 >> 16 == 0 { w0 } else { f32::from_bits(w0) as u32 },
             tok::RASTER_POS4F => {
                 let w = self.transform(args_f32(d));
@@ -1239,12 +1239,12 @@ impl Gl {
                 self.q.raster_color = w.c;
                 self.q.raster_tex = math::xform(self.tex.get(), self.texcoord);
             }
-            tok::UPDATE_RASTER_POS => {
+            tok::TOKEN_0D6 => {
                 let a = args_f32(d);
                 self.raster[0] += a[0];
                 self.raster[1] += a[1];
             }
-            tok::LOAD_RASTER_POS_INFO => {
+            tok::TOKEN_0D7 => {
                 self.color = self.raster_color;
                 if self.ci != 0 { self.current_index = self.color[0] * 4095.0; }
                 // The depth glDrawPixels / glCopyPixels fragments take
@@ -1254,11 +1254,11 @@ impl Gl {
             }
             tok::INDEX_MASK => self.set_state(|g| g.index_mask = w0 & 0xFFF, sink),
             tok::READ_BUFFER => self.read_back = (d.get(2) == Some(&0x405)) as u32,
-            tok::SAVE_RSS => {
+            tok::TOKEN_0D2 => {
                 self.pixel_op = 1;
                 self.pixel_planes = d.get(3).copied().unwrap_or(0);
             }
-            tok::READ_TEXTURE if d.len() >= 5 => {
+            tok::TOKEN_0F0 if d.len() >= 5 => {
                 if sink.tracing_tex() {
                     sink.trace(format!("TEX read {}x{} page {:#x} xfrmode {:#x}", d[0], d[1], self.te_tables[0][0], d[4]));
                 }
@@ -1270,7 +1270,7 @@ impl Gl {
             }
             // TRAM saved raw: the level the sampler points at (64 texels of
             // 32 bits a row from its page), byte for byte.
-            tok::READ_TEXTURE_RAW if d.len() >= 3 => {
+            tok::MGRAS_HQ3_TOKEN_TEX_READ_SETUP if d.len() >= 3 => {
                 self.begin_raster(sink);
                 let size = self.te[te1::CONTEXT_REGS.iter().position(|&r| r == te_reg::MGRAS_TE1_TEXTURE_SIZE).unwrap_or(0)];
                 if sink.tracing_tex() {
@@ -1287,7 +1287,7 @@ impl Gl {
             }
             // TRAM restored: the texels of the 0xDA8 rectangle come by host
             // DMA as they were saved.
-            tok::WRITE_DMAGESETUP if d.len() >= 4 && d[3] == SEND_PIXELS_TEXTURE => {
+            tok::MGRAS_HQ3_TOKEN_CLIENT_GE_DMA_SETUP if d.len() >= 4 && d[3] == SEND_PIXELS_TEXTURE => {
                 // Rows of the transfer mode's texels (RGB 3 bytes, RGBA 4).
                 let (w, h) = (self.tl_rect[2], self.tl_rect[3]);
                 let words = (w * te1::Te1::read_texel_bytes(self.xfrmode)).div_ceil(4);
@@ -1300,14 +1300,14 @@ impl Gl {
             // changes: 0xDA8 rectangle 780 x 490, CI 16 bits a pixel, one
             // DMA line of 0xBA9F0 bytes, start 0xA7). The 0xDA8 transfer
             // size gives the rows and their width in transfer mode pixels.
-            tok::WRITE_DMAGESETUP if d.len() >= 4 && d[3] == SEND_PIXELS_DRAW => {
+            tok::MGRAS_HQ3_TOKEN_CLIENT_GE_DMA_SETUP if d.len() >= 4 && d[3] == SEND_PIXELS_DRAW => {
                 let xs = self.tl_rect[4];
                 let (w, h) = (xs & 0xFFFF, xs >> 16);
                 let words = (w * super::rss::bytes_per_pixel(self.xfrmode)).div_ceil(4);
                 self.send_pixels = [words, 0, 0, h, 0, 1, SEND_PIXELS_DRAW, 0];
                 self.send_pixels_pending = 1;
             }
-            tok::RESTORE_RSS => {
+            tok::TOKEN_0D3 => {
                 if self.tex_reading != 0 {
                     self.tex_reading = 0;
                     sink.rss_write(re::XFRCONTROL, 0, false);
@@ -1320,8 +1320,8 @@ impl Gl {
                 self.pixel_op = 0;
                 self.end_raster(sink);
             }
-            tok::GET_PIXELS => self.get_pixels(w0 & 2 != 0, sink),
-            tok::PIXEL_STATE | tok::INIT_PIXEL_STATE_ERAM if d.len() >= 7 => {
+            tok::TOKEN_0DB => self.get_pixels(w0 & 2 != 0, sink),
+            tok::TOKEN_080 | tok::TOKEN_0CD if d.len() >= 7 => {
                 self.pixel_state_block(d);
             }
             tok::TEX_COORD => self.texcoord = args_f32(d),
@@ -1332,10 +1332,10 @@ impl Gl {
             tok::POINT_SMOOTH => self.point_smooth = on,
             // Our pixel paths never texture, which is what the bracket
             // asks the GE for; the texture state itself stays as it was.
-            tok::SAVE_TEXMODE | tok::RESTORE_TEXMODE => {}
+            tok::TOKEN_0E9 | tok::TOKEN_0EA => {}
             // The TE load path here needs neither (an absent table is the
-            // identity; each SEND_PIXELS is a whole sub-load).
-            tok::TL_NO_TABLE | tok::TL_SUBLOAD_END => {}
+            // identity; each token_08d is a whole sub-load).
+            tok::TOKEN_09B | tok::TOKEN_09C => {}
             tok::TEX_GENIV if d.len() >= 3 && d[0].wrapping_sub(0x2000) < 4 && d[1] == 0x2500 => {
                 self.texgen_mode[(d[0] - 0x2000) as usize] = match d[2] {
                     0x2401 => 0,
@@ -1343,10 +1343,10 @@ impl Gl {
                     _ => 1,
                 };
             }
-            tok::TEX_GEN_PLANE_HEADER if d.len() >= 2 && d[0].wrapping_sub(0x2000) < 4 => {
+            tok::TOKEN_05B if d.len() >= 2 && d[0].wrapping_sub(0x2000) < 4 => {
                 self.texgen_plane = (d[0] - 0x2000) | ((d[1] == 0x2502) as u32) << 2;
             }
-            tok::TEX_GEN_PLANE_DATA if d.len() >= 4 => {
+            tok::TOKEN_05C if d.len() >= 4 => {
                 let p = args_f32(d);
                 let i = (self.texgen_plane & 3) as usize;
                 if self.texgen_plane & 4 != 0 {
@@ -1359,20 +1359,20 @@ impl Gl {
                     self.texgen_obj[i] = p;
                 }
             }
-            tok::ENABLE_CAP | tok::DISABLE_CAP if w0.wrapping_sub(0xC60) < 4 => {
+            tok::TOKEN_075 | tok::TOKEN_076 if w0.wrapping_sub(0xC60) < 4 => {
                 let bit = 1 << (w0 - 0xC60);
-                if cmd == tok::ENABLE_CAP { self.texgen_on |= bit } else { self.texgen_on &= !bit }
+                if cmd == tok::TOKEN_075 { self.texgen_on |= bit } else { self.texgen_on &= !bit }
             }
-            tok::TEX_ON | tok::TEX_OFF => {
-                self.tex_on = (cmd == tok::TEX_ON) as u32;
+            tok::TOKEN_00B | tok::TOKEN_00C => {
+                self.tex_on = (cmd == tok::TOKEN_00B) as u32;
                 if self.raster_loaded != 0 {
                     sink.rss_write(te_reg::MGRAS_RE4_TEXTURE_MODE_FIRST, self.texmode1(), false);
                 }
             }
-            tok::RSS_REG_SHADOW_IDX if d.len() >= 4 => {
+            tok::TOKEN_0EC if d.len() >= 4 => {
                 self.te_write(d[2] & 0x3FF, d[3], sink);
             }
-            tok::SEND_PIXELS if d.len() >= 8 => {
+            tok::TOKEN_08D if d.len() >= 8 => {
                 self.send_pixels.copy_from_slice(&d[..8]);
                 self.send_pixels_pending = 1;
             }
@@ -1382,17 +1382,17 @@ impl Gl {
                 self.bitmap_row = 0;
                 self.bitmap_pending = 1;
             }
-            tok::GENERAL_BITMAP if d.len() >= 5 => {
+            tok::TOKEN_091 if d.len() >= 5 => {
                 self.bitmap = [d[0], d[1], d[2], d[3], d[4], 0, 0, 0];
                 self.bitmap_general = 1;
                 self.bitmap_row = 0;
                 self.bitmap_pending = 0;
             }
-            tok::BITMAP_ROWS if d.len() >= 2 && self.bitmap_general != 0 => {
+            tok::TOKEN_090 if d.len() >= 2 && self.bitmap_general != 0 => {
                 self.bitmap[7] = d[1];
                 self.bitmap_pending = 1;
             }
-            tok::BITMAP_MOVE if d.len() >= 2 => {
+            tok::TOKEN_092 if d.len() >= 2 => {
                 if self.raster_valid != 0 {
                     self.raster[0] += f32::from_bits(d[0]);
                     self.raster[1] += f32::from_bits(d[1]);
@@ -1521,7 +1521,7 @@ impl Gl {
         s.epoch = s.epoch.wrapping_add(1);
     }
 
-    /// Hit-record word `i` (__MGR_RETURN_MODE's select-buffer reads).
+    /// Hit-record word `i` (cfifo_cmd_query's select-buffer reads).
     pub fn select_word(&self, i: u32) -> u32 {
         if self.sel.second != 0 || i >= self.sel.len {
             return 0;
@@ -1942,7 +1942,7 @@ impl Gl {
         self.send_pixels_pending != 0
     }
 
-    /// Words a pending SEND_PIXELS image needs before it can be drawn or
+    /// Words a pending token_08d image needs before it can be drawn or
     /// loaded (words per row times rows, when the header says; 0 for
     /// glBitmap, drawn as it comes).
     pub fn pixel_words_needed(&self) -> usize {
@@ -1953,7 +1953,7 @@ impl Gl {
         (self.send_pixels_row_words() * rows).min(1 << 22)
     }
 
-    /// Words in one SEND_PIXELS row: header words 0 + 1. Texture loads
+    /// Words in one token_08d row: header words 0 + 1. Texture loads
     /// split their rows evenly between the two ([0x10, 0x10] for 128-byte
     /// rows); so does glDrawPixels by DMA (Advanced Visualizer's window
     /// restore, 156-pixel RGBA strips: [0x4E, 0x4E, ..]), while FIFO
@@ -1964,8 +1964,8 @@ impl Gl {
         (self.send_pixels[0] + self.send_pixels[1]) as usize
     }
 
-    /// The pixel operation transfers stencil indices (SAVE_RSS's planes).
-    /// SAVE_RSS word 3 has the planes in bits 24:22 for a read (word 4
+    /// The pixel operation transfers stencil indices (token_0d2's planes).
+    /// token_0d2 word 3 has the planes in bits 24:22 for a read (word 4
     /// = 2) and in bits 20:18 for a draw (word 4 = 3): 6 stencil, 7 depth.
     fn stencil_pixels(&self) -> bool {
         self.pixel_planes & 0x1C0_0000 == 0x180_0000 || self.pixel_planes & 0x1C_0000 == 0x18_0000
@@ -1975,7 +1975,7 @@ impl Gl {
     /// buffer (the depth buffer for the depth format, transfer mode format
     /// 2 / type 3, our reading); the host starts the transfer itself
     /// (raster interface register 5, see hq3.rs). The raster state stays
-    /// loaded until RESTORE_RSS.
+    /// loaded until token_0d3.
     fn get_pixels(&mut self, pio: bool, sink: &mut dyn Hq3Sink) {
         self.pixel_op = 2;
         self.begin_raster(sink);
@@ -2000,7 +2000,7 @@ impl Gl {
             let b = (self.read_back != 0) != (self.swapped != 0);
             sink.rss_write(re::PP1FILLMODE, (self.pp1_base() & !(0x1F << 21)) | (b as u32) << 21, false);
         }
-        // GET_PIXELS' word is the transfer control the host starts it
+        // token_0db' word is the transfer control the host starts it
         // with: 0x4009 a DMA read, 0x400A a PIO read through the char
         // registers (libGLcore reads packed-type rows so, one a time).
         self.fill_mode(if pio { FILL_PIO_READ } else { FILL_DMA_READ }, sink);
@@ -2036,7 +2036,7 @@ impl Gl {
                 return;
             }
         }
-        // SEND_PIXELS counts transport rows. Narrow StudioPaint tile edges
+        // token_08d counts transport rows. Narrow StudioPaint tile edges
         // arrive flattened (e.g. 6x11 pixels as one 66-word row); 0xDA8
         // still gives the image shape and its offset from the raster position.
         let xs = self.tl_rect[4];
@@ -2086,7 +2086,7 @@ impl Gl {
         self.draw_pixels_words(&words, wpr, rows, bpp, sink);
     }
 
-    /// SEND_PIXELS' image through the GE pixel pipeline (`pixpipe`): the
+    /// token_08d' image through the GE pixel pipeline (`pixpipe`): the
     /// raster engine's pixels (`bpp` bytes each), a row of words per image
     /// row, and the row count; None when the image's shape does not fit
     /// what came. The image is 0xDA8's transfer size; its rows come one a
@@ -2549,7 +2549,7 @@ impl Gl {
         }
     }
 
-    /// SCHEDULE_SWAP reached the GE: front and back trade places for what
+    /// token_037 reached the GE: front and back trade places for what
     /// follows (the display flips at the next retrace, by the kernel's
     /// BUF_SELECT write).
     pub fn swap_buffers(&mut self, sink: &mut dyn Hq3Sink) {
@@ -2562,8 +2562,8 @@ impl Gl {
     }
 
     /// The bank GL draws into, as the kernel tracks it (MgrasValidateBanks:
-    /// the window's displayed bank xor 1, sent as VALIDATE_BANKS before
-    /// each SCHEDULE_SWAP for the frame after it, or stored in a parked
+    /// the window's displayed bank xor 1, sent as token_098 before
+    /// each token_037 for the frame after it, or stored in a parked
     /// context's image, words 16-17). 1 is B (DRBpointers bits 19:10),
     /// where GL_BACK draws unswapped (DRAW_BUFFER [4, 1]); 0 is A. Traced
     /// with Maya: [1, 1], swap, frame drawn in B; [0, 0], swap, frame in
@@ -2736,7 +2736,7 @@ impl Gl {
         }
     }
 
-    /// An RGB context whose visual is 12 bits a pixel (INIT_FORMAT_VALUES
+    /// An RGB context whose visual is 12 bits a pixel (token_09a
     /// 0x100 or 0, traced on a HighImpact at 1280x1024: octahedra's and
     /// electropaint's double-buffered visuals, XMAP formats 7 and 5): it
     /// draws 12-bit pixel pairs, buffer A in a word's low half and B in
@@ -2750,7 +2750,7 @@ impl Gl {
     }
 
     /// A colour-index context's PP1 pixel format (bits 13, 10:8): what
-    /// INIT_FORMAT_VALUES sent (CI12 0x400, CI8 0x500 / 0x600), CI8 before
+    /// token_09a sent (CI12 0x400, CI8 0x500 / 0x600), CI8 before
     /// it has.
     fn ci_format(&self) -> u32 {
         let f = self.pixel_format & 0x2700;
@@ -2764,7 +2764,7 @@ impl Gl {
         self.ci != 0 && !matches!(self.draw_mask(), Some(m) if m & 0x70 == 0x40)
     }
 
-    /// An RGB context whose visual is 12:12:12 (INIT_FORMAT_VALUES 0x2300,
+    /// An RGB context whose visual is 12:12:12 (token_09a 0x2300,
     /// see `rss::rgb36`).
     fn rgb36(&self) -> bool {
         self.ci == 0
@@ -3062,7 +3062,7 @@ impl Gl {
         (words, (1u32 << 24) / n * (n - 1), (1u32 << 24) / n)
     }
 
-    /// A GE pixel state block (PIXEL_STATE / INIT_PIXEL_STATE_ERAM, or
+    /// A GE pixel state block (token_080 / token_0cd, or
     /// such a token's payload sent as pixel data): [?, ?, bytes, address,
     /// 0, 0, count, values, count, values again].
     pub fn pixel_state_block(&mut self, d: &[u32]) {
@@ -3077,7 +3077,7 @@ impl Gl {
         }
     }
 
-    /// A GE pixel state word (PIXEL_STATE / INIT_PIXEL_STATE_ERAM) at
+    /// A GE pixel state word (token_080 / token_0cd) at
     /// `addr`: into the pixel pipeline's memory; the pixel zoom and the
     /// texture loader's blocks are kept apart as well.
     fn pixel_state(&mut self, addr: u32, v: u32) {
@@ -3099,7 +3099,7 @@ impl Gl {
         if self.tex_on != 0 { m } else { m & !te1::TEXMODE1_ENABLE }
     }
 
-    /// A TE register from the driver (register lists, RSS_REG_SHADOW_IDX):
+    /// A TE register from the driver (register lists, token_0ec):
     /// into the context's shadow, and through to the TE while a batch has
     /// it loaded. False for other registers.
     pub fn te_write(&mut self, r: u32, v: u32, sink: &mut dyn Hq3Sink) -> bool {
@@ -3154,13 +3154,13 @@ impl Gl {
         sink.rss_write(te_reg::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX, self.te_index, false);
     }
 
-    /// A texture image (SEND_PIXELS routine 0x511A): the texels to the
+    /// A texture image (token_08d routine 0x511A): the texels to the
     /// texture loader. The GE pixel state says which sub-image (0xDA8: s
     /// and t origin, signed, -1 for a border; width, height) and which TRAM
     /// page (0xDB1); the context's texture_loader_mode / texture_loader_level_spec (in the TE once the
     /// batch is loaded) say level size, components and depth. Large images
     /// come as 64-texel-wide strips (a TRAM page's width). Rows are
-    /// SEND_PIXELS' words-per-row apart when it sends a row per texel row,
+    /// token_08d' words-per-row apart when it sends a row per texel row,
     /// else packed; host components are 8 or 16 bits (the pixel format's
     /// scale, 0xD0A) or floats, and become the internal format's
     /// (luminance replicated, alpha picked out, missing alpha 1).
@@ -3181,7 +3181,7 @@ impl Gl {
             }
         }
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
-        // A row is SEND_PIXELS words 0 + 1 (`send_pixels_row_words`; traced
+        // A row is token_08d words 0 + 1 (`send_pixels_row_words`; traced
         // 64x64 luminance-alpha and 128-wide RGBA strips: [0x10, 0x10, ..]
         // with 128-byte rows, [0x40, 0x40, ..] with 512-byte rows). Word 0
         // alone halved the row: texel s took texel s / 2's bytes.
