@@ -470,6 +470,33 @@ impl<M: HostMem> KonaEngine<M> {
 impl<M: HostMem> BoardEngine for KonaEngine<M> {
     type Region = Region;
 
+    fn heads(&self) -> u32 {
+        1
+    }
+
+    fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
+        out.clear();
+        if let Some(f) = self.fault_now() {
+            return Err(Fault(f));
+        }
+        if head != 0 {
+            return Ok(None);
+        }
+        let (w, h, pixels) = self.compose();
+        // The compose is 0xAABBGGRR; the scan-out the shells share is 0x00RRGGBB.
+        out.extend(pixels.iter().map(|p| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff)));
+        Ok((w != 0 && h != 0).then_some((w, h)))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn lend_frame(&mut self, head: u32) -> Result<Option<sgi_engine::LentFrame>, Fault> {
+        if head != 0 {
+            return Ok(None);
+        }
+        let lent = KonaEngine::lend_frame(self).map_err(Fault)?;
+        Ok(lent.map(|f| sgi_engine::LentFrame { width: f.width, height: f.height, buffer: Arc::new(f.buffer) }))
+    }
+
     fn write(&mut self, off: u32, bits: u32, val: u64) -> Write {
         if self.dead() {
             return Write::Fault;
