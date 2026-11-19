@@ -142,3 +142,14 @@ fn the_gpu_counters_are_there_with_a_gpu_unit_and_refused_without() {
     assert_eq!((counters.faults, counters.rejections), (0, 0));
     unsafe { iris_engine_free(h) };
 }
+
+#[test]
+fn the_cursor_accessor_answers_the_registers_and_refuses_a_null_out() {
+    let v12 = CString::new("v12").unwrap();
+    let h = unsafe { sgi_odyssey_new(&config(v12.as_ptr(), 0), &host()) };
+    let (mut x, mut y, mut shown) = (9i32, 9i32, 9u32);
+    assert_eq!(unsafe { sgi_odyssey_cursor(h, &mut x, &mut y, &mut shown) }, IRIS_ENGINE_OK);
+    assert_eq!((x, y, shown), (0, 0, 0), "off at power-on");
+    assert_eq!(unsafe { sgi_odyssey_cursor(h, null_mut(), &mut y, &mut shown) }, IRIS_ENGINE_ERROR);
+    unsafe { iris_engine_free(h) };
+}

@@ -256,6 +256,14 @@ impl SharedRegs {
         self.cursor[index].load(Relaxed)
     }
 
+    /// Where the cursor sits (signed 16-bit components) and whether anything is drawn: enabled, not
+    /// on the second channel (`DisplayRegs::cursor_shown`).
+    pub fn cursor_state(&self) -> (i32, i32, bool) {
+        let position = self.cursor(cursor::POSITION as usize);
+        let control = self.cursor(cursor::CONTROL as usize);
+        ((position >> 16) as i16 as i32, position as i16 as i32, (control & cursor::CTL_ENABLE) != 0 && (control & cursor::CTL_CHANNEL1) == 0)
+    }
+
     /// The glyph the display draws, for the host's pointer steering
     /// (`GfxDisplay::hw_cursor`): where it sits and which pixels are
     /// opaque, by the same plane and glyph rules `cursor_row` draws with.

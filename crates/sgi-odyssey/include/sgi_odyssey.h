@@ -54,6 +54,12 @@ uint64_t sgi_odyssey_memory_bytes(const IrisVproConfig *cfg);
 IrisEngine *sgi_odyssey_new(const IrisVproConfig *cfg,
                           const IrisEngineHost *host);
 
+/*
+ * The cursor's position (signed, in pixels) and whether it is drawn, as the display
+ * registers hold them.
+ */
+int sgi_odyssey_cursor(IrisEngine *h, int32_t *x, int32_t *y, uint32_t *shown);
+
 /* What the GPU unit has done. */
 typedef struct IrisVproGpuCounters {
     uint64_t records;

@@ -115,6 +115,25 @@ pub unsafe extern "C" fn sgi_odyssey_new(cfg: *const IrisVproConfig, host: *cons
     })
 }
 
+/// The cursor's position (signed, in pixels) and whether it is drawn, as the display registers
+/// hold them, for a shell that publishes the pointer.
+///
+/// # Safety
+/// `h` is a live VPro handle; `x` and `y` point to `int32_t` and `shown` to `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_odyssey_cursor(h: *mut IrisEngine, x: *mut i32, y: *mut i32, shown: *mut u32) -> c_int {
+    unsafe {
+        call::<VproEngine, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| {
+            if x.is_null() || y.is_null() || shown.is_null() {
+                return IRIS_ENGINE_ERROR;
+            }
+            let (cx, cy, on) = e.cursor();
+            (*x, *y, *shown) = (cx, cy, on as u32);
+            IRIS_ENGINE_OK
+        })
+    }
+}
+
 /// What the GPU unit has done, for a shell that asserts a GPU run executed GPU records.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]

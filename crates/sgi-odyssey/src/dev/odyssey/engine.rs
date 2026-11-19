@@ -371,6 +371,11 @@ impl VproEngine {
         self.quiescent().then_some(()).ok_or(Refused::NotQuiesced)
     }
 
+    /// The cursor's position and whether it is drawn, from the display registers.
+    pub fn cursor(&self) -> (i32, i32, bool) {
+        self.locks.shared.regs.cursor_state()
+    }
+
     /// The GPU unit's records, batches, copies, readbacks, rejections and faults; None without a
     /// GPU unit or once the engine has stopped.
     pub fn gpu_counters(&self) -> Option<[u64; 6]> {
