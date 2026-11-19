@@ -385,6 +385,12 @@ impl Pixels {
         Pixels { store, map, tables }
     }
 
+    /// Word `w` of the pixel at (x, y) as the planes hold it.
+    pub fn word(&self, x: u32, y: u32, w: usize) -> u32 {
+        self.store.observe(w, Rect { x0: x as i32, y0: y as i32, x1: x as i32 + 1, y1: y as i32 + 1 });
+        self.store.cpu().read(x, y, w)
+    }
+
     /// The words of one pixel that have an array, as the planes hold them.
     fn pix(&self, x: u32, y: u32, w: &mut dyn Write) -> io::Result<()> {
         let store = self.store.cpu();

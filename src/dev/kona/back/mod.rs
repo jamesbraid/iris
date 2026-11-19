@@ -882,7 +882,7 @@ impl KonaBackend {
     }
 
     /// Wait until every raster job has run.
-    fn drain(&mut self) {
+    pub fn drain(&mut self) {
         if let Some(t) = &mut self.tiles {
             let _ = t.drain();
         }
