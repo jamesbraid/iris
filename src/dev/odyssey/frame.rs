@@ -25,7 +25,7 @@
 //! No dirty lines: a frame is composed whole from memory, as the board scans
 //! it out, or not at all (`Frame::shows`, `ScanoutReader::update_to`).
 
-use super::display::{IdShow, ResolveCtx};
+use super::resolve::{IdShow, ResolveCtx};
 use super::field::{lanes_from, texel_unpack, word_of, Codec, Field, Layout, FIELD_FOUR, FIELD_INDEX, FIELD_PACKED, PIXEL_FMT_B};
 use super::reader::DisplayRegs;
 use super::vram::{Format, Surface, VramPtr, TILE, UNIT};

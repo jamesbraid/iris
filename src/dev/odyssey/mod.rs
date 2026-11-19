@@ -39,6 +39,7 @@
 //!   the fixed-point fast path for textured triangles; `raster_fill`: the row
 //!   loops filled triangles take, specialised by draw state and planes;
 //!   `raster_bench`: a fill-rate benchmark (tests only).
+//! - `resolve`: what the display registers make of each window id.
 //! - `memory`, `scanout`, `reader`, `display`: board memory and planes; the
 //!   marks writers make and the display thread's own reader, with the scanned
 //!   frame and retrace; what reaches the window.
@@ -94,6 +95,7 @@ mod raster_unit;
 mod record;
 mod reader;
 mod registers;
+mod resolve;
 mod scanout;
 mod snapshot;
 #[cfg(test)]
