@@ -1272,7 +1272,7 @@ impl GpuRaster {
         let mut lo = f64::INFINITY;
         let mut hi = f64::NEG_INFINITY;
         for j in [j0, j1] {
-            let yc = j as f64 + 0.5;
+            let yc = j as f64 + 1.0;
             for x in [t.x0 + t.s0 * (t.yref - yc), t.x1 + t.s1 * (t.yref - yc), t.x2 + t.s2 * (t.yref2 - yc)] {
                 lo = lo.min(x);
                 hi = hi.max(x);
