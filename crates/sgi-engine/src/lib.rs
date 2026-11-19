@@ -44,6 +44,8 @@
 //! **Time.** Passed in on `advance`, `frame` and `wait_idle`; the engine reads
 //! no host clock but for the host-time `budget_ns` the shell gives.
 
+#[cfg(feature = "conformance")]
+pub mod conformance;
 pub mod engine;
 pub mod ffi;
 pub mod inject;
