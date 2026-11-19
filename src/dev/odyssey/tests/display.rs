@@ -608,6 +608,18 @@ fn cursor_entry(s: &mut Board, index: u32, word: u32) {
     backend_entry(s, cursor::BASE + index, word);
 }
 
+/// The shell's cursor accessor: the position as signed 16-bit halves, and whether it is drawn.
+#[test]
+fn the_cursor_state_is_the_signed_position_and_whether_it_is_drawn() {
+    let (mut s, _) = board("v12");
+    assert_eq!(s.regs().cursor_state(), (0, 0, false), "off at power-on");
+    cursor_entry(&mut s, cursor::POSITION, 0xfffd_0007);
+    cursor_entry(&mut s, cursor::CONTROL, cursor::CTL_ENABLE);
+    assert_eq!(s.regs().cursor_state(), (-3, 7, true));
+    cursor_entry(&mut s, cursor::CONTROL, cursor::CTL_ENABLE | cursor::CTL_CHANNEL1);
+    assert_eq!(s.regs().cursor_state(), (-3, 7, false), "not drawn on the second channel");
+}
+
 fn cursor_readback(s: &mut Board, index: u32) -> u32 {
     s.mmio_read(backend::READ_BASE + (((cursor::BASE + index) as u64) << 3), 4) as u32
 }
