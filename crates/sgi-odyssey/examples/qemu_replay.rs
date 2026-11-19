@@ -166,11 +166,16 @@ fn main() {
     let guest = Arc::new(Sparse(Default::default()));
     // SAFETY: board_mem outlives the engine (dropped after it) and nothing else touches it.
     let lent = unsafe { Lent::new(board_mem.as_mut_ptr().cast(), bytes as usize) }.unwrap();
-    let mut engine = VproEngine::new(
-        Config { product: product.into(), widget: 11, mode: if threaded { Mode::Threaded } else { Mode::Inline }, pool: (0, 0), params: Default::default(), gpu },
+    // The GPU device is opened here so a buffer of this program's can be composed into.
+    let loss = sgi_engine::GpuLoss::new();
+    let device = gpu.as_ref().map(|b| sgi_odyssey::wgpu::Gpu::new(&sgi_odyssey::wgpu::GpuOptions { backend: b.clone(), ..Default::default() }, loss.callback()).expect("a GPU"));
+    let mut engine = VproEngine::with_gpu(
+        Config { product: product.into(), widget: 11, mode: if threaded { Mode::Threaded } else { Mode::Inline }, pool: (0, 0), params: Default::default(), gpu: None },
         Some(lent),
         Guest(guest.clone()),
         None,
+        device.clone(),
+        loss,
     )
     .unwrap();
 
@@ -316,6 +321,19 @@ fn main() {
             Ok(Some(f)) => println!("lent frame {}x{} (wgpu buffer: {})", f.width, f.height, f.buffer.downcast_ref::<wgpu::Buffer>().is_some()),
             Ok(None) => println!("no lent frame"),
             Err(e) => println!("lend failed: {e}"),
+        }
+    }
+    if let Some(dev) = &device {
+        // The frame composed into a buffer of the caller's, a stride wider than the frame, against the copy.
+        if let Some((w, h, copy)) = engine.scanout() {
+            let stride = w + 16;
+            let dst = dev.buffer("replay compose_into", stride as u64 * h as u64 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+            let size = sgi_engine::BoardEngine::compose_into(&mut engine, 0, &dst, stride).expect("compose_into");
+            let mut bytes = vec![0u8; stride as usize * h as usize * 4];
+            dev.read(&dst, &[(0, bytes.len() as u64)], &mut bytes).expect("read back");
+            let words: &[u32] = bytemuck::cast_slice(&bytes);
+            let same = (0..h as usize).map(|y| (0..w as usize).filter(|&x| words[y * stride as usize + x] == copy[y * w as usize + x]).count()).sum::<usize>();
+            println!("compose_into {size:?}: {same} of {} words equal the copy, stride {stride}, generation {}", w as usize * h as usize, sgi_engine::BoardEngine::frame_generation(&engine, 0));
         }
     }
     match engine.scanout() {

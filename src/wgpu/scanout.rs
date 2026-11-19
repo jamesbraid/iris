@@ -45,7 +45,8 @@ struct Header {
     width: u32,
     height: u32,
     stride: u32,
-    pad: u32,
+    /// 0: words are 0xAABBGGRR; 1: 0x00RRGGBB, as the board's kernel produces them.
+    format: u32,
 }
 
 fn entry(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
@@ -104,6 +105,10 @@ pub struct Scanout {
     max_pixels: u32,
     last_dimensions: Option<(u32, u32)>,
     slot_initialized: bool,
+    /// The last caller's buffer composed into and the group that binds it (`compose_into`), with its
+    /// own header so the lent output's cached one is not disturbed.
+    into: Option<(wgpu::Buffer, wgpu::BindGroup)>,
+    into_header: wgpu::Buffer,
     label: String,
     /// Frames composed so far.
     pub frames: u64,
@@ -128,9 +133,10 @@ impl Scanout {
             layout: &pipeline.slot_layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: slot_buf.as_entire_binding() }],
         });
+        let into_header = gpu.buffer("scanout header into", 16, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         Scanout {
             gpu: Arc::clone(gpu), header_buf, out_buf, slot_buf, frame_group, slot_group,
-            max_pixels, last_dimensions: None, slot_initialized: false,
+            max_pixels, last_dimensions: None, slot_initialized: false, into: None, into_header,
             label: pipeline.label.clone(), frames: 0,
         }
     }
@@ -189,6 +195,62 @@ impl Scanout {
         self.compose_inner(pipeline, width, height, Some(slot), groups, true).map_err(|e| self.fail(e))
     }
 
+    /// Compose a frame as `compose` does, but into `dst` (a storage buffer on this device) as 0x00RRGGBB
+    /// words, `stride_words` a row, rows from the top: the buffer a display exports is the compose
+    /// target, with no second pass. `dst` must hold `(height - 1) * stride_words + width` words and the
+    /// stride must be at least the width.
+    pub fn compose_into(&mut self, pipeline: &ScanoutPipeline, width: u32, height: u32, slot: &[u8], groups: &[&wgpu::BindGroup], dst: &wgpu::Buffer, stride_words: u32) -> Result<(), String> {
+        self.compose_into_inner(pipeline, width, height, slot, groups, dst, stride_words).map_err(|e| self.fail(e))
+    }
+
+    fn compose_into_inner(&mut self, pipeline: &ScanoutPipeline, width: u32, height: u32, slot: &[u8], groups: &[&wgpu::BindGroup], dst: &wgpu::Buffer, stride_words: u32) -> Result<(), String> {
+        let pixels = width as u64 * height as u64;
+        if pixels == 0 {
+            return Ok(());
+        }
+        if pixels > self.max_pixels as u64 {
+            return Err(format!("a {width} x {height} frame does not fit"));
+        }
+        if stride_words < width {
+            return Err(format!("a stride of {stride_words} words under the width {width}"));
+        }
+        let need = ((height as u64 - 1) * stride_words as u64 + width as u64) * 4;
+        if dst.size() < need || !dst.usage().contains(wgpu::BufferUsages::STORAGE) {
+            return Err(format!("a destination of {} bytes (storage: {}) for a frame of {need}", dst.size(), dst.usage().contains(wgpu::BufferUsages::STORAGE)));
+        }
+        if slot.len() as u64 > self.slot_buf.size() {
+            return Err(format!("a slot of {} bytes does not fit {}", slot.len(), self.slot_buf.size()));
+        }
+        if self.into.as_ref().is_none_or(|(b, _)| b != dst) {
+            let group = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("scanout frame into"),
+                layout: &pipeline.frame_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.into_header.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: dst.as_entire_binding() },
+                ],
+            });
+            self.into = Some((dst.clone(), group));
+        }
+        self.gpu.write(&self.into_header, 0, bytemuck::bytes_of(&Header { width, height, stride: stride_words, format: 1 }));
+        self.gpu.write(&self.slot_buf, 0, slot);
+        let mut enc = self.gpu.encoder("scanout into");
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("scanout into"), timestamp_writes: None });
+            pass.set_pipeline(&pipeline.pipeline);
+            pass.set_bind_group(0, &self.into.as_ref().expect("set above").1, &[]);
+            pass.set_bind_group(1, &self.slot_group, &[]);
+            for (i, g) in groups.iter().enumerate() {
+                pass.set_bind_group(2 + i as u32, *g, &[]);
+            }
+            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+        }
+        self.gpu.submit(enc);
+        self.frames += 1;
+        self.slot_initialized = true;
+        self.gpu.check()
+    }
+
     /// Reuse an already submitted slot, and only update the frame header when
     /// its dimensions change. The first nonempty frame must supply a slot.
     /// A `slot` shorter than the buffer rewrites only its first bytes: a
@@ -229,7 +291,7 @@ impl Scanout {
             return Err("no previously submitted slot".into());
         }
         if always_write_header || self.last_dimensions != Some((width, height)) {
-            self.gpu.write(&self.header_buf, 0, bytemuck::bytes_of(&Header { width, height, stride: width, pad: 0 }));
+            self.gpu.write(&self.header_buf, 0, bytemuck::bytes_of(&Header { width, height, stride: width, format: 0 }));
         }
         if let Some(slot) = slot {
             self.gpu.write(&self.slot_buf, 0, slot);

@@ -514,3 +514,24 @@ fn a_held_slice_makes_a_waiting_read_busy_until_it_is_released() {
         std::thread::yield_now();
     }
 }
+
+/// The frame generation moves with anything that can change the picture and stays put when nothing
+/// does, so a shell that composed at one value can skip while it reads the same; compose_into has
+/// nothing to compose into on an engine with no GPU unit, and refuses what is not a GPU buffer.
+#[test]
+fn the_frame_generation_moves_with_stores_and_holds_when_idle() {
+    let (mut e, _) = engine(Mode::Inline);
+    let g = BoardEngine::frame_generation(&e, 0);
+    assert_ne!(g, 0);
+    assert_eq!(BoardEngine::frame_generation(&e, 0), g, "nothing happened");
+    assert_eq!(BoardEngine::frame_generation(&e, 1), 0, "no such head keeps none");
+    let _ = e.read(0x4, 32);
+    e.advance(1_000);
+    assert_eq!(BoardEngine::frame_generation(&e, 0), g, "a read and a pump are not changes");
+    put(&mut e, CMD_FIFO, 0);
+    let g2 = BoardEngine::frame_generation(&e, 0);
+    assert_ne!(g2, g, "a store");
+    e.cpu_wrote(0, 8);
+    assert_ne!(BoardEngine::frame_generation(&e, 0), g2, "a CPU write");
+    assert_eq!(e.compose_into(0, &0u8, 1280), Ok(None), "no GPU unit, nothing to compose into");
+}

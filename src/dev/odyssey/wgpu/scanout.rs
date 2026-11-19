@@ -146,6 +146,12 @@ impl VproScanout {
         Ok(self.scanout.output().clone())
     }
 
+    /// As `compose`, into `dst` as 0x00RRGGBB words of `stride_words` a row (`Scanout::compose_into`).
+    pub fn compose_into(&mut self, frame: &Frame, regs: &DisplayRegs, width: u32, height: u32, dst: &wgpu::Buffer, stride_words: u32) -> Result<(), String> {
+        let slot = self.slot(frame, regs)?;
+        self.scanout.compose_into(&self.pipeline, width, height, bytemuck::bytes_of(&slot), &[&self.vram_group], dst, stride_words)
+    }
+
     /// Frames composed.
     pub fn frames(&self) -> u64 {
         self.scanout.frames

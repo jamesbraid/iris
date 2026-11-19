@@ -671,6 +671,18 @@ impl ScanoutReader {
     /// fails (the device then reports the failure, and nothing is composed).
     #[cfg(feature = "wgpu")]
     pub fn update_on_gpu(&mut self) -> Option<(wgpu::Buffer, u32, u32)> {
+        self.compose_on_gpu(|sc, frame, snap, w, h| sc.compose(frame, snap, w, h).map(|b| (b, w, h)))
+    }
+
+    /// As `update_on_gpu`, composing into the caller's `dst` as 0x00RRGGBB words of `stride` a row
+    /// (`VproScanout::compose_into`): the size, or None as there.
+    #[cfg(feature = "wgpu")]
+    pub fn update_into_gpu(&mut self, dst: &wgpu::Buffer, stride: u32) -> Option<(u32, u32)> {
+        self.compose_on_gpu(|sc, frame, snap, w, h| sc.compose_into(frame, snap, w, h, dst, stride).map(|_| ((), w, h))).map(|(_, w, h)| (w, h))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn compose_on_gpu<T>(&mut self, run: impl FnOnce(&mut GpuScanout, &Frame, &DisplayRegs, u32, u32) -> Result<(T, u32, u32), String>) -> Option<(T, u32, u32)> {
         let shared = self.shared();
         let scanout = shared.gpu_scanout.get()?;
         if shared.gpu_fault.lock().is_some() {
@@ -684,9 +696,9 @@ impl ScanoutReader {
         self.snap_gen = shared.regs.snapshot(&mut self.snap, self.snap_gen);
         let frame = Frame::snapshot(&self.snap, displayed)?;
         let (w, h) = (frame.width.min(self.frame_width), frame.height.min(self.frame_height));
-        let composed = scanout.lock().compose(&frame, &self.snap, w, h);
+        let composed = run(&mut scanout.lock(), &frame, &self.snap, w, h);
         match composed {
-            Ok(buffer) => Some((buffer, w, h)),
+            Ok(r) => Some(r),
             Err(e) => {
                 fail_gpu(&shared.gpu_fault, "GPU scanout", e);
                 None

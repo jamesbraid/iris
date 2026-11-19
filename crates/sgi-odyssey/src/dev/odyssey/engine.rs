@@ -231,6 +231,9 @@ pub struct VproEngine {
     credits: Credits,
     failed: OnceLock<String>,
     fault_sent: Arc<AtomicBool>,
+    /// Moves with every store, push, CPU write, load and reset: what the picture may follow
+    /// (`frame_generation`, with the retrace swaps).
+    activity: u64,
 }
 
 impl VproEngine {
@@ -311,6 +314,7 @@ impl VproEngine {
             credits: Credits::default(),
             failed: OnceLock::new(),
             fault_sent,
+            activity: 0,
         };
         if config.mode == Mode::Threaded {
             e.locks.work_start();
@@ -470,8 +474,16 @@ impl BoardEngine for VproEngine {
         }))
     }
 
+    fn frame_generation(&self, head: u32) -> u64 {
+        if head != 0 {
+            return 0;
+        }
+        // Every term only grows, so the sum moves when any does; never 0.
+        1 + self.activity + self.locks.shared.swaps.load(Ordering::Relaxed)
+    }
+
     /// The composed frame left in the GPU scan-out's buffer, no readback; None without the GPU unit
-    /// or while there is no video mode.
+    /// or while there is no video mode. Its words are 0xAABBGGRR (`FrameWords::Abgr`).
     #[cfg(feature = "wgpu")]
     fn lend_frame(&mut self, head: u32) -> Result<Option<LentFrame>, Fault> {
         if head != 0 || !self.gpu {
@@ -481,9 +493,35 @@ impl BoardEngine for VproEngine {
             let g = self.settle()?;
             g.gpu_upload_tick(true);
         }
+        let generation = self.frame_generation(0);
         let r = &mut self.reader;
         r.attach(&self.locks.shared);
-        Ok(r.update_on_gpu().map(|(buffer, width, height)| LentFrame { width, height, stride: width, words: FrameWords::Abgr, generation: 0, buffer: Arc::new(buffer) }))
+        Ok(r.update_on_gpu().map(|(buffer, width, height)| LentFrame { width, height, stride: width, words: FrameWords::Abgr, generation, buffer: Arc::new(buffer) }))
+    }
+
+    /// The frame composed into `dst` (a `wgpu::Buffer`, or an `Arc` of one, on the engine's device) as
+    /// 0x00RRGGBB words, `stride_words` a row.
+    #[cfg(feature = "wgpu")]
+    fn compose_into(&mut self, head: u32, dst: &dyn std::any::Any, stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
+        if head != 0 || !self.gpu {
+            return Ok(None);
+        }
+        let dst = match (dst.downcast_ref::<wgpu::Buffer>(), dst.downcast_ref::<Arc<wgpu::Buffer>>()) {
+            (Some(b), _) => b,
+            (None, Some(b)) => b.as_ref(),
+            (None, None) => return Err(Fault("compose_into: the destination is not a wgpu buffer".into())),
+        };
+        {
+            let g = self.settle()?;
+            g.gpu_upload_tick(true);
+        }
+        let r = &mut self.reader;
+        r.attach(&self.locks.shared);
+        let composed = r.update_into_gpu(dst, stride_words);
+        if let Some(f) = self.fault() {
+            return Err(Fault(f));
+        }
+        Ok(composed)
     }
 
     fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
@@ -496,6 +534,7 @@ impl BoardEngine for VproEngine {
     }
 
     fn write(&mut self, off: u32, bits: u32, val: u64) -> Write {
+        self.activity += 1;
         let Some(size) = Self::size_of(bits) else { return Write::Fault };
         if self.faulted() {
             return Write::Fault;
@@ -515,6 +554,7 @@ impl BoardEngine for VproEngine {
     }
 
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize {
+        self.activity += 1;
         if !fifo_port(port as u64) {
             return 0;
         }
@@ -625,6 +665,7 @@ impl BoardEngine for VproEngine {
     }
 
     fn cpu_wrote(&mut self, off: u64, len: u64) {
+        self.activity += 1;
         self.vram.mark_for_upload(off, len);
     }
 
@@ -676,6 +717,7 @@ impl BoardEngine for VproEngine {
     }
 
     fn load(&mut self, src: &mut dyn StateSource) -> Result<(), Refused> {
+        self.activity += 1;
         self.need_quiescent()?;
         let bad = |m: String| Refused::Mismatch(m);
         let lent = self.lent.is_some();
@@ -721,6 +763,7 @@ impl BoardEngine for VproEngine {
     }
 
     fn reset(&mut self) -> Result<(), Refused> {
+        self.activity += 1;
         if !self.quiescent() {
             return Err(Refused::NotQuiesced);
         }
