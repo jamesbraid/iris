@@ -24,7 +24,7 @@ use super::hq3::{host, Hq3Board, Hq3Engine, Hq3Regs, Hq3Sink};
 use super::pixmem::Buffer;
 use super::plain::boxed_zeroed;
 use super::quirks::Hq4Quirks;
-use super::rss::{reg, Rss};
+use super::rss::{Entry, Rss};
 use crate::display::Rect;
 use crate::wgpu::Gpu;
 
@@ -438,11 +438,8 @@ impl Core {
     /// iris's board: the destination RE gate, then the write.
     #[inline]
     fn rss_write(&mut self, r: u32, val: u32, exec: bool) {
-        let rss = &mut *self.back.rss;
-        if r == reg::CONFIG || rss.accepts_destination() || Rss::uses_shared_texture_state(r) {
-            if rss.write(r, val, exec) {
-                self.drawn();
-            }
+        if self.back.rss.run_entry(Entry::Write { reg: r, val, exec }) {
+            self.drawn();
         }
     }
 
@@ -479,7 +476,7 @@ impl Hq3Sink for Core {
         Some((rss.transfer_armed()?, rss.transfer_shape()?))
     }
     fn dma_write_line(&mut self, line: u32, bytes: &[u8]) {
-        self.back.rss.dma_write_line(line, bytes);
+        self.back.rss.run_entry(Entry::DmaLine { line, bytes });
         self.drawn();
     }
     fn dma_read_line(&mut self, line: u32) -> Vec<u8> {
@@ -487,11 +484,7 @@ impl Hq3Sink for Core {
         self.back.rss.dma_read_line(line)
     }
     fn gl_bracket(&mut self, enter: bool) {
-        if enter {
-            self.back.rss.gl_enter();
-        } else {
-            self.back.rss.gl_leave();
-        }
+        self.back.rss.run_entry(if enter { Entry::GlEnter } else { Entry::GlLeave });
     }
     fn finish_raster(&mut self) {
         self.back.rss.gpu_flush();
