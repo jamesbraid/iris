@@ -106,7 +106,7 @@ pub fn common_regs(rng: &mut Rng, regs: &mut Regs, gl: bool) {
     regs.push((reg::PP1FILLMODE, pp1));
     regs.push((reg::DRBPOINTERS, drb));
     // Tiles per row, and sometimes two raster engines (Maximum Impact).
-    regs.push((reg::DRBSIZE, (rng.chance(0.3) as u32) << 6 | (rng.range(1, 3) as u32) << 2 | rng.range(1, 2) as u32));
+    regs.push((reg::MGRAS_PP1_DRB_SIZE, (rng.chance(0.3) as u32) << 6 | (rng.range(1, 3) as u32) << 2 | rng.range(1, 2) as u32));
     let mask = |rng: &mut Rng| {
         let r = rng.u32();
         rng.pick(&[0xFF_FFFFu32, u32::MAX, 0xFFF, 0xFF, 0, r])
@@ -119,7 +119,7 @@ pub fn common_regs(rng: &mut Rng, regs: &mut Regs, gl: bool) {
         win |= (rng.range(1, 15) as u32) << 4;
     }
     win |= (rng.below(4) as u32) << 10;
-    regs.push((reg::PP1WINMODE, win));
+    regs.push((reg::MGRAS_PP1_REG_F17B, win));
     let mut mode = 0;
     let n = rng.pick(&[0, 0, 1, 1, 2, 3, 4]);
     let mut order = [0u32, 1, 2, 3];
@@ -158,45 +158,45 @@ pub fn colour_regs(rng: &mut Rng, regs: &mut Regs) {
 /// The GL per-fragment and texture registers.
 pub fn gl_regs(rng: &mut Rng, regs: &mut Regs, tex_bias: f64) {
     let te = |b: bool, v: u32| if b { v | rss::TEST_ENABLE } else { v & !rss::TEST_ENABLE };
-    regs.push((reg::AFUNCMODE, te(rng.chance(0.5), rng.u32() & 0xFFFF)));
+    regs.push((reg::MGRAS_PP1_REG_F169, te(rng.chance(0.5), rng.u32() & 0xFFFF)));
     let ops = |rng: &mut Rng| (rng.below(8) as u32) << 4 | (rng.below(8) as u32) << 8 | (rng.below(8) as u32) << 12;
-    regs.push((reg::STENCILMODE, te(rng.chance(0.5), rng.below(8) as u32 | ops(rng) | (rng.u32() & 0xFF) << 16)));
-    regs.push((reg::STENCILMASK, { let opts = [0xFFFFu32, rng.u32() & 0xFFFF, 0xFF0F]; rng.pick(&opts) }));
+    regs.push((reg::MGRAS_PP1_REG_F166, te(rng.chance(0.5), rng.below(8) as u32 | ops(rng) | (rng.u32() & 0xFF) << 16)));
+    regs.push((reg::MGRAS_PP1_REG_F167, { let opts = [0xFFFFu32, rng.u32() & 0xFFFF, 0xFF0F]; rng.pick(&opts) }));
     let zmask = { let opts = [0xFF_FFFFu32, rng.u32() & 0xFF_FFFF, 0]; rng.pick(&opts) };
-    regs.push((reg::ZMODE, te(rng.chance(0.6), rng.below(8) as u32 | zmask << 4)));
+    regs.push((reg::MGRAS_PP1_REG_F168, te(rng.chance(0.6), rng.below(8) as u32 | zmask << 4)));
     let blend = (rng.below(16) as u32)
         | (rng.below(16) as u32) << 4
         | (rng.below(6) as u32) << rss::BLEND_EQ_SHIFT
         | if rng.chance(0.5) { rss_blend_enable() } else { 0 };
-    regs.push((reg::BLENDFACTOR, blend));
-    regs.push((reg::BLENDCOLOR_RG, rng.u32() & 0x0FFF_0FFF));
-    regs.push((reg::BLENDCOLOR_BA, rng.u32() & 0x0FFF_0FFF));
+    regs.push((reg::MGRAS_PP1_REG_F165, blend));
+    regs.push((reg::MGRAS_PP1_REG_F16B, rng.u32() & 0x0FFF_0FFF));
+    regs.push((reg::MGRAS_PP1_REG_F16C, rng.u32() & 0x0FFF_0FFF));
     let tex_on = rng.chance(tex_bias);
     let m1 = (rng.u32() & 0xFFE) | tex_on as u32;
-    regs.push((te::TEXMODE1, m1));
+    regs.push((te::MGRAS_RE4_TEXTURE_MODE_FIRST, m1));
     // Detail textures (bit 9) on a quarter of them: the JIT declines them.
     let detail = rng.chance(0.25);
-    regs.push((te::TEXMODE2, rng.u32() & 0xFFDFF | (detail as u32) << 9));
+    regs.push((te::MGRAS_TE1_TEXTURE_MODE_DRAWN, rng.u32() & 0xFFDFF | (detail as u32) << 9));
     let dlevel = (rng.below(5) as u32 + 2) << 16;
-    regs.push((te::TXSIZE, rng.range(0, 9) as u32 | (rng.range(0, 9) as u32) << 4 | dlevel));
+    regs.push((te::MGRAS_TE1_TEXTURE_SIZE, rng.range(0, 9) as u32 | (rng.range(0, 9) as u32) << 4 | dlevel));
     let last = { let opts = [0u32, 15, 31, rng.below(32) as u32]; rng.pick(&opts) };
-    regs.push((te::TXLOD, { let opts = [0u32, 1, 3, 7, 15, rng.u32() & 0xF]; rng.pick(&opts) } | last << 11));
-    regs.push((te::TXDETAIL, rng.u32() & 0xFF));
-    regs.push((te::TXADDR, 0));
+    regs.push((te::MGRAS_TE1_TEXTURE_LOD, { let opts = [0u32, 1, 3, 7, 15, rng.u32() & 0xF]; rng.pick(&opts) } | last << 11));
+    regs.push((te::MGRAS_TE1_TEXTURE_DETAIL_BLOCK, rng.u32() & 0xFF));
+    regs.push((te::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX, 0));
     for _ in 0..32 {
-        regs.push((te::DETAILSCALE, rng.u32() & 0x1F));
+        regs.push((te::MGRAS_TE1_DETAILSCALE, rng.u32() & 0x1F));
     }
-    regs.push((te::TXBCOLOR_RG, rng.u32()));
-    regs.push((te::TXBCOLOR_BA, rng.u32()));
-    regs.push((te::TXENV_RG, rng.u32()));
-    regs.push((te::TXENV_B, rng.u32()));
-    regs.push((te::TXADDR, 0));
+    regs.push((te::MGRAS_TE1_TEXTURE_BORDER_COLOR_RG, rng.u32()));
+    regs.push((te::MGRAS_TE1_TEXTURE_BORDER_COLOR_BA, rng.u32()));
+    regs.push((te::MGRAS_RE4_TEXENV_RG, rng.u32()));
+    regs.push((te::MGRAS_RE4_TEXENV_B, rng.u32()));
+    regs.push((te::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX, 0));
     for _ in 0..16 {
-        regs.push((te::TXMIPMAP, rng.u32() & 0x1FF));
+        regs.push((te::MGRAS_TE1_REG_F191, rng.u32() & 0x1FF));
     }
-    regs.push((te::TXADDR, 0));
+    regs.push((te::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX, 0));
     for _ in 0..16 {
-        regs.push((te::TXBORDER, rng.u32() & 0x1FF));
+        regs.push((te::MGRAS_TE1_TEXTURE_BORDER_BLOCK, rng.u32() & 0x1FF));
     }
     regs.push((reg::FOG_ON, rng.chance(0.35) as u32));
     regs.push((reg::FOG_RG, rng.u32()));
@@ -244,13 +244,13 @@ pub fn plane_regs(rng: &mut Rng, regs: &mut Regs) {
     };
     let scale = 10f64.powf(rng.f(-3.5, -0.3));
     let (s, t) = (rng.f(-1.5, 2.5), rng.f(-1.5, 2.5));
-    hilo(regs, te::WI, (w * one) as i64);
-    hilo(regs, te::SW, (s * w * one) as i64);
-    hilo(regs, te::TW, (t * w * one) as i64);
-    for r in [te::DSWE, te::DTWE, te::DSWX, te::DTWX, te::DSWY, te::DTWY] {
+    hilo(regs, te::MGRAS_RE4_REG_E084, (w * one) as i64);
+    hilo(regs, te::MGRAS_RE4_REG_E080, (s * w * one) as i64);
+    hilo(regs, te::MGRAS_RE4_REG_E082, (t * w * one) as i64);
+    for r in [te::MGRAS_RE4_REG_E0C0, te::MGRAS_RE4_REG_E0C2, te::MGRAS_RE4_REG_E0C4, te::MGRAS_RE4_REG_E0C6, te::MGRAS_RE4_REG_E0C8, te::MGRAS_RE4_REG_E0CA] {
         hilo(regs, r, (rng.f(-1.0, 1.0) * scale * one) as i64);
     }
-    for r in [te::DWIE, te::DWIX, te::DWIY] {
+    for r in [te::MGRAS_RE4_REG_E086, te::MGRAS_RE4_REG_E088, te::MGRAS_RE4_REG_E08A] {
         hilo(regs, r, (rng.f(-1.0, 1.0) * scale * 0.2 * one) as i64);
     }
 }
@@ -281,9 +281,9 @@ pub fn gl_line_regs(rng: &mut Rng, regs: &mut Regs) -> u32 {
         regs.push((r, pos(v)));
     }
     plane_regs(rng, regs);
-    regs.push((reg::GLINECONFIG, rng.pick(&[0u32, 0, 1, 2, 3])));
+    regs.push((reg::MGRAS_RE4_AALINE_CONFIG, rng.pick(&[0u32, 0, 1, 2, 3])));
     regs.push((reg::LINE_STIPPLE, rng.u32()));
-    regs.push((reg::LSCRL, rng.pick(&[0u32, 1, 3])));
+    regs.push((reg::MGRAS_RE4_LINE_STIPPLE_REPEAT, rng.pick(&[0u32, 1, 3])));
     rss::OP_GL_LINE
 }
 

@@ -936,7 +936,7 @@ impl Mgras {
     /// one, unless `IRIS_MGRAS_ENGINES` (1, 2 or 4) says otherwise. More
     /// threads than the board has engines split its scanlines the same way
     /// (row y to thread y % n) without changing anything the guest sees:
-    /// where a row lives in pixel memory follows DRBsize (`Buffer::locate`),
+    /// where a row lives in pixel memory follows drb_size (`Buffer::locate`),
     /// not the thread count, and the threads share pixel memory and TRAM.
     fn engines_for(board: GraphicsBoard) -> usize {
         match std::env::var("IRIS_MGRAS_ENGINES").ok().as_deref().map(str::trim) {

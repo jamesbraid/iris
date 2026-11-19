@@ -148,7 +148,7 @@ impl MgrasScanout {
         s[D_MAIN] = main.ptr;
         s[D_BACK] = (dcb.xmap.dib_pointers() >> 10) & 0x3FF;
         s[D_OVERLAY] = overlay.map_or(NO_BUFFER, |o| o.ptr);
-        s[D_DRBSIZE] = r.reg(rss::reg::DRBSIZE);
+        s[D_DRBSIZE] = r.reg(rss::reg::MGRAS_PP1_DRB_SIZE);
         s[D_SELECT] = dcb.xmap.buf_select();
         s[D_BLANK] = (dcb.dac.pixmask() == 0) as u32;
         for did in 0..32u32 {

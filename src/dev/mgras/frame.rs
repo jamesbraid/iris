@@ -127,7 +127,7 @@ impl Frame {
         // buffer B. The window-ID runs are decoded below; this pass needs
         // them first, so decode them before the planes.
         let select = dcb.xmap.buf_select();
-        let back = Buffer::new(dcb.xmap.dib_pointers() >> 10, Kind::Wide, rss.reg(rss::reg::DRBSIZE));
+        let back = Buffer::new(dcb.xmap.dib_pointers() >> 10, Kind::Wide, rss.reg(rss::reg::MGRAS_PP1_DRB_SIZE));
         let mut runs = Vec::with_capacity(64);
         for y in 0..h {
             dcb.vc3.main_did_runs(y, &mut runs);
@@ -272,7 +272,7 @@ impl Frame {
 /// its pointer differs, the overlay.
 pub fn scanout_buffers(rss: &Rss, dcb: &Dcb) -> (Buffer, Option<Buffer>) {
     let dib = dcb.xmap.dib_pointers();
-    let drbsize = rss.reg(rss::reg::DRBSIZE);
+    let drbsize = rss.reg(rss::reg::MGRAS_PP1_DRB_SIZE);
     let main = Buffer::new(dib, Kind::Wide, drbsize);
     let overlay = Buffer::new(dib >> 20, Kind::Overlay, drbsize);
     (main, (overlay.ptr != main.ptr).then_some(overlay))

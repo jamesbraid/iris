@@ -23,7 +23,7 @@ struct Buf {
     yshift: u32,
 }
 
-// DRBsize bits 5:2 / 1:0: 36-bit and overlay tiles a row (the PROM's
+// drb_size bits 5:2 / 1:0: 36-bit and overlay tiles a row (the PROM's
 // 1280x1024 layout until programmed).
 fn buf_new(ptr: u32, kind: u32, drbsize: u32) -> Buf {
     var x36 = (drbsize >> 2u) & 0xfu;

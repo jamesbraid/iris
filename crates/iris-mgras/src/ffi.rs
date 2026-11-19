@@ -32,7 +32,7 @@ pub struct IrisMgrasRegion {
     pub page: u32,
     /// Nonzero: the 9-bit overlay buffer.
     pub overlay: u32,
-    /// The raster DRBSIZE register the buffer was laid out with.
+    /// The raster drb_size register the buffer was laid out with.
     pub drbsize: u32,
     pub x0: i32,
     pub y0: i32,

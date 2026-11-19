@@ -31,7 +31,7 @@
 //! current by `sync` for the readers (PIO and DMA reads, hashes, display).
 //!
 //! One unit draws every scanline: Maximum Impact's second engine is only
-//! the memory layout here (`DRBsize` bits 7:6, which the kernels' locate
+//! the memory layout here (`drb_size` bits 7:6, which the kernels' locate
 //! follows), as it is for one CPU engine with `IRIS_MGRAS_ENGINES=1`.
 
 #[cfg(feature = "scanout")]
@@ -227,7 +227,7 @@ const SL_PAGES: usize = 48;
 const SL_BPAGES: usize = 64;
 const SL_STIPPLE: usize = 80;
 /// The detail texture (`te1::Detail`): on, page, log2 N, shift S, shift T,
-/// the TXLOD cutoff index, then its 32 weights at SL_DTABLE.
+/// the texture_lod cutoff index, then its 32 weights at SL_DTABLE.
 const SL_DETAIL: usize = 112;
 const SL_DTABLE: usize = 120;
 /// The fog table (`rss::reg::FOG_LUT`) and its index's scale and offset
@@ -257,18 +257,18 @@ impl Slot {
             (SL_LSBB, reg::COLORMASKLSBSB),
             (SL_MSBS, reg::COLORMASKMSBS),
             (SL_DRB, reg::DRBPOINTERS),
-            (SL_DRBSIZE, reg::DRBSIZE),
+            (SL_DRBSIZE, reg::MGRAS_PP1_DRB_SIZE),
             (SL_XYWIN, reg::XYWIN),
             (SL_CONFIG, reg::CONFIG),
             (SL_CLIPMODE, reg::CLIP_MODE),
-            (SL_WINMODE, reg::PP1WINMODE),
-            (SL_ZMODE, reg::ZMODE),
-            (SL_STMODE, reg::STENCILMODE),
-            (SL_STMASK, reg::STENCILMASK),
-            (SL_AFUNC, reg::AFUNCMODE),
-            (SL_BLEND, reg::BLENDFACTOR),
-            (SL_BLENDRG, reg::BLENDCOLOR_RG),
-            (SL_BLENDBA, reg::BLENDCOLOR_BA),
+            (SL_WINMODE, reg::MGRAS_PP1_REG_F17B),
+            (SL_ZMODE, reg::MGRAS_PP1_REG_F168),
+            (SL_STMODE, reg::MGRAS_PP1_REG_F166),
+            (SL_STMASK, reg::MGRAS_PP1_REG_F167),
+            (SL_AFUNC, reg::MGRAS_PP1_REG_F169),
+            (SL_BLEND, reg::MGRAS_PP1_REG_F165),
+            (SL_BLENDRG, reg::MGRAS_PP1_REG_F16B),
+            (SL_BLENDBA, reg::MGRAS_PP1_REG_F16C),
             (SL_FOGRG, reg::FOG_RG),
             (SL_FOGB, reg::FOG_B),
             (SL_XFERZ, reg::XFER_Z),
@@ -280,9 +280,9 @@ impl Slot {
             w[SL_CLIP + 2 * n + 1] = r.reg(reg::CLIP_Y + 2 * n as u32);
         }
         if tex {
-            w[SL_TM1] = r.reg(te_reg::TEXMODE1);
-            w[SL_TXENVRG] = r.reg(te_reg::TXENV_RG);
-            w[SL_TXENVB] = r.reg(te_reg::TXENV_B);
+            w[SL_TM1] = r.reg(te_reg::MGRAS_RE4_TEXTURE_MODE_FIRST);
+            w[SL_TXENVRG] = r.reg(te_reg::MGRAS_RE4_TEXENV_RG);
+            w[SL_TXENVB] = r.reg(te_reg::MGRAS_RE4_TEXENV_B);
             let smp = r.sampler();
             w[SL_MODE2] = smp.mode2;
             w[SL_LS] = smp.ls;

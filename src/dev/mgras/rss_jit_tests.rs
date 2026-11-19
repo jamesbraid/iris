@@ -543,13 +543,13 @@ fn bench_interpreter_vs_jit() {
     let base: Regs = vec![
         (reg::PP1FILLMODE, 1 << 14 | 2 << 8),
         (reg::DRBPOINTERS, 0x40 | 0x80 << 10),
-        (reg::DRBSIZE, 7 << 2 | 2),
+        (reg::MGRAS_PP1_DRB_SIZE, 7 << 2 | 2),
         (reg::COLORMASKLSBSA, u32::MAX),
         (reg::COLORMASKMSBS, 0xFF),
         (reg::XYWIN, 1023 << 16),
         (reg::CONFIG, rss::CONFIG_YFLIP),
         (reg::CLIP_MODE, 0),
-        (reg::PP1WINMODE, 0),
+        (reg::MGRAS_PP1_REG_F17B, 0),
     ];
     let run = |p: &mut Pair, name: &str, regs: &Regs, pixels: f64, n: u32, go: &dyn Fn(&mut Rss)| {
         p.apply(&base);
@@ -613,11 +613,11 @@ fn bench_interpreter_vs_jit() {
     let mut tri: Regs = vec![
         (reg::CONFIG, 0),
         (reg::XYWIN, 0),
-        (reg::ZMODE, 0x0FFF_FFF0 | rss::ZMODE_TEST | 3),
-        (reg::AFUNCMODE, 0),
-        (reg::STENCILMODE, 0),
-        (reg::BLENDFACTOR, 0),
-        (te::TEXMODE1, 0),
+        (reg::MGRAS_PP1_REG_F168, 0x0FFF_FFF0 | rss::ZMODE_TEST | 3),
+        (reg::MGRAS_PP1_REG_F169, 0),
+        (reg::MGRAS_PP1_REG_F166, 0),
+        (reg::MGRAS_PP1_REG_F165, 0),
+        (te::MGRAS_RE4_TEXTURE_MODE_FIRST, 0),
         (reg::FOG_ON, 0),
         (reg::FILLMODE, 0),
     ];
@@ -642,19 +642,19 @@ fn bench_interpreter_vs_jit() {
     let mut ttri = tri.clone();
     let one = rss_iter_one();
     ttri.extend([
-        (te::TEXMODE1, 1 | 3 << 3 | 4 << 9),
-        (te::TEXMODE2, 1 << 2 | 1 << 5 | 1 << 6 | 1 << 7 | 1 << 8 | 1 << 19),
-        (te::TXSIZE, 8 | 8 << 4),
-        (te::TXLOD, 8),
-        (te::TXADDR, 0),
+        (te::MGRAS_RE4_TEXTURE_MODE_FIRST, 1 | 3 << 3 | 4 << 9),
+        (te::MGRAS_TE1_TEXTURE_MODE_DRAWN, 1 << 2 | 1 << 5 | 1 << 6 | 1 << 7 | 1 << 8 | 1 << 19),
+        (te::MGRAS_TE1_TEXTURE_SIZE, 8 | 8 << 4),
+        (te::MGRAS_TE1_TEXTURE_LOD, 8),
+        (te::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX, 0),
     ]);
     for l in 0..16 {
-        ttri.push((te::TXMIPMAP, l * 4));
+        ttri.push((te::MGRAS_TE1_REG_F191, l * 4));
     }
-    hilo(&mut ttri, te::WI, one as i64);
-    hilo(&mut ttri, te::SW, 0);
-    hilo(&mut ttri, te::TW, 0);
-    for (r, v) in [(te::DSWX, 0.004), (te::DTWX, 0.0), (te::DSWE, 0.0), (te::DTWE, -0.004), (te::DWIX, 0.0), (te::DWIE, 0.0)] {
+    hilo(&mut ttri, te::MGRAS_RE4_REG_E084, one as i64);
+    hilo(&mut ttri, te::MGRAS_RE4_REG_E080, 0);
+    hilo(&mut ttri, te::MGRAS_RE4_REG_E082, 0);
+    for (r, v) in [(te::MGRAS_RE4_REG_E0C4, 0.004), (te::MGRAS_RE4_REG_E0C6, 0.0), (te::MGRAS_RE4_REG_E0C0, 0.0), (te::MGRAS_RE4_REG_E0C2, -0.004), (te::MGRAS_RE4_REG_E088, 0.0), (te::MGRAS_RE4_REG_E086, 0.0)] {
         hilo(&mut ttri, r, (v * one) as i64);
     }
     run(&mut p, "GL textured trilinear tri 20k px", &ttri, 20_000.0, 100, &|r| {
@@ -662,7 +662,7 @@ fn bench_interpreter_vs_jit() {
     });
     // Bilinear, no mipmaps: no level of detail to compute.
     let mut btri = ttri.clone();
-    btri.push((te::TEXMODE2, 1 << 2 | 1 << 7 | 1 << 8));
+    btri.push((te::MGRAS_TE1_TEXTURE_MODE_DRAWN, 1 << 2 | 1 << 7 | 1 << 8));
     run(&mut p, "GL textured bilinear tri 20k px", &btri, 20_000.0, 100, &|r| {
         r.write(reg::IR, rss::OP_AREA_LTOR, true);
     });
@@ -678,12 +678,12 @@ fn bench_overhead() {
     p.apply(&[
         (reg::PP1FILLMODE, 1 << 14 | 2 << 8),
         (reg::DRBPOINTERS, 0x40 | 0x80 << 10),
-        (reg::DRBSIZE, 7 << 2 | 2),
+        (reg::MGRAS_PP1_DRB_SIZE, 7 << 2 | 2),
         (reg::COLORMASKLSBSA, u32::MAX),
         (reg::XYWIN, 1023 << 16),
         (reg::CONFIG, rss::CONFIG_YFLIP),
         (reg::CLIP_MODE, 0),
-        (reg::PP1WINMODE, 0),
+        (reg::MGRAS_PP1_REG_F17B, 0),
         (reg::FILLMODE, 1 << 20 | 1 << 22),
         (reg::BLOCKXYSTARTI, xy(10, 10)),
         (reg::BLOCKXYENDI, xy(10, 10)),

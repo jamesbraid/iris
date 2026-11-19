@@ -37,7 +37,7 @@ const LIVE_PAGES: usize = super::super::pixmem::PAGES;
 const LIVE_CID_ROWS: usize = 512;
 
 /// A layout in which no two framebuffer pixels share a memory word, as in
-/// IRIX's: the generators' narrow `DRBsize` rows (192 to 576 pixels, so
+/// IRIX's: the generators' narrow `drb_size` rows (192 to 576 pixels, so
 /// x = 192 is the word of x = 0 a tile row down) and overlapping page
 /// runs (A from 0x40 into B at 0x80 and the depth buffer from page 0 into
 /// A) make a primitive's pixels alias. The interpreter settles aliased
@@ -58,7 +58,7 @@ fn unaliased(regs: &mut Regs) {
                 };
                 *v = page(*v & 0x3FF) | page((*v >> 10) & 0x3FF) << 10;
             }
-            reg::DRBSIZE => *v = (*v & 0xC0) | (5 + *v % 3) << 2 | 2,
+            reg::MGRAS_PP1_DRB_SIZE => *v = (*v & 0xC0) | (5 + *v % 3) << 2 | 2,
             _ => {}
         }
     }
@@ -208,9 +208,9 @@ impl Pair {
     fn recent(&self) -> String {
         let n = self.log.len();
         let mode: Vec<String> = [
-            reg::PP1FILLMODE, reg::FILLMODE, reg::DRBPOINTERS, reg::DRBSIZE, reg::COLORMASKLSBSA, reg::COLORMASKLSBSB, reg::COLORMASKMSBS,
-            reg::PP1WINMODE, reg::CLIP_MODE, reg::XYWIN, reg::CONFIG, reg::ZMODE, reg::STENCILMODE, reg::STENCILMASK, reg::AFUNCMODE,
-            reg::BLENDFACTOR, reg::BLENDCOLOR_RG, reg::BLENDCOLOR_BA, reg::FOG_ON, te::TEXMODE1, te::TEXMODE2, te::TXSIZE, te::TXLOD,
+            reg::PP1FILLMODE, reg::FILLMODE, reg::DRBPOINTERS, reg::MGRAS_PP1_DRB_SIZE, reg::COLORMASKLSBSA, reg::COLORMASKLSBSB, reg::COLORMASKMSBS,
+            reg::MGRAS_PP1_REG_F17B, reg::CLIP_MODE, reg::XYWIN, reg::CONFIG, reg::MGRAS_PP1_REG_F168, reg::MGRAS_PP1_REG_F166, reg::MGRAS_PP1_REG_F167, reg::MGRAS_PP1_REG_F169,
+            reg::MGRAS_PP1_REG_F165, reg::MGRAS_PP1_REG_F16B, reg::MGRAS_PP1_REG_F16C, reg::FOG_ON, te::MGRAS_RE4_TEXTURE_MODE_FIRST, te::MGRAS_TE1_TEXTURE_MODE_DRAWN, te::MGRAS_TE1_TEXTURE_SIZE, te::MGRAS_TE1_TEXTURE_LOD,
         ]
         .iter()
         .map(|&r| format!("{r:#05x}={:#x}", self.cpu.reg(r)))
@@ -257,12 +257,12 @@ impl Pair {
         let mode = (self.rng.below(4) as u32) << 1 | (self.rng.below(4) as u32) << 3 | (self.rng.below(3) as u32) << 5;
         let (ls, lt) = (self.rng.range(0, 7) as u32, self.rng.range(0, 7) as u32);
         let regs = vec![
-            (te::TL_MODE, mode),
-            (te::TL_SPEC, ls << 4 | lt << 8),
-            (te::TL_MIPMAP, self.rng.below(256) as u32),
-            (te::TL_BORDER, self.rng.below(256) as u32),
-            (te::TL_S_LEFT, self.rng.range(-1, 4) as u32),
-            (te::TL_T_BOTTOM, self.rng.range(-1, 4) as u32),
+            (te::MGRAS_TE1_TEXTURE_LOADER_MODE, mode),
+            (te::MGRAS_TE1_TEXTURE_LOADER_LEVEL_SPEC, ls << 4 | lt << 8),
+            (te::MGRAS_TE1_TEXTURE_LOADER_MIPMAP_BLOCK, self.rng.below(256) as u32),
+            (te::MGRAS_TE1_TEXTURE_LOADER_BORDER_BLOCK, self.rng.below(256) as u32),
+            (te::MGRAS_TE1_TEXTURE_LOADER_COPY_LEFT, self.rng.range(-1, 4) as u32),
+            (te::MGRAS_TE1_TEXTURE_LOADER_COPY_BOTTOM, self.rng.range(-1, 4) as u32),
             (reg::XFRSIZE, 1 << ls),
         ];
         self.apply(&regs);
@@ -384,8 +384,8 @@ fn steep_and_far_triangles_match_the_interpreter() {
         unaliased(&mut mode);
         // Slopes this steep reach past any row's width: keep the pixels
         // to the 1344-pixel rows with screen mask 0.
-        mode.retain(|&(r, _)| r != reg::DRBSIZE);
-        mode.push((reg::DRBSIZE, 7 << 2 | 2));
+        mode.retain(|&(r, _)| r != reg::MGRAS_PP1_DRB_SIZE);
+        mode.push((reg::MGRAS_PP1_DRB_SIZE, 7 << 2 | 2));
         let clip = mode.iter().find(|&&(r, _)| r == reg::CLIP_MODE).map_or(0, |&(_, v)| v);
         mode.push((reg::CLIP_X, 1343));
         mode.push((reg::CLIP_Y, 1023));
@@ -505,25 +505,25 @@ fn a_texture_load_lands_between_the_triangles_around_it() {
         (reg::PP1FILLMODE, 2 << 8 | 1 << 14),
         (reg::FILLMODE, 0),
         (reg::DRBPOINTERS, 0x100),
-        (reg::DRBSIZE, 7 << 2 | 2),
+        (reg::MGRAS_PP1_DRB_SIZE, 7 << 2 | 2),
         (reg::COLORMASKLSBSA, u32::MAX),
-        (reg::PP1WINMODE, 0),
+        (reg::MGRAS_PP1_REG_F17B, 0),
         (reg::CLIP_MODE, 0),
         (reg::CONFIG, 0),
-        (reg::ZMODE, 0),
-        (reg::STENCILMODE, 0),
-        (reg::AFUNCMODE, 0),
-        (reg::BLENDFACTOR, 0),
+        (reg::MGRAS_PP1_REG_F168, 0),
+        (reg::MGRAS_PP1_REG_F166, 0),
+        (reg::MGRAS_PP1_REG_F169, 0),
+        (reg::MGRAS_PP1_REG_F165, 0),
         (reg::FOG_ON, 0),
         // RGBA8 8x8, modulate, nearest, repeat; level 0 at PAGE.
-        (te::TEXMODE1, 1 | 3 << 3 | 4 << 9),
-        (te::TEXMODE2, 1 << 2),
-        (te::TXSIZE, 3 | 3 << 4),
-        (te::TXLOD, 0),
-        (te::TXADDR, 0),
-        (te::TXMIPMAP, PAGE),
-        (te::TXADDR, 0),
-        (te::TXBORDER, PAGE + 1),
+        (te::MGRAS_RE4_TEXTURE_MODE_FIRST, 1 | 3 << 3 | 4 << 9),
+        (te::MGRAS_TE1_TEXTURE_MODE_DRAWN, 1 << 2),
+        (te::MGRAS_TE1_TEXTURE_SIZE, 3 | 3 << 4),
+        (te::MGRAS_TE1_TEXTURE_LOD, 0),
+        (te::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX, 0),
+        (te::MGRAS_TE1_REG_F191, PAGE),
+        (te::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX, 0),
+        (te::MGRAS_TE1_TEXTURE_BORDER_BLOCK, PAGE + 1),
     ];
     // Half a 50-pixel square, white, s and t across it once.
     for (r, v) in [(0x000, 10.0), (0x001, 10.0), (0x002, 60.0), (0x003, 60.0), (0x004, 10.0), (0x005, 10.0)] {
@@ -535,10 +535,10 @@ fn a_texture_load_lands_between_the_triangles_around_it() {
     for c in 0..4u32 {
         mode.extend([(0x05C + c, 0xFFF000), (0x060 + 2 * c, 0), (0x061 + 2 * c, 0)]);
     }
-    hilo(&mut mode, te::WI, one as i64);
-    hilo(&mut mode, te::SW, 0);
-    hilo(&mut mode, te::TW, 0);
-    for (r, v) in [(te::DSWX, 1.0 / 50.0), (te::DTWX, 0.0), (te::DSWE, 0.0), (te::DTWE, 1.0 / 50.0), (te::DWIX, 0.0), (te::DWIE, 0.0)] {
+    hilo(&mut mode, te::MGRAS_RE4_REG_E084, one as i64);
+    hilo(&mut mode, te::MGRAS_RE4_REG_E080, 0);
+    hilo(&mut mode, te::MGRAS_RE4_REG_E082, 0);
+    for (r, v) in [(te::MGRAS_RE4_REG_E0C4, 1.0 / 50.0), (te::MGRAS_RE4_REG_E0C6, 0.0), (te::MGRAS_RE4_REG_E0C0, 0.0), (te::MGRAS_RE4_REG_E0C2, 1.0 / 50.0), (te::MGRAS_RE4_REG_E088, 0.0), (te::MGRAS_RE4_REG_E086, 0.0)] {
         hilo(&mut mode, r, (v * one) as i64);
     }
     p.apply(&mode);
@@ -546,12 +546,12 @@ fn a_texture_load_lands_between_the_triangles_around_it() {
     p.exec(reg::IR, rss::OP_AREA_LTOR);
     // New texels into level 0's page, then the same triangle further right.
     let load: Regs = vec![
-        (te::TL_MODE, 3 << 1 | 1 << 5),
-        (te::TL_SPEC, 3 << 4 | 3 << 8),
-        (te::TL_MIPMAP, PAGE),
-        (te::TL_BORDER, PAGE + 1),
-        (te::TL_S_LEFT, 0),
-        (te::TL_T_BOTTOM, 0),
+        (te::MGRAS_TE1_TEXTURE_LOADER_MODE, 3 << 1 | 1 << 5),
+        (te::MGRAS_TE1_TEXTURE_LOADER_LEVEL_SPEC, 3 << 4 | 3 << 8),
+        (te::MGRAS_TE1_TEXTURE_LOADER_MIPMAP_BLOCK, PAGE),
+        (te::MGRAS_TE1_TEXTURE_LOADER_BORDER_BLOCK, PAGE + 1),
+        (te::MGRAS_TE1_TEXTURE_LOADER_COPY_LEFT, 0),
+        (te::MGRAS_TE1_TEXTURE_LOADER_COPY_BOTTOM, 0),
     ];
     p.apply(&load);
     p.write(reg::XFRCONTROL, 5);
@@ -595,7 +595,7 @@ fn scanout_composes_as_the_cpu_frame() {
     let mut cpu = vec![0u32; frame::OUT_STRIDE * frame::H];
     let mut out = vec![0u32; frame::OUT_STRIDE * frame::H];
     for trial in 0..16 {
-        r.write(reg::DRBSIZE, (rng.chance(0.5) as u32) << 6 | (5 + rng.below(3) as u32) << 2 | 2, false);
+        r.write(reg::MGRAS_PP1_DRB_SIZE, (rng.chance(0.5) as u32) << 6 | (5 + rng.below(3) as u32) << 2 | 2, false);
         for did in 0..32 {
             let format = match rng.below(6) {
                 0 => 1,

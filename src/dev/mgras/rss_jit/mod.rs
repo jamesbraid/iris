@@ -322,7 +322,7 @@ fn common(rss: &mut Rss) -> PipeKey {
     let mut c = std::mem::take(&mut rss.jit_ctx.common);
     let pp1 = rss.reg(reg::PP1FILLMODE);
     let field = rss::draw_buffer(pp1);
-    let drbsize = rss.reg(reg::DRBSIZE);
+    let drbsize = rss.reg(reg::MGRAS_PP1_DRB_SIZE);
     let b = rss.target();
     c.tgt = [Target::default(); 2];
     c.tgt[0] = target(rss, b, rss::draws_b(field));
@@ -354,7 +354,7 @@ fn common(rss: &mut Rss) -> PipeKey {
         4..=7 => Pix::Ci12,
         _ => Pix::Plain,
     };
-    let winmode = rss.reg(reg::PP1WINMODE);
+    let winmode = rss.reg(reg::MGRAS_PP1_REG_F17B);
     c.cidmatch = rss::cid_match(winmode);
     c.cidwmask = rss::cid_write_mask(winmode) as u32;
     let mode = rss.reg(reg::CLIP_MODE);
@@ -406,33 +406,33 @@ fn common(rss: &mut Rss) -> PipeKey {
 fn gl_common(rss: &mut Rss, mut k: PipeKey) -> PipeKey {
     let mut c = std::mem::take(&mut rss.jit_ctx.gl);
     k.rgb = rss.rgb_mode();
-    let af = rss.reg(reg::AFUNCMODE);
+    let af = rss.reg(reg::MGRAS_PP1_REG_F169);
     k.alpha = (af & rss::TEST_ENABLE != 0).then_some((af & 7) as u8);
     c.aref = (((af >> 4) & 0xFFF) << 16) as i32;
-    let st = rss.reg(reg::STENCILMODE);
+    let st = rss.reg(reg::MGRAS_PP1_REG_F166);
     k.stencil = (st & rss::TEST_ENABLE != 0).then_some(Stencil {
         func: (st & 7) as u8,
         fail: ((st >> 4) & 7) as u8,
         zfail: ((st >> 8) & 7) as u8,
         zpass: ((st >> 12) & 7) as u8,
     });
-    let masks = rss.reg(reg::STENCILMASK);
+    let masks = rss.reg(reg::MGRAS_PP1_REG_F167);
     c.sref = (st >> 16) & 0xFF;
     c.scmask = masks & 0xFF;
     c.swmask = (masks >> 8) & 0xFF;
-    let zm = rss.reg(reg::ZMODE);
+    let zm = rss.reg(reg::MGRAS_PP1_REG_F168);
     k.z = (zm & rss::ZMODE_TEST != 0).then_some((zm & 7) as u8);
     c.zmask = ((zm >> 4) & 0xFF_FFFF) as u64;
-    let bf = rss.reg(reg::BLENDFACTOR);
+    let bf = rss.reg(reg::MGRAS_PP1_REG_F165);
     k.blend = (bf & rss::BLEND_ENABLE != 0).then_some(Blend {
         src: (bf & 0xF) as u8,
         dst: ((bf >> 4) & 0xF) as u8,
         eq: ((bf >> rss::BLEND_EQ_SHIFT) & 7) as u8,
     });
     c.blend_c = rss.blend_constant();
-    let m1 = rss.reg(te_reg::TEXMODE1);
+    let m1 = rss.reg(te_reg::MGRAS_RE4_TEXTURE_MODE_FIRST);
     if m1 & te1::TEXMODE1_ENABLE != 0 {
-        let m2 = rss.reg(te_reg::TEXMODE2);
+        let m2 = rss.reg(te_reg::MGRAS_TE1_TEXTURE_MODE_DRAWN);
         k.tex = Some(Tex {
             env: ((m1 >> 1) & 3) as u8,
             nc: ((m1 >> 3) & 3) as u8 + 1,
@@ -461,7 +461,7 @@ fn gl_common(rss: &mut Rss, mut k: PipeKey) -> PipeKey {
             }
         }
         let e = super::fixed::field12;
-        let (rg, b) = (rss.reg(te_reg::TXENV_RG), rss.reg(te_reg::TXENV_B));
+        let (rg, b) = (rss.reg(te_reg::MGRAS_RE4_TEXENV_RG), rss.reg(te_reg::MGRAS_RE4_TEXENV_B));
         c.env_c = [e(rg), e(rg >> 12), e(b)];
         c.env_a = e(b >> 12);
     }

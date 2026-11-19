@@ -252,7 +252,7 @@ fn detail_weight(si: u32, lambda: i32) -> i32 {
         i = x >> 8u;
         f = x & 0xffu;
     }
-    // From the TXLOD index on, no detail.
+    // From the texture_lod index on, no detail.
     if i >= sr(si, SL_DETAIL + 5u) {
         return 0;
     }
