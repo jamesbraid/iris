@@ -296,7 +296,7 @@ impl Uploads {
                 gpu.submit_locked(self, None);
                 *bulk = true;
             } else if *bulk {
-                if let Err(e) = gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(30)) }) {
+                if let Err(e) = wait_for(&gpu.device, None) {
                     gpu.fail(&format!("wait for an upload slot: {e}"));
                     return None;
                 }
@@ -313,6 +313,18 @@ impl Uploads {
     }
 }
 
+/// Wait for `submission` (all work with None) for up to ten minutes, warning every 30 s. A cold
+/// shader compile on a software rasteriser takes about 25 s, so a short deadline fails a slow device.
+fn wait_for(device: &wgpu::Device, submission: Option<wgpu::SubmissionIndex>) -> Result<(), wgpu::PollError> {
+    for slice in 1..=20 {
+        match device.poll(wgpu::PollType::Wait { submission_index: submission.clone(), timeout: Some(Duration::from_secs(30)) }) {
+            Err(wgpu::PollError::Timeout) => log::warn!("wgpu: still waiting for the GPU after {} s", 30 * slice),
+            done => return done.map(|_| ()),
+        }
+    }
+    Err(wgpu::PollError::Timeout)
+}
+
 impl Drop for Gpu {
     /// The upload ring's host memory is ours to free, once the GPU is done
     /// with it.
@@ -320,7 +332,7 @@ impl Drop for Gpu {
         if self.uploads.get_mut().slots.is_empty() {
             return;
         }
-        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(30)) });
+        let _ = wait_for(&self.device, None);
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         for s in &mut self.uploads.get_mut().slots {
             if let Some(raw) = s.raw.take() {
@@ -609,7 +621,7 @@ impl Gpu {
     /// Block until `submission` has finished (or everything, with None).
     pub fn wait(&self, submission: Option<wgpu::SubmissionIndex>) -> Result<(), String> {
         crate::pf_scope!(crate::perfetto::events::WGPU_WAIT);
-        let waited = self.device.poll(wgpu::PollType::Wait { submission_index: submission, timeout: Some(Duration::from_secs(30)) });
+        let waited = wait_for(&self.device, submission);
         // wgpu cannot wait for a submission it refused (a pipeline that
         // failed to build, a lost device); the error that refused it is
         // the one to report.
