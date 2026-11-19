@@ -40,7 +40,6 @@ use super::consts::{
     ODSY_INT_DEST_UPPER, ODSY_RESET_CONTROL, ODSY_STATUS, ODSY_STATUS0, ODSY_SW_TOKEN,
     ODSY_USER_CMD_FIFO, ODSY_XT_REQ_TIMEOUT, ODSY_BLOCK_END,
 };
-use super::debug::begin_name;
 use super::assembly::Prim;
 use super::draw::{RasterOp, RASTER_CLEAR};
 
@@ -231,6 +230,12 @@ impl Trace {
 }
 
 // ── names ────────────────────────────────────────────────────────────────────
+
+/// A primitive type's name.
+pub(super) fn begin_name(mode: u32) -> &'static str {
+    const NAMES: [&str; 10] = ["POINTS", "LINES", "LINE_LOOP", "LINE_STRIP", "TRIANGLES", "TRIANGLE_STRIP", "TRIANGLE_FAN", "QUADS", "QUAD_STRIP", "POLYGON"];
+    NAMES.get(mode as usize).copied().unwrap_or("?")
+}
 
 /// The name of a modelled aperture offset, for CPU lines. A configuration
 /// block register answers at its base and at base+4 (`registers::reg`), so
