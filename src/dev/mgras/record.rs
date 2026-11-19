@@ -291,7 +291,7 @@ impl BusDevice for ReplayMem {
 pub(super) mod tests {
     use super::*;
     use crate::config::GraphicsBoard;
-    use crate::dev::mgras::{Mgras, MGRAS_SLOT_GFX_BASE};
+    use crate::dev::mgras::{Mgras, GFX_SLOT_BASE};
     use crate::traits::BUS_BUSY;
 
     /// A High IMPACT board with its engine threads running (no display);
@@ -355,7 +355,7 @@ pub(super) mod tests {
 
     /// Store, retrying on bus back-pressure like the CPU does.
     pub fn write(m: &Mgras, bits: u8, off: u32, val: u64) {
-        let a = (MGRAS_SLOT_GFX_BASE + off) as u64;
+        let a = (GFX_SLOT_BASE + off) as u64;
         loop {
             let st = match bits {
                 8 => m.write8(a, val as u8),
@@ -372,7 +372,7 @@ pub(super) mod tests {
 
     /// Load, retrying while the board answers busy.
     pub fn read(m: &Mgras, bits: u8, off: u32) -> u64 {
-        let a = (MGRAS_SLOT_GFX_BASE + off) as u64;
+        let a = (GFX_SLOT_BASE + off) as u64;
         loop {
             let (st, v) = match bits {
                 8 => { let r = m.read8(a); (r.status, r.data as u64) }

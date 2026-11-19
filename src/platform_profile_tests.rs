@@ -15,7 +15,7 @@ mod tests {
     };
     use crate::dev::eeprom_93c56::Eeprom93c56;
     use crate::dev::ioc::{Ioc, IOC_BASE, IOC_SYS_ID, l1_regs, IOC_INT3_L1_STAT};
-    use crate::dev::mgras::{Mgras, GIO_ID, MGRAS_SLOT_GFX_BASE};
+    use crate::dev::mgras::{Mgras, GIO_ID, GFX_SLOT_BASE};
     use crate::traits::{BusDevice, Saveable};
     use crate::dev::gr2::{Gr2, Gr2Variant, GR2_BASE};
 
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn mgras_answers_the_gio_id_probe() {
         let m = Mgras::new(GraphicsBoard::SolidImpact, std::array::from_fn(|_| crate::irq::IrqLine::unconnected()), crate::disp::StatusSource::detached());
-        assert_eq!(m.read32(MGRAS_SLOT_GFX_BASE as u64).data, GIO_ID);
+        assert_eq!(m.read32(GFX_SLOT_BASE as u64).data, GIO_ID);
     }
 
     #[test]
