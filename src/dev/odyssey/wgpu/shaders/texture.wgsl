@@ -200,9 +200,15 @@ fn floor_i32(x: f32) -> i32 {
     return i - select(0, 1, x < f32(i));
 }
 
+// Rust's `as u32`: truncation, saturating, NaN to 0.
 fn sat_u32(x: f32) -> u32 {
-    let c = clamp(x, 0.0, 4294967040.0);
-    return select(u32(c), 0u, x != x);
+    if is_nan(x) || x <= 0.0 {
+        return 0u;
+    }
+    if x >= 4294967296.0 {
+        return 0xffffffffu;
+    }
+    return u32(x);
 }
 
 // log2(v) in 1/256 for v > 0 (fixed::log2_q8): the leading one's position

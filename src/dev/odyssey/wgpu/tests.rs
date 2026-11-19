@@ -951,3 +951,126 @@ fn a_failed_gpu_stops_the_unit_and_does_not_fall_back() {
     assert!(gpu.check().unwrap_err().contains("lost"));
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "the machine hears it once");
 }
+
+/// `fn name` and the comment lines above it, out of a shader's text.
+fn wgsl_fn(src: &str, name: &str) -> String {
+    let at = src.find(&format!("\nfn {name}(")).unwrap_or_else(|| panic!("no fn {name}")) + 1;
+    let end = at + src[at..].find("\n}\n").unwrap() + 3;
+    let mut start = at;
+    while let Some(prev) = src[..start - 1].rfind('\n') {
+        if !src[prev + 1..start - 1].starts_with("//") {
+            break;
+        }
+        start = prev + 1;
+    }
+    src[start..end].to_string()
+}
+
+/// The saturating float-to-integer helpers the kernels place texels and
+/// weights with, against the CPU pipeline's Rust casts and
+/// `lanes::floor_i32`: NaN, infinities, and values past the integer range.
+/// Subnormal inputs are left out: the GPUs flush them, which is its own
+/// finding.
+#[test]
+fn float_to_integer_casts_match_the_cpu_on_nan_and_out_of_range() {
+    use super::super::pipe::lanes;
+    use fearless_simd::{dispatch, Simd};
+
+    let Some(gpu) = gpu() else { return };
+    let vpro = include_str!("shaders/vpro.wgsl");
+    let texture = include_str!("shaders/texture.wgsl");
+    let mut wgsl = String::new();
+    for (text, names) in [(vpro, &["is_nan", "sat_i32"][..]), (texture, &["floor_i32", "sat_u32"][..])] {
+        for n in names {
+            if text.contains(&format!("\nfn {n}(")) {
+                wgsl += &wgsl_fn(text, n);
+                wgsl += "\n";
+            }
+        }
+    }
+    wgsl += r#"
+@group(0) @binding(0) var<storage, read> ins: array<u32>;
+@group(0) @binding(1) var<storage, read_write> outs: array<vec4<u32>>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+    let i = g.x;
+    if i >= arrayLength(&ins) {
+        return;
+    }
+    let x = bitcast<f32>(ins[i]);
+    outs[i] = vec4<u32>(bitcast<u32>(sat_i32(x)), bitcast<u32>(floor_i32(x)), sat_u32(x), 0u);
+}
+"#;
+    let wgsl: &'static str = Box::leak(wgsl.into_boxed_str());
+
+    let mut inputs: Vec<f32> = vec![
+        f32::NAN, -f32::NAN, f32::from_bits(0x7f80_0001), f32::from_bits(0xff80_0001), f32::from_bits(0x7fff_ffff),
+        f32::INFINITY, f32::NEG_INFINITY, f32::MAX, f32::MIN, 1e30, -1e30, 0.0, -0.0, 0.5, -0.5, 1.0, -1.0, 0.999_999_9, -0.999_999_9,
+        2147483520.0, 2147483648.0, 2147483904.0, -2147483648.0, -2147483904.0, -2147484160.0,
+        4294967040.0, 4294967296.0, 4294967808.0, 8589934592.0, -4294967296.0, 8388608.0, -8388608.0, 16777216.0,
+    ];
+    let mut rng = Lcg(0x5A7_C457);
+    while inputs.len() < 40_000 {
+        let v = f32::from_bits(rng.next() << 1 ^ rng.next());
+        // Normal values only (see above); NaN and infinity stay.
+        if v == 0.0 || v.is_normal() || !v.is_finite() {
+            inputs.push(v);
+        }
+    }
+    // Magnitudes around 2^31 and 2^32, where the casts saturate.
+    for k in 0..2000 {
+        let base = if k % 2 == 0 { 2147483648.0f32 } else { 4294967296.0 };
+        let v = f32::from_bits(base.to_bits() + (k / 2) as u32 - 500);
+        inputs.push(v);
+        inputs.push(-v);
+    }
+
+    let src = crate::wgpu::shader::Source::new("cast test").body(crate::wgpu::shader::Fragment::new("cast_test.wgsl", wgsl));
+    let entry = |binding, read_only| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None },
+        count: None,
+    };
+    let layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("cast"), entries: &[entry(0, true), entry(1, false)] });
+    let pipeline = src.compute_pipeline(&gpu.device, "main", &[&layout]).unwrap_or_else(|e| panic!("{e}"));
+    let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+    let bits: Vec<u32> = inputs.iter().map(|v| v.to_bits()).collect();
+    let inb = gpu.buffer("cast in", (bits.len() * 4) as u64, storage);
+    let outb = gpu.buffer("cast out", (bits.len() * 16) as u64, storage);
+    gpu.write(&inb, 0, bytemuck::cast_slice(&bits));
+    let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("cast"),
+        layout: &layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: inb.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: outb.as_entire_binding() },
+        ],
+    });
+    let mut enc = gpu.encoder("cast");
+    {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("cast"), timestamp_writes: None });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups((bits.len() as u32).div_ceil(64), 1, 1);
+    }
+    gpu.submit(enc);
+    let mut bytes = vec![0u8; outb.size() as usize];
+    gpu.read(&outb, &[(0, outb.size())], &mut bytes).unwrap_or_else(|e| panic!("{e}"));
+    gpu.check().unwrap_or_else(|e| panic!("{e}"));
+    let got: &[[u32; 4]] = bytemuck::cast_slice(&bytes);
+
+    let mut bad = Vec::new();
+    for (x, g) in inputs.iter().zip(got) {
+        let floor = dispatch!(lanes::level(), s => {
+            let v = s.splat_f32x4(*x);
+            s.as_array_i32x4(lanes::floor_i32(s, v))[0]
+        });
+        let want = [(*x as i32) as u32, floor as u32, *x as u32];
+        if g[..3] != want {
+            bad.push(format!("{x:e} ({:#010x}): gpu {:#x} {:#x} {:#x}, cpu {:#x} {:#x} {:#x}", x.to_bits(), g[0], g[1], g[2], want[0], want[1], want[2]));
+        }
+    }
+    assert!(bad.is_empty(), "{} of {} inputs differ on {}; first {:?}", bad.len(), inputs.len(), gpu.caps, &bad[..bad.len().min(8)]);
+}

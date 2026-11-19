@@ -114,10 +114,24 @@ fn p(x: f32) -> f32 {
     return bitcast<f32>(bitcast<u32>(x) ^ nz);
 }
 
+// NaN by its bits: naga lowers `x != x` to an ordered compare, false for NaN
+// on Vulkan.
+fn is_nan(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
+}
+
 // Rust's `as i32`: truncation, saturating, NaN to 0.
 fn sat_i32(x: f32) -> i32 {
-    let c = clamp(x, -2147483648.0, 2147483520.0);
-    return select(i32(c), 0, x != x);
+    if is_nan(x) {
+        return 0;
+    }
+    if x >= 2147483648.0 {
+        return 2147483647;
+    }
+    if x <= -2147483648.0 {
+        return -2147483647 - 1;
+    }
+    return i32(x);
 }
 
 // word_for_fraction32: the 24-bit depth word of a window depth.
