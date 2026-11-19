@@ -269,10 +269,13 @@ size_t iris_engine_drain_events(IrisEngine *h, IrisEngineEvent *out,
 
 /*
  * Lent memory. drain_dirty moves the runs the engine wrote since the last
- * call into out (call it after quiesce too; runs past cap are dropped, so
- * give room for all). trapped lists the ranges the shell must not map into
+ * call into out, up to cap, and keeps the rest for the next call: call it
+ * until it returns less than cap (after quiesce too). Runs are whole
+ * 16 KiB blocks but for the last, so there are at most (lent_len / 16 KiB + 1)
+ * / 2 of them at once. trapped lists the ranges the shell must not map into
  * the guest: a CPU read calls observe_lent first, a CPU write calls
- * cpu_wrote after. The trapped ranges are fixed for the engine's life.
+ * cpu_wrote after. The trapped ranges are fixed for the engine's life and
+ * few; trapped returns at most cap of them.
  */
 size_t iris_engine_drain_dirty(IrisEngine *h, IrisEngineRun *out, size_t cap);
 size_t iris_engine_trapped(IrisEngine *h, IrisEngineRun *out, size_t cap);
