@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use iris_kona::dev::kona::defs::{CAUSE_LOWATER, INT_ENABLE};
 use iris_kona::dev::kona::engine::{KonaEngine, Options};
 use iris_kona::dev::kona::ident::KonaConfig;
 use parking_lot::Mutex;
@@ -133,7 +134,7 @@ fn tally(e: &mut Engine, out: &mut Vec<Event>, t: &mut Tally) {
     }
 }
 
-fn run(rp: &Replay, cfg: KonaConfig, eager: bool, ram: Ram, snapshot_at: Option<usize>, gpu: &Option<iris_kona::SharedGpu>, frame_every: usize) -> (Engine, Tally, std::time::Duration) {
+fn run(rp: &Replay, cfg: KonaConfig, eager: bool, ram: Ram, snapshot_at: Option<usize>, gpu: &Option<iris_kona::SharedGpu>, frame_every: usize, sleep_on_drain: bool) -> (Engine, Tally, std::time::Duration) {
     let opts = || Options { gpu: gpu.clone(), ..Options::default() };
     let mut e = Engine::new(cfg, ram.clone(), opts(), None).expect("engine");
     let mut t = Tally::default();
@@ -179,6 +180,12 @@ fn run(rp: &Replay, cfg: KonaConfig, eager: bool, ram: Ram, snapshot_at: Option<
                 }
                 if eager {
                     e.run(usize::MAX);
+                }
+                // A guest enables the FIFO-low cause to sleep until the pipe drains, and the pipe
+                // drains once the shell gives it its frames; the recording has the guest's reads
+                // after the interrupt, so the replay waits here as that guest does.
+                if sleep_on_drain && *off == INT_ENABLE && *val & CAUSE_LOWATER as u64 != 0 {
+                    settle(&mut e);
                 }
             }
             Rec::Read { off, size, val, mask, line } => {
@@ -245,6 +252,7 @@ fn main() {
     let mut use_gpu = false;
     let mut skip_onewire = false;
     let mut frame_every = 0usize;
+    let mut sleep_on_drain = false;
     let mut snapshot_at: Option<usize> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -256,6 +264,7 @@ fn main() {
             "--gpu" => use_gpu = true,
             "--skip-onewire" => skip_onewire = true,
             "--frame-every" => frame_every = args.next().unwrap().parse().unwrap(),
+            "--sleep-on-drain" => sleep_on_drain = true,
             "--snapshot-at" => snapshot_at = args.next().map(|n| n.parse().unwrap()),
             "--widget" => widget = args.next().unwrap().parse().unwrap(),
             _ => file = Some(a),
@@ -271,7 +280,7 @@ fn main() {
         println!("GPU: {}", g.caps);
     }
     let ram = Ram::default();
-    let (mut e, mut t, d) = run(&rp, cfg, eager, ram, snapshot_at, &gpu, frame_every);
+    let (mut e, mut t, d) = run(&rp, cfg, eager, ram, snapshot_at, &gpu, frame_every, sleep_on_drain);
     if skip_onewire {
         let skipped: usize = [0x98, 0x9c].iter().filter_map(|o| t.by_offset.remove(o)).sum();
         t.mismatches -= skipped;
@@ -322,7 +331,7 @@ fn main() {
         let mut best = std::time::Duration::MAX;
         let mut all = Vec::new();
         for _ in 0..runs {
-            let (_e, _t, d) = run(&rp, cfg, eager, Ram::default(), None, &gpu, frame_every);
+            let (_e, _t, d) = run(&rp, cfg, eager, Ram::default(), None, &gpu, frame_every, sleep_on_drain);
             best = best.min(d);
             all.push(d.as_secs_f64());
         }
