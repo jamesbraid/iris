@@ -873,9 +873,9 @@ fn unframable_words_are_dropped() {
 fn video_commands_frame_by_table_or_by_checksum() {
     let f = Fixture::hooked();
     f.take_jobs();
-    // 0x08 SetupFrameBuffer: three data words.
+    // 0x08 DISPREQ_FRAME_BUFFER_TILE_SET_UP: three data words.
     f.cmd(&[0x1a6, 0x08, 1280, 1024, 3, 0x08 + 1280 + 1024 + 3]);
-    // 0x00 Test: one data word.
+    // 0x00 DISPREQ_LOOP_BACK_TEST: one data word.
     f.cmd(&[0x1a6, 0x00, 11, 11]);
     // 0x5d is past the table: the checksum is searched for, and the command is consumed with nothing posted.
     f.cmd(&[0x1a6, 0x5d, 11, 22, 33, 0x5d + 66]);

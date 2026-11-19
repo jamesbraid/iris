@@ -7,36 +7,36 @@
 //! (`start`). The layouts are those of the server's combination load and its channel requests;
 //! word 0 of every channel setter is the physical channel, the board mask's bit number.
 //!
-//! - DisableChannel [channel]: the channel stops and holds no format until the next LoadFormat.
-//! - LoadFormat [channel, 1, ...]: words 2 to 18 are the format file's name and its datestamp,
-//!   kept for GetChannelConfig; words 23 and 24 are the active lines and pixels, the output
+//! - DISPREQ_DISABLE_A_CHANNEL [channel]: the channel stops and holds no format until the next DISPREQ_LOAD_A_VIDEO_FORMAT.
+//! - DISPREQ_LOAD_A_VIDEO_FORMAT [channel, 1, ...]: words 2 to 18 are the format file's name and its datestamp,
+//!   kept for DISPREQ_CHANNEL_CONFIGURATION_READ; words 23 and 24 are the active lines and pixels, the output
 //!   size. The channel runs.
-//! - EnableChannel [channel, on, own timing]: word 1 nonzero runs a channel that holds a format.
-//! - Resize [channel, x, top row from the bottom, width, height, 1, flicker, 0]: the input
-//!   rectangle, and GetResize's pan rectangle when word 7 is 0.
-//! - PlacementRes [channel, x code, y code, w3, 1, largest width, height, smallest width,
-//!   height]: GetResize words 8 to 15.
-//! - ChannelBlanking [channel, blank]; ChannelGammaMap [channel, map]; CursorPriority
-//!   [channel, priority]; Vampire [channel, source, ...].
+//! - DISPREQ_ENABLE_A_CHANNEL [channel, on, own timing]: word 1 nonzero runs a channel that holds a format.
+//! - DISPREQ_CHANNEL_RESIZE [channel, x, top row from the bottom, width, height, 1, flicker, 0]: the input
+//!   rectangle, and DISPREQ_CHANNEL_RESIZE_READ's pan rectangle when word 7 is 0.
+//! - DISPREQ_PLACEMENT_RESOLUTION [channel, x code, y code, w3, 1, largest width, height, smallest width,
+//!   height]: DISPREQ_CHANNEL_RESIZE_READ words 8 to 15.
+//! - DISPREQ_CHANNEL_BLANKING_SET [channel, blank]; DISPREQ_CHANNEL_GAMMA_MAP_SELECT [channel, map]; DISPREQ_CURSOR_PRIORITY
+//!   [channel, priority]; DISPREQ_COPY_ANOTHER_CHANNEL_OUTPUT [channel, source, ...].
 //!
-//! Inferred: the combination load sends DisableChannel for every channel, then each enabled
-//! channel's LoadFormat, Resize and blanking, then two EnableChannel passes, [channel, on, 0]
+//! Inferred: the combination load sends a channel disable for every channel, then each enabled
+//! channel's format load, resize and blanking, then two channel enable passes, [channel, on, 0]
 //! and [channel, 0, own timing]. Word 1 cannot be the channel's state, or the second pass would
-//! turn every channel off. So a channel runs from its LoadFormat, and EnableChannel's word 1 is
-//! only a request to run a channel that has had a LoadFormat since its last DisableChannel.
+//! turn every channel off. So a channel runs from its format load, and the channel enable's word 1 is
+//! only a request to run a channel that has had a format load since its last channel disable.
 //!
 //! The Gets answer from this state. A reply is the reply id, the data words, then the id plus the
 //! data words, written from byte 8 of the return page ahead of the ready word; the reply ids and
 //! sizes are the server's tables (`tables::VIDEO_REPLY`), and the words not set by `reply_words`
 //! are zero:
 //!
-//! - GetBoardConfig: version 1, the board mask (bit n: physical channel n exists).
-//! - GetChannelConfig: word 0 bit 0x1 present, 0x2 the encoder (channel 0), 0xc enabled and
-//!   active; words 1 to 17 the format's name and datestamp, as LoadFormat gave them; word 18 the
+//! - DISPREQ_BOARD_CONFIGURATION_READ: version 1, the board mask (bit n: physical channel n exists).
+//! - DISPREQ_CHANNEL_CONFIGURATION_READ: word 0 bit 0x1 present, 0x2 the encoder (channel 0), 0xc enabled and
+//!   active; words 1 to 17 the format's name and datestamp, as DISPREQ_LOAD_A_VIDEO_FORMAT gave them; word 18 the
 //!   cursor priority.
-//! - GetResize: the input rectangle, the pan rectangle, then PlacementRes's words.
-//! - GetVampire: word 0 the channel whose timing this one takes.
-//! - GetChannelBlanking: word 0 whether the channel is blanked. GetChannelEnables: word 1 whether
+//! - DISPREQ_CHANNEL_RESIZE_READ: the input rectangle, the pan rectangle, then DISPREQ_PLACEMENT_RESOLUTION's words.
+//! - DISPREQ_COPY_CHANNEL_INFORMATION_READ: word 0 the channel whose timing this one takes.
+//! - DISPREQ_CHANNEL_BLANKING_READ: word 0 whether the channel is blanked. DISPREQ_CHANNEL_ENABLES_READ: word 1 whether
 //!   it is enabled.
 //!
 //! Approximated: the layouts are the server's readers'; no reply was measured from a pipe. The
@@ -49,7 +49,7 @@
 //! error flag, rebuild again and run the built-in fallback combination. The stored words are
 //! video commands framed as on the command page: the command, its data words and their checksum;
 //! the image is accepted only whole, every command known with the table's data-word count and
-//! every checksum matching. The run records the size SetupFrameBuffer gave (`frame`), but the
+//! every checksum matching. The run records the size the frame-buffer set-up gave (`frame`), but the
 //! board keeps the managed size it was configured with and reports that one to the X server; a
 //! combination that names another is logged and the other size is ignored.
 //!
@@ -58,10 +58,10 @@
 //! rejects the image; a Get in the image runs for no effect; and a system reset runs nothing,
 //! where a pipe's power-up also runs the stored image before the PROM.
 //!
-//! Approximated: a channel that takes another's timing (Vampire), one bound to an X window, the
-//! timing words of LoadFormat are kept or logged and change nothing on the screen; the board shows
-//! one channel's worth of pixels at the managed size. Blanking (ChannelBlanking and
-//! TempBlankAllChannels) blacks the frame when it blanks channel 0 or every channel.
+//! Approximated: a channel that takes another's timing (copy-another-channel-output), one bound to an X window, the
+//! timing words of format load are kept or logged and change nothing on the screen; the board shows
+//! one channel's worth of pixels at the managed size. Blanking (channel blanking and
+//! temporary blank of all channels) blacks the frame when it blanks channel 0 or every channel.
 //!
 //! Ported from hw/misc/sgi-kona.c in jamesbraid/qemu-sgi-origami.
 
@@ -91,7 +91,7 @@ const TILE_WIDTH: u64 = 160;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Channel {
     pub enabled: bool,
-    /// A LoadFormat since its DisableChannel.
+    /// A format load since its channel disable.
     pub loaded: bool,
     /// The format's active size: pixels, then lines.
     pub format: (u32, u32),
@@ -104,9 +104,9 @@ pub struct Channel {
     /// The channel whose timing this one takes.
     pub source: u32,
     pub name: [u32; NAME_WORDS],
-    /// GetResize words 4 to 7.
+    /// The resize read's words 4 to 7.
     pub pan: [u32; 4],
-    /// GetResize words 8 to 15: PlacementRes's words 1 to 8.
+    /// The resize read's words 8 to 15: the placement resolution's words 1 to 8.
     pub placement: [u32; 8],
 }
 
@@ -151,9 +151,9 @@ impl Channel {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Channels {
     pub channel: [Channel; CHANNELS],
-    /// TempBlankAllChannels' last word.
+    /// The last word of the temporary blank of all channels.
     pub blanked: bool,
-    /// The managed area SetupFrameBuffer last named.
+    /// The managed area frame-buffer set-up last named.
     pub frame: (u32, u32),
     /// A setter raised the error flag, which stops a stored combination.
     pub error: bool,
@@ -201,7 +201,7 @@ impl Channels {
         }
     }
 
-    /// SetupFrameBuffer [width, height, pixel depth], as the firmware runs it: a budget below
+    /// The frame-buffer set-up [width, height, pixel depth], as the firmware runs it: a budget below
     /// Small's, or a named depth (0 to 3) the budget does not cover, raises the error flag; -1,
     /// -2 and other values pick a depth that fits. It never replies.
     fn setup_frame_buffer(&mut self, width: u32, height: u32, depth: u32) {
@@ -325,7 +325,7 @@ impl Channels {
         match command {
             VIDEO_TEMP_BLANK => {
                 self.blanked = d(0) != 0;
-                crate::dlog!(LogModule::Kona, "kona: TempBlankAllChannels {}", d(0));
+                crate::dlog!(LogModule::Kona, "kona: temporary blank of all channels {}", d(0));
             }
             VIDEO_SETUP_FRAME_BUFFER => self.setup_frame_buffer(d(0), d(1), d(2)),
             VIDEO_DISABLE_CHANNEL | VIDEO_LOAD_FORMAT | VIDEO_ENABLE_CHANNEL | VIDEO_RESIZE | VIDEO_CHANNEL_BLANKING | VIDEO_CHANNEL_GAMMA_MAP | VIDEO_CURSOR_PRIORITY | VIDEO_VAMPIRE | VIDEO_BIND_TO_X_WINDOW | VIDEO_PLACEMENT_RES => {
@@ -435,7 +435,7 @@ fn append(image: &mut Vec<u32>, command: u32, data: &[u32]) {
     image.push(data.iter().fold(command, |s, w| s.wrapping_add(*w)));
 }
 
-/// LoadFormat for `channel`, named `name` and datestamped `stamp`, 1280x1024 at 60 Hz in the
+/// The format load for `channel`, named `name` and datestamped `stamp`, 1280x1024 at 60 Hz in the
 /// words the model reads.
 fn append_format(image: &mut Vec<u32>, channel: u32, name: &str, stamp: u32, size: (u32, u32)) {
     let mut format = [0u32; 383];
@@ -462,8 +462,8 @@ fn append_format(image: &mut Vec<u32>, channel: u32, name: &str, stamp: u32, siz
 ///
 /// Approximated: only the commands the model gives meaning are built, so not the clock, encoder,
 /// gamma, sync, gain, pedestal and phase settings, the cursor priorities (which stay 0, as at
-/// reset), or the commands for the option channel; and LoadFormat's words past the size and rate
-/// are zero. Both channels' Resize and PlacementRes words are the firmware's.
+/// reset), or the commands for the option channel; and format load's words past the size and rate
+/// are zero. Both channels' resize and placement resolution words are the firmware's.
 fn fallback() -> Vec<u32> {
     let mut i = Vec::new();
     for c in 0..2 {
@@ -497,7 +497,7 @@ fn names_channel(command: u32) -> bool {
 mod tests {
     use super::*;
 
-    /// A LoadFormat request for `channel`: name words, datestamp and the active size.
+    /// A format-load request for `channel`: name words, datestamp and the active size.
     fn format(channel: u32, name: &str, stamp: u32, width: u32, height: u32) -> Vec<u32> {
         let mut w = vec![0u32; 383];
         w[0] = channel;
@@ -724,7 +724,7 @@ mod tests {
         assert_eq!(&name[2..6], &[u32::from_be_bytes(*b"1280"), u32::from_be_bytes(*b"x102"), u32::from_be_bytes(*b"4_60"), u32::from_be_bytes(*b".vfo")]);
         assert_eq!(name[18], 0x31ea_4b22);
         let two = words(&c.reply(VIDEO_GET_RESIZE, &[1]).unwrap());
-        assert_eq!(&two[9..17], &[4, 1, 4, 1, 2048, 2048, 640, 486], "PlacementRes of channel 1");
+        assert_eq!(&two[9..17], &[4, 1, 4, 1, 2048, 2048, 640, 486], "placement resolution of channel 1");
     }
 
     #[test]
