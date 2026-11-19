@@ -89,7 +89,7 @@ use ge11::Ge11;
 use hq3::{host, Hq3Engine, Hq3Regs, Hq3Sink};
 pub use gl::Gl;
 pub use hq3::Hq3Board;
-use rss::Rss;
+use rss::{Entry, Rss};
 
 /// The graphics slot the board decodes.
 pub const MGRAS_SLOT_GFX_BASE: u32 = 0x1F00_0000;
@@ -1913,39 +1913,23 @@ impl Mgras {
             }
             let changed = match t {
                 tag::EXIT => break,
-                t if t < 0x1000 => {
-                    let reg = (t & 0x7FF) >> 1;
-                    if reg == rss::reg::CONFIG
-                        || rss.accepts_destination()
-                        || Rss::uses_shared_texture_state(reg)
-                    {
-                        rss.write(reg, val as u32, t & 1 != 0)
-                    } else {
-                        false
-                    }
-                }
+                t if t < 0x1000 => rss.run_entry(Entry::Write { reg: (t & 0x7FF) >> 1, val: val as u32, exec: t & 1 != 0 }),
                 tag::PIO_ADVANCE => {
                     advances += 1;
                     if id == 0 {
-                        rss.pio_read_hi();
+                        rss.run_entry(Entry::PioAdvance);
                         self.pio_advances.store(advances, Ordering::Release);
                     } else {
                         let wait = crossbeam_utils::Backoff::new();
                         while self.pio_advances.load(Ordering::Acquire) < advances {
                             wait.snooze();
                         }
-                        rss.pio_read_hi();
+                        rss.run_entry(Entry::PioAdvance);
                     }
                     false
                 }
-                tag::GL_ENTER => {
-                    rss.gl_enter();
-                    false
-                }
-                tag::GL_LEAVE => {
-                    rss.gl_leave();
-                    false
-                }
+                tag::GL_ENTER => rss.run_entry(Entry::GlEnter),
+                tag::GL_LEAVE => rss.run_entry(Entry::GlLeave),
                 tag::DMA_LINE => {
                     let (line, len) = (val as u32, (val >> 32) as usize);
                     payload.resize(len.div_ceil(8), 0);
@@ -1955,8 +1939,7 @@ impl Mgras {
                     for (b, w) in bytes.chunks_exact_mut(8).zip(&payload) {
                         b.copy_from_slice(&w.to_be_bytes());
                     }
-                    rss.dma_write_line(line, &bytes[..len]);
-                    true
+                    rss.run_entry(Entry::DmaLine { line, bytes: &bytes[..len] })
                 }
                 _ => false,
             };

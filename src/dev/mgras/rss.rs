@@ -1117,6 +1117,20 @@ pub struct Planes {
     pub te_sync: TeSync,
 }
 
+/// An entry of the stream the raster engines read: what the HQ3 parser
+/// sends them.
+pub enum Entry<'a> {
+    /// A raster register write; `exec` runs the primitive after it. Dropped
+    /// when `CONFIG.DestRE` routes it to the other engine.
+    Write { reg: u32, val: u32, exec: bool },
+    /// The PIO read takes the next doubleword.
+    PioAdvance,
+    GlEnter,
+    GlLeave,
+    /// One line of a host-to-board transfer, as bytes.
+    DmaLine { line: u32, bytes: &'a [u8] },
+}
+
 /// The engines' handshake around a write to their shared `Te1`: each
 /// engine but 0 says how many writes it has reached (`arrived`, one cache
 /// line each), engine 0 how many it has made (`done`). Valid zeroed.
@@ -1561,6 +1575,36 @@ impl Rss {
             let wait = crossbeam_utils::Backoff::new();
             while self.te_sync.done.load(Ordering::Acquire) < self.te_writes {
                 wait.snooze();
+            }
+        }
+    }
+
+    /// Run one entry of the stream every raster engine reads, and say
+    /// whether it stored pixels. Both `Mgras`'s raster threads and the
+    /// engine crate dispatch through here. The waits between engines
+    /// (`te_settle`, the PIO advance) stay with the caller.
+    #[inline]
+    pub fn run_entry(&mut self, e: Entry) -> bool {
+        match e {
+            Entry::Write { reg: r, val, exec } => {
+                (r == reg::CONFIG || self.accepts_destination() || Rss::uses_shared_texture_state(r))
+                    && self.write(r, val, exec)
+            }
+            Entry::PioAdvance => {
+                self.pio_read_hi();
+                false
+            }
+            Entry::GlEnter => {
+                self.gl_enter();
+                false
+            }
+            Entry::GlLeave => {
+                self.gl_leave();
+                false
+            }
+            Entry::DmaLine { line, bytes } => {
+                self.dma_write_line(line, bytes);
+                true
             }
         }
     }
