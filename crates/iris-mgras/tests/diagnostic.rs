@@ -168,9 +168,8 @@ fn every_path_stores_the_same_scene() {
 }
 
 /// The acceptance the plan names: each scene's wrapping sum is the
-/// diagnostic's stored sum. The dither matrix was fitted to the three
-/// triangles together, so their match is a smoke check; the lines are not
-/// part of that fit.
+/// diagnostic's stored sum. The three triangles meet it with the classic
+/// Bayer matrix (inferred); the lines are the open acceptance below.
 #[test]
 fn the_engine_stores_what_the_diagnostic_stores() {
     for (name, w, rows, cols, want) in scenes().into_iter().take(3) {

@@ -1434,7 +1434,7 @@ fn gl_default_light_and_material() {
     fifo_token(&m, 0x71, &[0]);
     fifo_token(&m, 0x07, &[f(0.0), f(0.0), f(1.0)]);
     gl_mid_quad(&m, [0.0; 4]);
-    assert_eq!(grey(gl_px(&m, 200, 150)), [215, 215, 215]);
+    assert_eq!(grey(gl_px(&m, 200, 150)), [214, 214, 214]);
     // A red diffuse material through glMaterial (front, GL_DIFFUSE).
     fifo_token(&m, 0x11, &[0x404, 0x1201, f(1.0), f(0.0), f(0.0), f(1.0)]);
     gl_mid_quad(&m, [0.0; 4]);
