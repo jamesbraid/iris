@@ -429,6 +429,8 @@ pub fn answer(gl: &mut Gl, c: &mut Counts, selector: u32, a: &[u32]) -> Vec<u32>
             let p = gl.pix.pos;
             let mut r = [0u32; reply::RASTER_WORDS];
             r[reply::RASTER_COLOUR..][..4].copy_from_slice(&floats(&p.colour));
+            r[reply::RASTER_INDEX] = p.index.to_bits();
+            r[reply::RASTER_TEXTURE..][..4].copy_from_slice(&floats(&p.texture));
             r[reply::RASTER_POSITION..][..4].copy_from_slice(&floats(&[p.x, p.y, p.z as f32 / 4_294_967_040.0, 1.0]));
             r[reply::RASTER_VALID] = p.valid as u32;
             r.to_vec()
@@ -1015,12 +1017,14 @@ mod tests {
     fn the_raster_position_reply_tiles_its_fifteen_words() {
         let mut gl = Gl::default();
         let mut c = Counts::default();
-        gl.pix.pos = crate::dev::kona::back::gl::pixels::RasterPos { valid: true, x: 3.0, y: 4.0, z: 0, colour: [0.25, 0.5, 0.75, 1.0] };
+        gl.pix.pos = crate::dev::kona::back::gl::pixels::RasterPos { valid: true, x: 3.0, y: 4.0, z: 0, colour: [0.25, 0.5, 0.75, 1.0], index: 7.0, texture: [0.1, 0.2, 0.3, 0.4] };
         let r = answer(&mut gl, &mut c, QUERY_RASTER_POSITION_STATE, &[0]);
         assert_eq!(r.len(), 15);
         let f = |i: usize| f32::from_bits(r[i]);
         assert_eq!([f(0), f(1), f(2), f(3)], [0.25, 0.5, 0.75, 1.0], "colour at byte 0");
         assert_eq!([f(9), f(10), f(11), f(12)], [3.0, 4.0, 0.0, 1.0], "position at byte 36");
+        assert_eq!(f(4), 7.0, "index at byte 16");
+        assert_eq!([f(5), f(6), f(7), f(8)], [0.1, 0.2, 0.3, 0.4], "texture at byte 20");
         assert_eq!(r[13], 1, "valid at byte 52");
         assert_eq!(r[14], 0, "distance at byte 56");
         gl.pix.pos.valid = false;

@@ -2210,6 +2210,8 @@ pub mod reply {
     /// handler's push order is not separately decoded.
     pub const RASTER_WORDS: usize = 15;
     pub const RASTER_COLOUR: usize = 0;
+    pub const RASTER_INDEX: usize = 4;
+    pub const RASTER_TEXTURE: usize = 5;
     pub const RASTER_POSITION: usize = 9;
     pub const RASTER_VALID: usize = 13;
     /// Feedback vertices: the pipe's formatter scales window x and y by 0.0625 after subtracting
