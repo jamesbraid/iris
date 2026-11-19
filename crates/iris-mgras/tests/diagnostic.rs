@@ -207,3 +207,47 @@ fn the_engine_stores_the_diagnostics_lines() {
     let got = sum(&readback(Board::High, Mode::Inline, None, &scene(lines), 17, 14));
     assert_eq!(got, 0xc584_ed6b, "five lines: sum {got:#010x}");
 }
+
+/// The shipped diagnostic holds the stored tables; this reads them in place
+/// from a local copy and never keeps a word. Offsets: data base 0x20953380
+/// is file offset 0x143380 (red, green, blue at +0, +0x600, +0xc00), the
+/// lines table is at 0x144b80. Words are big-endian 0xAABBGGRR.
+const IDE_ENV: &str = "IRIS_MGRAS_IDE";
+const IDE_DEFAULT: &str = "usr/stand/ide";
+const IDE_SIZE: u64 = 1_516_224;
+
+fn stored(ide: &[u8], offset: usize, n: usize) -> Vec<u32> {
+    ide[offset..offset + 4 * n].chunks(4).map(|b| u32::from_be_bytes(b.try_into().unwrap())).collect()
+}
+
+/// Words of the engine's scene that differ from the stored table's.
+fn differing(name: &str, got: &[u32], want: &[u32], cols: usize) -> usize {
+    let bad: Vec<usize> = (0..want.len()).filter(|&i| got[i] != want[i]).collect();
+    println!("{name}: {} of {} words differ (sum {:#010x}, stored {:#010x})", bad.len(), want.len(), sum(got), sum(want));
+    bad.iter().take(8).for_each(|&i| println!("  row {} col {}: engine {:#010x}", i / cols, i % cols, got[i]));
+    bad.len()
+}
+
+/// Word for word against the stored tables, when the shipped binary is
+/// available locally; the triangles must match exactly. The lines' count is
+/// reported only.
+#[test]
+fn the_engine_matches_the_stored_tables_word_for_word() {
+    let path = std::env::var(IDE_ENV).unwrap_or_else(|_| IDE_DEFAULT.into());
+    let Ok(ide) = std::fs::read(&path) else {
+        eprintln!("skipped: no diagnostic binary at {path} (set {IDE_ENV})");
+        return;
+    };
+    assert_eq!(ide.len() as u64, IDE_SIZE, "{path} is not the IRIX 6.4 Octane diagnostic");
+    let tables = [(0x143380, 0), (0x143980, 1), (0x143f80, 2), (0x144b80, 3)];
+    let mut triangles = 0;
+    for (offset, i) in tables {
+        let (name, w, rows, cols, _) = scenes().swap_remove(i);
+        let got = readback(Board::High, Mode::Inline, None, &w, rows, cols);
+        let n = differing(name, &got, &stored(&ide, offset, (rows * cols) as usize), cols as usize);
+        if i < 3 {
+            triangles += n;
+        }
+    }
+    assert_eq!(triangles, 0, "the triangles differ from the stored tables");
+}
