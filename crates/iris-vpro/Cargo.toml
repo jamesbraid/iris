@@ -32,3 +32,4 @@ wgpu = ["scanout"]
 scanout = []
 
 [dev-dependencies]
+sgi-engine = { path = "../sgi-engine", features = ["conformance"] }
