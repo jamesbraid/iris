@@ -200,7 +200,26 @@ impl Scanout {
     /// target, with no second pass. `dst` must hold `(height - 1) * stride_words + width` words and the
     /// stride must be at least the width.
     pub fn compose_into(&mut self, pipeline: &ScanoutPipeline, width: u32, height: u32, slot: &[u8], groups: &[&wgpu::BindGroup], dst: &wgpu::Buffer, stride_words: u32) -> Result<(), String> {
+        // A destination that cannot hold the frame is the caller's mistake: refused with the device
+        // left as it was (`check_into`). Only what the GPU does wrong fails the device.
+        Self::check_into(width, height, dst, stride_words)?;
         self.compose_into_inner(pipeline, width, height, slot, groups, dst, stride_words).map_err(|e| self.fail(e))
+    }
+
+    /// Whether `dst` can take a `width` by `height` frame of `stride_words` a row: the stride at least the
+    /// width, `(height - 1) * stride + width` words of room, and storage usage.
+    pub fn check_into(width: u32, height: u32, dst: &wgpu::Buffer, stride_words: u32) -> Result<(), String> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        if stride_words < width {
+            return Err(format!("a stride of {stride_words} words under the width {width}"));
+        }
+        let need = ((height as u64 - 1) * stride_words as u64 + width as u64) * 4;
+        if dst.size() < need || !dst.usage().contains(wgpu::BufferUsages::STORAGE) {
+            return Err(format!("a destination of {} bytes (storage: {}) for a frame of {need}", dst.size(), dst.usage().contains(wgpu::BufferUsages::STORAGE)));
+        }
+        Ok(())
     }
 
     fn compose_into_inner(&mut self, pipeline: &ScanoutPipeline, width: u32, height: u32, slot: &[u8], groups: &[&wgpu::BindGroup], dst: &wgpu::Buffer, stride_words: u32) -> Result<(), String> {
@@ -210,13 +229,6 @@ impl Scanout {
         }
         if pixels > self.max_pixels as u64 {
             return Err(format!("a {width} x {height} frame does not fit"));
-        }
-        if stride_words < width {
-            return Err(format!("a stride of {stride_words} words under the width {width}"));
-        }
-        let need = ((height as u64 - 1) * stride_words as u64 + width as u64) * 4;
-        if dst.size() < need || !dst.usage().contains(wgpu::BufferUsages::STORAGE) {
-            return Err(format!("a destination of {} bytes (storage: {}) for a frame of {need}", dst.size(), dst.usage().contains(wgpu::BufferUsages::STORAGE)));
         }
         if slot.len() as u64 > self.slot_buf.size() {
             return Err(format!("a slot of {} bytes does not fit {}", slot.len(), self.slot_buf.size()));

@@ -493,6 +493,11 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         Ok((w != 0 && h != 0).then_some((w, h)))
     }
 
+    fn frame_size(&self, head: u32) -> Option<(u32, u32)> {
+        let (w, h) = self.core.managed;
+        (head == 0 && w != 0 && h != 0).then_some((w, h))
+    }
+
     fn frame_generation(&self, head: u32) -> u64 {
         if head != 0 {
             return 0;

@@ -152,6 +152,11 @@ impl VproScanout {
         self.scanout.compose_into(&self.pipeline, width, height, bytemuck::bytes_of(&slot), &[&self.vram_group], dst, stride_words)
     }
 
+    /// Whether `dst` can take a `width` by `height` frame of `stride_words` a row (`Scanout::check_into`).
+    pub fn check_into(width: u32, height: u32, dst: &wgpu::Buffer, stride_words: u32) -> Result<(), String> {
+        Scanout::check_into(width, height, dst, stride_words)
+    }
+
     /// Frames composed.
     pub fn frames(&self) -> u64 {
         self.scanout.frames

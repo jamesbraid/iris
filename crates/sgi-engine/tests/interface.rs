@@ -519,6 +519,7 @@ fn heads_scan_out_and_each_has_its_own_deadline() {
 #[test]
 fn a_frame_composes_into_the_callers_buffer_and_the_generation_says_when_it_changed() {
     let (mut e, _) = mock(MockConfig::default());
+    assert_eq!((e.frame_size(0), e.frame_size(1), e.frame_size(2)), (Some((4, 2)), Some((4, 2)), None), "sized without composing");
     let g0 = e.frame_generation(0);
     assert_eq!(e.frame_generation(0), g0, "nothing happened");
     assert_eq!(e.frame_generation(2), 0, "no such head keeps none");
