@@ -1,0 +1,45 @@
+[package]
+name = "sgi-mgras"
+version = "0.1.0"
+edition = "2021"
+description = "Iris's IMPACT (MGRAS) raster engine, CPU and GPU, without the board"
+publish = false
+
+[lib]
+# The tests inside the mounted files drive the whole board and stay with iris.
+test = false
+doctest = false
+
+[features]
+default = ["wgpu"]
+wgpu = []
+# Panic injection points for the tests (`sgi_engine::inject`).
+fault-injection = ["sgi-engine/fault-injection"]
+# `tools/check-header`: cbindgen compares the C header with src/ffi.rs.
+header-check = ["dep:cbindgen"]
+gr4-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]
+
+[dependencies]
+sgi-engine = { path = "../sgi-engine" }
+sgi-gpu-core = { path = "../sgi-gpu-core", default-features = false }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan", "metal", "dx12"] }
+bytemuck = { version = "1", features = ["derive"] }
+parking_lot = "0.12"
+serde = { version = "1.0.228", features = ["derive"] }
+log = "0.4"
+postcard = { version = "1", features = ["alloc"] }
+crossbeam-utils = "0.8"
+cbindgen = { version = "0.29", optional = true, default-features = false }
+cranelift-codegen = { version = "0.134", optional = true }
+cranelift-frontend = { version = "0.134", optional = true }
+cranelift-jit = { version = "0.134", optional = true }
+cranelift-module = { version = "0.134", optional = true }
+cranelift-native = { version = "0.134", optional = true }
+
+[dev-dependencies]
+sgi-engine = { path = "../sgi-engine", features = ["conformance"] }
+blake3 = "1"
+
+[[example]]
+name = "cbindgen_header"
+required-features = ["header-check"]
