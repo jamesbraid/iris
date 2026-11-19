@@ -1629,17 +1629,10 @@ impl Board {
     }
 }
 
-/// Match the shared rasterizer's eight-bit channel conversion.
+/// A colour word's channel as the frame stores it: floor(256 c) limited to 255, the rasterizer's
+/// own conversion (`quantise8`), established on the vendor simulation frames.
 pub(super) fn float_channel(bits: u32) -> u32 {
-    let c = f64::from(odyssey_f32(bits));
-
-    if !(c > 0.0) {
-        return 0;
-    }
-    if c >= 1.0 {
-        return 255;
-    }
-    (c * 255.0 + 0.5) as u32
+    super::pipe::backend::quantise8(f64::from(odyssey_f32(bits)))
 }
 
 /// The GL library's conversion of a signed-integer colour or normal operand
