@@ -2,8 +2,11 @@
 //! with its screendump. Reads are checked against QEMU's values and counted, not fatal; `pixel`
 //! lines read QEMU's own planes, so they are skipped. `--eager` runs the stream after each store
 //! (QEMU's order), `--runs N` times fresh engines, `--snapshot-at N` saves and reloads mid-replay.
+//! `--skip-onewire` leaves the one-wire register out of the mismatch count: the maintenance-menu
+//! fixture was recorded from an unconfigured QEMU device, whose chain has two parts to this
+//! engine's one.
 //!
-//! `qemu_replay [--eager] [--threads N] [--gpu] [--runs N] [--ref REF.ppm] [--out OUT.ppm] FILE`
+//! `qemu_replay [--eager] [--no-latch] [--frame-every N] [--skip-onewire] [--threads N] [--gpu] [--runs N] [--ref REF.ppm] [--out OUT.ppm] FILE`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -99,8 +102,8 @@ fn source(off: u32) -> Source {
     Source { hub: Some(0), charged: (0xc10000..0xc14000).contains(&off) }
 }
 
-fn run(rp: &Replay, cfg: KonaConfig, eager: bool, ram: Arc<Ram>, snapshot_at: Option<usize>, gpu: &Option<iris_kona::SharedGpu>) -> (Engine, Tally, std::time::Duration) {
-    let opts = || Options { gpu: gpu.clone(), ..Options::default() };
+fn run(rp: &Replay, cfg: KonaConfig, eager: bool, ram: Arc<Ram>, snapshot_at: Option<usize>, gpu: &Option<iris_kona::SharedGpu>, latch: bool, frame_every: usize) -> (Engine, Tally, std::time::Duration) {
+    let opts = || Options { gpu: gpu.clone(), latch_swaps: latch, ..Options::default() };
     let mut e = Engine::new(cfg, ram.clone(), opts()).expect("engine");
     let mut t = Tally::default();
     let mut out = Vec::new();
@@ -120,6 +123,9 @@ fn run(rp: &Replay, cfg: KonaConfig, eager: bool, ram: Arc<Ram>, snapshot_at: Op
                 snapped = true;
             }
             let _ = std::fs::remove_dir_all(&dir);
+        }
+        if frame_every != 0 && n % frame_every == 0 {
+            e.frame();
         }
         match rec {
             Rec::Write { off, size, val } => {
@@ -200,6 +206,8 @@ fn main() {
     let (mut eager, mut threads, mut runs, mut refp, mut outp, mut file) = (false, 0usize, 1usize, None, None, None);
     let mut widget = 0u8;
     let mut use_gpu = false;
+    let mut skip_onewire = false;
+    let (mut latch, mut frame_every) = (true, 0usize);
     let mut snapshot_at: Option<usize> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -209,6 +217,9 @@ fn main() {
             "--ref" => refp = args.next(),
             "--out" => outp = args.next(),
             "--gpu" => use_gpu = true,
+            "--no-latch" => latch = false,
+            "--skip-onewire" => skip_onewire = true,
+            "--frame-every" => frame_every = args.next().unwrap().parse().unwrap(),
             "--snapshot-at" => snapshot_at = args.next().map(|n| n.parse().unwrap()),
             "--widget" => widget = args.next().unwrap().parse().unwrap(),
             _ => file = Some(a),
@@ -224,7 +235,12 @@ fn main() {
         println!("GPU: {}", g.caps);
     }
     let ram = Arc::new(Ram::default());
-    let (mut e, t, d) = run(&rp, cfg, eager, ram, snapshot_at, &gpu);
+    let (mut e, mut t, d) = run(&rp, cfg, eager, ram, snapshot_at, &gpu, latch, frame_every);
+    if skip_onewire {
+        let skipped: usize = [0x98, 0x9c].iter().filter_map(|o| t.by_offset.remove(o)).sum();
+        t.mismatches -= skipped;
+        println!("{skipped} one-wire reads left out of the count");
+    }
     println!("reads {}: {} differ from QEMU's; {} interrupt packets, {} credits returned, {} busy retries, {} command-page words", t.reads, t.mismatches, t.interrupts, t.credits, t.busy, t.command_words);
     for l in &t.first {
         println!("  {l}");
@@ -270,7 +286,7 @@ fn main() {
         let mut best = std::time::Duration::MAX;
         let mut all = Vec::new();
         for _ in 0..runs {
-            let (_e, _t, d) = run(&rp, cfg, eager, Arc::new(Ram::default()), None, &gpu);
+            let (_e, _t, d) = run(&rp, cfg, eager, Arc::new(Ram::default()), None, &gpu, latch, frame_every);
             best = best.min(d);
             all.push(d.as_secs_f64());
         }
