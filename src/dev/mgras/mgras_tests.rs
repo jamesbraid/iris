@@ -853,7 +853,7 @@ fn switch_to_gl_context_cid(m: &Mgras, id: u32, x: u32, y: u32, w: u32, h: u32, 
     img[12] = y << 16 | (y + h - 1);
     img[13] = 0x240;
     // The banks drawn into, B and B, as the kernel stores them in a new
-    // context (MgrasValidateBanks).
+    // context (the kernel's draw-bank validation).
     (img[16], img[17]) = (1, 1);
     for wd in img {
         write(m, 32, CFIFO, wd as u64);
@@ -898,7 +898,7 @@ fn gl_state_and_window_follow_the_context() {
 }
 
 /// A window whose visible region is too complex for the screen masks: the
-/// X server paints it with a clip ID (mgrasDrawCID: draw field 0x50, the ID
+/// X server paints it with a clip ID (its clip-ID draw routine: draw field 0x50, the ID
 /// in the fill colour, reg_f17b 0xC00, left set), and the kernel has the
 /// window's GL drawing match that ID (reg_f17b 1 << (4 + id)). The clear
 /// lands only on the window's pixels with the ID; a window without one, and

@@ -34,8 +34,8 @@ pub mod host {
     pub const GE_READBACK_HI: u32 = 0x70010;
     pub const GE_READBACK_LO: u32 = 0x70014;
     pub const CFIFO: u32 = 0x70080;
-    /// libGLcore's immediate-mode path stores command words here (HQ3.h
-    /// HQ3_CFIFO_GL); taken as another user FIFO port.
+    /// libGLcore's immediate-mode path stores command words here (gr4's hq3
+    /// cfifo_gl); taken as another user FIFO port.
     pub const CFIFO_GL: u32 = 0x74080;
     pub const GIOSTATUS: u32 = 0x70100;
     pub const DMABUSY: u32 = 0x70104;
@@ -59,18 +59,18 @@ pub mod host {
     /// board is wedged), its high-water mark in 28:22.
     pub const FIFOSTATUS_HIGH_SHIFT: u32 = 22;
 
-    /// DMABUSY bits the kernel polls until clear (MgrasFlushHQ3Poll):
+    /// DMABUSY bits the kernel polls until clear (the kernel's command-FIFO drain poll):
     /// host interface, command FIFO, raster interface.
     pub const DMABUSY_HIF: u32 = 0x02;
     pub const DMABUSY_CFIFO: u32 = 0x04;
     pub const DMABUSY_REIF: u32 = 0x10;
 
-    /// The FIFO interrupt (GIO interrupt 0, MgrasFIFOInterrupt) enables in
+    /// The FIFO interrupt (GIO interrupt 0, the kernel's FIFO interrupt handler) enables in
     /// INTERRUPT_ENABLE: command FIFO at/above high water, below low water;
     /// the same for the data FIFO. The kernel enables the two high-water
     /// ones (0x4400E200); when the FIFO stays high it blocks the writer and
     /// swaps the command FIFO's high-water enable for the low-water one,
-    /// and MgrasFlushHQ3 sleeps on the low-water one (its mark set to the
+    /// and the kernel's FIFO flush sleeps on the low-water one (its mark set to the
     /// level it waits for, plus one).
     pub const INTR_CFIFO_HIGH: u32 = 1 << 26;
     pub const INTR_CFIFO_LOW: u32 = 1 << 27;
@@ -149,7 +149,7 @@ const PARSER_WORDS: usize = 6 + CFIFO_KEEP;
 /// transfers ran through a parked table and scribbled on low memory).
 const IF_WORDS: usize = 0x80 + 0x10;
 const SLOT_RECORD_WORDS: usize = GL_WORDS + PARSER_WORDS + IF_WORDS;
-/// IRIX 6.5.22's slot size (MgrasGlContextAlloc; slots traced 0x17C7 words
+/// IRIX 6.5.22's slot size (the kernel's GL context slot allocation; slots traced 0x17C7 words
 /// apart): our record must fit.
 const KERNEL_SLOT_WORDS: usize = 0x17C7;
 const _: () = assert!(SLOT_RECORD_WORDS <= KERNEL_SLOT_WORDS);
@@ -211,7 +211,7 @@ mod cmd {
     /// Command-processor token: schedule a buffer swap for the next retrace.
     pub const TOKEN_037: u32 = 0x37;
     /// Command-processor token: return the state word at a GE address
-    /// (`__Mgr_ReturnMode(addr, 1, 1)`: glGet*, glIsEnabled, and glFinish,
+    /// (the library's return-mode call with the address and 1, 1: glGet*, glIsEnabled, and glFinish,
     /// which is a glGetBooleanv(GL_DITHER) round trip). The host clears
     /// FLAG_GE_DATA, sends this, polls for the flag, then reads the answer
     /// at GE_READBACK_LO.
@@ -221,13 +221,13 @@ mod cmd {
     /// cfifo_cmd_query). Native IRIS GL getcolor() and clear() request address
     /// 4: the current index as a float, not the address itself.
     pub const TOKEN_0A1: u32 = 0xA1;
-    /// Kernel token (MgrasValidateClip, current context): a GL window's
+    /// Kernel token (the window clip validation, current context): a GL window's
     /// raster state, 15 words: origin, window mode, PP1 window mode (the
     /// kernel stores them as one doubleword, window mode high),
     /// screen masks 4..1 as (x, y) pairs, DRB pointers, 0, then the same
     /// origin and pointers for the second buffer set.
-    /// The kernel's and X server's way into GE11 ERAM (MgrasEramRead /
-    /// MgrasEramWrite; SGI's diagnostic names CP_PASS_THROUGH_GE_*). Write:
+    /// The kernel's and X server's way into GE11 ERAM (its GE memory read and
+    /// write paths). Write:
     /// cfifo_cmd_ge_memory_write_chunk (word count, rounded up to even), the words (FIFO pixel
     /// data, or a host to board DMA), cfifo_cmd_ge_memory_write_addr (address, count), and
     /// cfifo_cmd_ge_memory_write_end after the last chunk. Read: a board to host DMA armed
@@ -946,7 +946,7 @@ impl Hq3Engine {
                 // OpenGL's initial state. Every image also carries its
                 // context's window (words 2-13: origin, window mode, PP1
                 // window mode, masks 4..1, DRB pointers); the kernel
-                // (MgrasValidateClip) rewrites it and sets bit 29 of word 1
+                // (the window clip validation) rewrites it and sets bit 29 of word 1
                 // when the window changed.
                 self.load_context(img[0], img[1] & CTX_FIRST_LOAD != 0, sink);
                 let masks = [[img[11], img[12]], [img[9], img[10]], [img[7], img[8]], [img[5], img[6]]];
@@ -954,7 +954,7 @@ impl Hq3Engine {
                     sink.trace(format!("context {:#x}: window changed", img[0]));
                 }
                 self.apply_window(img[2], img[3], masks, img[13], img[4], sink);
-                // Words 16-17: the banks drawn into (MgrasValidateBanks).
+                // Words 16-17: the banks drawn into (the draw-bank validation).
                 self.gl.set_draw_bank(img[16], sink);
                 sink.set_flags(host::FLAG_CONTEXT_LOADED);
             }
@@ -1074,9 +1074,9 @@ impl Hq3Engine {
                     self.gl.bitmap_rows(&rows, &self.lut.0[..], sink);
                 }
             } else if self.eram_in.is_none() {
-                // libGLcore __glMgrFlushImageRegs: cfifo_cmd_raster_pairs (0x07F)
+                // libGLcore's image register flush: cfifo_cmd_raster_pairs (0x07F)
                 // carries (raster register, value) pairs, cfifo_cmd_raster_triples
-                // (0x07C, __glMgrRSSRegShadow) (register, value, GE shadow
+                // (0x07C, the library's raster register shadow write) (register, value, GE shadow
                 // address) triples, padded to whole doublewords.
                 let group = match self.last_token {
                     Some(0x07F) => 2,
@@ -1348,7 +1348,7 @@ impl Hq3Engine {
         self.dma(word, DmaPeer::Raster, sink);
     }
 
-    /// The ERAM pass-through commands (see `cmd::CP_ERAM_*`). A transfer
+    /// The ERAM pass-through commands (see the `cmd::MGRAS_HQ3_CFIFO_CMD_GE_MEMORY_*` tokens). A transfer
     /// repeating GE0's last one is GE1's (two-GE boards); GE1's ERAM is
     /// kept for the round trip but nothing reads it.
     fn eram_pass_through(&mut self, cmd: u32, data: &[u32], sink: &mut dyn Hq3Sink) {

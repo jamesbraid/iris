@@ -316,12 +316,11 @@ const OP_BLOCK: u32 = 0x8;
 /// PolyPoint).
 const OP_POINT: u32 = 0x4;
 /// IR opcodes: a triangle (area) whose spans run left to right (the major
-/// edge on the left) or right to left. SGI's names are IR_OP_AREA_LTOR /
-/// IR_OP_AREA_RTOL; their numbers are not known (only GE11 microcode writes
+/// edge on the left) or right to left. Their numbers are not known (only GE11 microcode writes
 /// them), these are provisional and used by our GE11 HLE alone.
 pub const OP_AREA_LTOR: u32 = 0x0;
 pub const OP_AREA_RTOL: u32 = 0x1;
-/// IR opcode: an OpenGL line (IR_OP_GL_LINE; number provisional, ours).
+/// IR opcode: an OpenGL line (number provisional, ours).
 pub const OP_GL_LINE: u32 = 0x2;
 /// IR opcode 3: the line the Octane diagnostic sends (0x63 with its smooth
 /// bits), drawn as a GL line.
@@ -352,7 +351,7 @@ pub(super) const BLEND_ENABLE: u32 = 1 << 8;
 /// (EXT_blend_color, EXT_blend_minmax, EXT_blend_subtract; GL_LOGIC_OP is
 /// the GE's business: it becomes PP1's logic op). Only the GE HLE writes
 /// these, so beyond the factors' 4-bit fields the encoding is ours (SGI's
-/// diagnostics set BlendSfactor / BlendDfactor and nothing else):
+/// diagnostics set the source and destination blend factors and nothing else):
 ///   reg_f165 (0x165) source 3:0, destination 7:4, enable 8, equation
 ///     11:9 (`BLEND_EQ_*`). Factor codes 0..=10 in OpenGL order (ZERO ONE
 ///     SRC_COLOR ONE_MINUS_SRC_COLOR SRC_ALPHA ONE_MINUS_SRC_ALPHA
@@ -418,7 +417,7 @@ pub(super) fn blend_rgba(bf: u32, kc: &[i32; 4], s: &[i32; 4], d: &[i32; 4]) -> 
     })
 }
 const FILL_POLY_STIPPLE: u32 = 1 << 2;
-/// Polygon stipple RAM in the indirect device space (SGI's POLYSTIP_RAM).
+/// Polygon stipple RAM in the indirect device space (the board's polygon stipple RAM).
 pub const POLY_STIPPLE_RAM: u32 = 0xA000_0000;
 
 /// `a` OP `b` for an OpenGL compare function (0 NEVER .. 7 ALWAYS).
@@ -501,9 +500,9 @@ pub(super) const DRAW_CID: u32 = 0x50;
 /// CIDmatch, CIDdata, CIDmask). Bits 3:0 are the window origin's low x and
 /// y bits (not modelled). Bits 7:4 (CIDmatch) are one bit per clip ID:
 /// bit 4 + n lets a pixel whose clip ID is n be drawn; all clear, no
-/// check. The kernel (MgrasValidateClip) sets 1 << (4 + n) for a window
+/// check. The kernel (its window clip validation) sets 1 << (4 + n) for a window
 /// that X gave clip ID n, else 0. Bits 11:10 (CIDmask, our reading) write
-/// enable the two clip-ID planes: the X server (mgrasDrawCID) sets 0xC00
+/// enable the two clip-ID planes: the X server (its clip-ID draw routine) sets 0xC00
 /// to draw clip IDs and leaves it set.
 pub(super) fn cid_match(reg_f17b: u32) -> u32 {
     (reg_f17b >> 4) & 0xF
@@ -592,7 +591,7 @@ pub(super) fn rgb12_pair(pp1fillmode: u32) -> bool {
 /// sets this bit in any trace. The GL front-end sets it.
 pub(super) const PP1_DITHER: u32 = 1 << 3;
 
-/// The two pixel-pair layouts (libGLcore InitFormatValues' plane masks,
+/// The two pixel-pair layouts (libGLcore's pixel-format table set-up: plane masks,
 /// A | B): pixel type 0 holds 4:4:4 RGB in bits 11:0 / 23:12 and a 4-bit
 /// alpha in 27:24 / 31:28 (0x0F000FFF | 0xF0FFF000, the RGBA 4,4,4,4
 /// visual and the X server's 12-bit windows); pixel type 1 holds 5:5:5 RGB
@@ -2312,7 +2311,7 @@ impl Rss {
     }
 
     /// A triangle from the area registers, as SGI's diagnostic triangle
-    /// setup (_mg0_FillTriangle) loads them: vertices sorted top (max y),
+    /// setup (its triangle set-up routine) loads them: vertices sorted top (max y),
     /// middle, bottom (min y); positions as floats biased by 49151.5
     /// (window coordinates, y up); edge slopes dx per unit of y going down,
     /// s.24 fixed point in hi/lo pairs:
@@ -3078,7 +3077,7 @@ impl Rss {
         let (fx, fy) = self.block_px(&x.block, k as i32, line as i32);
         // PIO reads of RGB(A) come in the reverse of the DMA order: RGBA
         // (RGBorder set) alpha first, ABGR (clear) red first. libGLcore's
-        // packed-type reads (__glMgr_PackPixels, one row at a time) unpack
+        // packed-type reads (its pixel packing path, one row at a time) unpack
         // them so: its 4-4-4-4 and 8-8-8-8 come out right in both orders.
         // The X server's reads (XGetImage, xfrmode 0x40080) set bit 18 and
         // take the pixel word in the DMA order (traced: colours right).
