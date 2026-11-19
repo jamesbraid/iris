@@ -157,6 +157,8 @@ pub(super) struct CommandFifo {
     /// The board's thread is running stores.
     pub slice: CachePadded<AtomicBool>,
     exit: AtomicBool,
+    /// Called each time the board's thread retires stores (`on_retire`).
+    retired_hook: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
     sleeper: Mutex<Option<std::thread::Thread>>,
     pub thread: Mutex<Option<JoinHandle<()>>>,
     /// Edge filter for the traced level; zero-sized without the feature.
@@ -200,6 +202,7 @@ impl Default for CommandFifo {
             hurry: CachePadded::new(AtomicBool::new(false)),
             slice: CachePadded::new(AtomicBool::new(false)),
             exit: AtomicBool::new(false),
+            retired_hook: std::sync::OnceLock::new(),
             sleeper: Mutex::new(None),
             thread: Mutex::new(None),
             pf_level: crate::PfValue::new(),
@@ -434,6 +437,15 @@ impl CommandFifo {
             self.levels.words.fetch_sub(words, SeqCst);
         }
         self.levels.stores.fetch_sub(n as u32, SeqCst);
+        if let Some(hook) = self.retired_hook.get() {
+            hook();
+        }
+    }
+
+    /// Call `hook` whenever the board has retired stores, so a caller owed
+    /// their flow-control credits can return them. It only schedules.
+    pub fn on_retire(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        let _ = self.retired_hook.set(hook);
     }
 
     /// Abandon every waiting store.
