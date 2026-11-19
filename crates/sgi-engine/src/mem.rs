@@ -100,6 +100,12 @@ impl Lent {
         self.words == 0
     }
 
+    /// The start of the region, for an engine whose raster code addresses
+    /// memory by pointer. Access it only as `Lent` says: whole words.
+    pub fn as_ptr(&self) -> *mut u64 {
+        self.ptr
+    }
+
     fn word(&self, i: usize) -> &AtomicU64 {
         assert!(i < self.words, "lent word {i} past {}", self.words);
         // SAFETY: in range by the assert; `new`'s contract.
