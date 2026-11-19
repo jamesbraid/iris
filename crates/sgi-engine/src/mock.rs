@@ -402,6 +402,7 @@ impl<M: HostMem> BoardEngine for Mock<M> {
     }
 
     fn observe(&mut self, region: &(u32, u32)) -> Result<(), Fault> {
+        self.run(usize::MAX);
         if let Some(f) = self.fault() {
             return Err(Fault(f));
         }

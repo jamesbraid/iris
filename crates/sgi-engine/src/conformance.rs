@@ -34,6 +34,11 @@ pub trait Subject {
     fn holds_stores(&self) -> bool;
     /// Whether a store from a charged source comes back as `Event::Credits`.
     fn credits(&self) -> bool;
+    /// Whether `observe` runs the queued stores first (the trait says it waits for queued
+    /// CPU work). False for a board whose stream runs only under `run` and `wait_idle`.
+    fn observe_waits_for_stores(&self) -> bool {
+        true
+    }
     /// Raise one interrupt line over and over without draining, and say how
     /// many distinct lines that was; None for a board with no packets.
     fn packet_storm(&self, _e: &mut Self::Engine) -> Option<usize> {
@@ -287,9 +292,12 @@ pub fn a_storm_on_one_interrupt_line_stays_one_packet<S: Subject>(s: &S) {
 
 pub fn observe_brings_a_box_current<S: Subject>(s: &S) {
     let mut e = s.engine(None);
-    put(s, &mut e, 1);
-    settle(&mut e);
+    put(s, &mut e, 1000);
     e.observe(&s.region()).unwrap();
+    if s.observe_waits_for_stores() {
+        assert_eq!(e.advance(0).idle, Idle::Yes, "observe waits for the queued CPU work");
+    }
+    settle(&mut e);
 }
 
 /// One `#[test]` for each clause, for a board's test file.
