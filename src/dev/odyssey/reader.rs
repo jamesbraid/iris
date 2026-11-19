@@ -568,6 +568,8 @@ pub(super) struct ScanoutReader {
     /// mark is not ordered against its data, so the frame may have missed
     /// the data; one more is composed to catch it.
     settling: bool,
+    /// The time the caller last gave: the retrace epoch of a restart.
+    pub now_ns: i64,
 }
 
 impl ScanoutReader {
@@ -617,7 +619,7 @@ impl ScanoutReader {
         }
         if restart != self.restart_gen {
             self.restart_gen = restart;
-            self.clock.restart();
+            self.clock.restart(self.now_ns);
         }
     }
 
@@ -632,6 +634,7 @@ impl ScanoutReader {
     pub fn poll(&mut self, now_ns: i64) {
         let shared = self.shared();
 
+        self.now_ns = now_ns;
         self.sync(&shared);
         while self.clock.next_retrace(now_ns) {
             shared.retrace();

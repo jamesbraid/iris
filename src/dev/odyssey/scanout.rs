@@ -1,5 +1,5 @@
 //! An SGI graphics head's scanout mode and retrace. Display line 0 is the
-//! top. The retrace is counted on the host's monotonic clock: the
+//! top. The retrace is counted on the clock its caller reads: the
 //! deadline (-1 when disarmed) is when the next one is due, and
 //! [`RetraceClock::next_retrace`] reports each as it comes due.
 //!
@@ -49,8 +49,8 @@ pub(super) struct Scanout {
     pub shared: Arc<DisplayShared>,
 }
 
-/// The retrace clock: the mode's frame period on the host's monotonic
-/// clock. `deadline` (-1 when disarmed) is when the next retrace is due,
+/// The retrace clock: the mode's frame period on the clock its caller
+/// reads. `deadline` (-1 when disarmed) is when the next retrace is due,
 /// and [`RetraceClock::next_retrace`] reports each as it comes due.
 #[derive(Clone, Debug)]
 pub(super) struct RetraceClock {
@@ -83,13 +83,6 @@ impl Scanout {
 
 /// Nanoseconds in a second.
 pub(super) const NS_PER_SECOND: u64 = 1_000_000_000;
-
-/// The host's monotonic clock in nanoseconds since the first call: the
-/// time base of every scanout's retrace.
-pub(super) fn monotonic_ns() -> i64 {
-    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    EPOCH.get_or_init(std::time::Instant::now).elapsed().as_nanos() as i64
-}
 
 /// a * b / c without overflowing the product.
 pub(super) fn mul_div(a: u64, b: u64, c: u64) -> u64 {
@@ -173,8 +166,8 @@ impl RetraceClock {
         self.deadline = if when < 0 { -1 } else { when };
     }
 
-    pub fn restart(&mut self) {
-        self.epoch = monotonic_ns();
+    pub fn restart(&mut self, now_ns: i64) {
+        self.epoch = now_ns;
         self.frames = 0;
         self.arm();
     }

@@ -9,6 +9,13 @@ use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 
+/// The host's monotonic clock in nanoseconds since the first call: the
+/// time base of the retrace here.
+pub(super) fn monotonic_ns() -> i64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(std::time::Instant::now).elapsed().as_nanos() as i64
+}
+
 use crate::cpu::mips_core::CyclesPtr;
 use crate::gfx_display::Screen;
 

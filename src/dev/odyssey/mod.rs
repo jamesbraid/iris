@@ -124,7 +124,7 @@ use consts::ODSY_APERTURE;
 use display::Display;
 use fifo::set_display_fifo_pending;
 use mmio::BoardLocks;
-use scanout::monotonic_ns;
+use display::monotonic_ns;
 
 /// The VPro board on widget `slot`: a `BusDevice` for the widget's
 /// windows.
@@ -286,6 +286,7 @@ impl Odyssey {
         state.trace.flush(false);
         let mut reader = display.reader.lock();
         reader.attach(&state.shared);
+        reader.now_ns = monotonic_ns();
         if !display.polled.swap(false, Ordering::Relaxed) {
             reader.poll(monotonic_ns());
         }
@@ -307,6 +308,7 @@ impl Odyssey {
         crate::pf_begin!(crate::perfetto::events::ODSY_CAPTURE);
         let mut reader = display.reader.lock();
         reader.attach(&state.shared);
+        reader.now_ns = monotonic_ns();
         // The retrace comes due before the frame is composed, so a swap it
         // latches shows in this frame. The tick's retrace duty then leaves
         // the clock alone.
