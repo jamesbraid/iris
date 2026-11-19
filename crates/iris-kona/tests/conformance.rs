@@ -87,6 +87,11 @@ impl Subject for Kona {
         Some(1)
     }
 
+    /// KONA's command stream runs only under `run` and `wait_idle`; `observe` drains the drawing.
+    fn observe_waits_for_stores(&self) -> bool {
+        false
+    }
+
     /// Every packet of the storm sets the pending bit; none clears it.
     fn storm_ends_high(&self) -> bool {
         true
