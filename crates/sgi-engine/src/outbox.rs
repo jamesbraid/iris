@@ -56,7 +56,7 @@ impl Outbox {
                 Event::Note(t) => q.notes.len() < SEEN_MAX && q.notes.insert(t.clone()),
                 Event::BusFault { addr, write } => q.faults.len() < SEEN_MAX && q.faults.insert((addr >> 12, *write)),
                 Event::Interrupt(i) => {
-                    let line = |x: &Event| matches!(x, Event::Interrupt(o) if (o.widget, o.addr, o.vector) == (i.widget, i.addr, i.vector));
+                    let line = |x: &Event| matches!(x, Event::Interrupt(o) if (o.sender, o.widget, o.addr, o.vector) == (i.sender, i.widget, i.addr, i.vector));
                     match q.events.iter().position(line) {
                         Some(at) if q.events[at] == e => false,
                         Some(at) => {

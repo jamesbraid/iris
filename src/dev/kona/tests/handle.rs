@@ -288,7 +288,7 @@ fn a_controller_that_routes_foreign_packets_takes_them() {
     struct Router(Mutex<Vec<(u8, u64, u32)>>);
     impl crate::irq::InterruptController for Router {
         fn set_line(&self, _line: u32, _level: bool) {}
-        fn foreign_packet(&self, widget: u8, address: u64, line: u32, _level: bool) -> bool {
+        fn foreign_packet(&self, _source: u8, widget: u8, address: u64, line: u32, _level: bool) -> bool {
             self.0.lock().push((widget, address, line));
             true
         }

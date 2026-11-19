@@ -9,7 +9,7 @@
 //! `Stalled(Frame)` until the shell calls `frame`. Drawing runs on the pipe's tile workers, or on the
 //! caller's thread when the configuration has none.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -53,50 +53,30 @@ impl<M: HostMem> BusDevice for Mem<M> {
     }
 }
 
-/// The shell's event queue, and where the pipe's interrupt packets go. A packet sets a pending bit
-/// and the pipe never clears one, so a packet equal to one still queued adds nothing and is not queued
-/// again: the queue holds one packet for each distinct target and vector.
+/// The shell's event queue, and where the pipe's interrupt packets go. `Outbox` keeps one packet for
+/// each line, so a guest that raises a vector faster than the shell drains adds nothing.
 struct Events {
     out: Outbox,
-    queued: Mutex<HashSet<(u8, u64, u8, bool)>>,
     /// The widget the host's packets go to (the DMA widget the driver programmed).
     host_widget: Arc<AtomicU8>,
 }
 
 impl Events {
-    fn post(&self, widget: u8, addr: u64, vector: u8, level: bool) {
-        if self.queued.lock().insert((widget, addr, vector, level)) {
-            self.out.post(Event::Interrupt(Interrupt { widget, addr, vector, level }));
-        }
-    }
-
-    fn drain(&self, out: &mut Vec<Event>, max: usize) {
-        let mut queued = self.queued.lock();
-        let from = out.len();
-        self.out.drain(out, max);
-        for e in &out[from..] {
-            if let Event::Interrupt(p) = e {
-                queued.remove(&(p.widget, p.addr, p.vector, p.level));
-            }
-        }
-    }
-
-    fn clear(&self) {
-        self.queued.lock().clear();
-        self.out.clear();
+    fn post(&self, sender: u8, widget: u8, addr: u64, vector: u8, level: bool) {
+        self.out.post(Event::Interrupt(Interrupt { sender, widget, addr, vector, level }));
     }
 }
 
 impl InterruptController for Events {
     fn set_line(&self, _line: u32, _level: bool) {}
 
-    fn packet(&self, _source: u8, address: u64, line: u32, level: bool) -> bool {
-        self.post(self.host_widget.load(Relaxed), address, line as u8, level);
+    fn packet(&self, source: u8, address: u64, line: u32, level: bool) -> bool {
+        self.post(source, self.host_widget.load(Relaxed), address, line as u8, level);
         true
     }
 
-    fn foreign_packet(&self, widget: u8, address: u64, line: u32, level: bool) -> bool {
-        self.post(widget, address, line as u8, level);
+    fn foreign_packet(&self, source: u8, widget: u8, address: u64, line: u32, level: bool) -> bool {
+        self.post(source, widget, address, line as u8, level);
         true
     }
 }
@@ -174,7 +154,7 @@ impl<M: HostMem> KonaEngine<M> {
         let pixels = back.pixels();
         let mut front = Front::new(&cfg);
         front.probe_value = cfg.probe;
-        let events = Arc::new(Events { out: Outbox::new(notify), queued: Mutex::new(HashSet::new()), host_widget: front.dma_widget_handle() });
+        let events = Arc::new(Events { out: Outbox::new(notify), host_widget: front.dma_widget_handle() });
         let host = Arc::new(Host::new(front, events.clone(), Arc::new(Mem(mem))));
         back.attach_manual(DisplayHandle::new(&host));
         back.latch_swaps(true);
@@ -515,7 +495,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
     }
 
     fn drain_events(&mut self, out: &mut Vec<Event>, max: usize) {
-        self.events.drain(out, max);
+        self.events.out.drain(out, max);
     }
 
     fn observe(&mut self, _region: &Region) -> Result<(), Fault> {
@@ -643,7 +623,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         self.host.front.lock().reset();
         self.host.activity.store(false, Relaxed);
         self.credits = Credits::default();
-        self.events.clear();
+        self.events.out.clear();
         *self.fault.lock() = None;
         self.events.out.post(Event::Irq);
         Ok(())

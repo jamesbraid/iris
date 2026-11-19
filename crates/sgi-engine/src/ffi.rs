@@ -167,6 +167,7 @@ pub struct IrisEngineBusFault {
 #[derive(Clone, Copy)]
 pub struct IrisEnginePacket {
     pub addr: u64,
+    pub sender: u32,
     pub widget: u32,
     pub vector: u32,
     pub level: u32,
@@ -714,7 +715,7 @@ fn c_event(e: &Event) -> IrisEngineEvent {
         }
         Event::Interrupt(i) => {
             c.kind = IRIS_ENGINE_EVENT_INTERRUPT;
-            c.data.packet = IrisEnginePacket { addr: i.addr, widget: i.widget as u32, vector: i.vector as u32, level: i.level as u32 };
+            c.data.packet = IrisEnginePacket { addr: i.addr, sender: i.sender as u32, widget: i.widget as u32, vector: i.vector as u32, level: i.level as u32 };
         }
         Event::Credits { source, retired } => {
             c.kind = IRIS_ENGINE_EVENT_CREDITS;

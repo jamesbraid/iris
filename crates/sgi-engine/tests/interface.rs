@@ -370,20 +370,36 @@ fn damage_joins_and_degrades_to_anything() {
 #[test]
 fn an_interrupt_packet_replaces_the_queued_one_for_its_line() {
     let o = Outbox::new(None);
-    let p = |vector: u8, level: bool| Event::Interrupt(Interrupt { widget: 8, addr: 0x80, vector, level });
+    let p = |vector: u8, level: bool| Event::Interrupt(Interrupt { sender: 7, widget: 8, addr: 0x80, vector, level });
     for e in [p(3, true), p(4, true), p(3, true), p(4, false), p(3, false), p(3, true)] {
         o.post(e);
     }
-    o.post(Event::Interrupt(Interrupt { widget: 9, addr: 0x80, vector: 3, level: true }));
+    o.post(Event::Interrupt(Interrupt { sender: 7, widget: 9, addr: 0x80, vector: 3, level: true }));
     let mut v = Vec::new();
     o.drain(&mut v, usize::MAX);
-    let other = Event::Interrupt(Interrupt { widget: 9, addr: 0x80, vector: 3, level: true });
+    let other = Event::Interrupt(Interrupt { sender: 7, widget: 9, addr: 0x80, vector: 3, level: true });
     assert_eq!(v, vec![p(4, false), p(3, true), other], "one per line, the newest state, in arrival order of those");
     for i in 0..100_000u32 {
         o.post(p(1, i % 2 == 0));
     }
     o.drain(&mut v, usize::MAX);
     assert_eq!(v.len(), 4, "a storm on one line stays one packet");
+}
+
+#[test]
+fn two_senders_of_one_address_and_vector_are_two_lines() {
+    let o = Outbox::new(None);
+    let from = |sender: u8| Event::Interrupt(Interrupt { sender, widget: 8, addr: 0x80, vector: 3, level: true });
+    for _ in 0..3 {
+        o.post(from(1));
+        o.post(from(2));
+    }
+    let mut v = Vec::new();
+    o.drain(&mut v, usize::MAX);
+    assert_eq!(v, vec![from(1), from(2)]);
+    o.post(from(1));
+    o.drain(&mut v, usize::MAX);
+    assert_eq!(v.len(), 3, "once the shell has drained a packet, the next equal one is queued again");
 }
 
 #[test]
