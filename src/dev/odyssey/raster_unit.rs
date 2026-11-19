@@ -286,6 +286,8 @@ pub(super) struct RasterQueue<const HEADS: usize = 1> {
     idle: Mutex<()>,
     idle_kick: Condvar,
     thread: Mutex<Option<JoinHandle<()>>>,
+    /// Where a panic on the raster thread or its pool is recorded as the board's fault.
+    pub fault: std::sync::OnceLock<super::gpu_unit::GpuFault>,
     /// Tests: the raster thread is in a slice.
     #[cfg(test)]
     test_in_slice: AtomicBool,
@@ -341,6 +343,7 @@ impl<const HEADS: usize> Default for RasterQueue<HEADS> {
             idle: Mutex::new(()),
             idle_kick: Condvar::new(),
             thread: Mutex::new(None),
+            fault: std::sync::OnceLock::new(),
             #[cfg(test)]
             test_in_slice: AtomicBool::new(false),
             #[cfg(test)]
@@ -620,7 +623,7 @@ impl RasterQueue {
             // back end's.
             let shader = std::env::var("IRIS_ODSY_SHADER").as_deref() != Ok("inline");
 
-            ctx.ring = Some(super::pipe::ring::QuadRing::start(shader, self.pool.0.load(SeqCst) as usize, self.pool.1.load(SeqCst)));
+            ctx.ring = Some(super::pipe::ring::QuadRing::start(shader, self.pool.0.load(SeqCst) as usize, self.pool.1.load(SeqCst), self.fault.get().cloned()));
         }
         self.running.store(true, SeqCst);
         let queue = self.clone();
@@ -718,35 +721,44 @@ impl RasterQueue {
                 self.taken.fetch_add(1, SeqCst);
                 let cost = (kind >> ENTRY_COST_SHIFT) as u64;
                 let kind = kind & ENTRY_KIND_MASK;
-                if kind == ENTRY_DRAW {
-                    // SAFETY: submit_draw() put it there, and it is taken once.
-                    let job = unsafe { Box::from_raw(value as *mut GlDrawJob) };
-                    if let Some(job) = job.run_owned(ctx) {
-                        self.give_back(job);
+                // A job that panics is the board's fault, and still counts as run, so a waiter ends.
+                let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if kind == ENTRY_DRAW {
+                        // SAFETY: submit_draw() put it there, and it is taken once.
+                        let job = unsafe { Box::from_raw(value as *mut GlDrawJob) };
+                        if let Some(job) = job.run_owned(ctx) {
+                            self.give_back(job);
+                        }
+                        for job in ctx.reclaim_shade() {
+                            self.give_back(job);
+                        }
+                    } else if kind == ENTRY_COMPLETION {
+                        // SAFETY: submit_completion() put it there, and it is
+                        // taken once.
+                        let job = unsafe { Box::from_raw(value as *mut Completion) };
+                        match &ctx.ring {
+                            Some(r) => r.complete(*job),
+                            None => job(),
+                        }
+                    } else if kind == ENTRY_RING {
+                        // SAFETY: submit_ring() put it there, and it is taken once.
+                        let job = unsafe { Box::from_raw(value as *mut RasterJob) };
+                        job(ctx);
+                    } else {
+                        // SAFETY: submit() put it there, and it is taken once.
+                        let job = unsafe { Box::from_raw(value as *mut RasterJob) };
+                        // Any other job touches board memory itself.
+                        ctx.drain_back();
+                        job(ctx);
+                        if self.held.load(SeqCst) {
+                            self.release_held(ctx);
+                        }
                     }
-                    for job in ctx.reclaim_shade() {
-                        self.give_back(job);
-                    }
-                } else if kind == ENTRY_COMPLETION {
-                    // SAFETY: submit_completion() put it there, and it is
-                    // taken once.
-                    let job = unsafe { Box::from_raw(value as *mut Completion) };
-                    match &ctx.ring {
-                        Some(r) => r.complete(*job),
-                        None => job(),
-                    }
-                } else if kind == ENTRY_RING {
-                    // SAFETY: submit_ring() put it there, and it is taken once.
-                    let job = unsafe { Box::from_raw(value as *mut RasterJob) };
-                    job(ctx);
-                } else {
-                    // SAFETY: submit() put it there, and it is taken once.
-                    let job = unsafe { Box::from_raw(value as *mut RasterJob) };
-                    // Any other job touches board memory itself.
-                    ctx.drain_back();
-                    job(ctx);
-                    if self.held.load(SeqCst) {
-                        self.release_held(ctx);
+                }));
+                if let Err(p) = ran {
+                    match self.fault.get() {
+                        Some(f) => drop(super::gpu_unit::fail_gpu(f, "the raster thread", format_args!("panicked: {}", super::gpu_unit::panic_text(&*p)))),
+                        None => std::panic::resume_unwind(p),
                     }
                 }
                 let left = self.queued.fetch_sub(cost, SeqCst) - cost;

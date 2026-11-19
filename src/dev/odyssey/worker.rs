@@ -13,7 +13,9 @@
 
 use super::board::Board;
 use super::fifo::Run;
+use super::gpu_unit::{fail_gpu, panic_text};
 use super::mmio::BoardLocks;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::Ordering::SeqCst;
 use std::time::Duration;
 
@@ -118,7 +120,12 @@ impl BoardLocks {
                 let s = unsafe { &mut *self.board.get() };
                 crate::pf_value!(self.fifo.pf_level, crate::perfetto::events::ODSY_CFIFO_LEVEL, self.fifo.level());
                 crate::pf_begin!(crate::perfetto::events::ODSY_SLICE, self.fifo.level());
-                s.work_step(&mut Budget::slice(words));
+                // A panic is the board's fault: the stores left are abandoned so a waiter is not left
+                // for a thread that no longer runs them.
+                if let Err(p) = catch_unwind(AssertUnwindSafe(|| s.work_step(&mut Budget::slice(words)))) {
+                    fail_gpu(&s.gpu_fault, "the board's thread", format_args!("panicked: {}", panic_text(&*p)));
+                    self.fifo.clear();
+                }
                 crate::pf_end!(crate::perfetto::events::ODSY_SLICE);
                 crate::pf_value!(self.fifo.pf_level, crate::perfetto::events::ODSY_CFIFO_LEVEL, self.fifo.level());
             }

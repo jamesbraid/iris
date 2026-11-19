@@ -23,14 +23,17 @@
 //!   returned as `Event::Credits` by the pump once the board has retired it.
 //! - The stream never waits on the shell: the board times its own retrace
 //!   from `advance`, so `Idle` is `Yes`, `Working` or `Faulted`.
-//! - A panic on the board's own threads is not caught. The GPU unit's
-//!   failure is the engine's fault, and wakes the shell when it happens.
+//! - A panic on the board's own threads (the front end, the raster unit and
+//!   its pool) is caught and is the engine's fault, as the GPU unit's failure
+//!   is. The fault wakes the shell at once, and the stores still queued are
+//!   abandoned so `quiesce` ends and `reset` recovers.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use sgi_engine::inject::{hit, Point};
 use sgi_engine::{GpuLoss, BoardEngine, Chunk, DirtyRun, Event, Fault, HostMem, Idle, Interrupt, Lent, MemFault, Outbox, Pump, Read, Rect, Refused, Source, StateSink, StateSource, Swap, Write, DIRTY_BLOCK};
 
 use super::board::Board;
@@ -251,7 +254,10 @@ impl VproEngine {
         }));
         // Retired stores free credits, which only the pump returns.
         let wake = out.clone();
-        b.fifo.on_retire(Box::new(move || wake.wake()));
+        b.fifo.on_retire(Box::new(move || {
+            hit(Point::Exec);
+            wake.wake()
+        }));
         // A fault found on any thread tells the shell then, not at its next pump.
         let fault_sent = Arc::new(AtomicBool::new(false));
         let (told, sent) = (out.clone(), fault_sent.clone());

@@ -216,6 +216,8 @@ pub(crate) struct QuadRing {
     /// Workers shade filled triangles; without it the raster thread shades
     /// every quad itself.
     shader: bool,
+    /// Told of a panic in a worker's job.
+    fault: Option<super::super::gpu_unit::GpuFault>,
     pool: Waiter,
     exit: AtomicBool,
     held: Mutex<VecDeque<Held>>,
@@ -239,8 +241,8 @@ unsafe impl Send for QuadRing {}
 impl QuadRing {
     /// Start the pool of `workers` threads on tiles `tile` pixels square (a
     /// power of two, 8 to 256); with `shader` the workers shade filled
-    /// triangles.
-    pub fn start(shader: bool, workers: usize, tile: u32) -> Arc<QuadRing> {
+    /// triangles. A worker's panic is told to `fault`.
+    pub fn start(shader: bool, workers: usize, tile: u32, fault: Option<super::super::gpu_unit::GpuFault>) -> Arc<QuadRing> {
         let tile = (tile.clamp(8, 256).next_power_of_two()) as i32;
         let grid = (GRID_SPAN / tile) as usize;
         let ntiles = grid * grid;
@@ -257,6 +259,7 @@ impl QuadRing {
             queue,
             ready: crossbeam_queue::ArrayQueue::new(ntiles),
             shader,
+            fault,
             pool: Waiter::default(),
             exit: AtomicBool::new(false),
             held: Mutex::new(VecDeque::new()),
@@ -570,7 +573,14 @@ impl QuadRing {
                 // SAFETY: the raster thread wrote the entry before moving
                 // the head past it.
                 let idx = unsafe { *self.queues[t as usize * self.queue as usize + (c & (self.queue - 1)) as usize].get() };
-                self.run(idx as usize, px, py, size);
+                // A job that panics still retires, or its slot and the producer wait for ever.
+                let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run(idx as usize, px, py, size)));
+                if let Err(p) = ran {
+                    match &self.fault {
+                        Some(fault) => drop(super::super::gpu_unit::fail_gpu(fault, "a tile worker", format_args!("panicked: {}", panic_text(&p)))),
+                        None => std::panic::resume_unwind(p),
+                    }
+                }
                 self.refs[idx as usize].fetch_sub(1, Release);
                 c += 1;
                 tile.tail.store(c, Release);
@@ -670,4 +680,8 @@ fn tile_copies(x0: i32, y0: i32, x1: i32, y1: i32, px: i32, py: i32, size: i32) 
         std::iter::successors(Some(first), |&c| Some(c + GRID_SPAN)).take_while(move |&c| c <= hi)
     };
     axis(y0, y1, py).flat_map(move |ty| axis(x0, x1, px).map(move |tx| (tx, ty)))
+}
+
+fn panic_text(p: &Box<dyn Any + Send>) -> String {
+    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown panic".into())
 }

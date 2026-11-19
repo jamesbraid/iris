@@ -98,6 +98,8 @@ pub struct TilePool<J: Send, F: Fn(&J, Tile) + Sync> {
     queue: u64,
     ready: crossbeam_queue::ArrayQueue<u32>,
     run: F,
+    /// Told the text of a panic in `run`; without it the panic goes on.
+    panicked: std::sync::OnceLock<Box<dyn Fn(String) + Send + Sync>>,
     pool: Waiter,
     exit: AtomicBool,
     threads: Mutex<Vec<JoinHandle<()>>>,
@@ -132,6 +134,7 @@ impl<J: Default + Send + 'static, F: Fn(&J, Tile) + Send + Sync + 'static> TileP
             queue,
             ready: crossbeam_queue::ArrayQueue::new(ntiles),
             run,
+            panicked: std::sync::OnceLock::new(),
             pool: Waiter::default(),
             exit: AtomicBool::new(false),
             threads: Mutex::new(Vec::new()),
@@ -148,6 +151,11 @@ impl<J: Default + Send + 'static, F: Fn(&J, Tile) + Send + Sync + 'static> TileP
 }
 
 impl<J: Send, F: Fn(&J, Tile) + Sync> TilePool<J, F> {
+    /// Tell `tell` when a job panics, instead of letting the panic go on.
+    pub fn on_panic(&self, tell: Box<dyn Fn(String) + Send + Sync>) {
+        let _ = self.panicked.set(tell);
+    }
+
     // The producer's side.
 
     /// Retire the slots every tile has run, in order; the new tail.
@@ -334,7 +342,14 @@ impl<J: Send, F: Fn(&J, Tile) + Sync> TilePool<J, F> {
                 let idx = unsafe { *self.queues[t as usize * self.queue as usize + (c & (self.queue - 1)) as usize].get() };
                 // SAFETY: on this tile's queue, so written and not yet
                 // retired.
-                (self.run)(unsafe { &*self.ring[idx as usize].get() }, tile);
+                // A job that panics still retires, or the slot, its tile and the producer wait for ever.
+                let job = unsafe { &*self.ring[idx as usize].get() };
+                if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.run)(job, tile))) {
+                    match self.panicked.get() {
+                        Some(tell) => tell(p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown panic".into())),
+                        None => std::panic::resume_unwind(p),
+                    }
+                }
                 self.refs[idx as usize].fetch_sub(1, Release);
                 c += 1;
                 q.tail.store(c, Release);
@@ -418,6 +433,27 @@ mod tests {
         pool.push(Job::default(), Rect { x0: 0, y0: 0, x1: 19, y1: 19 });
         pool.drain();
         assert_eq!(runs.load(SeqCst), 4);
+        pool.stop();
+    }
+
+    /// A job that panics still retires its slot and is told to the sink, so the producer's
+    /// drain ends and the next job runs.
+    #[test]
+    fn a_panicking_job_retires_and_is_told() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let n = runs.clone();
+        let pool = TilePool::new("tile-test", 4, 16, 2, move |_: &Job, _: Tile| {
+            if n.fetch_add(1, Relaxed) == 0 {
+                panic!("a quad went wrong");
+            }
+        });
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let sink = told.clone();
+        pool.on_panic(Box::new(move |why| sink.lock().push(why)));
+        pool.push(Job::default(), Rect { x0: 0, y0: 0, x1: 4, y1: 4 });
+        pool.push(Job::default(), Rect { x0: 0, y0: 0, x1: 4, y1: 4 });
+        pool.drain();
+        assert_eq!((runs.load(SeqCst), told.lock().clone()), (2, vec!["a quad went wrong".to_string()]));
         pool.stop();
     }
 
