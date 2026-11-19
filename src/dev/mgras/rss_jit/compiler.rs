@@ -725,7 +725,11 @@ impl<'a> E<'a> {
             let y = self.b.ins().band_imm_s(fy, 3);
             self.b.ins().ishl_imm_s(y, 2)
         });
-        let mut r = Row { cid, clip, tgt, z, bayer };
+        let dither = (self.k.rgb && !self.k.pix.pair()).then(|| {
+            let y = self.b.ins().band_imm_s(fy, 3);
+            self.b.ins().ishl_imm_s(y, 2)
+        });
+        let mut r = Row { cid, clip, tgt, z, bayer, dither };
         // Pin it all, so it is computed once per row.
         let mut vals: Vec<Value> = Vec::new();
         vals.extend(r.cid);
@@ -739,6 +743,7 @@ impl<'a> E<'a> {
             vals.extend([a, b]);
         }
         vals.extend(r.bayer);
+        vals.extend(r.dither);
         let mut p = self.pin(&vals).into_iter();
         if r.cid.is_some() {
             r.cid = p.next();
@@ -754,6 +759,9 @@ impl<'a> E<'a> {
         }
         if r.bayer.is_some() {
             r.bayer = p.next();
+        }
+        if r.dither.is_some() {
+            r.dither = p.next();
         }
         r
     }
@@ -1673,10 +1681,33 @@ impl<'a> E<'a> {
                 }
                 None => rgba,
             };
-            // Clamped 12.16 shifted down to bytes (`fixed::to_byte`).
+            // Clamped 12.16 shifted down to bytes (`fixed::to_byte`), or
+            // dithered (`fixed::to_byte_dithered`) unless a pixel pair does it.
+            let thr = r.dither.map(|row| {
+                let xi = self.b.ins().band_imm_s(x, 3);
+                let idx = self.b.ins().bor(row, xi);
+                let sh = self.b.ins().ishl_imm_s(idx, 2);
+                let sh = self.b.ins().uextend(I64, sh);
+                let m = self.i64c(fixed::DITHER as i64);
+                let t = self.b.ins().ushr(m, sh);
+                let t = self.b.ins().ireduce(I32, t);
+                self.b.ins().band_imm_s(t, 0xF)
+            });
             let mut src = self.i32c(0);
             for (kk, v) in c.iter().enumerate() {
-                let q = self.b.ins().ushr_imm_s(*v, 20);
+                let q = match thr {
+                    Some(t) => {
+                        let v12 = self.b.ins().ushr_imm_s(*v, 16);
+                        let hi = self.b.ins().ushr_imm_s(v12, 8);
+                        let y = self.b.ins().isub(v12, hi);
+                        let d = self.b.ins().ushr_imm_s(y, 4);
+                        let f = self.b.ins().band_imm_s(y, 15);
+                        let up = self.b.ins().icmp(IntCC::UnsignedGreaterThan, f, t);
+                        let up = self.b.ins().uextend(I32, up);
+                        self.b.ins().iadd(d, up)
+                    }
+                    None => self.b.ins().ushr_imm_s(*v, 20),
+                };
                 let q = if kk > 0 { self.b.ins().ishl_imm_s(q, 8 * kk as i64) } else { q };
                 src = self.b.ins().bor(src, q);
             }
@@ -2374,6 +2405,8 @@ struct Row {
     z: Option<(Value, Value)>,
     /// Dithering: the Bayer matrix row, (fy & 3) << 2.
     bayer: Option<Value>,
+    /// The same row of the 8-8-8-8 store's thresholds (`fixed::DITHER`).
+    dither: Option<Value>,
 }
 
 /// A level's geometry (i64): its size, its page and offset in it, and its

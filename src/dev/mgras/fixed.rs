@@ -66,6 +66,28 @@ pub fn to_byte(c: i32) -> u32 {
     (clamp(c) >> 20) as u32
 }
 
+/// The diagnostic's ordered-dither thresholds, a nibble each at index
+/// `(y & 3) << 2 | (x & 3)` of the framebuffer pixel. Fitted to its stored
+/// colour triangles and the intervals gr4 tabulates for them; the matrix is
+/// not recovered (ide-raster-tests.md), so this is an approximation.
+pub const DITHER: u64 = 0x1D7E_90B1_5D39_9050;
+
+/// The threshold at framebuffer pixel (x, y).
+#[inline]
+pub fn dither_at(x: u32, y: u32) -> u32 {
+    ((DITHER >> ((((y & 3) << 2) | (x & 3)) * 4)) & 0xF) as u32
+}
+
+/// A clamped colour as a pixel byte as the diagnostic's images store it:
+/// the 12-bit iterated value scaled to 8.4 (`v - (v >> 8)`), rounded up when
+/// its four fraction bits exceed the threshold `t`.
+#[inline]
+pub fn to_byte_dithered(c: i32, t: u32) -> u32 {
+    let v = (clamp(c) >> 16) as u32;
+    let y = v - (v >> 8);
+    (y >> 4) + ((y & 15) > t) as u32
+}
+
 /// A clamped colour as a 12-bit colour index.
 #[inline]
 pub fn to_index(c: i32) -> u32 {
