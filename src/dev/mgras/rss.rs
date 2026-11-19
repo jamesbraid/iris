@@ -3221,6 +3221,24 @@ impl Rss {
         }
     }
 
+    /// With the GPU unit: bring the box `b` (x0, y0, x1, y1) of `bufs`
+    /// current in the CPU's planes. Batches that do not touch it are not
+    /// waited for.
+    pub fn gpu_sync_box(
+        &mut self,
+        bufs: &[Buffer],
+        b: (i32, i32, i32, i32),
+        #[cfg(feature = "wgpu")] reason: super::wgpu::Observation,
+    ) -> Result<u64, String> {
+        #[cfg(feature = "wgpu")]
+        if let Some(g) = self.gpu.get() {
+            let result = g.sync_box(&mut self.mem, bufs, b, reason);
+            return self.gpu_result("box readback", result);
+        }
+        let _ = (bufs, b);
+        Ok(0)
+    }
+
     /// Submit what the GPU unit has recorded, if one draws; nothing waits
     /// and nothing comes back (the display reads the unit's memory).
     pub fn gpu_flush(&mut self) {
