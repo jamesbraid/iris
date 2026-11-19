@@ -12,6 +12,7 @@ mod perfetto_macros;
 
 pub mod display;
 pub mod jit;
+pub mod ffi;
 pub mod inject;
 pub mod interface;
 pub mod locks;
