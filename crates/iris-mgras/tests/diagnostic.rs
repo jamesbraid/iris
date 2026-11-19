@@ -12,6 +12,8 @@ mod support;
 
 use iris_mgras::dev::mgras::engine::{Board, MgrasEngine, Mode};
 use iris_mgras::dev::mgras::pixmem::{Buffer, Kind};
+use iris_mgras::wgpu::{Gpu, GpuOptions};
+use std::sync::Arc;
 use sgi_engine::BoardEngine;
 use support::*;
 
@@ -95,11 +97,15 @@ fn lines(w: &mut Vec<u32>) {
 
 /// Send the words, then read `rows` by `cols` back from (0, 0) of the draw page.
 fn readback(board: Board, mode: Mode, jit: Option<u32>, words: &[u32], rows: u32, cols: u32) -> Vec<u32> {
+    readback_on(board, mode, jit, None, words, rows, cols)
+}
+
+fn readback_on(board: Board, mode: Mode, jit: Option<u32>, gpu: Option<&Arc<Gpu>>, words: &[u32], rows: u32, cols: u32) -> Vec<u32> {
     let mut cfg = config("sgi-mgras", mode, jit);
     cfg.board = board;
     cfg.octane = false;
     cfg.queue_ops = 1 << 20;
-    let mut e = MgrasEngine::new(cfg, Mem::default(), None, None).unwrap();
+    let mut e = MgrasEngine::new(cfg, Mem::default(), gpu, None).unwrap();
     for chunk in words.chunks(4096) {
         assert_eq!(e.push_words(0, chunk), chunk.len());
         drive(&mut e);
@@ -156,14 +162,82 @@ fn the_triangles_have_the_stored_row_counts() {
     }
 }
 
-/// Inline, threaded and JIT runs store the same scene.
+/// A GPU unit, or None (the tests then skip that path; `IRIS_REQUIRE_GPU=1`
+/// makes a missing one an error).
+fn gpu() -> Option<Arc<Gpu>> {
+    match Gpu::new(&GpuOptions::default(), Box::new(|m| panic!("GPU failed: {m}"))) {
+        Ok(g) => {
+            eprintln!("GPU path on {} ({:?}, {:?})", g.caps.adapter, g.caps.backend, g.caps.device_type);
+            Some(g)
+        }
+        Err(e) => {
+            if std::env::var_os("IRIS_REQUIRE_GPU").is_some_and(|v| v == "1") {
+                panic!("no GPU: {e}");
+            }
+            eprintln!("skipped the GPU path: {e}");
+            None
+        }
+    }
+}
+
+/// Every path a scene runs on: name and the words it stores. The
+/// interpreter first, then the threaded engine, the JIT and the GPU unit.
+fn paths(w: &[u32], rows: u32, cols: u32, gpu: Option<&Arc<Gpu>>) -> Vec<(&'static str, Vec<u32>)> {
+    let mut out = vec![("interpreter", readback(Board::High, Mode::Inline, None, w, rows, cols))];
+    out.push(("threaded", readback(Board::High, Mode::Threaded, None, w, rows, cols)));
+    #[cfg(feature = "gr4-jit")]
+    out.push(("JIT", readback(Board::High, Mode::Inline, Some(iris_mgras::dev::mgras::rss_jit::MODE_SYNC), w, rows, cols)));
+    if let Some(g) = gpu {
+        out.push(("GPU", readback_on(Board::High, Mode::Inline, None, Some(g), w, rows, cols)));
+    }
+    out
+}
+
+/// Inline, threaded, JIT and GPU runs store the same scene.
 #[test]
 fn every_path_stores_the_same_scene() {
+    let g = gpu();
     for (name, w, rows, cols, _) in scenes() {
-        let want = readback(Board::High, Mode::Inline, None, &w, rows, cols);
-        assert_eq!(readback(Board::High, Mode::Threaded, None, &w, rows, cols), want, "{name}: threaded");
-        #[cfg(feature = "gr4-jit")]
-        assert_eq!(readback(Board::High, Mode::Inline, Some(iris_mgras::dev::mgras::rss_jit::MODE_SYNC), &w, rows, cols), want, "{name}: JIT");
+        let all = paths(&w, rows, cols, g.as_ref());
+        for (path, got) in &all[1..] {
+            assert_eq!(got, &all[0].1, "{name}: {path}");
+        }
+    }
+}
+
+/// Lines the diagnostic never draws, in its register interface: smooth,
+/// stippled, integer and blended ones at pseudo-random places over one
+/// 48 by 40 window, so the JIT's and the GPU unit's words are compared on
+/// more than the five.
+fn random_lines(w: &mut Vec<u32>) {
+    let mut s = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = |n: u64| {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s % n
+    };
+    let colours: [&[(u32, u32)]; 3] = [&[(0x5c, 0xff_f000), (0x5f, 0xff_f000)], &[(0x5d, 0xff_f000), (0x5e, 0x7f_f800), (0x5f, 0xff_f000)], &[(0x5c, 0x3f_f000), (0x5d, 0xbf_f000), (0x5f, 0x7f_f800)]];
+    for _ in 0..60 {
+        let p = |n: &mut dyn FnMut(u64) -> u64| (n(46) as f64 + 1.0 + n(4) as f64 / 4.0, n(38) as f64 + 1.0 + n(4) as f64 / 4.0);
+        let (a, b) = (p(&mut next), p(&mut next));
+        let (dx, dy) = ((b.0 - a.0).abs(), (b.1 - a.1).abs());
+        let inc = if dy >= dx { ((dx / dy.max(1e-6) * 16_777_216.0) as u32, 0x100_0000) } else { (0x100_0000, (dy / dx.max(1e-6) * 16_777_216.0) as u32) };
+        let stipple = next(3) == 0;
+        let smooth = next(2) == 0;
+        line(w, a, b, inc, colours[next(3) as usize], stipple, smooth);
+    }
+}
+
+/// The same for random diagnostic lines.
+#[test]
+fn every_path_stores_the_same_random_lines() {
+    let g = gpu();
+    let w = scene(random_lines);
+    let all = paths(&w, 40, 48, g.as_ref());
+    assert!(covered(&all[0].1) > 100, "the random lines drew little");
+    for (path, got) in &all[1..] {
+        assert_eq!(got, &all[0].1, "random lines: {path}");
     }
 }
 
@@ -238,8 +312,9 @@ fn differing(name: &str, got: &[u32], want: &[u32], cols: usize) -> usize {
 }
 
 /// Word for word against the stored tables, when the shipped binary is
-/// available locally; the triangles must match exactly and the lines may
-/// miss only the purple line's last row.
+/// available locally, on every path: the interpreter, the threaded engine,
+/// the JIT and the GPU unit must each match the triangles exactly and the
+/// lines but for the purple line's last row.
 #[test]
 fn the_engine_matches_the_stored_tables_word_for_word() {
     let path = std::env::var(IDE_ENV).unwrap_or_else(|_| IDE_DEFAULT.into());
@@ -248,18 +323,16 @@ fn the_engine_matches_the_stored_tables_word_for_word() {
         return;
     };
     assert_eq!(ide.len() as u64, IDE_SIZE, "{path} is not the IRIX 6.4 Octane diagnostic");
+    let g = gpu();
     let tables = [(0x143380, 0), (0x143980, 1), (0x143f80, 2), (0x144b80, 3)];
-    let (mut triangles, mut lines) = (0, 0);
+    let mut bad = 0;
     for (offset, i) in tables {
         let (name, w, rows, cols, _) = scenes().swap_remove(i);
-        let got = readback(Board::High, Mode::Inline, None, &w, rows, cols);
-        let n = differing(name, &got, &stored(&ide, offset, (rows * cols) as usize), cols as usize);
-        if i < 3 {
-            triangles += n;
-        } else {
-            lines = n;
+        let want = stored(&ide, offset, (rows * cols) as usize);
+        for (path, got) in paths(&w, rows, cols, g.as_ref()) {
+            bad += differing(&format!("{name}, {path}"), &got, &want, cols as usize);
         }
     }
-    assert_eq!(triangles, 0, "the triangles differ from the stored tables");
-    assert!(lines <= 1, "{lines} of the lines' words differ from the stored table");
+    // The lines miss one word on each of the four paths.
+    assert!(bad <= 4, "{bad} words differ from the stored tables");
 }

@@ -471,10 +471,11 @@ pub(crate) enum Observation {
     Debug,
     StateHash,
     Validation,
+    DiagLine,
 }
 
 impl Observation {
-    const COUNT: usize = 8;
+    const COUNT: usize = 9;
     const ALL: [Observation; Self::COUNT] = [
         Self::DmaRead,
         Self::PioRead,
@@ -484,6 +485,7 @@ impl Observation {
         Self::Debug,
         Self::StateHash,
         Self::Validation,
+        Self::DiagLine,
     ];
 
     fn index(self) -> usize {
@@ -500,6 +502,7 @@ impl Observation {
             Self::Debug => "debug",
             Self::StateHash => "state-hash",
             Self::Validation => "validation",
+            Self::DiagLine => "diag-line",
         }
     }
 }

@@ -329,7 +329,7 @@ pub const OP_DIAG_LINE: u32 = 0x3;
 const IR_SMOOTH: u32 = 0x60;
 /// PP1 fill mode bits the diagnostic's blend write sets (1:0 and 3); with
 /// them its lines blend as source alpha over one minus destination alpha
-/// (inferred from one stored pixel, see `diag_line`).
+/// (inferred from one stored pixel, see `diag_run`).
 const PP1_DIAG_BLEND: u32 = 0xB;
 /// The diagnostic's line stipple reads its pattern downward from this bit
 /// at the start vertex's pixel. Inferred: bit 5 read upward fits as well.
@@ -1202,9 +1202,10 @@ pub struct Rss {
     /// Pixels drawn since the GL line stipple was last restarted (line_stipple_repeat).
     pub(super) gl_line_stipple_pos: u32,
     /// The diagnostic line fragment being drawn: its coverage (1..=256,
-    /// 0 none) and whether it blends (`diag_line`). Not state.
+    /// 0 none) and whether it blends (`diag_run`). Not state.
     diag_cover: u32,
     diag_blend: u32,
+
     /// The raster registers as `gl_enter` found them.
     gl_stash: [u32; 0x400],
     /// Fill modes seen with a block, for bring-up logging.
@@ -2555,7 +2556,8 @@ impl Rss {
     /// written again.
     fn gl_line(&mut self) -> bool {
         let Some(l) = self.gl_line_setup() else { return true };
-        if l.diag & DIAG_LINE != 0 && self.diag_line(&l) {
+        if l.diag & DIAG_LINE != 0 {
+            self.diag_run(|s| s.diag_draw(&l));
             return true;
         }
         #[cfg(feature = "wgpu")]
@@ -2605,27 +2607,55 @@ impl Rss {
         true
     }
 
-    /// The Octane diagnostic's line (IR opcode 3) on the CPU, which neither
-    /// the JIT nor the GPU unit models; false when a GPU unit draws, which
-    /// then draws it as a plain GL line.
+    /// The Octane diagnostic's lines (IR opcode 3) are shaded on the CPU:
+    /// the JIT and the GPU unit do not model them. With a GPU unit its
+    /// memory is brought current first and the rows `draw` reached go back
+    /// after, so every path stores the same words.
     ///
     /// Inferred from the diagnostic's stored table (gr4 ide-raster-tests):
     /// - Stipple dots alternate from the start vertex's pixel (registers
     ///   0xe/0xf), the pattern read downward from `DIAG_STIPPLE_START`.
-    /// - A smooth line (IR 0x63) has weight a = 255 - 4 k at k = 64 d, d
+    /// - A smooth line (IR 0x63) has weight a = 255 - 4 k, k = 64 d for d
     ///   the pixel centre's distance from the line sampled at the major
-    ///   pixel, for d < 1; the loader's table is not read.
+    ///   pixel (k < 64); the loader's table is not read.
     /// - With `PP1_DIAG_BLEND` set a fragment blends as source alpha over
     ///   one minus destination alpha, and its coverage scales its alpha.
-    fn diag_line(&mut self, l: &GlLineSetup) -> bool {
+    fn diag_run(&mut self, draw: impl FnOnce(&mut Self) -> Option<(i32, i32)>) {
         #[cfg(feature = "wgpu")]
-        if self.gpu.get().is_some() {
-            log::warn!("mgras: the diagnostic's line is drawn as a plain GL line with a GPU unit");
-            return false;
+        if let Some(g) = self.gpu.get() {
+            if self.gpu_sync(super::wgpu::Observation::DiagLine).is_err() {
+                return;
+            }
+            if let Some((y0, y1)) = draw(self) {
+                let pp1 = self.reg(reg::PP1FILLMODE);
+                let drbsize = self.reg(reg::MGRAS_PP1_DRB_SIZE);
+                let mut bufs = vec![self.target(), Buffer::new(ZST_PAGE, Kind::Wide, drbsize)];
+                if draws_a_and_b(draw_buffer(pp1)) && !rgb12_pair(pp1) && !ci_pixtype(pp1) {
+                    bufs.extend(self.second_buffer().map(|p| Buffer::new(p, Kind::Wide, drbsize)));
+                }
+                g.upload_rows(&self.mem, &bufs, y0.max(0) as u32, y1.max(0) as u32);
+            }
+            return;
         }
+        draw(self);
+    }
+
+    /// One diagnostic line fragment of coverage `cover` (256 is full),
+    /// noting the framebuffer rows reached.
+    fn diag_frag(&mut self, w: (i32, i32), rgba: [i32; 4], z: i64, cover: u32, rows: &mut Option<(i32, i32)>) {
         let blend = self.reg(reg::PP1FILLMODE) & PP1_DIAG_BLEND == PP1_DIAG_BLEND;
+        let fy = self.to_fb(w.0, w.1).1;
+        *rows = Some(rows.map_or((fy, fy), |(a, b)| (a.min(fy), b.max(fy))));
+        (self.diag_cover, self.diag_blend) = if blend || cover < 256 { (cover, blend as u32) } else { (0, 0) };
+        self.gl_fragment(w.0, w.1, rgba, z);
+        (self.diag_cover, self.diag_blend) = (0, 0);
+    }
+
+    /// `diag_run`'s drawing: the framebuffer rows it reached, if any.
+    fn diag_draw(&mut self, l: &GlLineSetup) -> Option<(i32, i32)> {
         let smooth = l.diag & DIAG_SMOOTH != 0;
         let start = l.a1.floor() as i32;
+        let mut rows = None;
         let mut p = l.p0;
         let mut k = 0i32;
         while p != l.p1 {
@@ -2633,33 +2663,28 @@ impl Rss {
             if l.stipple == 0 || (l.pattern >> (DIAG_STIPPLE_START - idx).rem_euclid(16)) & 1 != 0 {
                 let rgba = [0, 1, 2, 3].map(|c| l.cbase[c].wrapping_add(l.cstep[c].wrapping_mul(k)));
                 let z = l.zbase.wrapping_add(l.zstep.wrapping_mul(k as i64));
-                let frag = |s: &mut Self, q: i32, cover: u32| {
-                    let (wx, wy) = if l.xmajor != 0 { (p, q) } else { (q, p) };
-                    (s.diag_cover, s.diag_blend) = if blend || cover < 256 { (cover, blend as u32) } else { (0, 0) };
-                    s.gl_fragment(wx, wy, rgba, z);
-                    (s.diag_cover, s.diag_blend) = (0, 0);
-                };
+                let at = |q: i32| if l.xmajor != 0 { (p, q) } else { (q, p) };
                 if smooth {
                     let b = l.b0 + l.slope * (p as f64 - l.a0);
                     let c = (b - 0.5).round() as i32;
                     for q in c - 1..=c + 1 {
-                        let d = ((q as f64 + 0.5) - b).abs();
-                        let a = 255 - 4 * (d * 64.0).round() as i32;
+                        let w = (((q as f64 + 0.5) - b).abs() * 64.0).round() as u32;
+                        let a = if w < 64 { 255 - 4 * w } else { 0 };
                         if a > 0 {
-                            frag(self, q, (a + (a >> 7)) as u32);
+                            self.diag_frag(at(q), rgba, z, a + (a >> 7), &mut rows);
                         }
                     }
                 } else {
                     let q0 = gl_line_q0(l.qk, l.qs, p);
                     for q in q0..q0.wrapping_add(l.width) {
-                        frag(self, q, 256);
+                        self.diag_frag(at(q), rgba, z, 256, &mut rows);
                     }
                 }
             }
             p = p.wrapping_add(l.dir);
             k = k.wrapping_add(1);
         }
-        true
+        rows
     }
 
     /// A GL line's per-primitive setup (see `gl_line`). None when it draws
