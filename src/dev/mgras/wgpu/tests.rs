@@ -209,8 +209,8 @@ impl Pair {
         let n = self.log.len();
         let mode: Vec<String> = [
             reg::PP1FILLMODE, reg::FILLMODE, reg::DRBPOINTERS, reg::MGRAS_PP1_DRB_SIZE, reg::COLORMASKLSBSA, reg::COLORMASKLSBSB, reg::COLORMASKMSBS,
-            reg::MGRAS_PP1_REG_F17B, reg::CLIP_MODE, reg::XYWIN, reg::CONFIG, reg::MGRAS_PP1_REG_F168, reg::MGRAS_PP1_REG_F166, reg::MGRAS_PP1_REG_F167, reg::MGRAS_PP1_REG_F169,
-            reg::MGRAS_PP1_REG_F165, reg::MGRAS_PP1_REG_F16B, reg::MGRAS_PP1_REG_F16C, reg::FOG_ON, te::MGRAS_RE4_TEXTURE_MODE_FIRST, te::MGRAS_TE1_TEXTURE_MODE_DRAWN, te::MGRAS_TE1_TEXTURE_SIZE, te::MGRAS_TE1_TEXTURE_LOD,
+            reg::MGRAS_PP1_WINDOW_MODE, reg::CLIP_MODE, reg::XYWIN, reg::CONFIG, reg::MGRAS_PP1_DEPTH_MODE, reg::MGRAS_PP1_STENCIL_MODE, reg::MGRAS_PP1_STENCIL_MASK, reg::MGRAS_PP1_ALPHA_TEST_MODE,
+            reg::MGRAS_PP1_BLEND_FACTOR, reg::MGRAS_PP1_BLEND_COLOR_RG, reg::MGRAS_PP1_BLEND_COLOR_BA, reg::FOG_ON, te::MGRAS_RE4_TEXTURE_MODE_FIRST, te::MGRAS_TE1_TEXTURE_MODE_DRAWN, te::MGRAS_TE1_TEXTURE_SIZE, te::MGRAS_TE1_TEXTURE_LOD,
         ]
         .iter()
         .map(|&r| format!("{r:#05x}={:#x}", self.cpu.reg(r)))
@@ -507,13 +507,13 @@ fn a_texture_load_lands_between_the_triangles_around_it() {
         (reg::DRBPOINTERS, 0x100),
         (reg::MGRAS_PP1_DRB_SIZE, 7 << 2 | 2),
         (reg::COLORMASKLSBSA, u32::MAX),
-        (reg::MGRAS_PP1_REG_F17B, 0),
+        (reg::MGRAS_PP1_WINDOW_MODE, 0),
         (reg::CLIP_MODE, 0),
         (reg::CONFIG, 0),
-        (reg::MGRAS_PP1_REG_F168, 0),
-        (reg::MGRAS_PP1_REG_F166, 0),
-        (reg::MGRAS_PP1_REG_F169, 0),
-        (reg::MGRAS_PP1_REG_F165, 0),
+        (reg::MGRAS_PP1_DEPTH_MODE, 0),
+        (reg::MGRAS_PP1_STENCIL_MODE, 0),
+        (reg::MGRAS_PP1_ALPHA_TEST_MODE, 0),
+        (reg::MGRAS_PP1_BLEND_FACTOR, 0),
         (reg::FOG_ON, 0),
         // RGBA8 8x8, modulate, nearest, repeat; level 0 at PAGE.
         (te::MGRAS_RE4_TEXTURE_MODE_FIRST, 1 | 3 << 3 | 4 << 9),
@@ -521,7 +521,7 @@ fn a_texture_load_lands_between_the_triangles_around_it() {
         (te::MGRAS_TE1_TEXTURE_SIZE, 3 | 3 << 4),
         (te::MGRAS_TE1_TEXTURE_LOD, 0),
         (te::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX, 0),
-        (te::MGRAS_TE1_REG_F191, PAGE),
+        (te::MGRAS_TE1_TEXTURE_MIPMAP_LEVELS, PAGE),
         (te::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX, 0),
         (te::MGRAS_TE1_TEXTURE_BORDER_BLOCK, PAGE + 1),
     ];
@@ -535,10 +535,10 @@ fn a_texture_load_lands_between_the_triangles_around_it() {
     for c in 0..4u32 {
         mode.extend([(0x05C + c, 0xFFF000), (0x060 + 2 * c, 0), (0x061 + 2 * c, 0)]);
     }
-    hilo(&mut mode, te::MGRAS_RE4_REG_E084, one as i64);
-    hilo(&mut mode, te::MGRAS_RE4_REG_E080, 0);
-    hilo(&mut mode, te::MGRAS_RE4_REG_E082, 0);
-    for (r, v) in [(te::MGRAS_RE4_REG_E0C4, 1.0 / 50.0), (te::MGRAS_RE4_REG_E0C6, 0.0), (te::MGRAS_RE4_REG_E0C0, 0.0), (te::MGRAS_RE4_REG_E0C2, 1.0 / 50.0), (te::MGRAS_RE4_REG_E088, 0.0), (te::MGRAS_RE4_REG_E086, 0.0)] {
+    hilo(&mut mode, te::MGRAS_TE1_TEXTURE_ONE_OVER_W_UPPER, one as i64);
+    hilo(&mut mode, te::MGRAS_TE1_TEXTURE_S_OVER_W_UPPER, 0);
+    hilo(&mut mode, te::MGRAS_TE1_TEXTURE_T_OVER_W_UPPER, 0);
+    for (r, v) in [(te::MGRAS_TE1_TEXTURE_S_OVER_W_X_STEP_UPPER, 1.0 / 50.0), (te::MGRAS_TE1_TEXTURE_T_OVER_W_X_STEP_UPPER, 0.0), (te::MGRAS_TE1_TEXTURE_S_OVER_W_EDGE_STEP_UPPER, 0.0), (te::MGRAS_TE1_TEXTURE_T_OVER_W_EDGE_STEP_UPPER, 1.0 / 50.0), (te::MGRAS_TE1_TEXTURE_ONE_OVER_W_X_STEP_UPPER, 0.0), (te::MGRAS_TE1_TEXTURE_ONE_OVER_W_EDGE_STEP_UPPER, 0.0)] {
         hilo(&mut mode, r, (v * one) as i64);
     }
     p.apply(&mode);

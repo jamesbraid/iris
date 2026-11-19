@@ -33,7 +33,7 @@ const MGRAS_PP1_DRB_SIZE: u32 = 0x16E;
 const XFRSIZE: u32 = 0x153;
 const XFRMODE: u32 = 0x159;
 const PP1FILLMODE: u32 = 0x161;
-const MGRAS_PP1_REG_F17B: u32 = 0x17B;
+const MGRAS_PP1_WINDOW_MODE: u32 = 0x17B;
 const FILL_COLOR_R: u32 = 0x176;
 const FILL_FAST: u32 = 1 << 20;
 
@@ -837,8 +837,8 @@ fn switch_to_gl_context(m: &Mgras, id: u32, x: u32, y: u32, w: u32, h: u32) {
     switch_to_gl_context_cid(m, id, x, y, w, h, 0);
 }
 
-/// The same, the window's PP1 window mode (image word 4) `reg_f17b`.
-fn switch_to_gl_context_cid(m: &Mgras, id: u32, x: u32, y: u32, w: u32, h: u32, reg_f17b: u32) {
+/// The same, the window's PP1 window mode (image word 4) `window_mode`.
+fn switch_to_gl_context_cid(m: &Mgras, id: u32, x: u32, y: u32, w: u32, h: u32, window_mode: u32) {
     // Clear the switch-done flag first: left set by the last switch, the
     // wait below would return before this one ran (and a test's next
     // register write would race the HQ thread; seen on CI).
@@ -848,7 +848,7 @@ fn switch_to_gl_context_cid(m: &Mgras, id: u32, x: u32, y: u32, w: u32, h: u32, 
     img[0] = id;
     img[2] = x | y << 16;
     img[3] = 0x11;
-    img[4] = reg_f17b;
+    img[4] = window_mode;
     img[11] = x << 16 | (x + w - 1);
     img[12] = y << 16 | (y + h - 1);
     img[13] = 0x240;
@@ -899,8 +899,8 @@ fn gl_state_and_window_follow_the_context() {
 
 /// A window whose visible region is too complex for the screen masks: the
 /// X server paints it with a clip ID (its clip-ID draw routine: draw field 0x50, the ID
-/// in the fill colour, reg_f17b 0xC00, left set), and the kernel has the
-/// window's GL drawing match that ID (reg_f17b 1 << (4 + id)). The clear
+/// in the fill colour, window_mode 0xC00, left set), and the kernel has the
+/// window's GL drawing match that ID (window_mode 1 << (4 + id)). The clear
 /// lands only on the window's pixels with the ID; a window without one, and
 /// the X server, draw everywhere.
 #[test]
@@ -908,10 +908,10 @@ fn gl_draws_only_where_the_clip_id_matches() {
     let m = live_board();
     x_server(&m);
     let x_fillmode = 0x0C00_4504;
-    direct_rss(&m, MGRAS_PP1_REG_F17B, 0, false);
+    direct_rss(&m, MGRAS_PP1_WINDOW_MODE, 0, false);
     // Clip ID 0 over the screen, then 1 over the window's left half
     // (screen rows top-down: GL rows 0..99 are 924..1023).
-    direct_rss(&m, MGRAS_PP1_REG_F17B, 0xC00, false);
+    direct_rss(&m, MGRAS_PP1_WINDOW_MODE, 0xC00, false);
     direct_rss(&m, PP1FILLMODE, 0x14_2600, false);
     fifo_rss(&m, FILLMODE, FILL_FAST, false);
     fifo_rss(&m, FILL_COLOR_R, 0, false);
@@ -934,7 +934,7 @@ fn gl_draws_only_where_the_clip_id_matches() {
     fifo_token(&m, 0x15, &[]);
     assert_eq!(at(50, 50), 0xFF_0000, "no clip ID to match: all of it");
 
-    // The X server draws anywhere with its reg_f17b back.
+    // The X server draws anywhere with its window_mode back.
     fifo_rss(&m, FILLMODE, FILL_FAST, false);
     fifo_rss(&m, FILL_COLOR_R, 0x2A, false);
     block(&m, 60, 1000, 60, 1000);
@@ -2375,7 +2375,7 @@ fn gl_root_painter_respects_clipping_ids_after_iconify() {
     use super::rss::reg;
     let m = live_board();
     x_server(&m);
-    direct_rss(&m, reg::MGRAS_PP1_REG_F17B, 0xC00, false);
+    direct_rss(&m, reg::MGRAS_PP1_WINDOW_MODE, 0xC00, false);
     direct_rss(&m, FILLMODE, FILL_FAST, false);
     direct_rss(&m, FILL_COLOR_R, 0x77, false);
     block(&m, 0, 724, 399, 1023);
@@ -3119,7 +3119,7 @@ fn gl_texgen_repeats_past_one() {
 }
 
 /// glGetTexImage as libGLcore sends it (traced): token_0d2, the sampler at
-/// the level (texture_size, reg_f191), token_0f0 (0x0F0), the host DMA armed,
+/// the level (texture_size, texture_mipmap_levels), token_0f0 (0x0F0), the host DMA armed,
 /// then raster interface register 5 = 0x400D starts the read. The texels
 /// reach host memory as RGBA bytes, row by row.
 #[test]

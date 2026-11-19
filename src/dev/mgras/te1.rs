@@ -17,7 +17,7 @@
 //!   in the RE (`tex_env`): the environment registers are RE registers.
 //!
 //! TRAM layout is ours. libGLcore's texture manager hands out 16 KB pages
-//! (4 TRAMs; `reg_f191` / `texture_loader_mipmap_block` hold a page and a bank bit per level),
+//! (4 TRAMs; `texture_mipmap_levels` / `texture_loader_mipmap_block` hold a page and a bank bit per level),
 //! and every texel's address must follow from what the registers say. A
 //! level starts at its page. Levels of 16x16 texels and smaller share one
 //! page, as libGLcore packs them, each at a fixed offset by size. A texel
@@ -89,7 +89,7 @@ pub mod reg {
     pub const MGRAS_TE1_REG_F186: u32 = 0x186;
     /// Index into the per-level tables below, advanced by each table write.
     pub const MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX: u32 = 0x190;
-    pub const MGRAS_TE1_REG_F191: u32 = 0x191;
+    pub const MGRAS_TE1_TEXTURE_MIPMAP_LEVELS: u32 = 0x191;
     /// The detail image's TRAM page (bits 7:0).
     pub const MGRAS_TE1_TEXTURE_DETAIL_BLOCK: u32 = 0x192;
     pub const MGRAS_TE1_TEXTURE_BORDER_BLOCK: u32 = 0x193;
@@ -107,23 +107,23 @@ pub mod reg {
     /// Iterators (double buffered; 64-bit hi/lo pairs): S/W, T/W, 1/W at
     /// the first pixel, their steps along the span (X) and down the major
     /// edge (E), and their Y derivatives.
-    pub const MGRAS_RE4_REG_E080: u32 = 0x080;
-    pub const MGRAS_RE4_REG_E082: u32 = 0x082;
-    pub const MGRAS_RE4_REG_E084: u32 = 0x084;
-    pub const MGRAS_RE4_REG_E086: u32 = 0x086;
-    pub const MGRAS_RE4_REG_E088: u32 = 0x088;
-    pub const MGRAS_RE4_REG_E08A: u32 = 0x08A;
-    pub const MGRAS_RE4_REG_E0C0: u32 = 0x0C0;
-    pub const MGRAS_RE4_REG_E0C2: u32 = 0x0C2;
-    pub const MGRAS_RE4_REG_E0C4: u32 = 0x0C4;
-    pub const MGRAS_RE4_REG_E0C6: u32 = 0x0C6;
-    pub const MGRAS_RE4_REG_E0C8: u32 = 0x0C8;
-    pub const MGRAS_RE4_REG_E0CA: u32 = 0x0CA;
+    pub const MGRAS_TE1_TEXTURE_S_OVER_W_UPPER: u32 = 0x080;
+    pub const MGRAS_TE1_TEXTURE_T_OVER_W_UPPER: u32 = 0x082;
+    pub const MGRAS_TE1_TEXTURE_ONE_OVER_W_UPPER: u32 = 0x084;
+    pub const MGRAS_TE1_TEXTURE_ONE_OVER_W_EDGE_STEP_UPPER: u32 = 0x086;
+    pub const MGRAS_TE1_TEXTURE_ONE_OVER_W_X_STEP_UPPER: u32 = 0x088;
+    pub const MGRAS_TE1_TEXTURE_ONE_OVER_W_Y_STEP_UPPER: u32 = 0x08A;
+    pub const MGRAS_TE1_TEXTURE_S_OVER_W_EDGE_STEP_UPPER: u32 = 0x0C0;
+    pub const MGRAS_TE1_TEXTURE_T_OVER_W_EDGE_STEP_UPPER: u32 = 0x0C2;
+    pub const MGRAS_TE1_TEXTURE_S_OVER_W_X_STEP_UPPER: u32 = 0x0C4;
+    pub const MGRAS_TE1_TEXTURE_T_OVER_W_X_STEP_UPPER: u32 = 0x0C6;
+    pub const MGRAS_TE1_TEXTURE_S_OVER_W_Y_STEP_UPPER: u32 = 0x0C8;
+    pub const MGRAS_TE1_TEXTURE_T_OVER_W_Y_STEP_UPPER: u32 = 0x0CA;
 }
 
 /// The texture registers a GL context owns (single buffered), which the GE
 /// keeps a shadow of and loads into the TE (`gl.rs`). texture_level_table_index and the
-/// per-level tables it indexes (reg_f191, texture_border_block, detailscale) are kept
+/// per-level tables it indexes (texture_mipmap_levels, texture_border_block, detailscale) are kept
 /// apart.
 pub const CONTEXT_REGS: [u32; 31] = [
     0x111, 0x142, 0x143, 0x180, 0x181, 0x182, 0x183, 0x184, 0x185, 0x186, 0x187, 0x188, 0x189, 0x18A,
@@ -132,7 +132,7 @@ pub const CONTEXT_REGS: [u32; 31] = [
 ];
 
 /// Per-level tables written through texture_level_table_index's index.
-pub const TABLE_REGS: [u32; 3] = [reg::MGRAS_TE1_REG_F191, reg::MGRAS_TE1_TEXTURE_BORDER_BLOCK, reg::MGRAS_TE1_DETAILSCALE];
+pub const TABLE_REGS: [u32; 3] = [reg::MGRAS_TE1_TEXTURE_MIPMAP_LEVELS, reg::MGRAS_TE1_TEXTURE_BORDER_BLOCK, reg::MGRAS_TE1_DETAILSCALE];
 pub const TABLE_LEN: usize = 32;
 
 /// Fixed point of the iterator registers: value * 2^32 (our choice; the
@@ -400,7 +400,7 @@ impl Te1 {
         fixed::widen(v, d)
     }
 
-    /// A table write (reg_f191, texture_border_block, detailscale) at `index`.
+    /// A table write (texture_mipmap_levels, texture_border_block, detailscale) at `index`.
     pub fn table_write(&mut self, r: u32, index: u32, v: u32) {
         if let Some(k) = TABLE_REGS.iter().position(|&t| t == r) {
             self.tables[k][index as usize % TABLE_LEN] = v;
@@ -493,7 +493,7 @@ impl Te1 {
     }
 
     /// Row `line` of the texture manager's page view (its save of TRAM
-    /// pages): from the page of level 0 in the reg_f191 table, `w` texels
+    /// pages): from the page of level 0 in the texture_mipmap_levels table, `w` texels
     /// a row in a level `w` wide, of the components (texture_mode_first) and depth
     /// (texture_mode_drawn) of the texture being saved. Each texel is its components
     /// in storage order, as many as the transfer mode's format carries
@@ -531,7 +531,7 @@ impl Te1 {
     }
 
     /// Row `line` of the level the sampler is aimed at (level 0 of the
-    /// reg_f191 table, texture_size's size), `w` texels in the transfer mode's
+    /// texture_mipmap_levels table, texture_size's size), `w` texels in the transfer mode's
     /// layout (XFRMODE): the texture's own components (one: luminance,
     /// alpha or intensity; two: luminance-alpha; RGB), or RGBA with the
     /// class's components where GL's readback puts them (luminance and
@@ -949,7 +949,7 @@ mod tests {
         regs[reg::MGRAS_RE4_TEXTURE_MODE_FIRST as usize] = TEXMODE1_ENABLE | 3 << 3 | 4 << 9;
         regs[reg::MGRAS_TE1_TEXTURE_MODE_DRAWN as usize] = 1 << 2;
         regs[reg::MGRAS_TE1_TEXTURE_SIZE as usize] = 2 << 4 | 2;
-        te.table_write(reg::MGRAS_TE1_REG_F191, 0, 0);
+        te.table_write(reg::MGRAS_TE1_TEXTURE_MIPMAP_LEVELS, 0, 0);
         for (base, v) in [(0x1D, 0x40u8), (0, 0xC0)] {
             regs[reg::MGRAS_TE1_REG_F186 as usize] = base;
             for t in 0..4 {
@@ -966,7 +966,7 @@ mod tests {
         }
         // The base wraps within TRAM's 256 pages.
         regs[reg::MGRAS_TE1_REG_F186 as usize] = 0xFF;
-        te.table_write(reg::MGRAS_TE1_REG_F191, 0, 2);
+        te.table_write(reg::MGRAS_TE1_TEXTURE_MIPMAP_LEVELS, 0, 2);
         assert_eq!(te.sampler(&regs).pages[0], 1);
     }
 
@@ -999,7 +999,7 @@ mod tests {
         for t in 0..256 {
             te.load_line(&regs, t, &det[t as usize * 1024..][..1024]);
         }
-        te.table_write(reg::MGRAS_TE1_REG_F191, 0, 0);
+        te.table_write(reg::MGRAS_TE1_TEXTURE_MIPMAP_LEVELS, 0, 0);
         for k in 0..32 {
             te.table_write(reg::MGRAS_TE1_DETAILSCALE, k, 0x1F);
         }
@@ -1067,7 +1067,7 @@ mod tests {
         }
         regs[reg::MGRAS_RE4_TEXTURE_MODE_FIRST as usize] = 2 << 3;
         regs[reg::MGRAS_TE1_TEXTURE_MODE_DRAWN as usize] = 1 << 2;
-        te.table_write(reg::MGRAS_TE1_REG_F191, 0, 1);
+        te.table_write(reg::MGRAS_TE1_TEXTURE_MIPMAP_LEVELS, 0, 1);
         let row = te.read_raw(&regs, 6, 64);
         assert_eq!(&row[..8], &[0, 70, 0xA5, 0, 1, 70, 0xA5, 0]);
     }

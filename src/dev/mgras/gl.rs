@@ -78,17 +78,17 @@ pub(super) mod tok {
     pub const VERTEX4F: u32 = 0x000;
     /// Context set-up for an RGB visual, or a colour-index one (one word:
     /// 8 or 12, presumably the index bits).
-    pub const TOKEN_009: u32 = 0x009;
-    pub const TOKEN_00A: u32 = 0x00A;
-    pub const TOKEN_09A: u32 = 0x09A;
+    pub const MGRAS_HQ3_CFIFO_CMD_INIT_RGB_CONTEXT: u32 = 0x009;
+    pub const MGRAS_HQ3_CFIFO_CMD_INIT_COLOR_INDEX_CONTEXT: u32 = 0x00A;
+    pub const MGRAS_HQ3_CFIFO_CMD_INIT_FORMAT_VALUES: u32 = 0x09A;
     /// glClearIndex.
     pub const CLEAR_INDEX: u32 = 0x0BD;
     /// glRasterPos (object x, y [, z [, w]]).
     pub const RASTER_POS4F: u32 = 0x038;
     /// glRasterPos / glBitmap raster position update (floats dx, dy).
-    pub const TOKEN_0D6: u32 = 0x0D6;
+    pub const MGRAS_HQ3_CFIFO_CMD_UPDATE_RASTER_POS: u32 = 0x0D6;
     /// Latch raster position attributes to current attributes.
-    pub const TOKEN_0D7: u32 = 0x0D7;
+    pub const MGRAS_HQ3_CFIFO_CMD_LOAD_RASTER_POS_INFO: u32 = 0x0D7;
     /// glIndexMask.
     pub const INDEX_MASK: u32 = 0x03D;
     /// glTexCoord (s [, t [, r [, q]]]).
@@ -96,7 +96,7 @@ pub(super) mod tok {
     /// Texturing on / off for the primitives that follow (libGLcore
     /// the texture manager's mode send: on when the bound texture is complete).
     pub const TOKEN_00B: u32 = 0x00B;
-    pub const TOKEN_00C: u32 = 0x00C;
+    pub const MGRAS_HQ3_CFIFO_CMD_TEXTURE_OFF: u32 = 0x00C;
     /// glEnable / glDisable(GL_POINT_SMOOTH): \[1\] / \[0\] (libGLcore's
     /// glEnable path; traced).
     pub const POINT_SMOOTH: u32 = 0x06C;
@@ -105,20 +105,20 @@ pub(super) mod tok {
     /// around glDrawPixels, glCopyPixels, glTexImage and glCopyTexImage):
     /// the GE keeps the texture mode aside and draws the operation
     /// untextured.
-    pub const TOKEN_0E9: u32 = 0x0E9;
-    pub const TOKEN_0EA: u32 = 0x0EA;
+    pub const MGRAS_HQ3_CFIFO_CMD_SAVE_TEXTURE_MODE: u32 = 0x0E9;
+    pub const MGRAS_HQ3_CFIFO_CMD_RESTORE_TEXTURE_MODE: u32 = 0x0EA;
     /// A texture load's lookup table: none (the texture manager's load routine sends this
     /// where it would send the TL table), and the end of each sub-load
     /// (after every token_08d of the load).
-    pub const TOKEN_09B: u32 = 0x09B;
-    pub const TOKEN_09C: u32 = 0x09C;
+    pub const MGRAS_HQ3_CFIFO_CMD_TEXTURE_LOAD: u32 = 0x09B;
+    pub const MGRAS_HQ3_CFIFO_CMD_TEXTURE_LOAD_END: u32 = 0x09C;
     /// GE pixel state (ERAM) writes: [?, ?, bytes, address, 0, 2, count,
     /// values]; the layout token_080 also has.
-    pub const TOKEN_0CD: u32 = 0x0CD;
+    pub const MGRAS_HQ3_CFIFO_CMD_INIT_PIXEL_STATE_BLOCK: u32 = 0x0CD;
     /// One register written through an indexed GE shadow table: [index
-    /// shadow, table shadow, register, value] (reg_f191, texture_border_block and
+    /// shadow, table shadow, register, value] (texture_mipmap_levels, texture_border_block and
     /// detailscale, indexed by texture_level_table_index).
-    pub const TOKEN_0EC: u32 = 0x0EC;
+    pub const MGRAS_HQ3_CFIFO_CMD_DETAIL_TEXTURE_FUNC: u32 = 0x0EC;
     /// The context's TRAM base page (TE1 TXBASE): the kernel's texture
     /// space allocator gives each process a run of pages and sends this
     /// when it places or moves it (0 around its own saves and restores).
@@ -137,7 +137,7 @@ pub(super) mod tok {
     /// glGetTexImage: [width, height, s and t offsets (floats, 0.5: texel
     /// centres), transfer mode, the raster interface start word]; the host
     /// starts the read itself (raster interface register 5).
-    pub const TOKEN_0F0: u32 = 0x0F0;
+    pub const MGRAS_HQ3_CFIFO_CMD_READ_TEXTURE: u32 = 0x0F0;
     /// The texture manager's save/restore of TRAM pages (its read
     /// / load halves): a raw read of the sampler's level [rows,
     /// xfrmode, 0x400D], and the GE set up for texels by host DMA [?, ?,
@@ -151,28 +151,28 @@ pub(super) mod tok {
     /// move (floats), data words; the rows follow as FIFO pixel data.
     pub const BITMAP: u32 = 0x094;
     /// Large glBitmap images: header, row batches, then raster advance.
-    pub const TOKEN_091: u32 = 0x091;
+    pub const MGRAS_HQ3_CFIFO_CMD_GENERAL_BITMAP: u32 = 0x091;
     pub const TOKEN_090: u32 = 0x090;
     pub const TOKEN_092: u32 = 0x092;
     /// glDrawPixels through the GE's pixel path (libGLcore
     /// pixel send path), 8 words: data words per row, two skips, the
     /// pixel-state counts, rows (provisional), the GE routine (0x49D0 for
     /// host to raster), flags; the rows follow as FIFO pixel data.
-    pub const TOKEN_08D: u32 = 0x08D;
+    pub const MGRAS_HQ3_CFIFO_CMD_SEND_PIXELS: u32 = 0x08D;
     /// A write of GE pixel-path state (libGLcore): words 3 the GE address,
     /// 6 the count, then the values. Address 0x192 holds 1 / pixel zoom
     /// (1.0 in mandel, 1/6 in snoop at zoom 6).
-    pub const TOKEN_080: u32 = 0x080;
+    pub const MGRAS_HQ3_CFIFO_CMD_GE_STATE_BLOCK: u32 = 0x080;
     /// glReadPixels into host memory (libGLcore GetPixels*): 1 word; the
     /// read block comes from cfifo_cmd_raster_triples, the host DMA follows.
-    pub const TOKEN_0DB: u32 = 0x0DB;
+    pub const MGRAS_HQ3_CFIFO_CMD_GET_PIXELS: u32 = 0x0DB;
     /// glReadBuffer: words, the third the GL enum (0x404 front, 0x405 back).
     pub const READ_BUFFER: u32 = 0x044;
     /// End of a pixel operation: the raster registers saved by token_0d2
     /// come back.
-    pub const TOKEN_0D3: u32 = 0x0D3;
+    pub const MGRAS_HQ3_CFIFO_CMD_RESTORE_RASTER_STATE: u32 = 0x0D3;
     /// Start of a pixel operation (libGLcore's raster-state save sequence, 5 words).
-    pub const TOKEN_0D2: u32 = 0x0D2;
+    pub const MGRAS_HQ3_CFIFO_CMD_SAVE_RASTER_STATE: u32 = 0x0D2;
     /// glNormal3f (other forms through the HQ's conversion field).
     pub const NORMAL: u32 = 0x007;
     pub const LIGHTING_ON: u32 = 0x00D;
@@ -223,13 +223,13 @@ pub(super) mod tok {
     /// Kernel token (the draw-bank validation, at every swap and window
     /// validation): the bank GL draws into from now on, main buffers then
     /// the second set (see `Gl::set_draw_bank`).
-    pub const TOKEN_098: u32 = 0x098;
+    pub const MGRAS_HQ3_CFIFO_CMD_VALIDATE_BANKS: u32 = 0x098;
     /// IRIS GL through IGLOO (libGLcore's IRIS GL source): swaptmesh,
     /// lmcolor(LMC_COLOR) on / off, n3f (a normal, 3 floats).
     pub const SWAPTMESH: u32 = 0x0DC;
     pub const LMC_COLOR_ON: u32 = 0x0DD;
     pub const LMC_COLOR_OFF: u32 = 0x0DE;
-    pub const TOKEN_0DF: u32 = 0x0DF;
+    pub const MGRAS_HQ3_CFIFO_CMD_NORMAL_3F: u32 = 0x0DF;
     pub const COLOR4F: u32 = 0x002;
     pub const CLEAR: u32 = 0x015;
     pub const BEGIN_POINTS: u32 = 0x016;
@@ -290,7 +290,7 @@ pub(super) mod tok {
     pub const LINE_STIPPLE_ON: u32 = 0x06A;
     pub const LOGIC_OP_ON: u32 = 0x06B;
     pub const POLYGON_STIPPLE_ON: u32 = 0x06D;
-    pub const TOKEN_06E: u32 = 0x06E;
+    pub const MGRAS_HQ3_CFIFO_CMD_SCISSOR_TEST_ENABLE: u32 = 0x06E;
     pub const STENCIL_TEST: u32 = 0x06F;
     /// glEnable / glDisable(GL_CULL_FACE), no data.
     pub const CULL_ON: u32 = 0x072;
@@ -356,7 +356,7 @@ mod re {
     pub const MGRAS_RE4_AALINE_CONFIG: u32 = 0x146;
     pub const MGRAS_RE4_SCREEN_MASK1_X: u32 = 0x147;
     pub const MGRAS_RE4_WINDOW_MODE: u32 = 0x14F;
-    pub const MGRAS_PP1_REG_F17B: u32 = 0x17B;
+    pub const MGRAS_PP1_WINDOW_MODE: u32 = 0x17B;
     pub const MGRAS_RE4_LINE_STIPPLE_PATTERN: u32 = 0x15A;
     pub const MGRAS_RE4_LINE_STIPPLE_REPEAT: u32 = 0x15B;
     pub const MGRAS_RE4_DEVICE_ADDR: u32 = 0x15C;
@@ -365,13 +365,13 @@ mod re {
     pub const COLORMASKMSBS: u32 = 0x162;
     pub const COLORMASKLSBSA: u32 = 0x163;
     pub const COLORMASKLSBSB: u32 = 0x164;
-    pub const MGRAS_PP1_REG_F165: u32 = 0x165;
-    pub const MGRAS_PP1_REG_F16B: u32 = 0x16B;
-    pub const MGRAS_PP1_REG_F16C: u32 = 0x16C;
-    pub const MGRAS_PP1_REG_F166: u32 = 0x166;
-    pub const MGRAS_PP1_REG_F167: u32 = 0x167;
-    pub const MGRAS_PP1_REG_F168: u32 = 0x168;
-    pub const MGRAS_PP1_REG_F169: u32 = 0x169;
+    pub const MGRAS_PP1_BLEND_FACTOR: u32 = 0x165;
+    pub const MGRAS_PP1_BLEND_COLOR_RG: u32 = 0x16B;
+    pub const MGRAS_PP1_BLEND_COLOR_BA: u32 = 0x16C;
+    pub const MGRAS_PP1_STENCIL_MODE: u32 = 0x166;
+    pub const MGRAS_PP1_STENCIL_MASK: u32 = 0x167;
+    pub const MGRAS_PP1_DEPTH_MODE: u32 = 0x168;
+    pub const MGRAS_PP1_ALPHA_TEST_MODE: u32 = 0x169;
     pub const DRBPOINTERS: u32 = 0x16D;
     pub const FILL_COLOR_R: u32 = 0x176;
 }
@@ -426,7 +426,7 @@ pub struct Window {
     pub drb: u32,
     /// PP1 window mode: the origin's low bits and the clip ID the window's
     /// pixels must carry (see rss.rs `cid_match`).
-    pub reg_f17b: u32,
+    pub window_mode: u32,
 }
 
 /// The GE's name stack, at most this deep (GL_MAX_NAME_STACK_DEPTH;
@@ -679,7 +679,7 @@ impl Gl {
              draw buffer bits {:#x}, swapped {}, colour mask {:#x}\n  \
              viewport x {}..{} y {}..{}, scissor {} {:?}\n  \
              colour {:?}, clear colour {:?}, lighting {} (lights {:#x}), depth test {}",
-            w.valid, w.origin, w.mode, w.reg_f17b, w.drb, w.masks, self.draw_bits, self.swapped, self.color_mask,
+            w.valid, w.origin, w.mode, w.window_mode, w.drb, w.masks, self.draw_bits, self.swapped, self.color_mask,
             self.vp.x0, self.vp.x1, self.vp.y0, self.vp.y1, self.scissor_test, self.scissor,
             self.color, self.clear_color, self.lt.on, self.lights_on, self.depth_test)
     }
@@ -1065,7 +1065,7 @@ impl Gl {
                     self.unlit = 1;
                 }
             }
-            tok::NORMAL | tok::TOKEN_0DF => {
+            tok::NORMAL | tok::MGRAS_HQ3_CFIFO_CMD_NORMAL_3F => {
                 let a = args_f32(d);
                 self.normal = [a[0], a[1], a[2]];
                 self.unlit = 0;
@@ -1188,7 +1188,7 @@ impl Gl {
             tok::STENCIL_MASK => self.set_state(|g| g.st_wmask = w0 & 0xFF, sink),
             tok::COLOR_MASK => self.set_state(|g| g.color_mask = w0 & 0xF, sink),
             tok::DITHER => self.dither = on,
-            tok::TOKEN_06E => self.scissor_test = on,
+            tok::MGRAS_HQ3_CFIFO_CMD_SCISSOR_TEST_ENABLE => self.scissor_test = on,
             tok::SCISSOR if d.len() >= 4 => self.scissor = [d[0] as i32, d[1] as i32, d[2] as i32, d[3] as i32],
             tok::CULL_ON => self.cull = 1,
             tok::CULL_OFF => self.cull = 0,
@@ -1212,7 +1212,7 @@ impl Gl {
                 self.set_state(|g| g.stipple_rows = rows, sink);
             }
             tok::FLUSH => self.end_raster(sink),
-            tok::TOKEN_098 => self.set_draw_bank(w0, sink),
+            tok::MGRAS_HQ3_CFIFO_CMD_VALIDATE_BANKS => self.set_draw_bank(w0, sink),
             tok::DRAW_BUFFER => {
                 self.end_raster(sink);
                 self.draw_bits = w0;
@@ -1230,9 +1230,9 @@ impl Gl {
                 self.end_raster(sink);
             }
             tok::VERTEX4F => self.vertex(args_f32(d), sink),
-            tok::TOKEN_09A => self.set_state(|g| g.pixel_format = PIXEL_FORMAT_SENT | w0 & 0x2700, sink),
-            tok::TOKEN_009 => self.ci = 0,
-            tok::TOKEN_00A => self.ci = 1,
+            tok::MGRAS_HQ3_CFIFO_CMD_INIT_FORMAT_VALUES => self.set_state(|g| g.pixel_format = PIXEL_FORMAT_SENT | w0 & 0x2700, sink),
+            tok::MGRAS_HQ3_CFIFO_CMD_INIT_RGB_CONTEXT => self.ci = 0,
+            tok::MGRAS_HQ3_CFIFO_CMD_INIT_COLOR_INDEX_CONTEXT => self.ci = 1,
             tok::CLEAR_INDEX => self.clear_index = if w0 >> 16 == 0 { w0 } else { f32::from_bits(w0) as u32 },
             tok::RASTER_POS4F => {
                 let w = self.transform(args_f32(d));
@@ -1249,26 +1249,26 @@ impl Gl {
                 self.q.raster_color = w.c;
                 self.q.raster_tex = math::xform(self.tex.get(), self.texcoord);
             }
-            tok::TOKEN_0D6 => {
+            tok::MGRAS_HQ3_CFIFO_CMD_UPDATE_RASTER_POS => {
                 let a = args_f32(d);
                 self.raster[0] += a[0];
                 self.raster[1] += a[1];
             }
-            tok::TOKEN_0D7 => {
+            tok::MGRAS_HQ3_CFIFO_CMD_LOAD_RASTER_POS_INFO => {
                 self.color = self.raster_color;
                 if self.ci != 0 { self.current_index = self.color[0] * 4095.0; }
                 // The depth glDrawPixels / glCopyPixels fragments take
-                // (traced: no depth crosses the bus for them, reg_f168 does).
+                // (traced: no depth crosses the bus for them, depth_mode does).
                 let z = (self.raster[2].clamp(0.0, ZMAX) as f64 * 256.0).round() as u32;
                 sink.rss_write(super::rss::reg::XFER_Z, z, false);
             }
             tok::INDEX_MASK => self.set_state(|g| g.index_mask = w0 & 0xFFF, sink),
             tok::READ_BUFFER => self.read_back = (d.get(2) == Some(&0x405)) as u32,
-            tok::TOKEN_0D2 => {
+            tok::MGRAS_HQ3_CFIFO_CMD_SAVE_RASTER_STATE => {
                 self.pixel_op = 1;
                 self.pixel_planes = d.get(3).copied().unwrap_or(0);
             }
-            tok::TOKEN_0F0 if d.len() >= 5 => {
+            tok::MGRAS_HQ3_CFIFO_CMD_READ_TEXTURE if d.len() >= 5 => {
                 if sink.tracing_tex() {
                     sink.trace(format!("TEX read {}x{} page {:#x} xfrmode {:#x}", d[0], d[1], self.te_tables[0][0], d[4]));
                 }
@@ -1317,7 +1317,7 @@ impl Gl {
                 self.send_pixels = [words, 0, 0, h, 0, 1, SEND_PIXELS_DRAW, 0];
                 self.send_pixels_pending = 1;
             }
-            tok::TOKEN_0D3 => {
+            tok::MGRAS_HQ3_CFIFO_CMD_RESTORE_RASTER_STATE => {
                 if self.tex_reading != 0 {
                     self.tex_reading = 0;
                     sink.rss_write(re::XFRCONTROL, 0, false);
@@ -1330,8 +1330,8 @@ impl Gl {
                 self.pixel_op = 0;
                 self.end_raster(sink);
             }
-            tok::TOKEN_0DB => self.get_pixels(w0 & 2 != 0, sink),
-            tok::TOKEN_080 | tok::TOKEN_0CD if d.len() >= 7 => {
+            tok::MGRAS_HQ3_CFIFO_CMD_GET_PIXELS => self.get_pixels(w0 & 2 != 0, sink),
+            tok::MGRAS_HQ3_CFIFO_CMD_GE_STATE_BLOCK | tok::MGRAS_HQ3_CFIFO_CMD_INIT_PIXEL_STATE_BLOCK if d.len() >= 7 => {
                 self.pixel_state_block(d);
             }
             tok::TEX_COORD => self.texcoord = args_f32(d),
@@ -1342,10 +1342,10 @@ impl Gl {
             tok::POINT_SMOOTH => self.point_smooth = on,
             // Our pixel paths never texture, which is what the bracket
             // asks the GE for; the texture state itself stays as it was.
-            tok::TOKEN_0E9 | tok::TOKEN_0EA => {}
+            tok::MGRAS_HQ3_CFIFO_CMD_SAVE_TEXTURE_MODE | tok::MGRAS_HQ3_CFIFO_CMD_RESTORE_TEXTURE_MODE => {}
             // The TE load path here needs neither (an absent table is the
             // identity; each token_08d is a whole sub-load).
-            tok::TOKEN_09B | tok::TOKEN_09C => {}
+            tok::MGRAS_HQ3_CFIFO_CMD_TEXTURE_LOAD | tok::MGRAS_HQ3_CFIFO_CMD_TEXTURE_LOAD_END => {}
             tok::TEX_GENIV if d.len() >= 3 && d[0].wrapping_sub(0x2000) < 4 && d[1] == 0x2500 => {
                 self.texgen_mode[(d[0] - 0x2000) as usize] = match d[2] {
                     0x2401 => 0,
@@ -1373,19 +1373,19 @@ impl Gl {
                 let bit = 1 << (w0 - 0xC60);
                 if cmd == tok::TOKEN_075 { self.texgen_on |= bit } else { self.texgen_on &= !bit }
             }
-            tok::TOKEN_00B | tok::TOKEN_00C => {
+            tok::TOKEN_00B | tok::MGRAS_HQ3_CFIFO_CMD_TEXTURE_OFF => {
                 self.tex_on = (cmd == tok::TOKEN_00B) as u32;
                 if self.raster_loaded != 0 {
                     sink.rss_write(te_reg::MGRAS_RE4_TEXTURE_MODE_FIRST, self.texture_mode_first(), false);
                 }
             }
-            tok::TOKEN_0EC if d.len() >= 4 => {
+            tok::MGRAS_HQ3_CFIFO_CMD_DETAIL_TEXTURE_FUNC if d.len() >= 4 => {
                 self.te_write(d[2] & 0x3FF, d[3], sink);
             }
             tok::TOKEN_0EB if !d.is_empty() => {
                 self.te_write(te_reg::MGRAS_TE1_REG_F186, d[0], sink);
             }
-            tok::TOKEN_08D if d.len() >= 8 => {
+            tok::MGRAS_HQ3_CFIFO_CMD_SEND_PIXELS if d.len() >= 8 => {
                 self.send_pixels.copy_from_slice(&d[..8]);
                 self.send_pixels_pending = 1;
             }
@@ -1395,7 +1395,7 @@ impl Gl {
                 self.bitmap_row = 0;
                 self.bitmap_pending = 1;
             }
-            tok::TOKEN_091 if d.len() >= 5 => {
+            tok::MGRAS_HQ3_CFIFO_CMD_GENERAL_BITMAP if d.len() >= 5 => {
                 self.bitmap = [d[0], d[1], d[2], d[3], d[4], 0, 0, 0];
                 self.bitmap_general = 1;
                 self.bitmap_row = 0;
@@ -1926,7 +1926,7 @@ impl Gl {
             // the major axis (in the edge step registers).
             let [qa, qb] = normalised_q([tex_q(&a), tex_q(&b)]);
             for k in 0..3 {
-                let (r, dr) = [(te_reg::MGRAS_RE4_REG_E080, te_reg::MGRAS_RE4_REG_E0C0), (te_reg::MGRAS_RE4_REG_E082, te_reg::MGRAS_RE4_REG_E0C2), (te_reg::MGRAS_RE4_REG_E084, te_reg::MGRAS_RE4_REG_E086)][k];
+                let (r, dr) = [(te_reg::MGRAS_TE1_TEXTURE_S_OVER_W_UPPER, te_reg::MGRAS_TE1_TEXTURE_S_OVER_W_EDGE_STEP_UPPER), (te_reg::MGRAS_TE1_TEXTURE_T_OVER_W_UPPER, te_reg::MGRAS_TE1_TEXTURE_T_OVER_W_EDGE_STEP_UPPER), (te_reg::MGRAS_TE1_TEXTURE_ONE_OVER_W_UPPER, te_reg::MGRAS_TE1_TEXTURE_ONE_OVER_W_EDGE_STEP_UPPER)][k];
                 put64(sink, r, qa[k] * te1::ITER_ONE);
                 put64(sink, dr, (qb[k] - qa[k]) / len as f64 * te1::ITER_ONE);
             }
@@ -2501,15 +2501,15 @@ impl Gl {
     /// rss.rs, provisional).
     fn load_fragment_state(&mut self, sink: &mut dyn Hq3Sink) {
         let zmask = if self.depth_mask != 0 { 0xFF_FFFF << 4 } else { 0 };
-        sink.rss_write(re::MGRAS_PP1_REG_F168, if self.depth_test != 0 { zmask | 1 << 3 | self.depth_func } else { 0 }, false);
-        sink.rss_write(re::MGRAS_PP1_REG_F169, if self.alpha_test != 0 { self.alpha_ref << 4 | 1 << 3 | self.alpha_func } else { 7 }, false);
+        sink.rss_write(re::MGRAS_PP1_DEPTH_MODE, if self.depth_test != 0 { zmask | 1 << 3 | self.depth_func } else { 0 }, false);
+        sink.rss_write(re::MGRAS_PP1_ALPHA_TEST_MODE, if self.alpha_test != 0 { self.alpha_ref << 4 | 1 << 3 | self.alpha_func } else { 7 }, false);
         let st = if self.stencil != 0 {
             self.st_ref << 16 | self.st_ops[2] << 12 | self.st_ops[1] << 8 | self.st_ops[0] << 4 | 1 << 3 | self.st_func
         } else {
             7
         };
-        sink.rss_write(re::MGRAS_PP1_REG_F166, st, false);
-        sink.rss_write(re::MGRAS_PP1_REG_F167, self.st_wmask << 8 | self.st_cmask, false);
+        sink.rss_write(re::MGRAS_PP1_STENCIL_MODE, st, false);
+        sink.rss_write(re::MGRAS_PP1_STENCIL_MASK, self.st_wmask << 8 | self.st_cmask, false);
         // EXT_blend_logic_op: with the GL_LOGIC_OP equation, GL_BLEND turns
         // the logic op on rather than blending.
         let blend_logic = self.blend != 0 && self.blend_eq == GL_LOGIC_OP;
@@ -2523,13 +2523,13 @@ impl Gl {
         };
         let (sf, df) = impact_subtract_factors(eq, self.blend_src, self.blend_dst);
         sink.rss_write(
-            re::MGRAS_PP1_REG_F165,
+            re::MGRAS_PP1_BLEND_FACTOR,
             if blend { eq << super::rss::BLEND_EQ_SHIFT | 1 << 8 | df << 4 | sf } else { 0 },
             false,
         );
         let k = self.blend_color.map(|c| (c * 4095.0).round() as u32);
-        sink.rss_write(re::MGRAS_PP1_REG_F16B, k[0] << 16 | k[1], false);
-        sink.rss_write(re::MGRAS_PP1_REG_F16C, k[2] << 16 | k[3], false);
+        sink.rss_write(re::MGRAS_PP1_BLEND_COLOR_RG, k[0] << 16 | k[1], false);
+        sink.rss_write(re::MGRAS_PP1_BLEND_COLOR_BA, k[2] << 16 | k[3], false);
         let op = if self.logic != 0 || blend_logic { self.logic_op } else { 3 };
         sink.rss_write(re::PP1FILLMODE, (self.pp1_base() & !(0xF << 26)) | op << 26, false);
         let (lsb, msb) = self.color_write_masks();
@@ -2646,7 +2646,7 @@ impl Gl {
                 sink.rss_write(re::MGRAS_RE4_SCREEN_MASK1_X + 2 * n as u32 + 1, *y, false);
             }
             sink.rss_write(re::MGRAS_RE4_WINDOW_MODE, w.mode, false);
-            sink.rss_write(re::MGRAS_PP1_REG_F17B, w.reg_f17b, false);
+            sink.rss_write(re::MGRAS_PP1_WINDOW_MODE, w.window_mode, false);
             sink.rss_write(re::DRBPOINTERS, self.draw_pointers(), false);
         }
         self.fill_loaded = 0;
@@ -2693,10 +2693,10 @@ impl Gl {
             }
         }
         self.begin_raster(sink);
-        sink.rss_write(re::MGRAS_PP1_REG_F168, 0, false);
-        sink.rss_write(re::MGRAS_PP1_REG_F169, 7, false);
-        sink.rss_write(re::MGRAS_PP1_REG_F166, 7, false);
-        sink.rss_write(re::MGRAS_PP1_REG_F165, 0, false);
+        sink.rss_write(re::MGRAS_PP1_DEPTH_MODE, 0, false);
+        sink.rss_write(re::MGRAS_PP1_ALPHA_TEST_MODE, 7, false);
+        sink.rss_write(re::MGRAS_PP1_STENCIL_MODE, 7, false);
+        sink.rss_write(re::MGRAS_PP1_BLEND_FACTOR, 0, false);
         // The ZST buffer takes its words as they are: never a 12-bit pair's
         // packing, a colour-index pixel type or dither.
         let pp1 = if drb == super::rss::ZST_PAGE { PP1_RGB24_BUFFER_A } else { self.pp1_base() };
@@ -2980,10 +2980,10 @@ impl Gl {
             let put = |r: u32, v: f64, sink: &mut dyn Hq3Sink| put64(sink, r, v * te1::ITER_ONE);
             let [s, t, w] = planes;
             for (r, v) in [
-                (te_reg::MGRAS_RE4_REG_E080, s[0]), (te_reg::MGRAS_RE4_REG_E082, t[0]), (te_reg::MGRAS_RE4_REG_E084, w[0]),
-                (te_reg::MGRAS_RE4_REG_E086, w[2]), (te_reg::MGRAS_RE4_REG_E088, w[1]), (te_reg::MGRAS_RE4_REG_E08A, w[3]),
-                (te_reg::MGRAS_RE4_REG_E0C0, s[2]), (te_reg::MGRAS_RE4_REG_E0C2, t[2]), (te_reg::MGRAS_RE4_REG_E0C4, s[1]),
-                (te_reg::MGRAS_RE4_REG_E0C6, t[1]), (te_reg::MGRAS_RE4_REG_E0C8, s[3]), (te_reg::MGRAS_RE4_REG_E0CA, t[3]),
+                (te_reg::MGRAS_TE1_TEXTURE_S_OVER_W_UPPER, s[0]), (te_reg::MGRAS_TE1_TEXTURE_T_OVER_W_UPPER, t[0]), (te_reg::MGRAS_TE1_TEXTURE_ONE_OVER_W_UPPER, w[0]),
+                (te_reg::MGRAS_TE1_TEXTURE_ONE_OVER_W_EDGE_STEP_UPPER, w[2]), (te_reg::MGRAS_TE1_TEXTURE_ONE_OVER_W_X_STEP_UPPER, w[1]), (te_reg::MGRAS_TE1_TEXTURE_ONE_OVER_W_Y_STEP_UPPER, w[3]),
+                (te_reg::MGRAS_TE1_TEXTURE_S_OVER_W_EDGE_STEP_UPPER, s[2]), (te_reg::MGRAS_TE1_TEXTURE_T_OVER_W_EDGE_STEP_UPPER, t[2]), (te_reg::MGRAS_TE1_TEXTURE_S_OVER_W_X_STEP_UPPER, s[1]),
+                (te_reg::MGRAS_TE1_TEXTURE_T_OVER_W_X_STEP_UPPER, t[1]), (te_reg::MGRAS_TE1_TEXTURE_S_OVER_W_Y_STEP_UPPER, s[3]), (te_reg::MGRAS_TE1_TEXTURE_T_OVER_W_Y_STEP_UPPER, t[3]),
             ] {
                 put(r, v, sink);
             }
@@ -3120,10 +3120,10 @@ impl Gl {
         // The driver's texture placement, for following libGLcore's TRAM
         // bookkeeping over a long run (`mgras trace <file> tex`).
         if sink.tracing_tex()
-            && matches!(r, te_reg::MGRAS_TE1_TEXTURE_SIZE | te_reg::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX | te_reg::MGRAS_TE1_REG_F191 | te_reg::MGRAS_TE1_TEXTURE_LOADER_INDEX | te_reg::MGRAS_TE1_TEXTURE_LOADER_LEVEL_SPEC | te_reg::MGRAS_TE1_TEXTURE_LOADER_MIPMAP_BLOCK)
+            && matches!(r, te_reg::MGRAS_TE1_TEXTURE_SIZE | te_reg::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX | te_reg::MGRAS_TE1_TEXTURE_MIPMAP_LEVELS | te_reg::MGRAS_TE1_TEXTURE_LOADER_INDEX | te_reg::MGRAS_TE1_TEXTURE_LOADER_LEVEL_SPEC | te_reg::MGRAS_TE1_TEXTURE_LOADER_MIPMAP_BLOCK)
         {
             let idx = match r {
-                te_reg::MGRAS_TE1_REG_F191 => format!(" [{}]", self.te_index),
+                te_reg::MGRAS_TE1_TEXTURE_MIPMAP_LEVELS => format!(" [{}]", self.te_index),
                 te_reg::MGRAS_TE1_TEXTURE_LOADER_MIPMAP_BLOCK => format!(" [{}]", self.te[te1::CONTEXT_REGS.iter().position(|&c| c == te_reg::MGRAS_TE1_TEXTURE_LOADER_INDEX).unwrap_or(0)]),
                 _ => String::new(),
             };

@@ -196,7 +196,7 @@ pub struct Stencil {
     pub zpass: u8,
 }
 
-/// Blend factors, 0..=14 in reg_f165's order (`rss::blend_rgba`; 15
+/// Blend factors, 0..=14 in blend_factor's order (`rss::blend_rgba`; 15
 /// acts as ONE and is folded into 1), and the equation (`rss::BLEND_EQ_*`,
 /// 0..=4; MIN and MAX ignore the factors, which fold to 0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -335,7 +335,7 @@ impl Tex {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct PipeKey {
     pub prim: Prim,
-    /// Clip-ID test on (`reg_f17b` CIDmatch nonzero).
+    /// Clip-ID test on (`window_mode` CIDmatch nonzero).
     pub cid_test: bool,
     /// Enabled screen masks, packed into the context's first `nclip` slots.
     pub nclip: u8,
