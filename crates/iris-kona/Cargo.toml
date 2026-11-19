@@ -16,6 +16,7 @@ wgpu = []
 
 [dependencies]
 sgi-gpu-core = { path = "../sgi-gpu-core", default-features = false }
+sgi-engine = { path = "../sgi-engine" }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan", "metal", "dx12"] }
 bytemuck = { version = "1", features = ["derive"] }
 parking_lot = "0.12"

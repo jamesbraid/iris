@@ -1,43 +1,54 @@
-//! Replay a QEMU KONA fixture (`sgi-replay 2`) into an `Engine` and compare the final frame
+//! Replay a QEMU KONA fixture (`sgi-replay 2`) into a `KonaEngine` and compare the final frame
 //! with its screendump. Reads are checked against QEMU's values and counted, not fatal; `pixel`
 //! lines read QEMU's own planes, so they are skipped. `--eager` runs the stream after each store
 //! (QEMU's order), `--runs N` times fresh engines, `--snapshot-at N` saves and reloads mid-replay.
 //! `--skip-onewire` leaves the one-wire register out of the mismatch count: the maintenance-menu
 //! fixture was recorded from an unconfigured QEMU device, whose chain has two parts to this
-//! engine's one.
+//! engine's one. The stream waits at each swap for a frame, which the replay gives only when a write
+//! finds the stream full or a read waits for it (`sgi_engine::shell::drain_stalls`), and once at the
+//! end; `--frame-every N` adds a frame every N records.
 //!
-//! `qemu_replay [--eager] [--no-latch] [--frame-every N] [--skip-onewire] [--threads N] [--gpu] [--runs N] [--ref REF.ppm] [--out OUT.ppm] FILE`
+//! `qemu_replay [--eager] [--frame-every N] [--skip-onewire] [--threads N] [--gpu] [--runs N] [--ref REF.ppm] [--out OUT.ppm] FILE`
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use iris_kona::dev::kona::engine::{Engine, Options, Out, PipeMemory, Read, Source, Write};
+use iris_kona::dev::kona::engine::{KonaEngine, Options};
 use iris_kona::dev::kona::ident::KonaConfig;
 use parking_lot::Mutex;
+use sgi_engine::{shell, BoardEngine, Chunk, Event, HostMem, Idle, MemFault, Read, Source, Swap, VecSource, Write};
 
-#[derive(Default)]
-struct Ram(Mutex<HashMap<u64, Box<[u8; 4096]>>>);
+#[derive(Clone, Default)]
+struct Ram(Arc<Mutex<HashMap<u64, Box<[u8; 4096]>>>>);
 
-impl PipeMemory for Ram {
-    fn read(&self, addr: u64, buf: &mut [u8]) -> bool {
-        let pages = self.0.lock();
-        for (i, b) in buf.iter_mut().enumerate() {
-            let a = addr + i as u64;
-            *b = pages.get(&(a >> 12)).map_or(0, |p| p[(a & 0xfff) as usize]);
-        }
-        true
-    }
-
-    fn write(&self, addr: u64, data: &[u8]) -> bool {
+impl Ram {
+    fn write(&self, addr: u64, data: &[u8]) {
         let mut pages = self.0.lock();
         for (i, b) in data.iter().enumerate() {
             let a = addr + i as u64;
             pages.entry(a >> 12).or_insert_with(|| Box::new([0; 4096]))[(a & 0xfff) as usize] = *b;
         }
-        true
     }
 }
+
+impl HostMem for Ram {
+    fn ram_read(&self, addr: u64, buf: &mut [u8], _: Swap) -> Result<(), MemFault> {
+        let pages = self.0.lock();
+        for (i, b) in buf.iter_mut().enumerate() {
+            let a = addr + i as u64;
+            *b = pages.get(&(a >> 12)).map_or(0, |p| p[(a & 0xfff) as usize]);
+        }
+        Ok(())
+    }
+
+    fn ram_write(&self, addr: u64, data: &[u8], _: Swap) -> Result<(), MemFault> {
+        self.write(addr, data);
+        Ok(())
+    }
+}
+
+type Engine = KonaEngine<Ram>;
 
 enum Rec {
     Write { off: u32, size: u32, val: u64 },
@@ -97,44 +108,74 @@ struct Tally {
     command_words: u64,
 }
 
-/// The processor interface charges a credit for a store into the command page only.
+/// The processor interface charges a credit for a store into the command page only. Hub 0 is
+/// source 1: source 0 is a store with no sender.
 fn source(off: u32) -> Source {
-    Source { hub: Some(0), charged: (0xc10000..0xc14000).contains(&off) }
+    Source { id: 1, charged: (0xc10000..0xc14000).contains(&off) }
 }
 
-fn run(rp: &Replay, cfg: KonaConfig, eager: bool, ram: Arc<Ram>, snapshot_at: Option<usize>, gpu: &Option<iris_kona::SharedGpu>, latch: bool, frame_every: usize) -> (Engine, Tally, std::time::Duration) {
-    let opts = || Options { gpu: gpu.clone(), latch_swaps: latch, ..Options::default() };
-    let mut e = Engine::new(cfg, ram.clone(), opts()).expect("engine");
+/// Host time in ns, the shell's clock for `frame`.
+fn now(t0: Instant) -> u64 {
+    t0.elapsed().as_nanos() as u64
+}
+
+/// Count what the engine has queued for the shell.
+fn tally(e: &mut Engine, out: &mut Vec<Event>, t: &mut Tally) {
+    out.clear();
+    e.drain_events(out, usize::MAX);
+    for ev in out.iter() {
+        match ev {
+            Event::Interrupt(_) => t.interrupts += 1,
+            Event::Credits { retired, .. } => t.credits += *retired as u64,
+            Event::DeviceFault(why) => println!("device fault: {why}"),
+            _ => {}
+        }
+    }
+}
+
+fn run(rp: &Replay, cfg: KonaConfig, eager: bool, ram: Ram, snapshot_at: Option<usize>, gpu: &Option<iris_kona::SharedGpu>, frame_every: usize) -> (Engine, Tally, std::time::Duration) {
+    let opts = || Options { gpu: gpu.clone(), ..Options::default() };
+    let mut e = Engine::new(cfg, ram.clone(), opts(), None).expect("engine");
     let mut t = Tally::default();
     let mut out = Vec::new();
     let t0 = Instant::now();
     let mut snapped = snapshot_at.is_none();
+    // The stream waits at a swap for a frame; the replay gives one when something needs the stream to move.
+    let settle = |e: &mut Engine| match shell::drain_stalls(e, &mut now(t0), 1_000_000, usize::MAX) {
+        Idle::Faulted => panic!("the pipe faulted: {:?}", e.fault()),
+        _ => {}
+    };
     for (n, rec) in rp.recs.iter().enumerate() {
         // Quiesce, save and load into a new engine at the first command boundary from `snapshot_at`.
         if !snapped && n >= snapshot_at.unwrap() {
-            e.run(usize::MAX);
-            let dir = std::env::temp_dir().join(format!("kona-replay-{}", std::process::id()));
-            let cs = iris_kona::chunk_store::ChunkStore::new(&dir);
-            if let Ok(chunks) = e.save_chunks(&cs) {
-                let mut next = Engine::new(cfg, ram.clone(), opts()).expect("engine");
-                next.load_chunks(&cs, &chunks).expect("load");
+            settle(&mut e);
+            let mut at = now(t0);
+            shell::quiesce(&mut e, &mut at, 1_000_000, usize::MAX).expect("quiesce");
+            let mut chunks: Vec<Chunk> = Vec::new();
+            if e.save(&mut chunks).is_ok() {
+                let mut next = Engine::new(cfg, ram.clone(), opts(), None).expect("engine");
+                next.quiesce(u64::MAX).expect("quiesce");
+                next.load(&mut VecSource::new(chunks.clone())).expect("load");
+                next.resume();
                 println!("snapshot at record {n}: {} chunks, loaded into a new engine", chunks.len());
                 e = next;
                 snapped = true;
+            } else {
+                e.resume();
             }
-            let _ = std::fs::remove_dir_all(&dir);
         }
         if frame_every != 0 && n % frame_every == 0 {
-            e.frame();
+            e.frame(now(t0));
         }
         match rec {
             Rec::Write { off, size, val } => {
                 if (0xc10000..0xc14000).contains(off) {
                     t.command_words += (*size as u64) / 4;
                 }
-                while e.write(*off, *size, *val, source(*off)) == Write::Busy {
+                e.set_source(source(*off));
+                while e.write(*off, *size * 8, *val) == Write::Busy {
                     t.busy += 1;
-                    e.run(1 << 12);
+                    shell::drain_stalls(&mut e, &mut now(t0), 1_000_000, usize::MAX);
                 }
                 if eager {
                     e.run(usize::MAX);
@@ -146,14 +187,13 @@ fn run(rp: &Replay, cfg: KonaConfig, eager: bool, ram: Arc<Ram>, snapshot_at: Op
                 for k in 0..(*size / 4) {
                     let o = off + 4 * k;
                     let v = loop {
-                        match e.read(o) {
+                        match e.read(o, 32) {
                             Read::Value(v) => break v,
-                            Read::Wait => {
-                                e.run(usize::MAX);
-                            }
+                            Read::Busy => settle(&mut e),
+                            Read::Fault => panic!("line {line}: the pipe faulted: {:?}", e.fault()),
                         }
                     };
-                    got = got << 32 | v as u64;
+                    got = got << 32 | v;
                 }
                 if (got ^ val) & mask != 0 {
                     t.mismatches += 1;
@@ -166,19 +206,16 @@ fn run(rp: &Replay, cfg: KonaConfig, eager: bool, ram: Arc<Ram>, snapshot_at: Op
             Rec::Dma { addr, data } => {
                 ram.write(*addr, data);
             }
-            Rec::Reset => e.reset(),
-        }
-        out.clear();
-        e.drain_out(&mut out);
-        for o in &out {
-            match o {
-                Out::Interrupt { .. } => t.interrupts += 1,
-                Out::Credits { credits, .. } => t.credits += *credits as u64,
+            Rec::Reset => {
+                settle(&mut e);
+                e.reset().expect("reset");
             }
         }
+        tally(&mut e, &mut out, &mut t);
     }
-    e.run(usize::MAX);
-    e.frame();
+    settle(&mut e);
+    e.frame(now(t0));
+    tally(&mut e, &mut out, &mut t);
     let d = t0.elapsed();
     (e, t, d)
 }
@@ -207,7 +244,7 @@ fn main() {
     let mut widget = 0u8;
     let mut use_gpu = false;
     let mut skip_onewire = false;
-    let (mut latch, mut frame_every) = (true, 0usize);
+    let mut frame_every = 0usize;
     let mut snapshot_at: Option<usize> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -217,7 +254,6 @@ fn main() {
             "--ref" => refp = args.next(),
             "--out" => outp = args.next(),
             "--gpu" => use_gpu = true,
-            "--no-latch" => latch = false,
             "--skip-onewire" => skip_onewire = true,
             "--frame-every" => frame_every = args.next().unwrap().parse().unwrap(),
             "--snapshot-at" => snapshot_at = args.next().map(|n| n.parse().unwrap()),
@@ -234,8 +270,8 @@ fn main() {
     if let Some(g) = &gpu {
         println!("GPU: {}", g.caps);
     }
-    let ram = Arc::new(Ram::default());
-    let (mut e, mut t, d) = run(&rp, cfg, eager, ram, snapshot_at, &gpu, latch, frame_every);
+    let ram = Ram::default();
+    let (mut e, mut t, d) = run(&rp, cfg, eager, ram, snapshot_at, &gpu, frame_every);
     if skip_onewire {
         let skipped: usize = [0x98, 0x9c].iter().filter_map(|o| t.by_offset.remove(o)).sum();
         t.mismatches -= skipped;
@@ -248,7 +284,7 @@ fn main() {
     for (o, n) in &t.by_offset {
         println!("  {n} mismatched reads at {o:#x}");
     }
-    println!("status {:?}", e.status());
+    println!("status: {} stores queued, swap waiting {}, fault {:?}", e.queued(), e.swap_waiting(), e.fault());
     println!("run: {:.3} s ({} ns per command-page word)", d.as_secs_f64(), d.as_nanos() as u64 / t.command_words.max(1));
 
     let c0 = Instant::now();
@@ -286,7 +322,7 @@ fn main() {
         let mut best = std::time::Duration::MAX;
         let mut all = Vec::new();
         for _ in 0..runs {
-            let (_e, _t, d) = run(&rp, cfg, eager, Arc::new(Ram::default()), None, &gpu, latch, frame_every);
+            let (_e, _t, d) = run(&rp, cfg, eager, Ram::default(), None, &gpu, frame_every);
             best = best.min(d);
             all.push(d.as_secs_f64());
         }
