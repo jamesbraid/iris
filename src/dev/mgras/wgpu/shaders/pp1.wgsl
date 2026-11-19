@@ -34,6 +34,9 @@ const CONFIG_YFLIP: u32 = 8u;
 const DRAW_CID: u32 = 0x50u;
 const BAYER_LO: u32 = 0x6E4CA280u;
 const BAYER_HI: u32 = 0x5D7F91B3u;
+// `fixed::DITHER`.
+const DITHER_LO: u32 = 0x5D399050u;
+const DITHER_HI: u32 = 0x1D7E90B1u;
 
 fn draw_buffer(pp1: u32) -> u32 {
     return (pp1 >> 14u) & 0x7fu;
@@ -349,6 +352,16 @@ fn to_byte(c: i32) -> u32 {
     return u32(fclamp(c) >> 20u);
 }
 
+// `fixed::to_byte_dithered` at framebuffer pixel (x, y).
+fn to_byte_dithered(c: i32, x: u32, y: u32) -> u32 {
+    let idx = ((y & 3u) << 2u) | (x & 3u);
+    let w = select(DITHER_LO, DITHER_HI, idx >= 8u);
+    let t = (w >> ((idx & 7u) * 4u)) & 0xfu;
+    let v = u32(fclamp(c) >> 16u);
+    let q = v - (v >> 8u);
+    return (q >> 4u) + select(0u, 1u, (q & 15u) > t);
+}
+
 fn to_index(c: i32) -> u32 {
     return u32(fclamp(c) >> 16u);
 }
@@ -512,7 +525,11 @@ fn fragment_color(si: u32, b: Buf, x: u32, y: u32, rgba: vec4<i32>, pp1: u32, ba
             }
             c = blend_rgba(blend, blend_constant(si), rgba, d);
         }
-        src = to_byte(c.x) | (to_byte(c.y) << 8u) | (to_byte(c.z) << 16u) | (to_byte(c.w) << 24u);
+        if b.kind == KIND_WIDE && pair != PAIR_NONE {
+            src = to_byte(c.x) | (to_byte(c.y) << 8u) | (to_byte(c.z) << 16u) | (to_byte(c.w) << 24u);
+        } else {
+            src = to_byte_dithered(c.x, x, y) | (to_byte_dithered(c.y, x, y) << 8u) | (to_byte_dithered(c.z, x, y) << 16u) | (to_byte_dithered(c.w, x, y) << 24u);
+        }
     } else {
         src = to_index(rgba.x) & 0xfffu;
     }

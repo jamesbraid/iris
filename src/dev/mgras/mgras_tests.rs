@@ -1080,13 +1080,13 @@ fn gl_blend_src_alpha_over_the_clear_colour() {
     gl_color4(&m, [0.0, 0.0, 1.0, 0.5]);
     gl_full_quad(&m);
     let p = gl_px(&m, 200, 150);
-    // Half of each in 12.16, shifted down to a byte: 0x7F (truncated).
-    assert_eq!((p & 0xFF, (p >> 8) & 0xFF, p >> 16), (0x7F, 0, 0x7F), "{p:#x}");
+    // Half of each in 12.16, 127.5 as a byte: 0x80 at this pixel's dither threshold.
+    assert_eq!((p & 0xFF, (p >> 8) & 0xFF, p >> 16), (0x80, 0, 0x80), "{p:#x}");
     // ONE, ONE adds.
     fifo_token(&m, 0x3F, &[1, 1]);
     gl_color4(&m, [0.0, 1.0, 0.0, 1.0]);
     gl_full_quad(&m);
-    assert_eq!(gl_px(&m, 200, 150), 0x7F_FF7F);
+    assert_eq!(gl_px(&m, 200, 150), 0x80_FF80);
     m.stop_engines();
 }
 
@@ -1392,11 +1392,11 @@ fn gl_default_light_and_material() {
     fifo_token(&m, 0x71, &[0]);
     fifo_token(&m, 0x07, &[f(0.0), f(0.0), f(1.0)]);
     gl_mid_quad(&m, [0.0; 4]);
-    assert_eq!(grey(gl_px(&m, 200, 150)), [214, 214, 214]);
+    assert_eq!(grey(gl_px(&m, 200, 150)), [215, 215, 215]);
     // A red diffuse material through glMaterial (front, GL_DIFFUSE).
     fifo_token(&m, 0x11, &[0x404, 0x1201, f(1.0), f(0.0), f(0.0), f(1.0)]);
     gl_mid_quad(&m, [0.0; 4]);
-    assert_eq!(grey(gl_px(&m, 200, 150)), [10 + 245, 10, 10], "0.04 ambient + 1.0 red diffuse");
+    assert_eq!(grey(gl_px(&m, 200, 150)), [10 + 245, 11, 11], "0.04 ambient + 1.0 red diffuse");
     m.stop_engines();
 }
 
@@ -1431,7 +1431,7 @@ fn gl_two_sided_lighting_uses_the_back_material() {
         fifo_token(&m, 0x00, &[f(p[0]), f(p[1]), f(0.0)]);
     }
     fifo_token(&m, 0x27, &[]);
-    assert_eq!(grey(gl_px(&m, 200, 150)), [10, 10, 255]);
+    assert_eq!(grey(gl_px(&m, 200, 150)), [11, 11, 255]);
     m.stop_engines();
 }
 

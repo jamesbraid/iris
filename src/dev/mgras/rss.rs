@@ -2732,7 +2732,10 @@ impl Rss {
             } else {
                 rgba
             };
-            fixed::to_byte(c[0]) | fixed::to_byte(c[1]) << 8 | fixed::to_byte(c[2]) << 16 | fixed::to_byte(c[3]) << 24
+            // Pixel pairs quantise (and may dither) later, in `Pair::pack`.
+            let t = (b.kind != Kind::Wide || Pair::of(pp1).is_none()).then(|| fixed::dither_at(ux, uy));
+            let q = |v| t.map_or_else(|| fixed::to_byte(v), |t| fixed::to_byte_dithered(v, t));
+            q(c[0]) | q(c[1]) << 8 | q(c[2]) << 16 | q(c[3]) << 24
         } else {
             fixed::to_index(rgba[0]) & 0xFFF
         };
