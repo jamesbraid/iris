@@ -700,6 +700,39 @@ mod timing_tests {
         assert_eq!(shared.restarts(), base + 1, "and the same clock again does not");
     }
 
+    /// The restart is anchored at the time of the write that changed the mode, whenever the display
+    /// next polls, so the retrace times a guest sees do not depend on the poll schedule.
+    #[test]
+    fn a_restart_anchors_at_the_write_not_the_next_poll() {
+        use super::super::reader::ScanoutReader;
+        use std::sync::atomic::Ordering::Relaxed;
+        let run = |polls: &[i64]| {
+            let mut f = fifo();
+            let shared = f.scanout.shared.clone();
+            let mut reader = ScanoutReader::default();
+            reader.attach(&shared);
+            f.set_scanout_size(1280, 1024);
+            reader.poll(0);
+            for (register, value) in [(0, 0x30), (1, 0), (2, 0), (3, 5), (4, 2)] {
+                write_register(&mut f, 0x58, register, value);
+            }
+            shared.write_ns.store(7_000_000, Relaxed);
+            f.data(vtg::CONTROL, 1);
+            shared.write_ns.store(-1, Relaxed);
+            for &t in polls {
+                reader.poll(t);
+            }
+            (reader.clock.epoch, reader.clock.retrace_time(1), reader.clock.frames)
+        };
+        let (epoch, first, _) = run(&[7_000_001]);
+        assert_eq!(epoch, 7_000_000, "the write's time, not the poll's");
+        // A late poll, and a run of polls, find the same retrace times and the same count by a given time.
+        let (late_epoch, late_first, frames_late) = run(&[40_000_000]);
+        let (steady_epoch, steady_first, frames_steady) = run(&[8_000_000, 20_000_000, 40_000_000]);
+        assert_eq!((late_epoch, late_first), (epoch, first));
+        assert_eq!((steady_epoch, steady_first, frames_steady), (epoch, first, frames_late));
+    }
+
     #[test]
     fn a_mode_load_sets_the_rate() {
         let mut f = fifo();

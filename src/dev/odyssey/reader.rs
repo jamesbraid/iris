@@ -31,7 +31,7 @@ use super::gpu_unit::{fail_gpu, GpuFault};
 #[cfg(feature = "wgpu")]
 use super::wgpu::scanout::VproScanout as GpuScanout;
 use super::scanout::ScanoutMode;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering, Ordering::{Acquire, Relaxed, Release}};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
@@ -455,6 +455,8 @@ struct ModeCell {
     gen: AtomicU64,
     /// Moves when the retrace phase restarts: a new mode or a reset.
     restart: AtomicU64,
+    /// The shell's time at the write that restarted it, or -1 when the write carried none.
+    restart_at: AtomicI64,
 }
 
 impl ModeCell {
@@ -469,6 +471,7 @@ impl ModeCell {
             fields: AtomicU32::new(0),
             gen: AtomicU64::new(1),
             restart: AtomicU64::new(1),
+            restart_at: AtomicI64::new(-1),
         }
     }
 }
@@ -485,6 +488,8 @@ pub(super) struct DisplayShared {
     pub gpu_scanout: OnceLock<Mutex<GpuScanout>>,
     /// A raster or scanout failure is sticky and closes board accesses.
     pub gpu_fault: GpuFault,
+    /// The shell's time at the bus write now being taken, -1 for a write with none (`Engine::write_at`).
+    pub write_ns: AtomicI64,
     /// The command stream position (`CommandFifo::retired`) the raster
     /// unit's submitted work covers: a flip armed after it waits
     /// (`HostInterface::retrace`). The GPU unit publishes it
@@ -504,6 +509,7 @@ impl DisplayShared {
             vram: OnceLock::new(),
             gpu_scanout: OnceLock::new(),
             gpu_fault: Default::default(),
+            write_ns: AtomicI64::new(-1),
             covered: Arc::new(AtomicU64::new(u64::MAX)),
             front,
             swaps: AtomicU64::new(0),
@@ -522,6 +528,7 @@ impl DisplayShared {
         cell.line_clocks.store(mode.line_clocks, Relaxed);
         cell.blank_lines.store(mode.blank_lines, Relaxed);
         cell.fields.store(mode.fields, Relaxed);
+        cell.restart_at.store(self.write_ns.load(Relaxed), Relaxed);
         cell.restart.fetch_add(1, Release);
         cell.gen.fetch_add(1, Release);
     }
@@ -534,6 +541,7 @@ impl DisplayShared {
 
     /// The retrace phase restarts, as for a reset.
     pub fn restart_retrace(&self) {
+        self.mode.restart_at.store(self.write_ns.load(Relaxed), Relaxed);
         self.mode.restart.fetch_add(1, Release);
     }
 
