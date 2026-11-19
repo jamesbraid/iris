@@ -355,7 +355,7 @@ impl KonaBackend {
             regions: RegionCounts::default(),
             dac_cursor_loads: 0,
             dac_cursor_refused: 0,
-            channels: display::channels::Channels::new(cfg.rm_count),
+            channels: display::channels::Channels::new(cfg.rm_count).with_count(cfg.display_board().channels as usize),
             tex_counts: Default::default(),
             pix_counts: Default::default(),
             query_counts: Default::default(),
@@ -597,8 +597,8 @@ impl KonaBackend {
             r.placed, r.copy_downs, r.swapped_out, r.bytes_out, r.swapped_in, r.bytes_in
         )?;
         writeln!(w, "display tables    {}", self.tables.lock().describe())?;
-        let on: Vec<usize> = (0..display::channels::CHANNELS).filter(|&c| self.channels.channel[c].enabled).collect();
-        let blanked: Vec<usize> = (0..display::channels::CHANNELS).filter(|&c| self.channels.channel[c].blanked).collect();
+        let on: Vec<usize> = (0..self.channels.count()).filter(|&c| self.channels.channel[c].enabled).collect();
+        let blanked: Vec<usize> = (0..self.channels.count()).filter(|&c| self.channels.channel[c].blanked).collect();
         writeln!(w, "video channels   enabled {:?}, blanked {:?} (channel 0's, and all while temporarily blanked, are drawn black), frame {} x {}{}", on, blanked, self.channels.frame.0, self.channels.frame.1, if self.channels.blanked { ", all blanked" } else { "" })?;
         let tables = self.tables.lock();
         let dac = tables.dac();

@@ -32,6 +32,13 @@ fn config(product: *const std::ffi::c_char) -> IrisKonaConfig {
         managed_height: 0,
         pool_threads: 0,
         pool_tile: 32,
+        geometry: null(),
+        rm_type: null(),
+        display: null(),
+        pixel_depth: null(),
+        texture_mb: 0,
+        channels: 0,
+        host_board: 0,
     }
 }
 
@@ -46,6 +53,46 @@ fn the_constructor_builds_an_engine_the_shared_entries_drive() {
     assert_eq!(unsafe { sgi_kona_observe(h, &r) }, IRIS_ENGINE_OK);
     assert_eq!(unsafe { sgi_kona_observe(h, null()) }, IRIS_ENGINE_ERROR);
     unsafe { iris_engine_free(h) };
+}
+
+#[test]
+fn the_boards_are_inputs_and_what_a_product_cannot_have_is_refused() {
+    let c = |s: &str| CString::new(s).unwrap();
+    let (ir2, ir3, ge14_2, ge16_4, dg5_2, rm9, gvo, medium) = (c("ir2"), c("ir3"), c("ge14-2"), c("ge16-4"), c("dg5-2"), c("rm9"), c("dg5-2-gvo"), c("medium"));
+    let builds = |c: &IrisKonaConfig| {
+        let h = unsafe { sgi_kona_new(c, &host()) };
+        let ok = !h.is_null();
+        if ok {
+            unsafe { iris_engine_free(h) };
+        }
+        ok
+    };
+    // A rack pipe: a Ktown allows four raster managers and a DG5-2 with its own two channels.
+    let mut rack = config(ir3.as_ptr());
+    (rack.host_board, rack.rm_count, rack.display, rack.channels, rack.texture_mb) = (1, 4, dg5_2.as_ptr(), 2, 256);
+    assert!(builds(&rack));
+    rack.host_board = 2;
+    assert!(builds(&rack), "an Onyx 3400's Ktown2 too");
+    rack.host_board = 0;
+    assert!(!builds(&rack), "a deskside holds two raster managers at most");
+    let mut two = config(ir2.as_ptr());
+    (two.geometry, two.pixel_depth) = (ge14_2.as_ptr(), medium.as_ptr());
+    assert!(builds(&two), "a two-engine geometry board and medium pixels");
+    two.geometry = ge16_4.as_ptr();
+    assert!(!builds(&two), "the InfiniteReality2 takes the GE14 boards");
+    let mut one = config(ir2.as_ptr());
+    one.rm_type = rm9.as_ptr();
+    assert!(!builds(&one), "the raster manager type is the product's");
+    one.rm_type = null();
+    one.texture_mb = 256;
+    assert!(!builds(&one), "and so is the texture board");
+    one.texture_mb = 0;
+    one.channels = 8;
+    one.display = dg5_2.as_ptr();
+    assert!(!builds(&one), "a DG5-2 has two channels");
+    one.channels = 0;
+    one.display = gvo.as_ptr();
+    assert!(!builds(&one), "the GVO option channel is not modelled");
 }
 
 #[test]

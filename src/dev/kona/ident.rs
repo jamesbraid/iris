@@ -7,10 +7,11 @@
 //! of the Onyx2 deskside by default: a GE14-4 geometry board, one or two RM7
 //! raster managers each with a TM7 texture board of 64 MB, and a DG5 display
 //! generator of eight channels. The InfiniteReality2E and InfiniteReality3
-//! change the boards, the board set and the texture size; the display
-//! generator is the deskside's DG5-8 for all (a limit: see [`Display`]). The deskside has no second
-//! host-interface record, so the one-wire chain holds the geometry board's
-//! alone. Part numbers, names and revisions are those of the ported model of
+//! change the boards, the board set and the texture size. A rack or Onyx 3400
+//! pipe adds a host board (`HostBoard`), which allows four raster managers
+//! and makes the DG5-2 the default display generator. The deskside has no
+//! second host-interface record, so the one-wire chain holds the geometry
+//! board's alone. Part numbers, names and revisions are those of the ported model of
 //! that pipe, or the capture a product's row names; ROM serials and barcodes
 //! are synthetic and marked so (the serial's top 32 bits are the marker
 //! 0x51454d55 and the barcode starts "EMU"; both follow the ported
@@ -31,9 +32,6 @@ pub(super) struct BoardSpec {
     revision: &'static str,
 }
 
-/// Geometry engines, four on every product the model presents.
-const ENGINES: u32 = 4;
-const OCCUPANCY: u32 = 0xf;
 /// Display generator channels: the DG5-8's.
 pub(super) const CHANNELS: u32 = 8;
 
@@ -43,11 +41,10 @@ pub(super) const CHANNELS: u32 = 8;
 /// from the captures), bits 18 to 16 are the channel count less one, 21 to 19
 /// the display option, bit 22 the colour-map size and bit 23 external gamma.
 ///
-/// Limit: the display model has a compile-time channel count (`CHANNELS`), so
-/// every product presents the DG5-8. The word of a DG5-2 with a GVO option, as
-/// the Onyx2 rack capture reads it, is checked in a test and the board is not
-/// presented: that would need the channel arrays in `back::display` sized by
-/// the board.
+/// Limit: the display model's channel arrays are eight long, so a board with
+/// fewer channels answers for its own and refuses the rest. The DG5-2 with a
+/// GVO option is not presented: its option channel is not modelled. Its word,
+/// as the Onyx2 rack capture reads it, is checked in a test.
 pub(super) struct Display {
     pub channels: u32,
     /// 3 TVO, 4 DPLEX, 5 DVP, 6 GVO, 7 none.
@@ -80,6 +77,108 @@ pub(super) const DG5_8: Display = Display {
     high: 0x51,
     board: BoardSpec { name: "", part: "030-1087-001", revision: "" },
 };
+/// The DG5-2 on its own: the rack capture's base board (high byte and part family) with the
+/// part a published PCA list gives a DG5-2, and no option. No capture shows it bare, an
+/// approximation.
+pub(super) const DG5_2: Display = Display {
+    channels: 2,
+    option: 7,
+    colour_map: false,
+    external_gamma: false,
+    high: 0xf9,
+    board: BoardSpec { name: "DG5-2", part: "030-1055-001", revision: "" },
+};
+
+/// The display generators a pipe takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayBoard {
+    Dg5_8,
+    Dg5_2,
+}
+
+impl DisplayBoard {
+    pub fn name(self) -> &'static str {
+        match self {
+            DisplayBoard::Dg5_8 => "dg5-8",
+            DisplayBoard::Dg5_2 => "dg5-2",
+        }
+    }
+
+    pub(super) fn spec(self) -> &'static Display {
+        match self {
+            DisplayBoard::Dg5_8 => &DG5_8,
+            DisplayBoard::Dg5_2 => &DG5_2,
+        }
+    }
+}
+
+/// The geometry boards a pipe takes: its identity record, engines, and the board word the
+/// configuration block carries.
+pub(super) struct GeometrySpec {
+    id: &'static str,
+    board: BoardSpec,
+    engines: u32,
+    occupancy: u32,
+    board_word: u32,
+}
+
+/// The deskside capture's GE14-4, with its hinv revision.
+const GE14_4: GeometrySpec = GeometrySpec { id: "ge14-4", board: BoardSpec { name: "GE14-4", part: "030-1129-002", revision: "F" }, engines: 4, occupancy: 0xf, board_word: 0x8016_0a04 };
+/// An owner's board list and gfxinfo for a two-engine pipe: part 030-1051-002 rev K, two engines,
+/// occupancy 0x03. Its board words are the GE14-4's, an approximation.
+const GE14_2: GeometrySpec = GeometrySpec { id: "ge14-2", board: BoardSpec { name: "GE14-2", part: "030-1051-002", revision: "K" }, engines: 2, occupancy: 0x3, board_word: 0x8016_0a04 };
+/// The rack capture's GE16-4, with its hinv revision and words.
+const GE16_4: GeometrySpec = GeometrySpec { id: "ge16-4", board: BoardSpec { name: "GE16-4", part: "030-1398-001", revision: "E" }, engines: 4, occupancy: 0xf, board_word: GE16_BOARD_WORD };
+
+/// The geometry boards of the model, by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Geometry {
+    Ge14_4,
+    Ge14_2,
+    Ge16_4,
+}
+
+impl Geometry {
+    pub(super) fn spec(self) -> &'static GeometrySpec {
+        match self {
+            Geometry::Ge14_4 => &GE14_4,
+            Geometry::Ge14_2 => &GE14_2,
+            Geometry::Ge16_4 => &GE16_4,
+        }
+    }
+}
+
+/// How much of a pixel the pipe keeps: what the configuration block reports and the X server
+/// chooses its visuals by. Large and Extra-Large are not modelled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PixelDepth {
+    #[default]
+    Small,
+    Medium,
+}
+
+impl PixelDepth {
+    /// The pixel bytes the X server's check wants of the raster managers' budget.
+    fn need(self) -> u64 {
+        match self {
+            PixelDepth::Small => 8,
+            PixelDepth::Medium => 16,
+        }
+    }
+}
+
+/// The board a pipe's host link ends in, which decides how many raster managers it holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HostBoard {
+    /// The Onyx2 deskside: no host board, at most two raster managers.
+    #[default]
+    Deskside,
+    /// An Onyx2 rack's Ktown.
+    Ktown,
+    /// An Onyx 3400's Ktown2, which shows no record of its own to the model.
+    Ktown2,
+}
+
 /// "4MB external" FIFO RAM, as the ported model reports.
 const FIFO_RAM_4MB_EXTERNAL: u32 = 1;
 
@@ -123,20 +222,18 @@ pub struct ProductSpec {
     pub label: &'static str,
     /// The board-set word at the start of the configuration block.
     board_set: u32,
-    /// The display generator the product presents.
-    display: &'static Display,
     /// What the pipe answers when the driver's attach reads the product
     /// selector (`SELECT_PRODUCT`): the low bits class the pipe.
     class_word: u32,
-    geometry: BoardSpec,
+    /// The geometry boards the product takes, the default first.
+    geometries: &'static [&'static GeometrySpec],
     raster: BoardSpec,
     texture: BoardSpec,
     /// Texture memory on each raster manager's texture board, and the size
     /// code the block carries for it.
     texture_mb: u32,
     texture_code: u32,
-    /// The geometry board's identity word and the raster manager's.
-    board_word: u32,
+    /// The raster manager's identity word.
     raster_word: u32,
     /// Where the product shipped.
     pub hosts: &'static [Host],
@@ -177,14 +274,12 @@ pub const PRODUCTS: [ProductSpec; 3] = [
         name: "ir2",
         label: "InfiniteReality2",
         board_set: 1,
-        display: &DG5_8,
         class_word: 0,
-        geometry: BoardSpec { name: "GE14-4", part: "030-1129-002", revision: "F" },
+        geometries: &[&GE14_4, &GE14_2],
         raster: BoardSpec { name: "RM7", part: "030-1054-001", revision: "G" },
         texture: BoardSpec { name: "TM7", part: "030-1053-001", revision: "F" },
         texture_mb: 64,
         texture_code: 2,
-        board_word: 0x8016_0a04,
         raster_word: IR2_RASTER_WORD,
         hosts: &[Host::Onyx2Deskside],
     },
@@ -202,14 +297,12 @@ pub const PRODUCTS: [ProductSpec; 3] = [
         name: "ir2e",
         label: "InfiniteReality2E",
         board_set: 4,
-        display: &DG5_8,
         class_word: 0,
-        geometry: GE16_4,
+        geometries: &[&GE16_4],
         raster: BoardSpec { revision: "", ..RM9 },
         texture: BoardSpec { name: "TM7", part: "030-1053-001", revision: "" },
         texture_mb: 64,
         texture_code: 2,
-        board_word: GE16_BOARD_WORD,
         raster_word: IR2_RASTER_WORD,
         hosts: &[Host::Onyx2Deskside, Host::Onyx2Rack, Host::Onyx300],
     },
@@ -223,21 +316,18 @@ pub const PRODUCTS: [ProductSpec; 3] = [
         name: "ir3",
         label: "InfiniteReality3",
         board_set: 5,
-        display: &DG5_8,
         class_word: 1,
-        geometry: GE16_4,
+        geometries: &[&GE16_4],
         raster: RM9,
         texture: BoardSpec { name: "TM8", part: "030-1588-001", revision: "" },
         texture_mb: 256,
         texture_code: 4,
-        board_word: GE16_BOARD_WORD,
         raster_word: IR3_RASTER_WORD,
         hosts: &[Host::Onyx2Rack, Host::Onyx300, Host::Onyx3000],
     },
 ];
 
 // The boards the GE16 products share, as the Onyx2 rack capture reads them.
-const GE16_4: BoardSpec = BoardSpec { name: "GE16-4", part: "030-1398-001", revision: "E" };
 const RM9: BoardSpec = BoardSpec { name: "RM9", part: "030-1402-001", revision: "E" };
 const GE16_BOARD_WORD: u32 = 0x80f6_1806;
 /// A raster slot word: type 6 (a TM7, the 2 and 2E) with texture code 2, and
@@ -288,6 +378,12 @@ pub struct KonaConfig {
     /// `tile`. Zero workers runs every job inline.
     pub threads: usize,
     pub tile: u32,
+    /// The geometry board; None is the product's first.
+    pub geometry: Option<Geometry>,
+    /// The display generator; None is the DG5-8, or the DG5-2 behind a host board.
+    pub display: Option<DisplayBoard>,
+    pub pixel_depth: PixelDepth,
+    pub host_board: HostBoard,
 }
 
 impl KonaConfig {
@@ -309,6 +405,115 @@ impl KonaConfig {
     /// The product's row.
     pub fn spec(&self) -> &'static ProductSpec {
         self.product.spec()
+    }
+
+    /// The board the host link ends in: set before `with_rm_count`, which it allows four of.
+    pub fn with_host_board(mut self, board: HostBoard) -> Self {
+        self.host_board = board;
+        self
+    }
+
+    /// Raster managers: 1, 2 or, behind a host board, 4. The pixel depth still has to fit.
+    pub fn with_rm_count(mut self, rm_count: u32) -> Result<Self, String> {
+        match rm_count {
+            1 | 2 => {}
+            4 if self.host_board == HostBoard::Deskside => {
+                return Err("kona: rm-count 4: a pipe with no Ktown is an Onyx2 deskside pipe, which holds at most two raster managers".into())
+            }
+            4 => {}
+            n => return Err(format!("kona: rm-count {n}: a pipe has 1, 2 or 4 raster managers")),
+        }
+        let before = self.rm_count;
+        self.rm_count = rm_count;
+        self.depth_fits().inspect_err(|_| self.rm_count = before)?;
+        Ok(self)
+    }
+
+    /// The geometry board `name` (`ge14-4`, `ge14-2`, `ge16-4`; empty for the product's own).
+    pub fn with_geometry(mut self, name: &str) -> Result<Self, String> {
+        if name.is_empty() {
+            self.geometry = None;
+            return Ok(self);
+        }
+        let found = [Geometry::Ge14_4, Geometry::Ge14_2, Geometry::Ge16_4].into_iter().find(|g| g.spec().id == name);
+        match found.filter(|g| self.spec().geometries.iter().any(|s| std::ptr::eq(*s, g.spec()))) {
+            Some(g) => self.geometry = Some(g),
+            None => {
+                let takes: Vec<_> = self.spec().geometries.iter().map(|g| g.id).collect();
+                return Err(format!("kona: product {} has no geometry board {name:?}; it takes {}", self.spec().name, takes.join(" or ")));
+            }
+        }
+        Ok(self)
+    }
+
+    /// The raster manager type, which the product fixes: `rm7` or `rm9`, or empty.
+    pub fn with_rm_type(self, name: &str) -> Result<Self, String> {
+        let own = self.spec().raster.name.to_ascii_lowercase();
+        if !name.is_empty() && name != own {
+            return Err(format!("kona: product {} has {own} raster managers, not {name:?}", self.spec().name));
+        }
+        Ok(self)
+    }
+
+    /// Texture memory per raster manager in MB, which the product fixes: 0 for its own.
+    pub fn with_texture_mb(self, mb: u32) -> Result<Self, String> {
+        if mb != 0 && mb != self.spec().texture_mb {
+            return Err(format!(
+                "kona: product {} with {mb} MB of texture per raster manager has no known texture board; it takes {} MB",
+                self.spec().name,
+                self.spec().texture_mb
+            ));
+        }
+        Ok(self)
+    }
+
+    /// The display generator `name` (`dg5-8`, `dg5-2`; empty for the default) and its channel
+    /// count, 0 or the board's own. Set after the host board, which picks the default.
+    pub fn with_display(mut self, name: &str, channels: u32) -> Result<Self, String> {
+        self.display = match name {
+            "" => None,
+            "dg5-8" => Some(DisplayBoard::Dg5_8),
+            "dg5-2" => Some(DisplayBoard::Dg5_2),
+            "dg5-2-gvo" => return Err("kona: display dg5-2-gvo: the GVO option's channel, mask and logic download are not modelled; use dg5-2".into()),
+            other => return Err(format!("kona: display {other:?} is not a display board the model presents: dg5-8 or dg5-2")),
+        };
+        let board = self.display_board();
+        if channels != 0 && channels != board.channels {
+            return Err(format!("kona: channels {channels}: display generator {} reports {}", board.board.part, board.channels));
+        }
+        Ok(self)
+    }
+
+    /// `small` or `medium`, or empty for small. Refused when the raster managers' pixel memory
+    /// cannot hold it, by the X server's own rule.
+    pub fn with_pixel_depth(mut self, name: &str) -> Result<Self, String> {
+        self.pixel_depth = match name {
+            "" | "small" => PixelDepth::Small,
+            "medium" => PixelDepth::Medium,
+            other => return Err(format!("kona: pixel-depth {other:?} is not modelled; the model presents small or medium")),
+        };
+        self.depth_fits()?;
+        Ok(self)
+    }
+
+    /// The X server's rule: raster managers times 20,971,520 over the managed area's height and
+    /// its width rounded up to 160 must be at least 8 pixel bytes for Small and 16 for Medium.
+    fn depth_fits(&self) -> Result<(), String> {
+        let area = self.managed.1 as u64 * (self.managed.0 as u64).div_ceil(160) * 160;
+        if area != 0 && (self.rm_count as u64 * 20_971_520 / area) < self.pixel_depth.need() {
+            return Err(format!("kona: pixel-depth {:?} needs more pixel memory than {} raster managers hold at {}x{}", self.pixel_depth, self.rm_count, self.managed.0, self.managed.1));
+        }
+        Ok(())
+    }
+
+    /// The geometry board the pipe has.
+    pub(super) fn geometry_spec(&self) -> &'static GeometrySpec {
+        self.geometry.map_or(self.spec().geometries[0], |g| g.spec())
+    }
+
+    /// The display generator the pipe has.
+    pub(super) fn display_board(&self) -> &'static Display {
+        self.display.unwrap_or(if self.host_board == HostBoard::Deskside { DisplayBoard::Dg5_8 } else { DisplayBoard::Dg5_2 }).spec()
     }
 
     pub fn in_slot(mut self, index: u8) -> Result<Self, String> {
@@ -367,7 +572,7 @@ impl KonaConfig {
 
 impl Default for KonaConfig {
     fn default() -> Self {
-        KonaConfig { product: Product::Ir2, rm_count: 2, identity_index: 0, host_widget: 0, widget: 0, probe: 0, managed: (1280, 1024), threads: 2, tile: 32 }
+        KonaConfig { product: Product::Ir2, rm_count: 2, identity_index: 0, host_widget: 0, widget: 0, probe: 0, managed: (1280, 1024), threads: 2, tile: 32, geometry: None, display: None, pixel_depth: PixelDepth::Small, host_board: HostBoard::Deskside }
     }
 }
 
@@ -401,7 +606,7 @@ pub(super) struct Identity {
 impl Identity {
     pub fn new(cfg: &KonaConfig) -> Self {
         let n = cfg.base();
-        let geometry = &cfg.spec().geometry;
+        let geometry = &cfg.geometry_spec().board;
         let record = BoardRecord {
             barcode: &barcode('G', n),
             part: geometry.part,
@@ -527,7 +732,7 @@ fn pools(cfg: &KonaConfig) -> [Pool; 4] {
     [
         Pool { max_key: 0, max_align: 0x4000, copies: 1, shared: 0, copy_down: 1, granule: 0x400, capacity: 0x100 },
         Pool { max_key: 0, max_align: 0x4000, copies: 1, shared: 1, copy_down: 1, granule: 0x400, capacity: 0x3c00 },
-        Pool { max_key: 10, max_align: 0x4000, copies: ENGINES, shared: 0, copy_down: 1, granule: 0x400, capacity: 0x400 },
+        Pool { max_key: 10, max_align: 0x4000, copies: cfg.geometry_spec().engines, shared: 0, copy_down: 1, granule: 0x400, capacity: 0x400 },
         Pool { max_key: 0, max_align: 0x4000, copies: 1, shared: 0, copy_down: 1, granule: 0x400, capacity: cfg.spec().texture_mb * (1 << 20) / 0x400 },
     ]
 }
@@ -541,23 +746,24 @@ pub(super) fn config_block(cfg: &KonaConfig, width: u32, height: u32) -> Vec<u8>
     let base = cfg.base();
     let spec = cfg.spec();
 
+    let (geometry, display) = (cfg.geometry_spec(), cfg.display_board());
+
     put(&mut b, CFG_BOARD_SET, spec.board_set);
-    put(&mut b, CFG_ENGINES, ENGINES);
+    put(&mut b, CFG_ENGINES, geometry.engines);
     put(&mut b, CFG_RMS, cfg.rm_count);
     put(&mut b, CFG_FIFO_RAM, FIFO_RAM_4MB_EXTERNAL);
-    put(&mut b, CFG_CHANNELS, CHANNELS);
+    put(&mut b, CFG_CHANNELS, display.channels);
     put(&mut b, CFG_VIDEO_OPTION, 0);
-    put(&mut b, CFG_GAMMA, spec.display.external_gamma as u32);
+    put(&mut b, CFG_GAMMA, display.external_gamma as u32);
     // The display generator's own channel count, which the combination
     // checker compares a combination's enabled channels against.
-    put(&mut b, CFG_DG_CHANNEL_COUNT, CHANNELS);
-    put(&mut b, CFG_ACTIVE_ENGINES, ENGINES);
+    put(&mut b, CFG_DG_CHANNEL_COUNT, display.channels);
+    put(&mut b, CFG_ACTIVE_ENGINES, geometry.engines);
     put(&mut b, CFG_ACTIVE_RMS, cfg.rm_count);
-    put(&mut b, CFG_OCCUPANCY, OCCUPANCY);
+    put(&mut b, CFG_OCCUPANCY, geometry.occupancy);
     put(&mut b, CFG_WIDTH, width);
     put(&mut b, CFG_HEIGHT, height);
-    // Small pixel depth.
-    put(&mut b, CFG_PIXEL_DEPTH, 0);
+    put(&mut b, CFG_PIXEL_DEPTH, cfg.pixel_depth as u32);
 
     for (i, p) in pools(cfg).iter().enumerate() {
         let at = CFG_POOLS + 0x1c * i;
@@ -569,7 +775,7 @@ pub(super) fn config_block(cfg: &KonaConfig, width: u32, height: u32) -> Vec<u8>
         }
     }
 
-    put(&mut b, CFG_BOARD_WORD, spec.board_word);
+    put(&mut b, CFG_BOARD_WORD, geometry.board_word);
     for (i, w) in [0, 0x1483_2057, 0x2473_1057, 0x1423_1057].into_iter().enumerate() {
         put(&mut b, CFG_GE_WORDS + 4 * i, w);
     }
@@ -586,11 +792,11 @@ pub(super) fn config_block(cfg: &KonaConfig, width: u32, height: u32) -> Vec<u8>
         put_record(&mut b[CFG_NIC_RM + 0x4c * i..][..0x4c], &spec.raster, base + 2 + i as u32);
         put_record(&mut b[CFG_NIC_TM + 0x4c * i..][..0x4c], &spec.texture, base + 6 + i as u32);
     }
-    put(&mut b, CFG_TRAILING_WORD, spec.display.word());
+    put(&mut b, CFG_TRAILING_WORD, display.word());
     put(&mut b, CFG_DG_WORDS, 0x0553_2057);
     put_words(&mut b, CFG_DG_WORDS + 4, 4, 0x1583_8057);
-    put_words(&mut b, CFG_DG_CHANNELS, CHANNELS as usize, 0x1563_1057);
-    put_record(&mut b[CFG_NIC_DG..][..0x4c], &spec.display.board, base + 10);
+    put_words(&mut b, CFG_DG_CHANNELS, display.channels as usize, 0x1563_1057);
+    put_record(&mut b[CFG_NIC_DG..][..0x4c], &display.board, base + 10);
     b
 }
 
@@ -615,8 +821,80 @@ pub(in crate::dev::kona) mod tests {
     fn a_deskside_holds_one_or_two_raster_managers() {
         assert!(KonaConfig::ir2(1).is_ok());
         assert!(KonaConfig::ir2(2).is_ok());
-        assert!(KonaConfig::ir2(4).is_err());
+        assert!(KonaConfig::ir2(4).is_err(), "four need a host board");
         assert!(KonaConfig::ir2(0).is_err());
+    }
+
+    fn word(block: &[u8], at: usize) -> u32 {
+        u32::from_be_bytes(block[at..at + 4].try_into().unwrap())
+    }
+
+    /// Four raster managers need a host board, and then fill the block's four slots exactly: the
+    /// last chip words end where the trailing word starts.
+    #[test]
+    fn four_raster_managers_need_a_host_board_and_fill_the_block() {
+        assert!(KonaConfig::ir2(1).unwrap().with_rm_count(4).is_err(), "a deskside holds two");
+        for board in [HostBoard::Ktown, HostBoard::Ktown2] {
+            let cfg = KonaConfig::new(Product::Ir3, 1).unwrap().with_host_board(board).with_rm_count(4).unwrap();
+            let block = config_block(&cfg, 1280, 1024);
+            assert_eq!((word(&block, CFG_RMS), word(&block, CFG_ACTIVE_RMS)), (4, 4));
+            for i in 0..4 {
+                assert_eq!((word(&block, CFG_RM_PRESENT + 8 * i), word(&block, CFG_RM_TEXTURE + 8 * i), word(&block, CFG_RM_CHIPS + 0x8c * i)), (1, 4, IR3_RASTER_WORD), "raster manager {i}");
+            }
+            assert_eq!(word(&block, CFG_TRAILING_WORD), DG5_2.word(), "the DG5-2 is the default behind a host board");
+        }
+        assert!(KonaConfig::ir2(2).unwrap().with_rm_count(3).is_err());
+    }
+
+    /// The geometry board sets the engine count, occupancy, pool copies and board word, and its
+    /// own record is the chain's.
+    #[test]
+    fn the_geometry_board_is_an_input_the_product_limits() {
+        let cfg = KonaConfig::ir2(1).unwrap().with_geometry("ge14-2").unwrap();
+        let block = config_block(&cfg, 1280, 1024);
+        assert_eq!((word(&block, CFG_ENGINES), word(&block, CFG_ACTIVE_ENGINES), word(&block, CFG_OCCUPANCY)), (2, 2, 3));
+        assert_eq!(word(&block, CFG_POOLS + 0x1c * 2 + 8), 2, "one copy of the geometry class per engine");
+        assert_eq!(cfg.geometry_spec().board.part, "030-1051-002");
+        assert!(KonaConfig::ir2(1).unwrap().with_geometry("ge16-4").is_err(), "the InfiniteReality2 takes GE14 boards");
+        assert!(KonaConfig::new(Product::Ir2e, 1).unwrap().with_geometry("ge14-4").is_err());
+        assert_eq!(KonaConfig::new(Product::Ir3, 1).unwrap().with_geometry("ge16-4").unwrap().geometry_spec().board.name, "GE16-4");
+    }
+
+    #[test]
+    fn the_display_board_sets_its_channels_gamma_and_identity() {
+        let cfg = KonaConfig::ir2(1).unwrap().with_display("dg5-2", 2).unwrap();
+        let block = config_block(&cfg, 1280, 1024);
+        assert_eq!((word(&block, CFG_CHANNELS), word(&block, CFG_DG_CHANNEL_COUNT), word(&block, CFG_GAMMA)), (2, 2, 0));
+        assert_eq!(word(&block, CFG_TRAILING_WORD), DG5_2.word());
+        assert_eq!(word(&block, CFG_DG_CHANNELS + 4 * 2), 0, "no word for a third channel");
+        assert!(KonaConfig::ir2(1).unwrap().with_display("dg5-2", 8).is_err());
+        assert!(KonaConfig::ir2(1).unwrap().with_display("dg5-8", 2).is_err());
+        assert!(KonaConfig::ir2(1).unwrap().with_display("dg5-2-gvo", 0).unwrap_err().contains("not modelled"));
+        assert!(KonaConfig::ir2(1).unwrap().with_display("dg9", 0).is_err());
+    }
+
+    /// The raster manager type and the texture board are the product's, as the old device had them.
+    #[test]
+    fn the_raster_type_and_texture_board_are_the_products() {
+        assert!(KonaConfig::ir2(1).unwrap().with_rm_type("rm7").is_ok());
+        assert!(KonaConfig::ir2(1).unwrap().with_rm_type("rm9").is_err());
+        assert!(KonaConfig::new(Product::Ir3, 1).unwrap().with_rm_type("rm9").is_ok());
+        assert!(KonaConfig::ir2(1).unwrap().with_texture_mb(64).is_ok());
+        assert!(KonaConfig::ir2(1).unwrap().with_texture_mb(256).is_err());
+        assert!(KonaConfig::new(Product::Ir3, 1).unwrap().with_texture_mb(256).is_ok());
+    }
+
+    /// Medium pixels need sixteen pixel bytes of the raster managers' memory at 1280x1024, which
+    /// one manager has; a bigger managed area needs more managers.
+    #[test]
+    fn the_pixel_depth_is_reported_and_must_fit_the_raster_managers() {
+        let cfg = KonaConfig::ir2(1).unwrap().with_pixel_depth("medium").unwrap();
+        assert_eq!(word(&config_block(&cfg, 1280, 1024), CFG_PIXEL_DEPTH), 1);
+        assert_eq!(word(&config_block(&KonaConfig::ir2(1).unwrap(), 1280, 1024), CFG_PIXEL_DEPTH), 0);
+        let mut big = KonaConfig::ir2(1).unwrap();
+        big.managed = (1920, 1200);
+        assert!(big.with_pixel_depth("medium").is_err(), "one manager cannot hold medium pixels at 1920x1200");
+        assert!(KonaConfig::ir2(1).unwrap().with_pixel_depth("large").is_err());
     }
 
     #[test]
