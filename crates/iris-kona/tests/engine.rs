@@ -31,6 +31,9 @@ impl HostMem for Ram {
 
 type Engine = KonaEngine<Ram>;
 
+/// The widget the pipe sits at (`KonaConfig::widget`), the sender of its packets.
+const SENDER: u8 = 0;
+
 fn engine() -> Engine {
     Engine::new(KonaConfig::ir2(2).unwrap().with_pool(0, 32), Ram::default(), Options::default(), None).expect("engine")
 }
@@ -165,7 +168,7 @@ fn a_retrace_completes_at_the_frame_after_the_one_that_shows_the_swap() {
     assert!(!e.swap_waiting());
     e.run(usize::MAX);
     assert_eq!(e.read(RETRACE_TAG, 32), Read::Value(0), "the request was made after that retrace");
-    assert_eq!(packets(&drain(&mut e)), [Interrupt { widget: 0, addr: 0x1000, vector: 0x11, level: true }], "the video interrupt, to the host");
+    assert_eq!(packets(&drain(&mut e)), [Interrupt { sender: SENDER, widget: 0, addr: 0x1000, vector: 0x11, level: true }], "the video interrupt, to the host");
 
     e.frame(0);
     assert_eq!(e.read(RETRACE_TAG, 32), Read::Value(0x1234));
@@ -183,7 +186,7 @@ fn a_packet_equal_to_one_still_queued_is_not_queued_again() {
     for _ in 0..3 {
         textport_packet(&mut e, [A, A, A]);
     }
-    assert_eq!(packets(&drain(&mut e)), [Interrupt { widget: 0, addr: 0x2000, vector: 0x22, level: true }]);
+    assert_eq!(packets(&drain(&mut e)), [Interrupt { sender: SENDER, widget: 0, addr: 0x2000, vector: 0x22, level: true }]);
     textport_packet(&mut e, [A, A, A]);
     assert_eq!(packets(&drain(&mut e)).len(), 1, "after a drain the next is another");
 }
@@ -196,7 +199,7 @@ fn a_packet_for_another_widget_goes_to_the_shell_with_that_widget() {
     store(&mut e, INT_VECTORS, 0x33, A);
     store(&mut e, INT_ENABLE, CAUSE_LOWATER, A);
     textport_packet(&mut e, [A, A, A]);
-    assert_eq!(packets(&drain(&mut e)), [Interrupt { widget: 3, addr: 0x40, vector: 0x33, level: true }]);
+    assert_eq!(packets(&drain(&mut e)), [Interrupt { sender: SENDER, widget: 3, addr: 0x40, vector: 0x33, level: true }]);
     assert_eq!(e.irq_levels(), 0, "packets are the only signal");
 }
 

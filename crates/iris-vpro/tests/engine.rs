@@ -25,6 +25,7 @@ const FLAG_VECTOR: u8 = 18;
 const RETRACE_VECTOR: u8 = 20;
 const SOFTSYNC_VECTOR: u8 = 21;
 const HEART: u8 = 8;
+const WIDGET: u32 = 11;
 
 /// Guest RAM, big-endian bytes in sparse pages, with one address a writer can be held at
 /// and a size past which nothing is mapped.
@@ -93,7 +94,7 @@ impl HostMem for Shared {
 }
 
 fn config(product: &str, mode: Mode) -> Config {
-    Config { product: product.into(), widget: 11, mode, pool: (0, 0), gpu: None }
+    Config { product: product.into(), widget: WIDGET, mode, pool: (0, 0), gpu: None }
 }
 
 fn engine(mode: Mode) -> (VproEngine, Arc<Ram>) {
@@ -135,7 +136,7 @@ fn route_to_heart(e: &mut impl BoardEngine) {
 }
 
 fn packet(vector: u8, level: bool) -> Event {
-    Event::Interrupt(Interrupt { widget: HEART, addr: 0x80, vector, level })
+    Event::Interrupt(Interrupt { sender: WIDGET as u8, widget: HEART, addr: 0x80, vector, level })
 }
 
 /// The first reads of every recorded V12 boot (QEMU's capture of an Octane2).

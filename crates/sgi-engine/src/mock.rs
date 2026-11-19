@@ -182,7 +182,7 @@ impl<M: HostMem> Mock<M> {
                 }
             }
             Op::Fence(addr, val) => self.fences.push((addr, val)),
-            Op::Packet(v) => self.out.post(Event::Interrupt(Interrupt { widget: 8, addr: 0x1000, vector: v, level: true })),
+            Op::Packet(v) => self.out.post(Event::Interrupt(Interrupt { sender: 7, widget: 8, addr: 0x1000, vector: v, level: true })),
             Op::Boom => panic!("the mock board was told to"),
             Op::LentStore(w, v) => self.lent_put(w, v),
             Op::LentAdd(w, v) => {
@@ -350,7 +350,7 @@ impl<M: HostMem> BoardEngine for Mock<M> {
             if self.mem.ram_write(addr, &(val as u64).to_be_bytes(), Swap::None).is_err() {
                 self.bus_fault(addr, true);
             }
-            self.out.post(Event::Interrupt(Interrupt { widget: 8, addr: 0x2000, vector: 3, level: true }));
+            self.out.post(Event::Interrupt(Interrupt { sender: 7, widget: 8, addr: 0x2000, vector: 3, level: true }));
         }
         Pump { idle: self.idle(), events: self.out.pending(), next_deadline: self.wait_until, irq_levels: self.irq_levels() }
     }

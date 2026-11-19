@@ -112,9 +112,13 @@ pub struct Source {
 }
 
 /// A packet the guest's routing registers composed: an interrupt for a
-/// widget, as the crosstalk fabric carries it.
+/// widget, as the crosstalk fabric carries it. `sender` is the widget it
+/// comes from (the board's own widget, or the hub a KONA store came from).
+/// Sender, widget, address and vector name the line the packet sets or
+/// clears; `Outbox` keeps the newest packet for each line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Interrupt {
+    pub sender: u8,
     pub widget: u8,
     pub addr: u64,
     pub vector: u8,
@@ -155,8 +159,8 @@ pub const DAMAGE_ANY: u64 = u64::MAX;
 
 /// What the board signals. `Irq` and `Credits` coalesce, `Damage` joins,
 /// `Note` and `BusFault` repeat once only: `Outbox` keeps the queue bounded.
-/// `Interrupt` packets for one line (widget, address, vector) collapse to the
-/// newest. Engines add variants, hence `non_exhaustive`.
+/// `Interrupt` packets for one line (sender, widget, address, vector) collapse
+/// to the newest. Engines add variants, hence `non_exhaustive`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Event {
@@ -181,6 +185,8 @@ pub enum Event {
     /// queued one for the same line, so the queue holds at most one per line.
     /// The receiver sets or clears a pending bit, and nothing runs between
     /// two packets delivered in one batch, so only the last state is seen.
+    /// An identical packet is dropped while its twin waits; once the shell has
+    /// drained one, the next is queued again, so a clear in between is honoured.
     Interrupt(Interrupt),
     /// Retired stores, by the source `set_source` named when they were
     /// written: the shell returns that many flow-control credits to it. One

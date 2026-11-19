@@ -172,6 +172,7 @@ typedef struct IrisEngineBusFault {
 
 typedef struct IrisEnginePacket {
     uint64_t addr;
+    uint32_t sender;        /* the widget the packet comes from */
     uint32_t widget;
     uint32_t vector;
     uint32_t level;

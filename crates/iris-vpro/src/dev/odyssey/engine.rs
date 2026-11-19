@@ -233,8 +233,9 @@ impl VproEngine {
         let out = Arc::new(Outbox::new(notify));
         b.guest = Some(Arc::new(Guest { mem: Arc::new(mem), out: out.clone() }));
         let sink = out.clone();
+        let sender = config.widget as u8;
         b.front.lock().packets = Some(Arc::new(move |widget, addr, vector, level| {
-            sink.post(Event::Interrupt(Interrupt { widget, addr, vector, level }));
+            sink.post(Event::Interrupt(Interrupt { sender, widget, addr, vector, level }));
             true
         }));
         // Retired stores free credits, which only the pump returns.
