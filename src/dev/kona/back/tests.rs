@@ -355,6 +355,7 @@ fn a_poisoned_tile_scheduler_makes_the_board_dead() {
     let kona = Kona::new(test_cfg().with_pool(2, 32), TestHost::new(), TestHost::new(), crate::dev::kona::tests::test_status(), None).unwrap();
     assert_eq!(kona.failure(), None);
     kona.with_backend(|b| {
+        use super::tiles::{ClearJob, RasterJob};
         let full = Rect { x0: 0, y0: 0, x1: 64, y1: 64 };
         let state = b.tiles().state(raster::DrawState { clip: full, colour: [77, 0], colours: 1, ..Default::default() });
         let req = raster::ClearReq { rect: full, colour: Some(1), ..Default::default() };
