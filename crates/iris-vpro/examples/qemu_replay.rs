@@ -2,7 +2,7 @@
 //! `analyze command-port-trace --head sgi-odyssey` writes) into the VPro
 //! engine, inline, and reports what it cost and how the last frame compares.
 //!
-//! Usage: qemu_replay [--ns-per-record N] [--dump FILE.ppm] [--ref FILE.ppm] FILE.replay
+//! Usage: qemu_replay [--gpu BACKEND] [--ns-per-record N] [--dump FILE.ppm] [--ref FILE.ppm] FILE.replay
 //!
 //! The recording has no time. A read that differs from the recorded value
 //! moves the engine's clock on by one frame period and reads again, up to
@@ -14,7 +14,7 @@ use std::io::Write as _;
 use std::sync::Arc;
 use std::time::Instant;
 
-use iris_vpro::dev::odyssey::engine::{memory_bytes, Config, Engine, Event, Lent, Mode};
+use iris_vpro::dev::odyssey::engine::{memory_bytes, Box2, Config, Engine, Event, Lent, Mode};
 use iris_vpro::traits::{BusDevice, BusRead8, BUS_OK};
 
 const PAGE: u64 = 4096;
@@ -127,10 +127,11 @@ fn write_ppm(path: &str, w: u32, h: u32, px: &[u32]) {
 }
 
 fn main() {
-    let (mut dump, mut reference, mut file, mut ns_per_record) = (None, None, None, 0i64);
+    let (mut dump, mut reference, mut file, mut ns_per_record, mut gpu) = (None, None, None, 0i64, None);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--gpu" => gpu = args.next(),
             "--dump" => dump = args.next(),
             "--ref" => reference = args.next(),
             "--ns-per-record" => ns_per_record = args.next().unwrap().parse().unwrap(),
@@ -144,6 +145,7 @@ fn main() {
     drop(text);
     eprintln!("parsed {} records for head {head} in {:.1} s", cmds.len(), t.elapsed().as_secs_f64());
 
+    let gpu_on = gpu.is_some();
     let product = "v12";
     let bytes = memory_bytes(product).unwrap();
     let mut board_mem = vec![0u64; (bytes / 8) as usize];
@@ -151,7 +153,7 @@ fn main() {
     // SAFETY: board_mem outlives the engine (dropped after it) and nothing else touches it.
     let engine = unsafe {
         Engine::new(
-            Config { product: product.into(), widget: 11, mode: Mode::Inline, pool: (0, 0), gpu: None },
+            Config { product: product.into(), widget: 11, mode: Mode::Inline, pool: (0, 0), gpu },
             Some(Lent { ptr: board_mem.as_mut_ptr(), bytes }),
             guest.clone(),
         )
@@ -212,9 +214,16 @@ fn main() {
             }
         }
         if i % 256 == 0 {
+            if gpu_on {
+                engine.advance(now);
+            }
             engine.drain_events(&mut evs);
             events += evs.len() as u64;
-            evs.clear();
+            for e in evs.drain(..) {
+                if let Event::Fault(f) = e {
+                    println!("record {i}: fault: {f}");
+                }
+            }
         }
         if i % (1 << 18) == (1 << 18) - 1 {
             segs.push((seg_t.elapsed().as_nanos() as u64, seg_w));
@@ -231,6 +240,9 @@ fn main() {
     now += 2 * frame_ns;
     engine.advance(now);
     assert!(engine.quiesce(std::time::Duration::from_secs(5)));
+    let synced = Instant::now();
+    assert!(engine.observe(Box2 { x0: 0, y0: 0, x1: 1279, y1: 1023 }));
+    println!("observe(whole screen) {:.1} ms", synced.elapsed().as_secs_f64() * 1e3);
     println!("records {} writes {writes} reads {reads} fifo words {fifo_words} busy {busy}", cmds.len());
     println!("replay loop {:.3} s = {:.1} ns per FIFO word overall (reads, DMA preloads and retries included)", total.as_secs_f64(), total.as_nanos() as f64 / fifo_words as f64);
     println!("read retries {retries}; events {events} (faults {faults}); displayed buffer {:#x}", engine.displayed_buffer());
@@ -245,6 +257,9 @@ fn main() {
     println!("reads still differing after retries: {} offsets", m.len());
     for (off, (n, want, got)) in m.iter().take(12) {
         println!("  {off:#08x} x{n}  first: recorded {want:#x} read {got:#x}");
+    }
+    if let Some(r) = engine.gpu_report() {
+        print!("{r}");
     }
     match engine.frame() {
         None => println!("no frame: the scan-out has no mode"),
