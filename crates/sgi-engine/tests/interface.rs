@@ -4,6 +4,7 @@
 
 mod support;
 
+use std::sync::Arc;
 use sgi_engine::mock::{reg, MockConfig, STATE_VERSION};
 use sgi_engine::shell::{drain_stalls, quiesce};
 use sgi_engine::*;
@@ -69,6 +70,20 @@ fn lines_that_reach_one_receiver_bit_are_found() {
     let alias = [line(1, 0x10, 5), line(2, 0x10, 5)];
     assert_eq!(outbox::aliasing_lines(&alias, by_vector), Some((alias[0], alias[1])));
     assert_eq!(outbox::aliasing_lines(&alias, |i| i.sender as u64), None, "a receiver that decodes the sender tells them apart");
+}
+
+#[test]
+fn a_gpu_loss_reaches_the_handler_whether_it_came_before_or_after_attach() {
+    use std::sync::Mutex;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (loss, sink) = (GpuLoss::new(), seen.clone());
+    let lost = loss.callback();
+    lost("RTX 4090: wgpu device lost (Unknown): first");
+    lost("a second report before the engine");
+    loss.attach(move |why| sink.lock().unwrap().push(why.to_string()));
+    assert_eq!(*seen.lock().unwrap(), ["RTX 4090: wgpu device lost (Unknown): first"], "the first loss, once, at attach");
+    lost("RTX 4090: wgpu device lost (Destroyed): later");
+    assert_eq!(seen.lock().unwrap().len(), 2);
 }
 
 #[test]
