@@ -26,6 +26,7 @@ pub mod store;
 #[cfg(feature = "wgpu")]
 pub mod gpu;
 pub mod context;
+pub mod draw;
 pub mod gl;
 pub mod textport;
 pub mod x;
@@ -54,9 +55,9 @@ use display::{ColourMap, Compositor};
 use store::layout::{BufferConfig, Layout, Refusal};
 use textport::Textport;
 use context::Contexts;
-use raster::setup::Shape;
+use draw::RasterCounts;
 use raster::Rect;
-use tiles::{ClearJob, RasterJob, Tiles};
+use tiles::Tiles;
 use store::texture::{Exclusive, TextureStore, PAGE_WORDS};
 use store::{Drained, Store, StoreOp};
 use super::stream;
@@ -805,42 +806,26 @@ fn texture_exclusive<'a>(tiles: &mut Option<Tiles>, store: &'a Store) -> Exclusi
     unsafe { store.cpu().texture().exclusive() }
 }
 
-/// What set-up counted, over the draws handed to it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RasterCounts {
-    pub draws: u64,
-    pub triangles: u64,
-    pub no_area: u64,
-    /// Triangles with area that no pixel's sample falls inside.
-    pub no_sample: u64,
-    pub clears: u64,
-    /// Triangles and clears that had no pixel to write: no colour or depth
-    /// target, or nothing inside the clip rectangle and viewport.
-    pub off_target: u64,
-    /// Draws and clears in a multisampled window, and of those the draws with alpha-to-mask and with
-    /// the sample mask on: each is a model choice the table does not settle (see `raster::multisample`).
-    pub multisampled: u64,
-    pub alpha_to_mask: u64,
-    pub sample_mask: u64,
-}
-
 /// Slots in the job ring, and the budget in pixels of work in flight.
 const RING: usize = 1 << 10;
 const BUDGET: u64 = 1 << 17;
 /// The tile size used when `[graphics] tile` is not a power of two.
 const DEFAULT_TILE: u32 = 32;
 
+/// A tile scheduler for `store`.
+fn make_tiles(store: &Arc<Store>, cfg: &KonaConfig, handle: &Option<DisplayHandle>) -> Tiles {
+    // A tile size that is not a power of two is a configuration mistake: say so and use the default.
+    Tiles::new(store.clone(), cfg.tile, cfg.threads, RING, BUDGET, activity(handle)).unwrap_or_else(|why| {
+        crate::dlog!(crate::devlog::LogModule::Kona, "kona: tile size {} refused ({why:?}); using {DEFAULT_TILE}", cfg.tile);
+        Tiles::new(store.clone(), DEFAULT_TILE, cfg.threads, RING, BUDGET, activity(handle)).expect("the default tile size is a power of two")
+    })
+}
+
 impl KonaBackend {
     /// The tile scheduler, made now if it is not yet.
     fn tiles(&mut self) -> &mut Tiles {
         let (store, cfg, handle) = (&self.store, &self.cfg, &self.handle);
-        self.tiles.get_or_insert_with(|| {
-            // A tile size that is not a power of two is a configuration mistake: say so and use the default.
-            Tiles::new(store.clone(), cfg.tile, cfg.threads, RING, BUDGET, activity(handle)).unwrap_or_else(|why| {
-                crate::dlog!(crate::devlog::LogModule::Kona, "kona: tile size {} refused ({why:?}); using {DEFAULT_TILE}", cfg.tile);
-                Tiles::new(store.clone(), DEFAULT_TILE, cfg.threads, RING, BUDGET, activity(handle)).expect("the default tile size is a power of two")
-            })
-        })
+        self.tiles.get_or_insert_with(|| make_tiles(store, cfg, handle))
     }
 
     /// Wait until every raster job has run.
@@ -857,111 +842,13 @@ impl KonaBackend {
 
     /// Allocate the arrays a job writes, before a worker can see it.
     fn arrays(&self, ds: &raster::DrawState) {
-        ds.colour[..ds.colours as usize].iter().for_each(|&w| self.store.cpu().ensure(w as usize));
-        if ds.depth_bits != 0 {
-            self.store.cpu().ensure(ds.depth_word as usize);
-        }
-        if ds.stencil_bits != 0 {
-            self.store.cpu().ensure(ds.stencil_word as usize);
-        }
-        if ds.ownership.is_some() {
-            self.store.cpu().ensure(store::DID_PLANE);
-        }
-        if let Some(ms) = &ds.samples {
-            [ms.colour, ms.depth, ms.stencil].iter().for_each(|&(first, n)| (first..first + n).for_each(|w| self.store.cpu().ensure(w as usize)));
-        }
+        draw::arrays(&self.store, ds);
     }
 
     /// Set up what the GL path made in `self.prims` and submit it, then empty it.
     fn flush(&mut self) {
-        // The GL path sets the state with every primitive it queues and `Prims::clear` unsets it,
-        // so no state means nothing is queued. This runs after every geometry command, and the
-        // moves below carry the whole `Prims` out and back.
-        if self.prims.state.is_none() {
-            return;
-        }
-        let mut prims = std::mem::take(&mut self.prims);
-        if let Some(ds) = prims.state.filter(|_| !prims.tris.is_empty() || !prims.lines.is_empty() || !prims.aa.is_empty() || !prims.discs.is_empty() || !prims.clears.is_empty()) {
-            self.raster.draws += !(prims.tris.is_empty() && prims.lines.is_empty() && prims.aa.is_empty() && prims.discs.is_empty()) as u64;
-            self.raster.triangles += (prims.tris.len() + prims.lines.len() + prims.aa.iter().map(|p| p.n as usize - 2).sum::<usize>() + 2 * prims.discs.len()) as u64;
-            self.raster.clears += prims.clears.len() as u64;
-            if let Some(ms) = &ds.samples {
-                self.raster.multisampled += 1;
-                self.raster.alpha_to_mask += ms.alpha_to_mask as u64;
-                self.raster.sample_mask += (ms.cover != !0) as u64;
-            }
-            let drawable = !ds.clip.is_empty() && (ds.colours != 0 || (ds.depth_test && ds.depth_bits != 0) || (ds.stencil.enabled && ds.stencil_bits != 0));
-            // The GPU arm takes the jobs itself, one op at a time; there are no tile workers.
-            let gpu = self.store.is_gpu();
-            let state = if gpu { 0 } else { self.tiles().state(ds) };
-            if drawable {
-                self.arrays(&ds);
-            }
-            // A poisoned scheduler refuses a job; it stays poisoned and the board is dead,
-            // so a refusal carries nothing more.
-            let run = |b: &mut Self, t: &[raster::WVertex; 3], line: bool, shape: Shape<'_>| {
-                if !drawable {
-                    b.raster.off_target += 1;
-                    return;
-                }
-                match raster::setup::shaped(t, &ds, state, shape) {
-                    Ok(mut job) => {
-                        job.line = line;
-                        if gpu {
-                            b.store.apply(StoreOp::Tri { ds: &ds, job: &job });
-                        } else {
-                            let _ = b.tiles().submit(RasterJob::Tri(job));
-                        }
-                    }
-                    Err(raster::setup::Skip::NoArea) => b.raster.no_area += 1,
-                    Err(raster::setup::Skip::NoSample) => b.raster.no_sample += 1,
-                    Err(raster::setup::Skip::Outside) => b.raster.off_target += 1,
-                }
-            };
-            for t in &prims.tris {
-                run(self, t, false, Shape::Plain);
-            }
-            for t in &prims.lines {
-                run(self, t, true, Shape::Plain);
-            }
-            // A smoothed polygon or line: its fan, each triangle weighing its pixels by the whole outline.
-            for poly in &prims.aa {
-                let v = &prims.aa_verts[poly.start as usize..(poly.start + poly.n) as usize];
-                let Some(outline) = raster::setup::Outline::new(v, &ds) else {
-                    self.raster.no_area += 1;
-                    continue;
-                };
-                for i in 1..v.len() - 1 {
-                    // The edges from the fan's apex and back to it are inner, but at its two ends.
-                    let inner = [i != 1, false, i != v.len() - 2];
-                    run(self, &[v[0], v[i], v[i + 1]], poly.line, Shape::Smooth { inner, outline: &outline });
-                }
-            }
-            for d in &prims.discs {
-                let shape = Shape::Disc { x: d.x, y: d.y, r: d.r };
-                let q = d.quad;
-                run(self, &[q[0], q[1], q[2]], false, shape);
-                run(self, &[q[0], q[2], q[3]], false, shape);
-            }
-            for c in &prims.clears {
-                let mut req = *c;
-                req.colour = req.colour.filter(|_| ds.colours != 0);
-                req.depth = req.depth.filter(|_| ds.depth_bits != 0);
-                req.stencil = req.stencil.filter(|_| ds.stencil_bits != 0);
-                if req.rect.is_empty() || (req.colour.is_none() && req.depth.is_none() && req.stencil.is_none()) {
-                    self.raster.off_target += 1;
-                    continue;
-                }
-                self.arrays(&ds);
-                if gpu {
-                    self.store.apply(StoreOp::Clear { ds: &ds, req: &req });
-                } else {
-                    let _ = self.tiles().submit(RasterJob::Clear(ClearJob { req, state }));
-                }
-            }
-        }
-        prims.clear();
-        self.prims = prims;
+        let (store, cfg, handle) = (&self.store, &self.cfg, &self.handle);
+        draw::flush(&mut self.prims, &mut draw::Sink { counts: &mut self.raster, store, tiles: &mut self.tiles, make: &|| make_tiles(store, cfg, handle) });
     }
 
     /// A texel draw's header: the image words that follow in the stream, sized from the
