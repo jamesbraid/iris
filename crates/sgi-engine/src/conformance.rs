@@ -174,7 +174,10 @@ pub fn state_round_trips<S: Subject>(s: &S) {
 
     let mut b = s.engine(None);
     settle(&mut b);
+    events(&mut b, usize::MAX);
     b.load(&mut VecSource::new(chunks.clone())).unwrap();
+    let seen = events(&mut b, usize::MAX);
+    assert_eq!(seen.iter().filter(|x| **x == Event::Irq).count(), 1, "a load posts one Irq, for levels it changed: {seen:?}");
     let mut again = Vec::new();
     b.save(&mut again).unwrap();
     assert_eq!(again, chunks, "a loaded state saves as it was");
