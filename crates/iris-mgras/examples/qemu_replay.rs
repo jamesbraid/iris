@@ -12,23 +12,30 @@ use iris_mgras::dev::mgras::engine::{Board, Config, Engine, Event, Mode, Read};
 use iris_mgras::dev::mgras::hq3::host;
 use iris_mgras::dev::mgras::pixmem::{Buffer, Kind};
 use iris_mgras::dev::mgras::rss::reg;
-use iris_mgras::traits::{BusDevice, BusRead32, BusRead8, BUS_OK};
+use iris_mgras::dev::mgras::hostmem::{Fault, HostMem};
 
 /// Host memory a replay can preload (`dma` lines); everything else reads 0.
 struct Sparse(parking_lot::Mutex<HashMap<u64, u8>>);
 
-impl BusDevice for Sparse {
-    fn read8(&self, a: u64) -> BusRead8 {
-        BusRead8::ok(self.0.lock().get(&a).copied().unwrap_or(0))
-    }
-    fn write8(&self, a: u64, v: u8) -> u32 {
-        self.0.lock().insert(a, v);
-        BUS_OK
-    }
-    fn read32(&self, a: u64) -> BusRead32 {
+impl HostMem for Sparse {
+    fn read32(&self, a: u64) -> Option<u32> {
         let m = self.0.lock();
         let b = |i: u64| m.get(&(a + i)).copied().unwrap_or(0) as u32;
-        BusRead32::ok(b(0) << 24 | b(1) << 16 | b(2) << 8 | b(3))
+        Some(b(0) << 24 | b(1) << 16 | b(2) << 8 | b(3))
+    }
+    fn read(&self, a: u64, out: &mut [u8]) -> Result<(), Fault> {
+        let m = self.0.lock();
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = m.get(&(a + i as u64)).copied().unwrap_or(0);
+        }
+        Ok(())
+    }
+    fn write(&self, a: u64, data: &[u8]) -> Result<(), Fault> {
+        let mut m = self.0.lock();
+        for (i, b) in data.iter().enumerate() {
+            m.insert(a + i as u64, *b);
+        }
+        Ok(())
     }
 }
 
@@ -247,9 +254,7 @@ fn run(path: &str, rep: &Replay, jit: Option<u32>, queued: bool, dump: Option<&s
             match c {
                 Cmd::Write { bits, off, val } => front.write(&mut e, *bits, *off, *val),
                 Cmd::Dma { addr, bytes } => {
-                    for (i, b) in bytes.iter().enumerate() {
-                        mem.write8(addr + i as u64, *b);
-                    }
+                    mem.write(*addr, bytes).unwrap();
                 }
                 Cmd::Read { bits, off, val, mask } => {
                     let hq3 = match *off {

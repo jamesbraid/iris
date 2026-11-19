@@ -19,13 +19,13 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use super::back::ImpactBack;
+use super::hostmem::HostMem;
 use super::hq3::{host, Hq3Board, Hq3Engine, Hq3Regs, Hq3Sink};
 use super::pixmem::Buffer;
 use super::plain::boxed_zeroed;
 use super::quirks::Hq4Quirks;
 use super::rss::{reg, Rss};
 use crate::display::Rect;
-use crate::traits::BusDevice;
 use crate::wgpu::Gpu;
 
 /// The boards that share this engine; they differ in the geometry engine
@@ -102,7 +102,7 @@ struct Core {
     back: ImpactBack,
     regs: Box<Hq3Regs>,
     flags: u32,
-    mem: Option<Arc<dyn BusDevice>>,
+    mem: Option<Arc<dyn HostMem>>,
     events: Vec<Event>,
     notes: HashSet<String>,
     damage: Option<Rect>,
@@ -150,7 +150,7 @@ impl Engine {
 
     /// The memory the board's DMA reads and writes. Called from the thread
     /// that calls `write` (inline) or `advance` (queued).
-    pub fn set_mem(&mut self, mem: Arc<dyn BusDevice>) {
+    pub fn set_mem(&mut self, mem: Arc<dyn HostMem>) {
         self.core.mem = Some(mem);
     }
 
@@ -505,7 +505,7 @@ impl Hq3Sink for Core {
         self.flag_event();
         was
     }
-    fn sys_mem(&mut self) -> Option<Arc<dyn BusDevice>> {
+    fn sys_mem(&mut self) -> Option<Arc<dyn HostMem>> {
         self.mem.clone()
     }
     fn note(&mut self, what: String) {

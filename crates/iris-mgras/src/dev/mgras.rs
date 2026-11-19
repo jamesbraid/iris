@@ -8,6 +8,8 @@ pub mod fixed;
 pub mod ge11;
 #[path = "../../../../src/dev/mgras/gl.rs"]
 pub mod gl;
+#[path = "../../../../src/dev/mgras/hostmem.rs"]
+pub mod hostmem;
 #[path = "../../../../src/dev/mgras/hq3.rs"]
 pub mod hq3;
 #[path = "../../../../src/dev/mgras/microcode.rs"]

@@ -34,6 +34,7 @@
 //! and feeds raster writes into `rss_fifo`; the RSS thread draws. The display
 //! thread scans the framebuffer out unlocked.
 
+mod bus_mem;
 mod dcb;
 mod fixed;
 mod debug;
@@ -41,6 +42,7 @@ mod disp;
 mod frame;
 mod ge11;
 mod gl;
+mod hostmem;
 mod hq3;
 pub mod hq4;
 pub mod microcode;
@@ -508,12 +510,12 @@ impl Hq3Sink for HqSink<'_> {
     fn readback_probe(&self, addr: u32) -> Option<u32> {
         self.0.probe_answer(addr)
     }
-    fn sys_mem(&mut self) -> Option<Arc<dyn BusDevice>> {
+    fn sys_mem(&mut self) -> Option<Arc<dyn hostmem::HostMem>> {
         let mem = self.0.mem.lock().clone()?;
-        Some(match self.0.mem_rec.lock().clone() {
+        Some(Arc::new(bus_mem::BusMem(match self.0.mem_rec.lock().clone() {
             Some(rec) => Arc::new(record::RecordingMem { inner: mem, rec }),
             None => mem,
-        })
+        })))
     }
     fn note(&mut self, what: String) {
         self.0.note(what);
