@@ -1,0 +1,12 @@
+[package]
+name = "sgi-gl-math"
+version = "0.1.0"
+edition = "2021"
+description = "The OpenGL math the SGI boards' geometry engines share: matrices, clipping, lighting, texture-coordinate generation"
+license = "BSD-3-Clause"
+publish = false
+
+# The sources are src/dev/gl in the iris crate, mounted in place by this path.
+[lib]
+path = "../../src/dev/gl/mod.rs"
+doctest = false
