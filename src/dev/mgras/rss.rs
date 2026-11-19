@@ -325,6 +325,8 @@ pub const OP_GL_LINE: u32 = 0x2;
 /// IR opcode 3: the line the Octane diagnostic sends (0x63 with its smooth
 /// bits), drawn as a GL line.
 pub const OP_DIAG_LINE: u32 = 0x3;
+/// IR bits the diagnostic ORs in for its smooth line (0x63; inferred).
+const IR_SMOOTH: u32 = 0x60;
 
 /// The OpenGL per-fragment state our GE11 HLE programs into the PP1
 /// registers. The real layouts are not known (only GE11 microcode writes
@@ -1183,6 +1185,9 @@ pub struct Rss {
     pub stats: RssStats,
     /// Pixels drawn since the GL line stipple was last restarted (line_stipple_repeat).
     pub(super) gl_line_stipple_pos: u32,
+    /// The diagnostic line fragment being drawn: its coverage (1..=256,
+    /// 0 none). Not state.
+    diag_cover: u32,
     /// The raster registers as `gl_enter` found them.
     gl_stash: [u32; 0x400],
     /// Fill modes seen with a block, for bring-up logging.
@@ -1303,6 +1308,9 @@ pub(super) struct TriSetup {
     pub stipple: u32,
 }
 
+pub(super) const DIAG_LINE: u32 = 1;
+pub(super) const DIAG_SMOOTH: u32 = 2;
+
 /// A GL line's setup (`Rss::gl_line_setup`), shared like `TriSetup`.
 /// Texture planes are (value, step along the major axis, 0).
 #[repr(C)]
@@ -1319,6 +1327,9 @@ pub(super) struct GlLineSetup {
     pub tbase: [i64; 3],
     pub tstep: [i64; 3],
     pub a0: f64,
+    /// The diagnostic line's flags (`DIAG_LINE`, `DIAG_SMOOTH`); the GPU
+    /// and JIT ignore them.
+    pub diag: u32,
     pub b0: f64,
     pub slope: f64,
     pub width: i32,
@@ -2498,6 +2509,9 @@ impl Rss {
     /// written again.
     fn gl_line(&mut self) -> bool {
         let Some(l) = self.gl_line_setup() else { return true };
+        if l.diag & DIAG_LINE != 0 && self.diag_line(&l) {
+            return true;
+        }
         #[cfg(feature = "wgpu")]
         if let Some(g) = self.gpu.get() {
             let pos = self.gl_line_stipple_pos;
@@ -2537,6 +2551,61 @@ impl Rss {
                 for q in q0..q0.wrapping_add(l.width) {
                     let (wx, wy) = if l.xmajor != 0 { (p, q) } else { (q, p) };
                     self.gl_fragment(wx, wy, rgba, l.zbase.wrapping_add(l.zstep.wrapping_mul(k as i64)));
+                }
+            }
+            p = p.wrapping_add(l.dir);
+            k = k.wrapping_add(1);
+        }
+        true
+    }
+
+    /// The Octane diagnostic's line (IR opcode 3) on the CPU, which neither
+    /// the JIT nor the GPU unit models; false when a GPU unit draws, which
+    /// then draws it as a plain GL line.
+    ///
+    /// Inferred from the diagnostic's stored table (gr4 ide-raster-tests):
+    /// - A smooth line (IR 0x63) has weight a = 255 - 4 k at k = 64 d, d
+    ///   the pixel centre's distance from the line sampled at the major
+    ///   pixel, for d < 1; the loader's table is not read.
+    fn diag_line(&mut self, l: &GlLineSetup) -> bool {
+        #[cfg(feature = "wgpu")]
+        if self.gpu.get().is_some() {
+            log::warn!("mgras: the diagnostic's line is drawn as a plain GL line with a GPU unit");
+            return false;
+        }
+        let smooth = l.diag & DIAG_SMOOTH != 0;
+        let mut p = l.p0;
+        let mut k = 0i32;
+        while p != l.p1 {
+            let draw = l.stipple == 0 || {
+                let bit = (self.gl_line_stipple_pos / l.repeat) % 16;
+                self.gl_line_stipple_pos = self.gl_line_stipple_pos.wrapping_add(1);
+                (l.pattern >> (15 - bit)) & 1 != 0
+            };
+            if draw {
+                let rgba = [0, 1, 2, 3].map(|c| l.cbase[c].wrapping_add(l.cstep[c].wrapping_mul(k)));
+                let z = l.zbase.wrapping_add(l.zstep.wrapping_mul(k as i64));
+                let frag = |s: &mut Self, q: i32, cover: u32| {
+                    let (wx, wy) = if l.xmajor != 0 { (p, q) } else { (q, p) };
+                    s.diag_cover = if cover < 256 { cover } else { 0 };
+                    s.gl_fragment(wx, wy, rgba, z);
+                    s.diag_cover = 0;
+                };
+                if smooth {
+                    let b = l.b0 + l.slope * (p as f64 - l.a0);
+                    let c = (b - 0.5).round() as i32;
+                    for q in c - 1..=c + 1 {
+                        let d = ((q as f64 + 0.5) - b).abs();
+                        let a = 255 - 4 * (d * 64.0).round() as i32;
+                        if a > 0 {
+                            frag(self, q, (a + (a >> 7)) as u32);
+                        }
+                    }
+                } else {
+                    let q0 = gl_line_q0(l.qk, l.qs, p);
+                    for q in q0..q0.wrapping_add(l.width) {
+                        frag(self, q, 256);
+                    }
                 }
             }
             p = p.wrapping_add(l.dir);
@@ -2618,6 +2687,7 @@ impl Rss {
             tbase: tq.map(|q| fixed::iter(q[0] + q[1] * t0)),
             tstep: tq.map(|q| fixed::iter(q[1])),
             a0,
+            diag: if self.reg(reg::IR) & 0xF == OP_DIAG_LINE { DIAG_LINE | if self.reg(reg::IR) & IR_SMOOTH != 0 { DIAG_SMOOTH } else { 0 } } else { 0 },
             b0,
             slope: (b1 - b0) / (a1 - a0),
             width: (self.reg(reg::MGRAS_RE4_AALINE_CONFIG) & 0xFF) as i32 + 1,
@@ -2730,20 +2800,36 @@ impl Rss {
         let rgb = self.rgb_mode();
         let src = if rgb {
             let blend = self.reg(reg::MGRAS_PP1_BLEND_FACTOR);
+            // Pixel pairs quantise (and may dither) later, in `Pair::pack`.
+            let t = (b.kind != Kind::Wide || Pair::of(pp1).is_none()).then(|| fixed::dither_at(ux, uy));
+            if let (Some(t), true) = (t, self.diag_cover != 0) {
+                return self.put_in(b, ux as i32, uy as i32, self.diag_pixel(rgba, t), back);
+            }
             let c = if blend & BLEND_ENABLE != 0 && !logic {
                 let d = [0, 8, 16, 24].map(|s| (fixed::widen((dst >> s) & 0xFF, 2) << 16) as i32);
                 blend_rgba(blend, &self.blend_constant(), &rgba, &d)
             } else {
                 rgba
             };
-            // Pixel pairs quantise (and may dither) later, in `Pair::pack`.
-            let t = (b.kind != Kind::Wide || Pair::of(pp1).is_none()).then(|| fixed::dither_at(ux, uy));
             let q = |v| t.map_or_else(|| fixed::to_byte(v), |t| fixed::to_byte_dithered(v, t));
             q(c[0]) | q(c[1]) << 8 | q(c[2]) << 16 | q(c[3]) << 24
         } else {
             fixed::to_index(rgba[0]) & 0xFFF
         };
         self.put_in(b, ux as i32, uy as i32, src, back);
+    }
+
+    /// A diagnostic line fragment as 8-8-8-8 bytes: the colour (12 bits,
+    /// rounded) scaled by the coverage `diag_cover` (256 is 1; alpha twice,
+    /// as source alpha over a zero destination), each reduced and dithered
+    /// like the triangles (`fixed::dither12`).
+    fn diag_pixel(&self, rgba: [i32; 4], t: u32) -> u32 {
+        let cover = self.diag_cover;
+        let c = rgba.map(|v| ((fixed::clamp(v) + 0x8000) >> 16) as u32);
+        (0..4).fold(0, |w, k| {
+            let v = if k < 3 { c[k] * cover >> 8 } else { c[3] * cover * cover >> 16 };
+            w | fixed::dither12(v, t) << (8 * k)
+        })
     }
 
     /// The constant blend colour (`blend_const`).

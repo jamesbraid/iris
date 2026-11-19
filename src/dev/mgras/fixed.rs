@@ -80,7 +80,13 @@ pub fn dither_at(x: u32, y: u32) -> u32 {
 /// the threshold `t`.
 #[inline]
 pub fn to_byte_dithered(c: i32, t: u32) -> u32 {
-    let v = ((clamp(c) + 0x8000) >> 16) as u32;
+    dither12(((clamp(c) + 0x8000) >> 16) as u32, t)
+}
+
+/// A 12-bit value as a pixel byte: scaled to 8.4 (`v - (v >> 8)`) and
+/// rounded up when its four fraction bits exceed the threshold `t`.
+#[inline]
+pub fn dither12(v: u32, t: u32) -> u32 {
     let y = v - (v >> 8);
     (y >> 4) + ((y & 15) > t) as u32
 }
