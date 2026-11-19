@@ -491,3 +491,26 @@ fn the_head_s_picture_is_copied_and_a_gpu_engine_lends_it() {
     }
     assert_eq!(BoardEngine::scanout(&mut g, 0, &mut px), Ok(Some((1280, 1024))), "the copy still works beside the lend");
 }
+
+/// A shell's test of its busy-read path: the held slice keeps queued work pending, so a read that
+/// waits answers busy until the hold ends.
+#[test]
+fn a_held_slice_makes_a_waiting_read_busy_until_it_is_released() {
+    let (inline, _) = engine(Mode::Inline);
+    assert!(!inline.hold_next_slice(10), "an inline board has no thread to hold");
+    let (mut e, _) = engine(Mode::Threaded);
+    assert!(e.hold_next_slice(60_000));
+    put(&mut e, CMD_FIFO, 0);
+    let start = std::time::Instant::now();
+    while !e.slice_open() {
+        assert!(start.elapsed().as_secs() < 20, "the held slice did not open");
+        std::thread::yield_now();
+    }
+    assert!(e.access_waits(CMD_FIFO, 32, false));
+    assert_eq!(e.read(CMD_FIFO, 32), Read::Busy);
+    e.release_hold();
+    while e.read(CMD_FIFO, 32) == Read::Busy {
+        assert!(start.elapsed().as_secs() < 40, "the release did not end the hold");
+        std::thread::yield_now();
+    }
+}

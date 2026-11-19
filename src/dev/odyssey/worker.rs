@@ -156,6 +156,18 @@ impl Board {
             }
         }
 
+        #[cfg(any(test, feature = "test-hold"))]
+        {
+            let ms = self.fifo.hold_ms.swap(0, SeqCst);
+            if ms != 0 {
+                let end = std::time::Instant::now() + std::time::Duration::from_millis(ms as u64);
+                while std::time::Instant::now() < end && !self.fifo.test_release.load(SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                self.fifo.test_release.store(false, SeqCst);
+            }
+        }
+
         let fifo = self.fifo.clone();
         let mut run = Run::new();
         'slice: loop {

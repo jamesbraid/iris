@@ -178,9 +178,13 @@ pub(super) struct CommandFifo {
     /// Tests: pushes the full ring has refused.
     #[cfg(test)]
     pub test_refused: AtomicU32,
-    /// Tests: ends a long slice's hold (`Board::test_slice_sleep_ms`) early.
-    #[cfg(test)]
+    /// Tests: ends a long slice's hold (`Board::test_slice_sleep_ms`, `hold_ms`) early.
+    #[cfg(any(test, feature = "test-hold"))]
     pub test_release: AtomicBool,
+    /// The next slice on the board's thread holds this many milliseconds, or until `test_release`,
+    /// as a long draw would (a shell's test of its busy-read path; never set by a guest).
+    #[cfg(any(test, feature = "test-hold"))]
+    pub hold_ms: AtomicU32,
     /// Tests: the next push calls this, once, as soon as its
     /// store is in the ring: a consumer that takes the store at that
     /// moment, before the push has returned.
@@ -214,8 +218,10 @@ impl Default for CommandFifo {
             test_parked: AtomicU32::new(0),
             #[cfg(test)]
             test_refused: AtomicU32::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-hold"))]
             test_release: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-hold"))]
+            hold_ms: AtomicU32::new(0),
             #[cfg(test)]
             test_after_ring_push: Mutex::new(None),
         }

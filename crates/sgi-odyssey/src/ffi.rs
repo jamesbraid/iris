@@ -115,6 +115,43 @@ pub unsafe extern "C" fn sgi_odyssey_new(cfg: *const IrisVproConfig, host: *cons
     })
 }
 
+/// Test hook (feature `test-hold`): the board's thread holds its next slice open for up to `ms`
+/// milliseconds or until `sgi_odyssey_release_hold`, so a read that waits answers BUSY meanwhile.
+/// OK in threaded mode; ERROR in inline mode, where there is no thread to hold.
+///
+/// # Safety
+/// `h` is a live VPro handle.
+#[cfg(feature = "test-hold")]
+#[no_mangle]
+pub unsafe extern "C" fn sgi_odyssey_hold_next_slice(h: *mut IrisEngine, ms: u32) -> c_int {
+    unsafe { call::<VproEngine, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| if e.hold_next_slice(ms) { IRIS_ENGINE_OK } else { IRIS_ENGINE_ERROR }) }
+}
+
+/// Test hook (feature `test-hold`): end a held slice.
+///
+/// # Safety
+/// `h` is a live VPro handle.
+#[cfg(feature = "test-hold")]
+#[no_mangle]
+pub unsafe extern "C" fn sgi_odyssey_release_hold(h: *mut IrisEngine) -> c_int {
+    unsafe {
+        call::<VproEngine, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| {
+            e.release_hold();
+            IRIS_ENGINE_OK
+        })
+    }
+}
+
+/// Test hook (feature `test-hold`): 1 while the board's thread is inside a slice, else 0.
+///
+/// # Safety
+/// `h` is a live VPro handle.
+#[cfg(feature = "test-hold")]
+#[no_mangle]
+pub unsafe extern "C" fn sgi_odyssey_slice_open(h: *mut IrisEngine) -> c_int {
+    unsafe { call::<VproEngine, _>(h, Point::Flags, 0, |e| e.slice_open() as c_int) }
+}
+
 /// The cursor's position (signed, in pixels) and whether it is drawn, as the display registers
 /// hold them, for a shell that publishes the pointer.
 ///

@@ -55,6 +55,17 @@ IrisEngine *sgi_odyssey_new(const IrisVproConfig *cfg,
                           const IrisEngineHost *host);
 
 /*
+ * Test hooks, in a build with the test-hold feature. sgi_odyssey_hold_next_slice:
+ * the board's thread holds its next slice open for up to ms milliseconds or until
+ * sgi_odyssey_release_hold, so a read that waits answers BUSY meanwhile (OK in
+ * threaded mode, ERROR in inline mode). sgi_odyssey_slice_open: 1 while the
+ * thread is inside a slice.
+ */
+int sgi_odyssey_hold_next_slice(IrisEngine *h, uint32_t ms);
+int sgi_odyssey_release_hold(IrisEngine *h);
+int sgi_odyssey_slice_open(IrisEngine *h);
+
+/*
  * The cursor's position (signed, in pixels) and whether it is drawn, as the display
  * registers hold them.
  */

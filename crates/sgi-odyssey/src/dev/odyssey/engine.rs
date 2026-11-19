@@ -371,6 +371,30 @@ impl VproEngine {
         self.quiescent().then_some(()).ok_or(Refused::NotQuiesced)
     }
 
+    /// Test hook, never reached by a guest: the board's thread holds its next slice open for up to `ms`
+    /// milliseconds or until `release_hold`, so stores queue behind it and a read that waits answers busy.
+    /// Threaded mode only; the call says so.
+    #[cfg(feature = "test-hold")]
+    pub fn hold_next_slice(&self, ms: u32) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        let fifo = &self.locks.fifo;
+        fifo.test_release.store(false, SeqCst);
+        fifo.hold_ms.store(ms, SeqCst);
+        self.mode == Mode::Threaded
+    }
+
+    /// Ends a `hold_next_slice` early.
+    #[cfg(feature = "test-hold")]
+    pub fn release_hold(&self) {
+        self.locks.fifo.test_release.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the board's thread is inside a slice now.
+    #[cfg(feature = "test-hold")]
+    pub fn slice_open(&self) -> bool {
+        self.locks.fifo.slice.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// The cursor's position and whether it is drawn, from the display registers.
     pub fn cursor(&self) -> (i32, i32, bool) {
         self.locks.shared.regs.cursor_state()
