@@ -17,6 +17,7 @@ pub use perfetto_macros::{PfBits, PfLevel, PfValue};
 
 pub mod devlog;
 pub mod display;
+pub mod ffi;
 pub mod gfifo;
 pub mod gfx_display;
 pub mod ip30;
