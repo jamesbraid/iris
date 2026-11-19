@@ -57,6 +57,8 @@ pub mod engine;
 pub mod ffi;
 pub mod gpu_loss;
 pub mod inject;
+#[cfg(feature = "conformance")]
+pub mod fuzz;
 pub mod mem;
 #[cfg(feature = "mock")]
 pub mod mock;
