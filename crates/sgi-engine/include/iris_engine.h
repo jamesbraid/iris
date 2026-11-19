@@ -30,6 +30,26 @@
  * Containment needs a build that unwinds: iris_engine_contains_panics() says
  * whether this one does; a build with panic=abort aborts on a panic.
  *
+ * QUIESCE LOOP. quiesce(budget) runs the queued work and answers OK, or
+ * MIDWAY: the engine is stalled on the shell, or still busy at the budget,
+ * and keeps running. On MIDWAY call iris_engine_wait_idle(now, 0); if it says
+ * STALLED_FRAME call iris_engine_frame, if STALLED_TIME call
+ * iris_engine_advance at that time, then call quiesce again. A VM-stop
+ * handler and migration give up after a bounded number of tries and say so
+ * (iris_engine_last_error has the reason): a guest that loops the engine must
+ * cost a bounded wait, not a dead monitor. A faulted engine answers FAULT and
+ * is parked.
+ *
+ * CLOCK. now_ns is one monotonic clock for iris_engine_frame, _advance and
+ * _wait_idle: the VM's virtual time, not the host's. It must not go backwards
+ * across calls, so a shell that ran the quiesce loop must not pass an older
+ * time afterwards. The loop gives a stall early: a held swap or retrace is
+ * released at the moment of a blocked read, not at the guest's next retrace.
+ *
+ * REGISTER VALUES. val in write and read is the register's value as a number
+ * of bits wide (8, 16, 32 or 64), after the bus's byte order has been
+ * applied: not a byte buffer, and not swapped again by the engine.
+ *
  * VM STOP. Quiesce when the VM stops and resume when it runs again: a worker
  * still draining keeps writing guest RAM and lent memory, and migration's
  * final RAM pass runs before devices save. Read drain_dirty after the
@@ -218,7 +238,10 @@ void iris_engine_free(IrisEngine *h);
 /* 1 if a panic in the engine becomes a device fault; 0 if this build aborts. */
 int iris_engine_contains_panics(void);
 
-/* A register or FIFO write. BUSY: the queue is full and nothing was taken. */
+/*
+ * A register or FIFO write. BUSY: the queue is full and nothing was taken.
+ * Charged stores earn credits (iris_engine_set_source).
+ */
 int iris_engine_write(IrisEngine *h, uint32_t off, uint32_t bits,
                       uint64_t val);
 
@@ -230,7 +253,15 @@ size_t iris_engine_push_words(IrisEngine *h, uint32_t port,
 int iris_engine_read(IrisEngine *h, uint32_t off, uint32_t bits,
                      uint64_t *val);
 
-/* Where the stores that follow come from, for flow control. */
+/*
+ * Where the stores that follow come from, for flow control. id is the shell's
+ * own number (a Hub, a CPU), which the engine echoes in CREDITS events and
+ * never reads; id 0 with charged 0 is a store with no sender. A charged store
+ * earns one credit once the board has retired it, returned in a CREDITS event
+ * for that source: retired is how many credits to give back to source. A
+ * source's credits coalesce into one event until drained, and reset drops the
+ * credits still owed, so the shell zeroes its own counts when it resets.
+ */
 int iris_engine_set_source(IrisEngine *h, uint32_t id, uint32_t charged);
 
 /* Whether a write (write non-zero) or a read at off would answer BUSY now:
@@ -260,10 +291,32 @@ int iris_engine_advance(IrisEngine *h, uint64_t now_ns, IrisEnginePump *pump);
 int iris_engine_wait_idle(IrisEngine *h, uint64_t now_ns, uint64_t budget_ns,
                           IrisEngineIdle *idle);
 
-/* The interrupt output lines, one bit per line, from atomics: never waits. */
+/*
+ * The interrupt output lines, one bit per line, from atomics: never waits.
+ * A level is state, not an edge: read it again after an IRQ event. A refused
+ * call (a re-entering one) answers 0, which reads as every line low, so do not
+ * call it from a callback. A board that signals by packets answers 0.
+ */
 uint64_t iris_engine_irq_levels(IrisEngine *h);
 
-/* Move up to cap events into out, oldest first; returns how many. */
+/*
+ * Move up to cap events into out, oldest first; returns how many. Works on a
+ * faulted engine. IRQ: levels may have changed, so read iris_engine_irq_levels;
+ * coalesced, and posted by load and reset too. INTERRUPT: one packet for the
+ * shell to deliver, which sets (level non-zero) or clears one pending bit
+ * of the receiver, named by sender, widget, addr and vector. The engine keeps
+ * the newest packet for each such line: a packet replaces the queued one, an
+ * identical one is dropped, and after a drain the next is queued again. So
+ * deliver every packet of one drain before any vCPU runs, in order: only then
+ * is the collapse of a set and a clear to the clear invisible. Distinct lines
+ * must reach distinct receiver bits (a receiver that decodes the vector alone
+ * must not see two lines with one vector); a receiver that counts packets
+ * cannot take this interface. After reset the receiver's pending
+ * bits for the engine's lines are the shell's to lower. CREDITS: see
+ * iris_engine_set_source. The text of NOTE, DEVICE_FAULT and GPU_LOST is cut
+ * to 95 bytes; iris_engine_fault has a fault's whole text, and a GPU_LOST text
+ * names the adapter.
+ */
 size_t iris_engine_drain_events(IrisEngine *h, IrisEngineEvent *out,
                                 size_t cap);
 
