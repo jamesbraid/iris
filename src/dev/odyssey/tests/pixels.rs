@@ -639,6 +639,19 @@ fn a_float_colour_channel_is_stored_as_floor_of_256_times_it() {
     }
 }
 
+/// A burst of 16-bit luminance-alpha pixels (source code 0x68, one word each) stores its alpha.
+/// The library sends the pixel as the luminance and alpha components side by side under the
+/// 0x6b burst-tag family, with no header bit that asks the board to replace the alpha (odsy
+/// devices/buzz/pixel-paths.md, "Which burst tag a write uses"); that the board stores what is
+/// sent is inferred, as for 0x48 and 0x6b. The engine stored 255.
+#[test]
+fn a_16_bit_luminance_alpha_burst_stores_its_alpha() {
+    let (mut s, _) = window();
+    burst_image(&mut s, (40, 61, 42, 60), 0x0f00_1068, image::FMT_CI, &[0x1122_5566, 0xd3d3_7a7a]);
+    assert_eq!(pixel(&s, 0, 40, 60), 0x1111_1155);
+    assert_eq!(pixel(&s, 0, 41, 60), 0xd3d3_d37a);
+}
+
 /// A copy rectangle the operands give 16 bits each way is bounded by the planes before the copy
 /// stages it: 65535 by 65535 asked for 17 GB and aborted the process.
 #[test]
