@@ -343,7 +343,7 @@ fn a_faulted_engine_answers_as_the_contract_says_on_every_entry() {
         e.reset().unwrap();
         e.resume();
         assert_eq!((e.fault(), e.write(CMD_FIFO, 32, 0)), (None, Write::Done));
-        assert!(drain(&mut e).is_empty(), "a reset drops what waited");
+        assert_eq!(drain(&mut e), vec![Event::Irq], "a reset drops what waited and says the levels may have changed");
     }
 }
 
