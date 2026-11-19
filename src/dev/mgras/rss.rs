@@ -496,7 +496,7 @@ pub(super) fn draws_a_and_b(f: u32) -> bool {
 }
 pub(super) const DRAW_CID: u32 = 0x50;
 
-/// PP1 window mode (`reg_f17b`; SGI's fields WINxLSBs, WINyLSBs,
+/// PP1 window mode (`reg_f17b`; fields: window x and y low bits,
 /// CIDmatch, CIDdata, CIDmask). Bits 3:0 are the window origin's low x and
 /// y bits (not modelled). Bits 7:4 (CIDmatch) are one bit per clip ID:
 /// bit 4 + n lets a pixel whose clip ID is n be drawn; all clear, no
@@ -533,8 +533,8 @@ mod block {
     pub const DMA_WRITE: u32 = 5;
 }
 
-/// Whether the pixel processors' pixel type (PP1 fill mode bits 10:8, SGI's
-/// PixType) is an RGB one: 0 4:4:4 pairs, 1 5:5:5 pairs, 2 RGBA8888
+/// Whether the pixel processors' pixel type (PP1 fill mode bits 10:8) is an
+/// RGB one: 0 4:4:4 pairs, 1 5:5:5 pairs, 2 RGBA8888
 /// (SGI's diagnostics: "32-bit rgba"), 3 RGB121212 (also the X server's
 /// 24-bit windows, fill mode 0xC006304). 4-7 are colour index (`ci_pixtype`).
 /// The pixel type alone says which; the plane masks do not.
@@ -723,9 +723,9 @@ fn pack_rgb(r: u32, g: u32, b: u32) -> u32 {
     (r & 0xFF) | (g & 0xFF) << 8 | (b & 0xFF) << 16
 }
 
-/// A host pixel of transfer format (PixelFormat, CompType) to a framebuffer
+/// A host pixel of transfer format (format, comp_type) to a framebuffer
 /// pixel, and back. Only the RGB formats convert.
-/// Transfer format (PixelFormat, CompType) of depth pixels.
+/// Transfer format (format, comp_type) of depth pixels.
 pub(super) const DEPTH_FORMAT: (u32, u32) = (2, 3);
 
 pub(super) fn from_host(format: (u32, u32), v: u64) -> u32 {
@@ -789,13 +789,14 @@ fn to_host(format: (u32, u32), v: u32) -> u64 {
     }) as u64
 }
 
-/// XFRMODE's transfer format as `Xfer` keeps it: (PixelFormat,
-/// CompType), and for RGBA (format 8) RGBorder (bit 22) as CompType bit 4.
+/// XFRMODE's transfer format as `Xfer` keeps it: (pixel format,
+/// component type), and for RGBA (format 8) rgb_order (bit 22) as
+/// comp_type bit 4.
 /// Traced with libGLcore (`test/gltest/pixtest.c`): formats 3 red, 4 green,
 /// 5 blue, 6 alpha, 7 RGB, 8 RGBA (2 depth, 1 stencil, 0 colour index);
 /// types 0 / 4 unsigned / signed bytes, 1 / 5 shorts, 3 / 7 32-bit (8 and
-/// 10 the X server's packed 4-4-4-4 and 5-5-5). RGBorder 1 sends red
-/// first, 0 alpha first (SGI: "RGBorder = 0; /* ABGR */"); RGB formats
+/// 10 the X server's packed 4-4-4-4 and 5-5-5). rgb_order 1 sends red
+/// first, 0 alpha first (SGI: "rgb_order = 0; /* ABGR */"); RGB formats
 /// are red first either way.
 pub(crate) fn xfer_format(mode: u32) -> (u32, u32) {
     let (f, t) = ((mode >> 4) & 0xF, mode & 0xF);
@@ -818,7 +819,7 @@ pub(crate) fn generic_format(f: (u32, u32)) -> bool {
 }
 
 /// Whether the raster JIT knows this format (its `XFmt` set; its RGBA16 is
-/// red first, RGBorder set).
+/// red first, rgb_order set).
 pub(crate) fn jit_xfer_ok(f: (u32, u32)) -> bool {
     // Colour indices beyond the X server's bytes and shorts: interpreter.
     if f.0 == 0 && !matches!(f.1, 0 | 1) {
@@ -848,7 +849,7 @@ fn format_comps(f: (u32, u32)) -> &'static [usize] {
     }
 }
 
-/// Bytes of one component of CompType `t`.
+/// Bytes of one component of comp_type `t`.
 fn type_size(t: u32) -> usize {
     match t & 0xF {
         1 | 5 => 2,
@@ -918,7 +919,7 @@ pub(crate) fn fb_pixel(f: (u32, u32), b: &[u8]) -> u32 {
     format_comps(f).iter().enumerate().fold(0, |px, (i, &k)| px | (fb_comp(f.1, &b[(i * n).min(b.len())..]) as u32) << (8 * k))
 }
 
-/// A pipeline component for the raster engine: `v` in CompType `t`'s
+/// A pipeline component for the raster engine: `v` in comp_type `t`'s
 /// range (the GE's clamp scaled it), as big-endian bytes.
 pub(crate) fn pack_comp(t: u32, v: f64, out: &mut Vec<u8>) {
     let r = v.round();
@@ -993,7 +994,7 @@ pub(super) struct Xfer {
     /// Armed by a PIO read block: the host reads it through the char
     /// registers.
     pub pio_read: bool,
-    /// Pixels per line, bytes per pixel, and (PixelFormat, CompType).
+    /// Pixels per line, bytes per pixel, and (format, comp_type).
     pub width: u32,
     pub bpp: u32,
     pub format: (u32, u32),
@@ -1045,7 +1046,7 @@ impl Xfer {
     }
 }
 
-/// Bytes per pixel for an xfrmode (PixelFormat, PixelCompType) pair.
+/// Bytes per pixel for an xfrmode (pixel format, component type) pair.
 pub(crate) fn bytes_per_pixel(xfrmode: u32) -> u32 {
     let f = xfer_format(xfrmode);
     if generic_format(f) {
@@ -2520,10 +2521,11 @@ impl Rss {
         [0, 1, 2, 3].map(|k| if k < 3 { mul(f, rgba[k]).wrapping_add(mul(ONE - f, fc[k])) } else { rgba[3] })
     }
 
-    /// A GL line (our GE11 HLE, IR `OP_GL_LINE`): from aaline_x_start/ystartf
-    /// to aaline_x_end/yendf (biased floats, as the triangle positions);
-    /// colours (red..alpha) and Z (depth_hi/low) at the start, their steps per
-    /// pixel along the major axis in color_red_edge/dge/dbe/dae and dze. Pixels whose
+    /// A GL line (our GE11 HLE, IR `OP_GL_LINE`): from the line's start
+    /// position registers to its end registers (biased floats, as the triangle
+    /// positions); colours (red..alpha) and Z at the start, their steps per
+    /// pixel along the major axis in the colour edge registers and the depth
+    /// edge register. Pixels whose
     /// far edge along the major axis lies in (start, end] in the direction
     /// of travel (`gl_line_setup`; OpenGL's diamond exit near the pixel
     /// centres, as a real High IMPACT draws), `aaline_config` + 1
@@ -2892,7 +2894,7 @@ impl Rss {
             begin_skip: begin,
             // Bits 17:14 (traced up to 6, the row padding to a
             // doubleword); 18 keeps a PIO read in the DMA order, 19 and 20
-            // enable zoom and decimation, 22 is RGBorder.
+            // enable zoom and decimation, 22 is rgb_order.
             stride_skip: (mode >> 14) & 0xF,
             pio_dma_order: mode & 1 << 18 != 0,
             line: 0,
@@ -3076,7 +3078,7 @@ impl Rss {
     fn pixel_bytes(&self, x: &Xfer, line: u32, k: u32, out: &mut [u8; PIXEL_MAX]) {
         let (fx, fy) = self.block_px(&x.block, k as i32, line as i32);
         // PIO reads of RGB(A) come in the reverse of the DMA order: RGBA
-        // (RGBorder set) alpha first, ABGR (clear) red first. libGLcore's
+        // (rgb_order set) alpha first, ABGR (clear) red first. libGLcore's
         // packed-type reads (its pixel packing path, one row at a time) unpack
         // them so: its 4-4-4-4 and 8-8-8-8 come out right in both orders.
         // The X server's reads (XGetImage, xfrmode 0x40080) set bit 18 and

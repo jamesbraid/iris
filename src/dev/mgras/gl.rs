@@ -2306,7 +2306,7 @@ impl Gl {
                 let i = r * wpr * 4 + c * bpp + k;
                 *b = words.get(i / 4).map_or(0, |w| (w >> (24 - 8 * (i % 4))) as u8);
             }
-            // GE pixels are RGBA; byte RGBA with RGBorder clear goes to the
+            // GE pixels are RGBA; byte RGBA with rgb_order clear goes to the
             // raster engine alpha first (`rss::xfer_format`).
             if bpp == 4 && self.xfrmode & 0xFF == 0x80 && self.xfrmode & 1 << 22 == 0 {
                 px[..4].reverse();

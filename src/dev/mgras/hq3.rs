@@ -1616,7 +1616,7 @@ impl Hq3Engine {
                         stream.drain(..n).collect()
                     }
                 };
-                // RGBorder (XFRMODE bit 22) is the raster engine's: it sends
+                // rgb_order (XFRMODE bit 22) is the raster engine's: it sends
                 // RGBA red first (`rss::xfer_format`).
                 format_pixels(self.formatter, &mut bytes);
                 let bytes = &bytes[..bytes.len().min(len as usize)];
