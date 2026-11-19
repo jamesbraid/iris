@@ -205,10 +205,10 @@ fn the_lines_draw_the_stored_tables_steps() {
     }
 }
 
-/// The lines' stored sum is not met: the blue lines' stipple dots and
-/// blend differ from the stored table. Kept as the open acceptance.
+/// The lines' stored sum is not met: the stippled blue lines' dots differ
+/// from the stored table. Kept as the open acceptance.
 #[test]
-#[ignore = "the lines' stipple dot order and blend are not matched"]
+#[ignore = "the lines' stipple dot order is not matched"]
 fn the_engine_stores_the_diagnostics_lines() {
     let got = sum(&readback(Board::High, Mode::Inline, None, &scene(lines), 17, 14));
     assert_eq!(got, 0xc584_ed6b, "five lines: sum {got:#010x}");
