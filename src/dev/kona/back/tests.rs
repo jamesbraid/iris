@@ -1760,8 +1760,8 @@ fn the_drain_table_row_by_row() {
     quiet(&mut b, "GL begin", Job::Command { grammar: Grammar::Gl, selector: BEGIN_PRIMITIVE_INDEPENDENT_TRIANGLES, args: &[0], packed: 0, handled: false });
     quiet(&mut b, "GL end", Job::Command { grammar: Grammar::Gl, selector: END_OPEN_PRIMITIVE, args: &[0], packed: 0, handled: false });
     quiet(&mut b, "a GL clear", Job::Command { grammar: Grammar::Gl, selector: CLEAR_SELECTED_BUFFERS, args: &[0], packed: 0, handled: false });
-    quiet(&mut b, "an X state load", Job::Command { grammar: Grammar::Kernel, selector: x::state::X_POSITION, args: &[0, 0, 8, 8], packed: 0, handled: false });
-    quiet(&mut b, "an X data token", Job::Command { grammar: Grammar::Kernel, selector: x::fill::X_DATA2, args: &[0, 0], packed: 0, handled: false });
+    quiet(&mut b, "an X state load", Job::Command { grammar: Grammar::Kernel, selector: WINDOW_SYSTEM_DRAWABLE_ORIGIN_AND_SIZE_LOAD, args: &[0, 0, 8, 8], packed: 0, handled: false });
+    quiet(&mut b, "an X data token", Job::Command { grammar: Grammar::Kernel, selector: WINDOW_SYSTEM_2_WORD_DATA_PRELOAD, args: &[0, 0], packed: 0, handled: false });
     quiet(&mut b, "a display-table load", Job::Command { grammar: Grammar::Kernel, selector: DISPLAY_MODE_BYTE, args: &[0, 13, 4], packed: 0, handled: false });
     quiet(&mut b, "an indirect store", Job::Indirect { selector: XMAP_CURSOR_MODE, value: 0 });
     quiet(&mut b, "a context event", Job::Context(super::super::job::ContextEvent::Activated { slot: 1, fresh: true }));
@@ -1773,7 +1773,7 @@ fn the_drain_table_row_by_row() {
         assert_eq!(drains(b), expect, "{what} drains");
     };
     loud(&mut b, "a textport command", Job::Command { grammar: Grammar::Textport, selector: TEXTPORT_FILL_BOX, args: &[0, 0, 3, 3], packed: 0, handled: false });
-    loud(&mut b, "an X box", Job::Command { grammar: Grammar::Kernel, selector: x::fill::X_BOX, args: &[0, 2 << 16 | 2], packed: 0, handled: false });
+    loud(&mut b, "an X box", Job::Command { grammar: Grammar::Kernel, selector: FILL_BOXES_TWO_CORNERS, args: &[0, 2 << 16 | 2], packed: 0, handled: false });
     loud(&mut b, "an X pixel finish", Job::Command { grammar: Grammar::Kernel, selector: x::pixel::X_PIXEL_FINISH, args: &[0], packed: 0, handled: false });
     loud(&mut b, "a swap", Job::Command { grammar: Grammar::Kernel, selector: DISPLAY_MODE_BYTE, args: &[0x3c0001, 13, 1], packed: 0, handled: false });
     loud(&mut b, "a region swap-out", Job::Command { grammar: Grammar::Kernel, selector: PIPE_MEMORY_SWAP_OUT, args: &[0; 8], packed: 0, handled: false });

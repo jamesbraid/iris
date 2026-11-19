@@ -12,7 +12,7 @@ use crate::dev::kona::back::raster::ops::{BlendEq, BlendFactor, Compare, LogicOp
 use crate::dev::kona::back::raster::setup::{self, Shape};
 use crate::dev::kona::back::raster::{AlphaTest, BlendState, StencilState, Surface, WVertex};
 use crate::dev::kona::back::store::Store;
-use crate::dev::kona::back::x::fill::X_BOX;
+use crate::dev::kona::defs::FILL_BOXES_TWO_CORNERS;
 use crate::dev::kona::back::x::pixel::{X_PIXEL_COPY, X_PIXEL_SETUP};
 use crate::dev::kona::back::x::state::XState;
 use crate::wgpu::GpuOptions;
@@ -594,8 +594,8 @@ fn run(seed: u64, steps: usize, max_clips: u32, chunk_planes: Option<u32>, trian
             let (mut xc, mut xg) = (XState::default(), XState::default());
             load(&mut xc, &rq.steps);
             load(&mut xg, &rq.steps);
-            xc.draw_command(&Surface::new(&p.cpu, 1), X_BOX, &rq.args);
-            xg.draw_command(&Surface::new(&p.gpu, 1), X_BOX, &rq.args);
+            xc.draw_command(&Surface::new(&p.cpu, 1), FILL_BOXES_TWO_CORNERS, &rq.args);
+            xg.draw_command(&Surface::new(&p.gpu, 1), FILL_BOXES_TWO_CORNERS, &rq.args);
             let key = |x: &XState| (x.fills.drawn, x.fills.bad_destination, x.fills.bad_context);
             assert_eq!(key(&xc), key(&xg), "seed {seed} step {step}: the request's outcome differs");
             drawn += xg.fills.drawn;

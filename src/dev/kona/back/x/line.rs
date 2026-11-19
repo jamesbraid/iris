@@ -56,21 +56,15 @@ use super::fill::Box4;
 use super::state::XState;
 use crate::dev::kona::back::raster::Surface;
 
-pub const X_SEGMENT: u32 = DRAW_LINE_SEGMENTS;
-pub const X_SEGMENT6: u32 = DRAW_LINE_SEGMENTS_BURST_OF_6;
-pub const X_LINE: u32 = DRAW_CONNECTED_POLYLINE;
-pub const X_LINE6: u32 = DRAW_CONNECTED_POLYLINE_BURST_OF_6;
-pub const X_RLINE: u32 = DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS;
-pub const X_RLINE6: u32 = DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS_BURST_OF_6;
 
 /// Whether `selector` is a segment or polyline token.
 pub fn is_line(selector: u32) -> bool {
-    matches!(selector, X_SEGMENT | X_SEGMENT6 | X_LINE | X_LINE6 | X_RLINE | X_RLINE6)
+    matches!(selector, DRAW_LINE_SEGMENTS | DRAW_LINE_SEGMENTS_BURST_OF_6 | DRAW_CONNECTED_POLYLINE | DRAW_CONNECTED_POLYLINE_BURST_OF_6 | DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS | DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS_BURST_OF_6)
 }
 
 /// Whether `selector` is one of the four polyline tokens (absolute or relative, one segment or a burst).
 pub fn is_polyline(selector: u32) -> bool {
-    matches!(selector, X_LINE | X_LINE6 | X_RLINE | X_RLINE6)
+    matches!(selector, DRAW_CONNECTED_POLYLINE | DRAW_CONNECTED_POLYLINE_BURST_OF_6 | DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS | DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS_BURST_OF_6)
 }
 
 fn point(w: u32) -> (i64, i64) {
@@ -142,7 +136,7 @@ impl XState {
         let bounds = self.bounds(width, height);
         let mut boxes = std::mem::take(&mut self.boxes);
         boxes.clear();
-        if matches!(selector, X_SEGMENT | X_SEGMENT6) {
+        if matches!(selector, DRAW_LINE_SEGMENTS | DRAW_LINE_SEGMENTS_BURST_OF_6) {
             let (ox, oy) = self.origin();
             for pair in args.chunks_exact(2) {
                 // Both ends, and a single pixel when they are the same point.
@@ -150,7 +144,7 @@ impl XState {
                 walk(&mut boxes, &bounds, (a.0 + ox, a.1 + oy), (b.0 + ox, b.1 + oy), true);
             }
         } else {
-            let relative = matches!(selector, X_RLINE | X_RLINE6);
+            let relative = matches!(selector, DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS | DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS_BURST_OF_6);
             // A relative polyline restarts at the drawable's origin with each command, as relative
             // points do (established); an absolute one adds the origin to each point.
             let (ox, oy) = self.origin();
@@ -211,12 +205,12 @@ mod tests {
     fn a_segment_draws_both_ends_and_runs_along_a_row() {
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
-        assert!(x.draw_command(&d, X_SEGMENT, &[pack(2, 3), pack(6, 3)]));
+        assert!(x.draw_command(&d, DRAW_LINE_SEGMENTS, &[pack(2, 3), pack(6, 3)]));
         assert_eq!(lit(&s), [(2, 3), (3, 3), (4, 3), (5, 3), (6, 3)]);
         // Backwards is the same pixels.
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_SEGMENT, &[pack(6, 3), pack(2, 3)]);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS, &[pack(6, 3), pack(2, 3)]);
         assert_eq!(lit(&s), [(2, 3), (3, 3), (4, 3), (5, 3), (6, 3)]);
     }
 
@@ -224,7 +218,7 @@ mod tests {
     fn a_segment_of_no_length_is_one_pixel() {
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_SEGMENT, &[pack(7, 9), pack(7, 9)]);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS, &[pack(7, 9), pack(7, 9)]);
         assert_eq!(lit(&s), [(7, 9)]);
     }
 
@@ -235,19 +229,19 @@ mod tests {
     fn diagonal_and_sloped_lines_follow_the_pixel_centres() {
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_SEGMENT, &[pack(1, 1), pack(4, 4)]);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS, &[pack(1, 1), pack(4, 4)]);
         assert_eq!(lit(&s), [(1, 1), (2, 2), (3, 3), (4, 4)]);
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
         // Four columns over two rows: the line is half a pixel along the
         // minor axis at the first column and at the third, and each exact half
         // goes to the end point's side.
-        x.draw_command(&d, X_SEGMENT, &[pack(0, 0), pack(4, 2)]);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS, &[pack(0, 0), pack(4, 2)]);
         assert_eq!(lit(&s), [(0, 0), (1, 1), (2, 1), (3, 2), (4, 2)]);
         // A steep line is the same shape on the other axis.
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_SEGMENT, &[pack(0, 0), pack(2, 4)]);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS, &[pack(0, 0), pack(2, 4)]);
         assert_eq!(lit(&s), [(0, 0), (1, 1), (1, 2), (2, 3), (2, 4)]);
     }
 
@@ -261,7 +255,7 @@ mod tests {
         for i in 0..6 {
             w.extend([pack(0, 2 * i), pack(3, 2 * i)]);
         }
-        x.draw_command(&d, X_SEGMENT6, &w);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS_BURST_OF_6, &w);
         assert_eq!(lit(&s).len(), 6 * 4);
         // Two segments through one pixel under XOR clear it.
         let (mut x, s) = rig();
@@ -269,8 +263,8 @@ mod tests {
         gc[9] = 12; // logic operation 6, xor
         x.command(0x129, &gc);
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_SEGMENT, &[pack(0, 5), pack(4, 5)]);
-        x.draw_command(&d, X_SEGMENT, &[pack(4, 5), pack(4, 8)]);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS, &[pack(0, 5), pack(4, 5)]);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS, &[pack(4, 5), pack(4, 8)]);
         assert!(!lit(&s).contains(&(4, 5)), "the meeting pixel was drawn by both");
         assert_eq!(lit(&s).len(), 4 + 3);
     }
@@ -284,7 +278,7 @@ mod tests {
         gc[9] = 12;
         x.command(0x129, &gc);
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_LINE6, &[pack(0, 0), pack(4, 0), pack(4, 4), pack(0, 4), pack(0, 1), pack(0, 1), pack(0, 1)]);
+        x.draw_command(&d, DRAW_CONNECTED_POLYLINE_BURST_OF_6, &[pack(0, 0), pack(4, 0), pack(4, 4), pack(0, 4), pack(0, 1), pack(0, 1), pack(0, 1)]);
         let got = lit(&s);
         assert!(got.contains(&(4, 0)) && got.contains(&(4, 4)) && got.contains(&(0, 4)), "{got:?}");
         assert!(got.contains(&(0, 0)), "the start");
@@ -293,7 +287,7 @@ mod tests {
         // The last point of the line is (0, 1): (0, 0) is lit only as the start.
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_LINE, &[pack(3, 3), pack(8, 3)]);
+        x.draw_command(&d, DRAW_CONNECTED_POLYLINE, &[pack(3, 3), pack(8, 3)]);
         assert_eq!(lit(&s).len(), 6);
     }
 
@@ -306,14 +300,14 @@ mod tests {
             let d = Surface::new(&s, 1);
             let run: Vec<u32> = (0..points - 1).map(|i| pack(2 * i, 4)).collect();
             x.draw_command(&d, 0x140 + run.len() as u32, &run);
-            x.draw_command(&d, X_LINE, &[pack(2 * (points - 1), 4)]);
+            x.draw_command(&d, DRAW_CONNECTED_POLYLINE, &[pack(2 * (points - 1), 4)]);
             let want: Vec<(u32, u32)> = (0..=2 * (points as u32 - 1)).map(|c| (c, 4)).collect();
             assert_eq!(lit(&s), want, "{points} points");
             assert_eq!(x.runs_dropped, 0);
         }
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_LINE, &[pack(5, 6)]);
+        x.draw_command(&d, DRAW_CONNECTED_POLYLINE, &[pack(5, 6)]);
         assert_eq!(lit(&s), [(5, 6)]);
     }
 
@@ -324,18 +318,18 @@ mod tests {
         let (mut x, s) = rig();
         x.command(0x12a, &[10, 20, 100, 100]);
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_SEGMENT, &[pack(1, 1), pack(3, 1)]);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS, &[pack(1, 1), pack(3, 1)]);
         assert_eq!(lit(&s), [(11, 21), (12, 21), (13, 21)]);
-        x.draw_command(&d, X_SEGMENT6, &[pack(0, 2), pack(1, 2), pack(0, 3), pack(1, 3), pack(0, 4), pack(1, 4), pack(0, 5), pack(1, 5), pack(0, 6), pack(1, 6), pack(0, 7), pack(1, 7)]);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS_BURST_OF_6, &[pack(0, 2), pack(1, 2), pack(0, 3), pack(1, 3), pack(0, 4), pack(1, 4), pack(0, 5), pack(1, 5), pack(0, 6), pack(1, 6), pack(0, 7), pack(1, 7)]);
         assert_eq!(lit(&s).len(), 3 + 12);
         assert!(lit(&s).contains(&(11, 27)));
         let (mut x, s) = rig();
         x.command(0x12a, &[10, 20, 100, 100]);
         let d = Surface::new(&s, 1);
         x.draw_command(&d, 0x141, &[pack(0, 0)]);
-        x.draw_command(&d, X_LINE, &[pack(2, 0)]);
+        x.draw_command(&d, DRAW_CONNECTED_POLYLINE, &[pack(2, 0)]);
         assert_eq!(lit(&s), [(10, 20), (11, 20), (12, 20)]);
-        x.draw_command(&d, X_LINE6, &[pack(0, 3), pack(2, 3), pack(2, 3), pack(2, 3), pack(2, 3), pack(2, 3), pack(2, 3)]);
+        x.draw_command(&d, DRAW_CONNECTED_POLYLINE_BURST_OF_6, &[pack(0, 3), pack(2, 3), pack(2, 3), pack(2, 3), pack(2, 3), pack(2, 3), pack(2, 3)]);
         assert_eq!(lit(&s).len(), 3 + 3);
         assert!(lit(&s).contains(&(10, 23)) && lit(&s).contains(&(12, 23)));
     }
@@ -347,11 +341,11 @@ mod tests {
         let (mut x, s) = rig();
         x.command(0x12a, &[10, 20, 100, 100]);
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_RLINE, &[pack(1, 1), pack(3, 0)]);
+        x.draw_command(&d, DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS, &[pack(1, 1), pack(3, 0)]);
         assert_eq!(lit(&s), [(11, 21), (12, 21), (13, 21), (14, 21)]);
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_RLINE6, &[pack(2, 2), pack(2, 0), pack(0, 2), pack(-2, 0), pack(0, 0), pack(0, 0), pack(0, 0)]);
+        x.draw_command(&d, DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS_BURST_OF_6, &[pack(2, 2), pack(2, 0), pack(0, 2), pack(-2, 0), pack(0, 0), pack(0, 0), pack(0, 0)]);
         // From (2, 2) right to (4, 2), down to (4, 4), left to (2, 4).
         assert_eq!(lit(&s).len(), 3 + 2 + 2);
     }
@@ -362,12 +356,12 @@ mod tests {
     fn a_line_is_clipped_to_the_screen_and_the_clip_list() {
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_SEGMENT, &[pack(-5, 2), pack(3, 2)]);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS, &[pack(-5, 2), pack(3, 2)]);
         assert_eq!(lit(&s), [(0, 2), (1, 2), (2, 2), (3, 2)]);
         x.command(0x12b, &[1, 10, 0, 12, 32]);
-        x.draw_command(&d, X_SEGMENT, &[pack(8, 6), pack(14, 6)]);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS, &[pack(8, 6), pack(14, 6)]);
         assert_eq!(lit(&s).iter().filter(|p| p.1 == 6).count(), 2);
-        x.draw_command(&d, X_SEGMENT, &[pack(-30000, -30000), pack(30000, 30000)]);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS, &[pack(-30000, -30000), pack(30000, 30000)]);
     }
 
     /// A line whose destination does not fit the target draws nothing, as
@@ -380,7 +374,7 @@ mod tests {
         x.command(0x129, &masked);
         s.write(4, 31 - 3, 1, 0x12_3456);
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_SEGMENT, &[pack(0, 3), pack(8, 3)]);
+        x.draw_command(&d, DRAW_LINE_SEGMENTS, &[pack(0, 3), pack(8, 3)]);
         assert_eq!((x.fills.bad_destination, s.read(0, 31 - 3, 1)), (1, 0));
     }
 
@@ -390,7 +384,7 @@ mod tests {
         let (mut x, _s) = rig();
         x.command(0x141, &[pack(1, 1)]);
         x.collect_command(0x141, &[pack(1, 1)]);
-        assert!(!x.command(X_SEGMENT, &[]));
+        assert!(!x.command(DRAW_LINE_SEGMENTS, &[]));
         assert_eq!(x.runs_dropped, 1);
     }
 
@@ -404,9 +398,9 @@ mod tests {
             x.command(0x141, &[p]);
             x.collect_command(0x141, &[p]);
         }
-        x.end_runs(X_LINE);
+        x.end_runs(DRAW_CONNECTED_POLYLINE);
         assert_eq!(x.runs_dropped, 0, "a polyline keeps the run");
-        x.draw_command(&d, X_LINE, &[pack(6, 5), pack(2, 5)]);
+        x.draw_command(&d, DRAW_CONNECTED_POLYLINE, &[pack(6, 5), pack(2, 5)]);
         assert_eq!(lit(&s).len(), 5 + 3 + 4, "(2,2)-(6,2), then down to (6,5), then to (2,5), shared vertices once");
         assert!(lit(&s).contains(&(2, 2)) && lit(&s).contains(&(2, 5)));
         // Spent: a second polyline starts from its own first point.
@@ -414,8 +408,8 @@ mod tests {
         let d = Surface::new(&s, 1);
         x.command(0x141, &[pack(2, 2)]);
         x.collect_command(0x141, &[pack(2, 2)]);
-        x.draw_command(&d, X_LINE, &[pack(4, 4), pack(4, 6)]);
-        x.draw_command(&d, X_LINE, &[pack(9, 9), pack(9, 9)]);
+        x.draw_command(&d, DRAW_CONNECTED_POLYLINE, &[pack(4, 4), pack(4, 6)]);
+        x.draw_command(&d, DRAW_CONNECTED_POLYLINE, &[pack(9, 9), pack(9, 9)]);
         assert!(!lit(&s).contains(&(2, 2)) || lit(&s).contains(&(3, 3)), "the first run joined the first polyline only");
         assert_eq!(lit(&s).iter().filter(|p| p.0 == 9).count(), 1);
     }
@@ -425,8 +419,8 @@ mod tests {
     fn a_relative_polyline_restarts_at_the_origin_each_command() {
         let (mut x, s) = rig();
         let d = Surface::new(&s, 1);
-        x.draw_command(&d, X_RLINE, &[pack(3, 3), pack(2, 0)]);
-        x.draw_command(&d, X_RLINE, &[pack(3, 3), pack(0, 2)]);
+        x.draw_command(&d, DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS, &[pack(3, 3), pack(2, 0)]);
+        x.draw_command(&d, DRAW_CONNECTED_POLYLINE_RELATIVE_POINTS, &[pack(3, 3), pack(0, 2)]);
         let l = lit(&s);
         assert!(l.contains(&(3, 3)) && l.contains(&(5, 3)) && l.contains(&(3, 5)));
         assert!(!l.contains(&(6, 6)), "the second command did not continue from the first's end");
