@@ -220,6 +220,9 @@ pub struct KonaBackend {
     /// The compositor a caller that supplies the frame boundaries itself drives (`attach_manual`), in
     /// place of the thread.
     manual: Option<Compositor>,
+    /// Swaps wait here for the next `frame` instead of showing at once (`latch_swaps`).
+    latch: bool,
+    swaps: Vec<(u32, u8)>,
     /// The window the board shows the guest, which the machine keeps a clone
     /// of (`KonaBackend::display`).
     display: Arc<Display>,
@@ -371,6 +374,8 @@ impl KonaBackend {
             clock: Arc::default(),
             thread: None,
             manual: None,
+            latch: false,
+            swaps: Vec::new(),
             layouts: 0,
             refused: [0; Refusal::ALL.len()],
             malformed: 0,
@@ -429,6 +434,9 @@ impl KonaBackend {
     pub fn visit_small<S: stream::Stream>(&mut self, s: &mut S) -> Result<(), String> {
         if !s.loading() {
             self.drain();
+            if !self.swaps.is_empty() {
+                return Err("a swap waits for its retrace".into());
+            }
             if self.contexts.busy() {
                 return Err("a context is in the middle of a primitive or a pixel transfer".into());
             }
@@ -696,9 +704,29 @@ impl KonaBackend {
         self.handle = Some(handle);
     }
 
-    /// A frame boundary of a back end attached with `attach_manual`: the waiting retrace
-    /// requests complete, the video interrupt rises, and the frame is composed.
+    /// Hold each swap until the next `frame`, as a pipe that changes the displayed buffer at a
+    /// retrace does, instead of showing it when the command is reached.
+    pub fn latch_swaps(&mut self, on: bool) {
+        self.latch = on;
+    }
+
+    /// Whether a swap waits for a frame.
+    pub fn swaps_waiting(&self) -> bool {
+        !self.swaps.is_empty()
+    }
+
+    fn show_bank(&mut self, id: u32, bank: u8) {
+        self.tables.lock().load_bank(id, bank);
+        self.contexts.swapped(id, bank);
+    }
+
+    /// A frame boundary of a back end attached with `attach_manual`: the waiting swaps show, so
+    /// that a swap ahead of a retrace request shows in the frame that completes it, then the
+    /// waiting retrace requests complete, the video interrupt rises, and the frame is composed.
     pub fn frame(&mut self) {
+        for (id, bank) in std::mem::take(&mut self.swaps) {
+            self.show_bank(id, bank);
+        }
         if let (Some(h), Some(c)) = (&self.handle, &mut self.manual) {
             self.clock.frame(h);
             c.frame();
@@ -713,6 +741,7 @@ impl KonaBackend {
         }
         self.resets += 1;
         self.clock.cancel();
+        self.swaps.clear();
         // Jobs queued before the reset finish first: they write the store it clears.
         self.drain();
         // SAFETY: the tiles are drained, and nothing draws until the reset returns.
@@ -1343,8 +1372,11 @@ impl KonaBackend {
                     // byte is inferred from the recorded swaps, which set it to 0 and 1
                     // alternately.
                     (DISPLAY_MODE_BYTE, &[window, id, mode]) if window != 0 => {
-                        self.tables.lock().load_bank(id, (mode & 1) as u8);
-                        self.contexts.swapped(id, (mode & 1) as u8);
+                        if self.latch {
+                            self.swaps.push((id, (mode & 1) as u8));
+                        } else {
+                            self.show_bank(id, (mode & 1) as u8);
+                        }
                     }
                     (LOAD_ONE_ENTRY_OF_DISPLAY_ID_TABLE, &[id, word]) => self.tables.lock().load_did(id, word),
                     (DISPLAY_MODE_BYTE, &[0, id, mode]) => self.tables.lock().load_mode(id, mode),
