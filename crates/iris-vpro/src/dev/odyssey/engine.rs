@@ -24,17 +24,17 @@
 //! - The stream never waits on the shell: the board times its own retrace
 //!   from `advance`, so `Idle` is `Yes`, `Working` or `Faulted`.
 //! - A panic on the board's own threads is not caught. The GPU unit's
-//!   failure is the engine's fault.
+//!   failure is the engine's fault, and wakes the shell when it happens.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use sgi_engine::{BoardEngine, Chunk, DirtyRun, Event, Fault, HostMem, Idle, Interrupt, Lent, MemFault, Outbox, Pump, Read, Rect, Refused, Source, StateSink, StateSource, Swap, Write, DIRTY_BLOCK};
+use sgi_engine::{GpuLoss, BoardEngine, Chunk, DirtyRun, Event, Fault, HostMem, Idle, Interrupt, Lent, MemFault, Outbox, Pump, Read, Rect, Refused, Source, StateSink, StateSource, Swap, Write, DIRTY_BLOCK};
 
 use super::board::Board;
-use super::gpu_unit::Observation;
+use super::gpu_unit::{fail_gpu, Observation};
 use super::mmio::{access_waits, command_store, fifo_port, level_word, BoardGuard, BoardLocks};
 use super::reader::{DisplayShared, ScanoutReader};
 use super::state::ODYSSEY_SNAPSHOT_VERSION;
@@ -205,7 +205,7 @@ pub struct VproEngine {
     source: Source,
     credits: Credits,
     failed: OnceLock<String>,
-    fault_sent: AtomicBool,
+    fault_sent: Arc<AtomicBool>,
 }
 
 impl VproEngine {
@@ -215,20 +215,31 @@ impl VproEngine {
     /// reaches, from the board's threads, so `ram_*` must be lock-free.
     /// `notify` only schedules the shell's pump.
     pub fn new<M: HostMem>(config: Config, lent: Option<Lent>, mem: M, notify: Option<Box<dyn Fn() + Send + Sync>>) -> Result<Self, String> {
+        let loss = GpuLoss::new();
+        #[cfg(feature = "wgpu")]
+        let gpu = match &config.gpu {
+            Some(backend) => Some(crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions { backend: backend.clone(), ..Default::default() }, loss.callback())?),
+            None => None,
+        };
+        #[cfg(not(feature = "wgpu"))]
+        let gpu = None;
+        Self::with_gpu(config, lent, mem, notify, gpu, loss)
+    }
+
+    /// As `new`, with the GPU unit the caller opened (`config.gpu` is not read). `loss` is the
+    /// target of that unit's device-loss callback (`GpuLoss::callback`).
+    pub fn with_gpu<M: HostMem>(config: Config, lent: Option<Lent>, mem: M, notify: Option<Box<dyn Fn() + Send + Sync>>, gpu: Option<Arc<crate::wgpu::Gpu>>, loss: Arc<GpuLoss>) -> Result<Self, String> {
         let region = lent.map(|l| (l.as_ptr(), l.len()));
         // SAFETY: `Lent`'s contract: aligned, valid until the engine drops,
         // and touched by nothing but the engine and the shell's `cpu_wrote` protocol.
         let mut b = unsafe { Board::new_lent(&config.product, config.widget, region)? };
         b.raster.set_pool(config.pool.0, config.pool.1);
-        if let Some(backend) = &config.gpu {
+        let has_gpu = gpu.is_some();
+        if let Some(gpu) = &gpu {
             #[cfg(feature = "wgpu")]
-            {
-                let opts = crate::wgpu::GpuOptions { backend: backend.clone(), ..Default::default() };
-                let gpu = crate::wgpu::Gpu::new(&opts, Box::new(|why| log::error!("iris-vpro: GPU failed: {why}")))?;
-                b.enable_gpu(&gpu)?;
-            }
+            b.enable_gpu(gpu)?;
             #[cfg(not(feature = "wgpu"))]
-            return Err(format!("the GPU unit {backend:?} needs the wgpu feature"));
+            return Err(format!("the GPU unit {:?} needs the wgpu feature", gpu.caps.adapter));
         }
         let out = Arc::new(Outbox::new(notify));
         b.guest = Some(Arc::new(Guest { mem: Arc::new(mem), out: out.clone() }));
@@ -241,7 +252,20 @@ impl VproEngine {
         // Retired stores free credits, which only the pump returns.
         let wake = out.clone();
         b.fifo.on_retire(Box::new(move || wake.wake()));
+        // A fault found on any thread tells the shell then, not at its next pump.
+        let fault_sent = Arc::new(AtomicBool::new(false));
+        let (told, sent) = (out.clone(), fault_sent.clone());
+        b.gpu_fault.on_fault(Box::new(move |why| {
+            if !sent.swap(true, Ordering::AcqRel) {
+                told.post(Event::DeviceFault(why.to_string()));
+            }
+        }));
         b.reset();
+        let (cell, told) = (b.gpu_fault.clone(), out.clone());
+        loss.attach(move |why| {
+            told.post(Event::GpuLost(why.to_string()));
+            fail_gpu(&cell, "the GPU", why);
+        });
         let vram = b.vram.ptr_shared();
         let locks = BoardLocks::new(b);
         let mut reader = ScanoutReader::default();
@@ -251,14 +275,14 @@ impl VproEngine {
             out,
             reader,
             mode: config.mode,
-            gpu: config.gpu.is_some(),
+            gpu: has_gpu,
             lent: region.map(|r| r.1),
             vram,
             parked: false,
             source: Source::default(),
             credits: Credits::default(),
             failed: OnceLock::new(),
-            fault_sent: AtomicBool::new(false),
+            fault_sent,
         };
         if config.mode == Mode::Threaded {
             e.locks.work_start();
