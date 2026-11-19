@@ -34,7 +34,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use sgi_engine::inject::{hit, Point};
-use sgi_engine::{GpuLoss, BoardEngine, Chunk, DirtyRun, Event, Fault, HostMem, Idle, Interrupt, Lent, MemFault, Outbox, Pump, Read, Rect, Refused, Source, StateSink, StateSource, Swap, Write, DIRTY_BLOCK};
+use sgi_engine::{GpuLoss, BoardEngine, Chunk, DirtyRun, Event, Fault, HostMem, Idle, Interrupt, Lent, LentFrame, MemFault, Outbox, Pump, Read, Rect, Refused, Source, StateSink, StateSource, Swap, Write, DIRTY_BLOCK};
 
 use super::board::{Board, Params};
 use super::gpu_unit::{fail_gpu, Observation};
@@ -422,6 +422,40 @@ impl VproEngine {
 impl BoardEngine for VproEngine {
     /// A box of pixels; every plane under it is brought current.
     type Region = Rect;
+
+    fn heads(&self) -> u32 {
+        1
+    }
+
+    fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
+        out.clear();
+        if let Some(f) = self.fault() {
+            return Err(Fault(f));
+        }
+        if head != 0 {
+            return Ok(None);
+        }
+        Ok(VproEngine::scanout(self).map(|(w, h, pixels)| {
+            *out = pixels;
+            (w, h)
+        }))
+    }
+
+    /// The composed frame left in the GPU scan-out's buffer, no readback; None without the GPU unit
+    /// or while there is no video mode.
+    #[cfg(feature = "wgpu")]
+    fn lend_frame(&mut self, head: u32) -> Result<Option<LentFrame>, Fault> {
+        if head != 0 || !self.gpu {
+            return Ok(None);
+        }
+        {
+            let g = self.settle()?;
+            g.gpu_upload_tick(true);
+        }
+        let r = &mut self.reader;
+        r.attach(&self.locks.shared);
+        Ok(r.update_on_gpu().map(|(buffer, width, height)| LentFrame { width, height, buffer: Arc::new(buffer) }))
+    }
 
     fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
         // A store the board takes inside this call (every one in inline mode) restarts the retrace at `now_ns`.

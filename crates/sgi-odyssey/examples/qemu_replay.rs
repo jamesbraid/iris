@@ -311,6 +311,13 @@ fn main() {
         None if gpu_on => println!("the GPU unit gave no report"),
         None => {}
     }
+    if gpu_on {
+        match sgi_engine::BoardEngine::lend_frame(&mut engine, 0) {
+            Ok(Some(f)) => println!("lent frame {}x{} (wgpu buffer: {})", f.width, f.height, f.buffer.downcast_ref::<wgpu::Buffer>().is_some()),
+            Ok(None) => println!("no lent frame"),
+            Err(e) => println!("lend failed: {e}"),
+        }
+    }
     match engine.scanout() {
         None => println!("no frame: the scan-out has no mode"),
         Some((w, h, px)) => {

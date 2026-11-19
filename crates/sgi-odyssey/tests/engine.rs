@@ -468,3 +468,26 @@ fn a_gpu_unit_traps_the_lent_memory() {
     e.observe_all().unwrap();
     assert_eq!(e.fault(), None);
 }
+
+/// The picture of the one head comes back by the trait's `scanout` (the inherent one has no head), and a GPU engine lends it where it is composed.
+#[test]
+fn the_head_s_picture_is_copied_and_a_gpu_engine_lends_it() {
+    let (mut e, _) = engine(Mode::Inline);
+    assert_eq!(e.heads(), 1);
+    let mut px = Vec::new();
+    assert_eq!(BoardEngine::scanout(&mut e, 0, &mut px), Ok(Some((1280, 1024))));
+    assert_eq!(px.len(), 1280 * 1024);
+    assert_eq!(BoardEngine::scanout(&mut e, 1, &mut px), Ok(None), "no second head");
+    assert!(px.is_empty());
+    assert!(e.lend_frame(0).unwrap().is_none(), "no GPU unit, nothing to lend");
+
+    let mut cfg = config("v12", Mode::Inline);
+    cfg.gpu = Some("auto".into());
+    let Ok(mut g) = VproEngine::new(cfg, None, Shared(Arc::new(Ram::default())), None) else { return };
+    // Until the registers describe a frame there is none to lend; one that is lent is the board's wgpu buffer.
+    if let Some(lent) = g.lend_frame(0).unwrap() {
+        assert_eq!((lent.width, lent.height), (1280, 1024));
+        assert!(lent.buffer.downcast_ref::<wgpu::Buffer>().is_some());
+    }
+    assert_eq!(BoardEngine::scanout(&mut g, 0, &mut px), Ok(Some((1280, 1024))), "the copy still works beside the lend");
+}
