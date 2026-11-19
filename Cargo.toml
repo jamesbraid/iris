@@ -436,6 +436,17 @@ opt-level = 1
 [profile.dev.package.blake3]
 opt-level = 3
 
+# The engines' random-input tests run guest-sized work in the test profile: optimised, but
+# with the debug assertions and overflow checks they exist to trip.
+[profile.dev.package.sgi-odyssey]
+opt-level = 1
+
+[profile.dev.package.sgi-mgras]
+opt-level = 1
+
+[profile.dev.package.sgi-kona]
+opt-level = 3
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
