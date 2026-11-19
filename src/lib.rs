@@ -234,6 +234,7 @@ pub type SharedGpu = std::sync::Arc<wgpu::Gpu>;
 pub type SharedGpu = std::convert::Infallible;
 pub mod trace_writer;
 pub mod gfx_display;
+pub mod display;
 pub mod side_by_side;
 pub mod tile_pool;
 pub mod hostinput;
