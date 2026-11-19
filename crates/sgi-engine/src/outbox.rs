@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 
-use crate::engine::{Event, Mark, Rect, DAMAGE_ANY};
+use crate::engine::{Event, Interrupt, Mark, Rect, DAMAGE_ANY};
 
 /// Distinct damage marks waiting before they degrade to "anything".
 const DAMAGE_MAX: usize = 16;
@@ -135,4 +135,20 @@ impl Outbox {
         *self.q.lock() = Queue::default();
         self.notified.store(false, Ordering::Release);
     }
+}
+
+/// Two packets whose merge keys differ but that reach one receiver bit, if any.
+/// The merge rule is exact only when keys and receiver bits correspond one to
+/// one: otherwise moving a packet to the back reorders two writes to a bit.
+pub fn aliasing_lines<'a>(packets: impl IntoIterator<Item = &'a Interrupt>, bit: impl Fn(&Interrupt) -> u64) -> Option<(Interrupt, Interrupt)> {
+    let mut seen: Vec<(u64, Interrupt)> = Vec::new();
+    for p in packets {
+        let b = bit(p);
+        match seen.iter().find(|(sb, _)| *sb == b) {
+            Some((_, q)) if (q.sender, q.widget, q.addr, q.vector) != (p.sender, p.widget, p.addr, p.vector) => return Some((*q, *p)),
+            Some(_) => {}
+            None => seen.push((b, *p)),
+        }
+    }
+    None
 }

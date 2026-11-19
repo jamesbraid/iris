@@ -61,6 +61,17 @@ fn packets_keep_their_order_and_widget() {
 }
 
 #[test]
+fn lines_that_reach_one_receiver_bit_are_found() {
+    let line = |sender, addr, vector| Interrupt { sender, widget: 8, addr, vector, level: true };
+    let by_vector = |i: &Interrupt| i.vector as u64;
+    let distinct = [line(1, 0x10, 5), line(1, 0x10, 5), line(1, 0x10, 6), line(2, 0x10, 7)];
+    assert_eq!(outbox::aliasing_lines(&distinct, by_vector), None);
+    let alias = [line(1, 0x10, 5), line(2, 0x10, 5)];
+    assert_eq!(outbox::aliasing_lines(&alias, by_vector), Some((alias[0], alias[1])));
+    assert_eq!(outbox::aliasing_lines(&alias, |i| i.sender as u64), None, "a receiver that decodes the sender tells them apart");
+}
+
+#[test]
 fn credits_go_to_the_source_of_the_store_and_coalesce() {
     let (mut e, _) = mock(MockConfig { queue_ops: 4096, ..Default::default() });
     e.set_source(Source { id: 7, charged: true });

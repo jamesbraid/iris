@@ -86,6 +86,11 @@ impl Subject for Kona {
         }
         Some(1)
     }
+
+    /// Every packet of the storm sets the pending bit; none clears it.
+    fn storm_ends_high(&self) -> bool {
+        true
+    }
 }
 
 sgi_engine::conformance_tests!(Kona);

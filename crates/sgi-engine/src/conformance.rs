@@ -39,6 +39,15 @@ pub trait Subject {
     fn packet_storm(&self, _e: &mut Self::Engine) -> Option<usize> {
         None
     }
+    /// The level the last packet of `packet_storm` carries.
+    fn storm_ends_high(&self) -> bool {
+        false
+    }
+    /// The receiver bit a packet sets or clears, as the shell's receiver decodes it. The
+    /// default is the vector alone, as HEART does: the strictest reading.
+    fn receiver_bit(&self, i: &crate::Interrupt) -> u64 {
+        i.vector as u64
+    }
 }
 
 const CHARGED: fn(u32) -> Source = |id| Source { id, charged: true };
@@ -251,8 +260,13 @@ pub fn a_storm_on_one_interrupt_line_stays_one_packet<S: Subject>(s: &S) {
     let Some(lines) = s.packet_storm(&mut e) else { return };
     settle(&mut e);
     let seen = events(&mut e, usize::MAX);
-    let packets = seen.iter().filter(|x| matches!(x, Event::Interrupt(_))).count();
-    assert!(packets >= 1 && packets <= lines, "{packets} packets for {lines} lines: {seen:?}");
+    let packets: Vec<&crate::Interrupt> = seen.iter().filter_map(|x| if let Event::Interrupt(i) = x { Some(i) } else { None }).collect();
+    assert!(!packets.is_empty() && packets.len() <= lines, "{} packets for {lines} lines: {seen:?}", packets.len());
+    if lines == 1 {
+        let last = packets.last().expect("a packet");
+        assert_eq!(last.level, s.storm_ends_high(), "the line ends the storm {}: a merge kept the wrong packet: {seen:?}", if s.storm_ends_high() { "high" } else { "low" });
+    }
+    assert_eq!(crate::outbox::aliasing_lines(packets.iter().copied(), |i| s.receiver_bit(i)), None, "two lines reach one receiver bit, so a merge can reorder them");
 }
 
 pub fn observe_brings_a_box_current<S: Subject>(s: &S) {
