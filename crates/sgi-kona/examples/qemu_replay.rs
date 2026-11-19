@@ -297,6 +297,13 @@ fn main() {
     println!("run: {:.3} s ({} ns per command-page word)", d.as_secs_f64(), d.as_nanos() as u64 / t.command_words.max(1));
 
     let c0 = Instant::now();
+    if gpu.is_some() {
+        match sgi_engine::BoardEngine::lend_frame(&mut e, 0) {
+            Ok(Some(f)) => println!("lent frame {}x{} (wgpu buffer: {})", f.width, f.height, f.buffer.downcast_ref::<wgpu::Buffer>().is_some()),
+            Ok(None) => println!("no lent frame"),
+            Err(x) => println!("lend failed: {x}"),
+        }
+    }
     let (w, h, words) = e.compose();
     println!("compose (waits for the drawing still queued, then reads the frame): {:.3} s", c0.elapsed().as_secs_f64());
     if let Some(p) = &outp {

@@ -506,3 +506,21 @@ fn a_gpu_frame_is_lent_in_place() {
     assert_eq!(got, want);
     assert!(want.iter().any(|&p| p != 0), "the point is in the frame");
 }
+
+/// The trait's scan-out: one head, the picture as 0x00RRGGBB, nothing lent without a GPU unit.
+#[test]
+fn the_pipe_has_one_head_whose_picture_is_copied_as_rgb_and_not_lent_without_a_gpu() {
+    let mut e = engine();
+    assert_eq!(e.heads(), 1);
+    let mut px = Vec::new();
+    let size = BoardEngine::scanout(&mut e, 0, &mut px).unwrap();
+    if let Some((w, h)) = size {
+        assert_eq!(px.len(), w as usize * h as usize);
+    }
+    assert!(px.iter().all(|p| p >> 24 == 0), "0x00RRGGBB");
+    assert_eq!(BoardEngine::scanout(&mut e, 1, &mut px), Ok(None));
+    assert!(px.is_empty());
+    assert!(BoardEngine::lend_frame(&mut e, 0).unwrap().is_none());
+    e.fail("gone");
+    assert_eq!(BoardEngine::scanout(&mut e, 0, &mut px), Err(sgi_engine::Fault("gone".into())));
+}
