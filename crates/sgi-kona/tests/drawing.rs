@@ -479,7 +479,7 @@ fn a_pixel_read_inside_a_bracket_is_delivered_by_output_dma() {
     assert_eq!(r.bytes(host + 0xff, 1), [0], "the byte before the range is untouched");
     assert_eq!(r.bytes(host + 0x100 + len as u64, 4), [0; 4], "and the one after");
     assert_eq!([r.word(REASON_PAGE), r.word(REASON_PAGE + 4), r.word(REASON_PAGE + 8), r.word(REASON_PAGE + 12)], [0x100, 7, 0, 0]);
-    // The same size with no bracket has no buffer to go to, and is not answered.
+    // The same size with no bracket has no buffer to go to: answered with zeros, the ready word set.
     r.command(Grammar::Gl, READ_PIXEL_RECTANGLE_BACK_TO_HOST, &[0, 0, 64, 64, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 0]);
-    assert_eq!(r.bytes(RETURN_PAGE, 16), [0; 16]);
+    assert_eq!(r.bytes(RETURN_PAGE, 16), [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 }

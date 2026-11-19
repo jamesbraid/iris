@@ -1164,8 +1164,8 @@ fn emit(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, img: &Image) {
 /// answer anyway (`MAX_PACK_BYTES`).
 pub const MAX_CAPTURE_PIXELS: u64 = 1 << 24;
 
-/// The zeros a read past the largest drawable is answered with: the return page after its first
-/// eight bytes, as the old device wrote them.
+/// The zeros a read the model cannot answer gets: the return page after its first eight bytes, as
+/// the old device wrote them.
 const REFUSED_READ_REPLY: usize = 0x4000 - 8;
 
 /// The rectangle of the read buffer, as an image of `kind`. Pixels outside the window read zero.
@@ -1360,13 +1360,17 @@ pub fn plane_command(gl: &mut Gl, c: &mut Counts, env: &Env<'_>, selector: u32, 
         }
         (READ_PIXEL_RECTANGLE_BACK_TO_HOST, &[x, y, w, h, format, ty, low]) => {
             c.reads += 1;
-            if w as u64 * h as u64 > MAX_CAPTURE_PIXELS {
-                // Answered with zeros the size of the return page's data, not built.
+            // A read the model cannot answer is answered with zeros the size of the return
+            // page's data, so the client that polls for the reply does not hang.
+            let zeros = || Out::Reply(vec![0; REFUSED_READ_REPLY]);
+            // The low bits are the destination's byte offset in a word: 0 to 3. An empty rectangle has
+            // nothing to read.
+            if w as u64 * h as u64 > MAX_CAPTURE_PIXELS || w == 0 || h == 0 || low > 3 {
                 c.refused += 1;
-                return Out::Reply(vec![0; REFUSED_READ_REPLY]);
+                return zeros();
             }
             let Some(img) = read_image(gl, c, &canvas, [x, y, w, h], format) else {
-                return Out::Nothing;
+                return zeros();
             };
             // The client library lays the rows out itself: it takes the reply as rows of the
             // width's own bytes and applies the alignment, row length and skips as it copies them
@@ -1377,11 +1381,11 @@ pub fn plane_command(gl: &mut Gl, c: &mut Counts, env: &Env<'_>, selector: u32, 
             let rec = Record { alignment: 1, row_length: 0, skip_rows: 0, skip_pixels: 0, ..gl.pix.pack };
             let Some(bytes) = pack(&img, format, ty, low & 3, &rec) else {
                 c.refused += 1;
-                return Out::Nothing;
+                return zeros();
             };
             if bytes.len() > READ_REPLY_LIMIT {
                 c.read_no_buffer += 1;
-                return Out::Nothing;
+                return zeros();
             }
             Out::Reply(bytes)
         }

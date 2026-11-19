@@ -927,9 +927,10 @@ fn a_pixel_read_inside_a_bracket_is_delivered_by_output_dma() {
     assert_eq!([r.ram.word(REASON_PAGE), r.ram.word(REASON_PAGE + 4), r.ram.word(REASON_PAGE + 8), r.ram.word(REASON_PAGE + 12)], [0x100, 7, 0, 0]);
     let text = run(&mut b, &["gl"]).1;
     assert!(text.contains("1 reads by DMA"), "{text}");
-    // The same size with no bracket has no buffer to go to, and is counted, not answered.
+    // The same size with no bracket has no buffer to go to: counted, and answered with zeros (the
+    // ready word set, the data zero) so the client that polls the return page does not hang.
     r.send(&mut b, Job::Command { grammar: Grammar::Gl, selector: READ_PIXEL_RECTANGLE_BACK_TO_HOST, args: &[0, 0, 64, 64, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 0], packed: 0, handled: false });
-    assert_eq!(r.ram.bytes(RETURN_PAGE, 16), [0; 16]);
+    assert_eq!(r.ram.bytes(RETURN_PAGE, 16), [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert!(run(&mut b, &["gl"]).1.contains("1 reads too big for the page with no buffer"));
 }
 
@@ -1014,7 +1015,7 @@ fn a_colour_index_window_is_read_in_indices() {
     let c = b.contexts.select(None);
     let env = gl::pixels::Env { store: &b.store, ds };
     let out = gl::pixels::plane_command(&mut c.gl, &mut b.pix_counts, &env, READ_PIXEL_RECTANGLE_BACK_TO_HOST, &[0, 0, 1, 1, FORMAT_COLOUR_INDEX, TYPE_UNSIGNED_BYTE, 0]);
-    assert_eq!(out, gl::pixels::Out::Nothing);
+    assert_eq!(out, gl::pixels::Out::Reply(vec![0; 0x4000 - 8]), "refused, and answered with zeros");
     assert_eq!(b.pix_counts.refused, 1);
 }
 
@@ -1070,6 +1071,35 @@ fn a_read_rectangle_past_the_largest_drawable_is_refused_before_it_is_built() {
     for (n, (w, h)) in huge.into_iter().enumerate() {
         let out = gl::pixels::plane_command(&mut c.gl, &mut b.pix_counts, &env, READ_PIXEL_RECTANGLE_BACK_TO_HOST, &[0, 0, w, h, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 0]);
         assert_eq!((out, b.pix_counts.refused), (gl::pixels::Out::Reply(vec![0; 0x4000 - 8]), n as u64 + 1), "{w} by {h}");
+    }
+}
+
+/// A bare read the model cannot answer is answered with a page of zeros, whatever the reason, so
+/// the client that polls the return page does not hang (the old device's read-*-refused cases):
+/// a format or type it has no packing for, a size past the reply, the raw enums, the low bits, an
+/// empty or negative extent.
+#[test]
+fn a_read_the_model_cannot_answer_gets_a_page_of_zeros() {
+    use crate::dev::kona::defs::pixel::*;
+    let mut b = pixel_window();
+    let screen = b.gl.screen();
+    let ds = b.contexts.select(None).gl.draw_state(screen);
+    b.arrays(&ds);
+    let c = b.contexts.select(None);
+    let env = gl::pixels::Env { store: &b.store, ds };
+    let cases: [(&str, [u32; 7]); 8] = [
+        ("format", [0, 0, 1, 1, 14, 1, 0]),
+        ("type", [0, 0, 1, 1, 4, 7, 0]),
+        ("size", [0, 0, 5457, 1, 4, 1, 0]),
+        ("raw enums", [10, 20, 3, 2, 0x1907, 0x1401, 0]),
+        ("low bits", [10, 20, 3, 2, 4, 1, 4]),
+        ("zero width", [10, 20, 0, 2, 4, 1, 0]),
+        ("zero height", [10, 20, 3, 0, 4, 1, 0]),
+        ("negative width", [10, 20, u32::MAX, 2, 4, 1, 0]),
+    ];
+    for (what, args) in cases {
+        let out = gl::pixels::plane_command(&mut c.gl, &mut b.pix_counts, &env, READ_PIXEL_RECTANGLE_BACK_TO_HOST, &args);
+        assert_eq!(out, gl::pixels::Out::Reply(vec![0; 0x4000 - 8]), "{what}");
     }
 }
 
