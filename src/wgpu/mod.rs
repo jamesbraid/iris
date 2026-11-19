@@ -71,6 +71,8 @@ pub use device::{Gpu, GpuOptions};
 pub use memory::GpuMemory;
 #[cfg(feature = "present")]
 pub use present::{Frame, Placement, Presenter};
+// Used by the boards' scan-out kernels in iris, not by this crate.
+#[allow(unused_imports)]
 pub(crate) use scanout::defines;
 pub use scanout::{storage_layout, Scanout, ScanoutPipeline, ScanoutShaders};
 pub use shader::{Fragment, Source};

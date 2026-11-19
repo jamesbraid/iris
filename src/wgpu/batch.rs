@@ -873,6 +873,8 @@ mod recording_tests {
         assert_eq!(choose_set(4, 2, cap, |i| available[i]), SetChoice::Free(0));
     }
 
+    /// Drives REX3's flat fill, so it runs only inside iris.
+    #[cfg(not(sgi_gpu_core))]
     #[test]
     fn full_retry_keeps_prepared_fill_and_advances_context_once() {
         std::thread::Builder::new()
