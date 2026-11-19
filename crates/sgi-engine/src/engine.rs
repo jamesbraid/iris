@@ -118,6 +118,12 @@ pub struct Source {
 /// comes from (the board's own widget, or the hub a KONA store came from).
 /// Sender, widget, address and vector name the line the packet sets or
 /// clears; `Outbox` keeps the newest packet for each line.
+///
+/// Contract rule: lines and receiver bits correspond one to one. Two lines
+/// that reach one bit (a receiver that decodes the vector alone, for two
+/// packets of different sender or address) can be reordered by the merge, and
+/// the bit then ends in the wrong state. A board must not emit such lines;
+/// `outbox::aliasing_lines` is the check, and the conformance suite runs it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Interrupt {
     pub sender: u8,

@@ -47,6 +47,7 @@ impl Subject for MockBoard {
         use sgi_engine::BoardEngine;
         for _ in 0..1000 {
             e.write(reg::PACKET, 32, 5);
+            e.write(reg::PACKET_CLR, 32, 5);
             e.run(usize::MAX);
         }
         Some(1)

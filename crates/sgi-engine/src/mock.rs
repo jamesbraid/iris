@@ -37,8 +37,9 @@ pub mod reg {
     pub const DMA_READ: u32 = 0x24;
     /// Queued: write the value back at `advance`, then send a packet for line 3.
     pub const FENCE: u32 = 0x20;
-    /// Queued: send an interrupt packet, vector the value.
+    /// Queued: send an interrupt packet that sets, or clears, the line of the vector the value names.
     pub const PACKET: u32 = 0x28;
+    pub const PACKET_CLR: u32 = 0x3C;
     /// Queued: panic when it runs.
     pub const BOOM: u32 = 0x2C;
     /// Reads: wait for queued work. The sum, and the last DMA read.
@@ -73,7 +74,7 @@ enum Op {
     DmaWrite(u64, u32),
     DmaRead(u64),
     Fence(u64, u32),
-    Packet(u8),
+    Packet(u8, bool),
     Boom,
     LentStore(usize, u64),
     LentAdd(usize, u64),
@@ -182,7 +183,7 @@ impl<M: HostMem> Mock<M> {
                 }
             }
             Op::Fence(addr, val) => self.fences.push((addr, val)),
-            Op::Packet(v) => self.out.post(Event::Interrupt(Interrupt { sender: 7, widget: 8, addr: 0x1000, vector: v, level: true })),
+            Op::Packet(v, level) => self.out.post(Event::Interrupt(Interrupt { sender: 7, widget: 8, addr: 0x1000, vector: v, level })),
             Op::Boom => panic!("the mock board was told to"),
             Op::LentStore(w, v) => self.lent_put(w, v),
             Op::LentAdd(w, v) => {
@@ -274,7 +275,8 @@ impl<M: HostMem> BoardEngine for Mock<M> {
             reg::DMA_WRITE => Op::DmaWrite(val, self.dma_data),
             reg::DMA_READ => Op::DmaRead(val),
             reg::FENCE => Op::Fence(val, self.dma_data),
-            reg::PACKET => Op::Packet(val as u8),
+            reg::PACKET => Op::Packet(val as u8, true),
+            reg::PACKET_CLR => Op::Packet(val as u8, false),
             reg::BOOM => Op::Boom,
             o if (reg::LENT_STORE..reg::LENT_ADD).contains(&o) => Op::LentStore(((o - reg::LENT_STORE) / 8) as usize, val),
             o if o >= reg::LENT_ADD => Op::LentAdd(((o - reg::LENT_ADD) / 8) as usize, val),
