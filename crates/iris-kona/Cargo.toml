@@ -2,7 +2,7 @@
 name = "iris-kona"
 version = "0.1.0"
 edition = "2021"
-description = "Iris's KONA (InfiniteReality) raster back end, CPU and GPU, without the board"
+description = "Iris's KONA (InfiniteReality) engine, from the token layer down, CPU and GPU, without the board"
 publish = false
 
 [lib]
@@ -23,6 +23,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 crossbeam-utils = "0.8"
 crossbeam-queue = "0.3"
 log = "0.4"
-
-[dev-dependencies]
+toml = "1.0.3"
 blake3 = "1"
+postcard = { version = "1", features = ["alloc"] }

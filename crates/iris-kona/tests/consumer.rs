@@ -6,7 +6,7 @@
 //! (`back/golden/mod.rs`, `a_tiled_run_is_bit_exact_with_the_inline_one`):
 //! the same generator, state and clear, and the store hash iris pins.
 
-use iris_kona::dev::kona::back::api::{KonaBack, Tri};
+use iris_kona::dev::kona::api::{KonaBack, Tri};
 use iris_kona::dev::kona::back::raster::ops::Compare;
 use iris_kona::dev::kona::back::raster::{ClearReq, DrawState, Rect, WVertex};
 use iris_kona::wgpu::{Gpu, GpuOptions};
