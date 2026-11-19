@@ -13,5 +13,4 @@ mod perfetto_macros;
 pub mod display;
 pub mod jit;
 pub mod locks;
-pub mod traits;
 pub mod dev;

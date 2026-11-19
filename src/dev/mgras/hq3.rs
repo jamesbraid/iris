@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use super::plain::RegMap;
 
-use crate::traits::BusDevice;
+use super::hostmem::{Fault, HostMem};
 
 /// Host interface register offsets.
 pub mod host {
@@ -298,7 +298,7 @@ const DL_MAX_SEGMENTS: u32 = 1 << 20;
 
 /// A display-list segment's words from host memory: `offset` in the
 /// display-list space, through `table`.
-fn fetch_dl_segment(mem: &dyn BusDevice, table: u32, offset: u32, words: u32) -> Option<Vec<u32>> {
+fn fetch_dl_segment(mem: &dyn HostMem, table: u32, offset: u32, words: u32) -> Option<Vec<u32>> {
     let mut out = Vec::with_capacity(words as usize);
     let mut cached: Option<(u32, u32)> = None;
     for i in 0..words {
@@ -307,16 +307,12 @@ fn fetch_dl_segment(mem: &dyn BusDevice, table: u32, offset: u32, words: u32) ->
         let frame = match cached {
             Some((p, f)) if p == page => f,
             _ => {
-                let r = mem.read32(table.wrapping_add(4 * page) as u64);
-                if !r.is_ok() {
-                    return None;
-                }
-                cached = Some((page, r.data << 12));
-                r.data << 12
+                let r = mem.read32(table.wrapping_add(4 * page) as u64)?;
+                cached = Some((page, r << 12));
+                r << 12
             }
         };
-        let w = mem.read32((frame | (l & 0xFFF)) as u64);
-        out.push(if w.is_ok() { w.data } else { 0 });
+        out.push(mem.read32((frame | (l & 0xFFF)) as u64).unwrap_or(0));
     }
     Some(out)
 }
@@ -383,7 +379,9 @@ pub trait Hq3Sink {
     /// Wait until the raster engines have drawn everything queued so far.
     fn finish_raster(&mut self) {}
     /// System memory for DMA, if connected.
-    fn sys_mem(&mut self) -> Option<Arc<dyn BusDevice>>;
+    fn sys_mem(&mut self) -> Option<Arc<dyn HostMem>>;
+    /// A DMA access that reached no memory.
+    fn host_fault(&mut self, _addr: u64, _write: bool) {}
     /// Something not modelled yet (reported once).
     fn note(&mut self, what: String);
     /// Whether the annotated trace wants HQ3 lines (call `tracing`).
@@ -1573,10 +1571,10 @@ impl Hq3Engine {
                 return None;
             }
             let r = mem.read32(table.wrapping_add(4 * idx) as u64);
-            if r.is_ok() && r.data == 0 && !stop_logged.replace(true) {
+            if r == Some(0) && !stop_logged.replace(true) {
                 eprintln!("mgras: {} reaches page {page} (table entry {idx}) = frame 0", desc());
             }
-            r.is_ok().then_some(r.data << 12)
+            r.map(|f| f << 12)
         };
         let mut cached: Option<(u32, u32)> = None;
         let mut phys = |l: u32| -> Option<u32> {
@@ -1621,9 +1619,16 @@ impl Hq3Engine {
                 // RGBorder (XFRMODE bit 22) is the raster engine's: it sends
                 // RGBA red first (`rss::xfer_format`).
                 format_pixels(self.formatter, &mut bytes);
-                for (k, b) in bytes.iter().take(len as usize).enumerate() {
+                let bytes = &bytes[..bytes.len().min(len as usize)];
+                let mut k = 0;
+                while k < bytes.len() {
+                    // One page at a time: contiguous in host memory.
+                    let n = (0x1000 - ((a as usize + k) & 0xFFF)).min(bytes.len() - k);
                     let Some(pa) = phys(a + k as u32) else { return };
-                    mem.write8(pa as u64, *b);
+                    if mem.write(pa as u64, &bytes[k..k + n]) == Err(Fault) {
+                        sink.host_fault(pa as u64, true);
+                    }
+                    k += n;
                 }
             } else {
                 let mut bytes = vec![0u8; len as usize];
@@ -1632,7 +1637,9 @@ impl Hq3Engine {
                     // One page at a time: contiguous in host memory.
                     let n = (0x1000 - ((a + k) & 0xFFF)).min(len - k);
                     let Some(pa) = phys(a + k) else { return };
-                    read_host(&*mem, pa, &mut bytes[k as usize..(k + n) as usize]);
+                    if mem.read(pa as u64, &mut bytes[k as usize..(k + n) as usize]) == Err(Fault) {
+                        sink.host_fault(pa as u64, false);
+                    }
                     k += n;
                 }
                 if i == 0 && sink.tracing() {
@@ -1647,29 +1654,6 @@ impl Hq3Engine {
                 }
             }
         }
-    }
-}
-
-/// Host memory bytes from `pa` into `out`, all within one page. RAM the bus
-/// maps directly is read a doubleword at a time; anything else (and the
-/// record/replay wrappers, whose recordings are byte reads) a byte at a
-/// time, 0 where a read fails.
-fn read_host(mem: &dyn BusDevice, pa: u32, out: &mut [u8]) {
-    let base = pa & !7;
-    if mem.mem_ptr(base as u64).is_some() {
-        let skip = (pa - base) as usize;
-        let mut buf = vec![0u64; (skip + out.len()).div_ceil(8)];
-        if mem.read_block(base as u64, &mut buf) == crate::traits::BUS_OK {
-            for (i, b) in out.iter_mut().enumerate() {
-                let at = skip + i;
-                *b = (buf[at / 8] >> (56 - 8 * (at % 8))) as u8;
-            }
-            return;
-        }
-    }
-    for (i, b) in out.iter_mut().enumerate() {
-        let r = mem.read8((pa + i as u32) as u64);
-        *b = if r.is_ok() { r.data } else { 0 };
     }
 }
 
@@ -1984,44 +1968,4 @@ pub fn token_name(t: u32) -> Option<&'static str> {
         0x0C3 => "COLOR_MATERIAL_DISABLE",
         _ => return None,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::traits::{BusRead8, BUS_OK};
-
-    /// RAM the bus maps directly (`mem_ptr`), big-endian: byte `a` at `a`.
-    struct Ram(Vec<u8>);
-
-    impl BusDevice for Ram {
-        fn read8(&self, addr: u64) -> BusRead8 {
-            BusRead8::ok(self.0[addr as usize])
-        }
-        fn mem_ptr(&self, addr: u64) -> Option<*const u64> {
-            Some(self.0[addr as usize..].as_ptr() as *const u64)
-        }
-        fn read_block(&self, addr: u64, buf: &mut [u64]) -> u32 {
-            for (i, w) in buf.iter_mut().enumerate() {
-                let at = addr as usize + 8 * i;
-                *w = u64::from_be_bytes(self.0[at..at + 8].try_into().unwrap());
-            }
-            BUS_OK
-        }
-    }
-
-    /// `read_host` from directly mapped RAM gives the bytes a byte read
-    /// would, for every alignment and length within a page.
-    #[test]
-    fn read_host_matches_byte_reads() {
-        let ram = Ram((0..0x2000u32).map(|i| (i * 7 + (i >> 8)) as u8).collect());
-        for pa in [0x1000u32, 0x1001, 0x1003, 0x1007, 0x1008, 0x10F5] {
-            for len in [0usize, 1, 5, 7, 8, 9, 16, 23, 64, 0x100] {
-                let mut fast = vec![0u8; len];
-                read_host(&ram, pa, &mut fast);
-                let slow: Vec<u8> = (0..len as u32).map(|i| ram.read8((pa + i) as u64).data).collect();
-                assert_eq!(fast, slow, "pa {pa:#x} len {len}");
-            }
-        }
-    }
 }
