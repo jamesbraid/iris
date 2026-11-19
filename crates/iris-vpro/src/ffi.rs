@@ -4,7 +4,7 @@
 
 use std::ffi::{c_char, c_int, CStr};
 
-use sgi_engine::ffi::{build, call, host_parts, read_config, IrisEngine, IrisEngineConfig, IrisEngineHost, IRIS_ENGINE_FAULT, IRIS_ENGINE_OK};
+use sgi_engine::ffi::{build, call, host_parts, read_config, IrisEngine, IrisEngineConfig, IrisEngineHost, IRIS_ENGINE_ERROR, IRIS_ENGINE_FAULT, IRIS_ENGINE_OK};
 use sgi_engine::inject::Point;
 use sgi_engine::{BoardEngine, GpuLoss, Rect};
 
@@ -122,4 +122,33 @@ pub unsafe extern "C" fn iris_vpro_new(cfg: *const IrisVproConfig, host: *const 
 #[no_mangle]
 pub unsafe extern "C" fn iris_vpro_observe(h: *mut IrisEngine, x0: i32, y0: i32, x1: i32, y1: i32) -> c_int {
     unsafe { call::<VproEngine, _>(h, Point::Observe, IRIS_ENGINE_FAULT, |e| e.observe(&Rect::new(x0, y0, x1, y1)).map_or(IRIS_ENGINE_FAULT, |_| IRIS_ENGINE_OK)) }
+}
+
+/// Copy the composed scan-out, one `0x00RRGGBB` word a pixel, row by row from the top, into `buf`
+/// (`cap` words). `*w` and `*hgt` are set to the frame's size: 0 by 0 while no video mode is set
+/// (OK, nothing copied), and the size needed when `cap` is too small (ERROR, nothing copied).
+/// FAULT on a faulted engine.
+///
+/// # Safety
+/// `h` is a live VPro handle, `buf` points to `cap` words and `w` and `hgt` to `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn iris_vpro_scanout(h: *mut IrisEngine, buf: *mut u32, cap: usize, w: *mut u32, hgt: *mut u32) -> c_int {
+    unsafe {
+        call::<VproEngine, _>(h, Point::Pixel, IRIS_ENGINE_FAULT, |e| {
+            if w.is_null() || hgt.is_null() || (buf.is_null() && cap != 0) {
+                return IRIS_ENGINE_ERROR;
+            }
+            if e.fault().is_some() {
+                return IRIS_ENGINE_FAULT;
+            }
+            let (fw, fh, pixels) = e.scanout().unwrap_or((0, 0, Vec::new()));
+            *w = fw;
+            *hgt = fh;
+            if pixels.len() > cap {
+                return IRIS_ENGINE_ERROR;
+            }
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), buf, pixels.len());
+            IRIS_ENGINE_OK
+        })
+    }
 }
