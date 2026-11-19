@@ -323,6 +323,9 @@ pub const OP_AREA_LTOR: u32 = 0x0;
 pub const OP_AREA_RTOL: u32 = 0x1;
 /// IR opcode: an OpenGL line (IR_OP_GL_LINE; number provisional, ours).
 pub const OP_GL_LINE: u32 = 0x2;
+/// IR opcode 3: the line the Octane diagnostic sends (0x63 with its smooth
+/// bits), drawn as a GL line.
+pub const OP_DIAG_LINE: u32 = 0x3;
 
 /// The OpenGL per-fragment state our GE11 HLE programs into the PP1
 /// registers. The real layouts are not known (only GE11 microcode writes
@@ -2130,7 +2133,7 @@ impl Rss {
             OP_POINT => return self.point(),
             OP_AREA_LTOR => return self.triangle(true),
             OP_AREA_RTOL => return self.triangle(false),
-            OP_GL_LINE => return self.gl_line(),
+            OP_GL_LINE | OP_DIAG_LINE => return self.gl_line(),
             _ => return false,
         }
         let fm = self.reg(reg::FILLMODE);
@@ -2220,7 +2223,7 @@ impl Rss {
                     if op == OP_AREA_LTOR { "left to right" } else { "right to left" },
                     pos(0x003), pos(0x004), pos(0x005), pos(0x000))
             }
-            OP_GL_LINE => {
+            OP_GL_LINE | OP_DIAG_LINE => {
                 let pos = |n: u32| f32::from_bits(self.reg(n)) - 49151.5;
                 format!("GL LINE ({}, {})-({}, {}) config={:#x} {target}",
                     pos(0x00C), pos(0x00D), pos(0x00E), pos(0x00F), self.reg(reg::GLINECONFIG))
