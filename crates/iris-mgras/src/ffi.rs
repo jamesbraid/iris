@@ -7,7 +7,7 @@ use std::ffi::{c_int, c_void};
 
 use sgi_engine::ffi::{build, call, host_parts, read_config, CMem, IrisEngine, IrisEngineConfig, IrisEngineHost, IRIS_ENGINE_ERROR, IRIS_ENGINE_FAULT, IRIS_ENGINE_OK};
 use sgi_engine::inject::Point;
-use sgi_engine::BoardEngine;
+use sgi_engine::{BoardEngine, GpuLoss};
 
 use crate::dev::mgras::engine::{Board, Config, MgrasEngine, Mode, Region};
 use crate::dev::mgras::pixmem::{Buffer, Kind};
@@ -82,22 +82,22 @@ pub unsafe extern "C" fn iris_mgras_new(cfg: *const IrisMgrasConfig, host: *cons
                 _ => None,
             };
         }
-        let gpu = match c.common.gpu {
-            sgi_engine::ffi::IRIS_ENGINE_GPU_NONE => None,
-            mode => {
-                let backend = (!c.common.gpu_backend.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(c.common.gpu_backend) }.to_string_lossy().into_owned());
-                let opts = GpuOptions { backend: backend.unwrap_or_else(|| "auto".into()), software: mode == sgi_engine::ffi::IRIS_ENGINE_GPU_SOFTWARE, ..Default::default() };
-                match Gpu::new(&opts, Box::new(|why| log::error!("iris_mgras: GPU failed: {why}"))) {
-                    Ok(g) => Some(g),
-                    Err(e) => {
-                        log::error!("iris_mgras_new: GPU: {e}");
-                        return None;
-                    }
+        let loss = GpuLoss::new();
+        let gpu = match unsafe { c.common.gpu_request() } {
+            None => None,
+            Some((backend, software)) => match Gpu::new(&GpuOptions { backend, software, ..Default::default() }, loss.callback()) {
+                Ok(g) => Some(g),
+                Err(e) => {
+                    log::error!("iris_mgras_new: GPU: {e}");
+                    return None;
                 }
-            }
+            },
         };
         match MgrasEngine::new(config, mem, gpu.as_ref(), notify) {
-            Ok(engine) => Some(engine),
+            Ok(engine) => {
+                loss.attach(engine.gpu_lost_handler());
+                Some(engine)
+            }
             Err(e) => {
                 log::error!("iris_mgras_new: {e}");
                 None
