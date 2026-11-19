@@ -520,6 +520,7 @@ impl Default for Board {
         let raster: std::sync::Arc<RasterQueue> = Default::default();
         let display = std::sync::Arc::new(DisplayShared::new(front.clone()));
         let gpu_fault = display.gpu_fault.clone();
+        let _ = raster.fault.set(gpu_fault.clone());
         let display_fifo = std::sync::Arc::new(parking_lot::Mutex::new(DisplayFifo::new(display.clone())));
         Board {
             slot: 0,

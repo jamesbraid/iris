@@ -65,6 +65,11 @@ impl Subject for Vpro {
         self.0 == Mode::Threaded
     }
 
+    /// The board's thread passes the point as it retires a store.
+    fn worker_panics(&self) -> bool {
+        self.0 == Mode::Threaded
+    }
+
     fn credits(&self) -> bool {
         true
     }

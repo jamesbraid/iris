@@ -110,6 +110,28 @@ fn eventually(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
+/// A job that panics on the raster thread is the board's fault, and the unit
+/// goes on: a waiter is not left for a job that no longer counts, and a later
+/// job still runs.
+#[test]
+fn a_panic_on_the_raster_thread_is_a_board_fault() {
+    if super::gpu_unit_tests() {
+        return;
+    }
+    let (s, _) = gl_board();
+    let h = BoardLocks::new(s);
+    h.raster.start();
+    h.raster.submit(|_| panic!("a draw went wrong"));
+    let after = Arc::new(AtomicBool::new(false));
+    let flag = after.clone();
+    h.raster.submit(move |_| flag.store(true, SeqCst));
+    h.raster.wait_idle();
+    assert!(after.load(SeqCst), "the job behind it ran");
+    let fault = h.gpu_fault().expect("a fault");
+    assert!(fault.contains("the raster thread") && fault.contains("a draw went wrong"), "{fault}");
+    h.raster.stop();
+}
+
 /// A GL draw returns to the front end before it is drawn; a register read
 /// that waits for the board's work, issued while the draw is still queued
 /// for the raster unit, answers only once it is in the planes. A read that

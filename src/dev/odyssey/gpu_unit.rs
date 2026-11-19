@@ -43,6 +43,11 @@ pub(super) fn fail_gpu(fault: &GpuFault, operation: &str, error: impl std::fmt::
     current.clone().unwrap_or(message)
 }
 
+/// The text of a caught panic.
+pub(super) fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
+    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown panic".into())
+}
+
 /// Why GPU-owned board memory is made visible to the CPU mirror.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(feature = "wgpu"), allow(dead_code))]

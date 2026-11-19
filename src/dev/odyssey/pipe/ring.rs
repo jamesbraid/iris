@@ -166,10 +166,14 @@ pub(crate) struct QuadRing {
 impl QuadRing {
     /// Start the pool of `workers` threads on tiles `tile` pixels square (a
     /// power of two, 8 to 256); with `shader` the workers shade filled
-    /// triangles.
-    pub fn start(shader: bool, workers: usize, tile: u32) -> Arc<QuadRing> {
+    /// triangles. A worker's panic is told to `fault`.
+    pub fn start(shader: bool, workers: usize, tile: u32, fault: Option<super::super::gpu_unit::GpuFault>) -> Arc<QuadRing> {
+        let tiles = TilePool::new(ODYSSEY_POOL_THREAD, RING, tile, workers, run_slot as RunSlot);
+        if let Some(fault) = fault {
+            tiles.on_panic(Box::new(move |why| drop(super::super::gpu_unit::fail_gpu(&fault, "a tile worker", format_args!("panicked: {why}")))));
+        }
         Arc::new(QuadRing {
-            tiles: TilePool::new(ODYSSEY_POOL_THREAD, RING, tile, workers, run_slot as RunSlot),
+            tiles,
             shader,
             held: Mutex::new(VecDeque::new()),
             held_clears: Mutex::new(VecDeque::new()),
