@@ -1690,6 +1690,42 @@ fn a_gl_triangle_draws_into_the_back_buffer_and_shows_after_the_swap() {
     assert!(text.contains("raster stage      1 triangles"), "{text}");
 }
 
+/// With swaps latched, the pipe is past the swap: a draw after it goes to the new back buffer
+/// at once, and only the display waits for the retrace.
+#[test]
+fn a_latched_swap_flips_the_draw_target_now_and_the_display_at_the_frame() {
+    use crate::dev::kona::back::display::compose;
+    use crate::dev::kona::back::store::DID_PLANE;
+    let mut b = KonaBackend::new(KonaConfig::default());
+    b.latch_swaps(true);
+    let f = |v: f32| v.to_bits();
+    command(&mut b, Grammar::Kernel, WINDOW_CLIP_SETUP, &[10, 20, 50, 40, 10, 20, 50, 40, 0, 13, 0]);
+    command(&mut b, Grammar::Gl, 1, &[0, 8, 0, 1, 0, 0, 24, 0, 0, 0]);
+    command(&mut b, Grammar::Gl, SET_VIEWPORT, &[0, 0, 50, 40]);
+    let triangle = |b: &mut KonaBackend, rgb: [f32; 3]| {
+        command(b, Grammar::Gl, SET_CURRENT_COLOUR_4_COMPONENTS_SINGLE_FLOAT, &[f(rgb[0]), f(rgb[1]), f(rgb[2]), f(1.0)]);
+        command(b, Grammar::Gl, BEGIN_PRIMITIVE_INDEPENDENT_TRIANGLES, &[0]);
+        for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (0.0, 1.0)] {
+            command(b, Grammar::Gl, SUBMIT_VERTEX_3_COMPONENTS_SINGLE_FLOAT, &[f(x), f(y), f(0.0)]);
+        }
+        command(b, Grammar::Gl, END_OPEN_PRIMITIVE, &[0]);
+        command(b, Grammar::Kernel, WINDOW_SYSTEM_PIXEL_PATH_FINISH, &[0]);
+    };
+    triangle(&mut b, [1.0, 0.0, 0.0]);
+    b.store.write(30, 30, DID_PLANE, 13 << 2);
+    command(&mut b, Grammar::Kernel, DISPLAY_MODE_BYTE, &[0, 13, 4]);
+    command(&mut b, Grammar::Kernel, DISPLAY_MODE_BYTE, &[0x3c0001, 13, 1]);
+    assert!(b.swaps_waiting());
+    triangle(&mut b, [0.0, 1.0, 0.0]);
+    assert_eq!(b.store.read(30, 30, 2), 0xffff_0000, "the frame the swap showed is not drawn over");
+    assert_eq!(b.store.read(30, 30, 1), 0xff00_ff00, "the next frame goes to the other buffer");
+    b.frame();
+    assert!(!b.swaps_waiting());
+    let mut out = vec![0u32; 1280 * 1024];
+    compose(&b.store, 1, &b.map.lock(), &b.tables.lock().snapshot(), &mut out, 1280);
+    assert_eq!(out[(1023 - 30) * 1280 + 30], 0xff00_00ff, "the frame at the retrace is the one the swap named");
+}
+
 /// Each row of the drain table: what reads or writes the store drains the
 /// GL stage, and what does not leaves it alone. Counted, so the test does not
 /// depend on a worker being slow enough to lose a race.
