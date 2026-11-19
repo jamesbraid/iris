@@ -42,6 +42,8 @@ pub const IRIS_ENGINE_WORKING: u32 = 1;
 pub const IRIS_ENGINE_STALLED_FRAME: u32 = 2;
 pub const IRIS_ENGINE_STALLED_TIME: u32 = 3;
 pub const IRIS_ENGINE_FAULTED: u32 = 4;
+/// The command stream stopped for good (a fetch fault) and the engine is not faulted.
+pub const IRIS_ENGINE_STOPPED: u32 = 5;
 
 pub const IRIS_ENGINE_EVENT_IRQ: u32 = 1;
 pub const IRIS_ENGINE_EVENT_DAMAGE: u32 = 2;
@@ -130,7 +132,7 @@ impl IrisEngineConfig {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct IrisEngineIdle {
-    /// `IRIS_ENGINE_IDLE` .. `IRIS_ENGINE_FAULTED`.
+    /// `IRIS_ENGINE_IDLE` .. `IRIS_ENGINE_STOPPED`.
     pub state: u32,
     /// `STALLED_TIME`: advance to this, in ns.
     pub stall_time: u64,
@@ -243,6 +245,10 @@ pub struct IrisEngine {
 trait DynEngine: Send {
     fn any(&mut self) -> &mut dyn Any;
     fn write(&mut self, off: u32, bits: u32, val: u64) -> Write;
+    fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write;
+    fn heads(&self) -> u32;
+    fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault>;
+    fn head_deadline(&self, head: u32) -> Option<u64>;
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize;
     fn read(&mut self, off: u32, bits: u32) -> Read;
     fn set_source(&mut self, source: Source);
@@ -274,6 +280,18 @@ impl<E: BoardEngine + Send + 'static> DynEngine for E {
     }
     fn write(&mut self, off: u32, bits: u32, val: u64) -> Write {
         BoardEngine::write(self, off, bits, val)
+    }
+    fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
+        BoardEngine::write_at(self, now_ns, off, bits, val)
+    }
+    fn heads(&self) -> u32 {
+        BoardEngine::heads(self)
+    }
+    fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
+        BoardEngine::scanout(self, head, out)
+    }
+    fn head_deadline(&self, head: u32) -> Option<u64> {
+        BoardEngine::head_deadline(self, head)
     }
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize {
         BoardEngine::push_words(self, port, words)
@@ -553,6 +571,7 @@ fn idle_state(i: Idle) -> IrisEngineIdle {
         Idle::Stalled(StallOn::Frame) => (IRIS_ENGINE_STALLED_FRAME, 0),
         Idle::Stalled(StallOn::Time(t)) => (IRIS_ENGINE_STALLED_TIME, t),
         Idle::Faulted => (IRIS_ENGINE_FAULTED, 0),
+        Idle::Stopped => (IRIS_ENGINE_STOPPED, 0),
     };
     IrisEngineIdle { state, stall_time }
 }
@@ -569,6 +588,74 @@ fn idle_code(i: Idle) -> c_int {
 #[no_mangle]
 pub unsafe extern "C" fn iris_engine_write(h: *mut IrisEngine, off: u32, bits: u32, val: u64) -> c_int {
     guard(h, Point::Write, IRIS_ENGINE_FAULT, |s| code_write(s.eng.write(off, bits, val)))
+}
+
+/// `iris_engine_write` with the shell's time at the store, in its `advance` time base.
+///
+/// # Safety
+/// `h` is a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn iris_engine_write_at(h: *mut IrisEngine, now_ns: u64, off: u32, bits: u32, val: u64) -> c_int {
+    guard(h, Point::Write, IRIS_ENGINE_FAULT, |s| code_write(s.eng.write_at(now_ns, off, bits, val)))
+}
+
+/// The number of scan-out heads `iris_engine_scanout` takes; 0 for a board with none.
+///
+/// # Safety
+/// `h` is a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn iris_engine_heads(h: *mut IrisEngine) -> u32 {
+    guard(h, Point::Flags, 0, |s| s.eng.heads())
+}
+
+/// Copy head `head`'s composed picture, one `0x00RRGGBB` word a pixel, rows from the top, into
+/// `buf` (`cap` words). `*w` and `*hgt` are the frame's size: 0 by 0 while the head has no mode
+/// (OK, nothing copied), and the size needed when `cap` is too small (ERROR, nothing copied).
+/// FAULT on a faulted engine.
+///
+/// # Safety
+/// `h` is a live handle, `buf` points to `cap` words and `w` and `hgt` to `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn iris_engine_scanout(h: *mut IrisEngine, head: u32, buf: *mut u32, cap: usize, w: *mut u32, hgt: *mut u32) -> c_int {
+    guard(h, Point::Pixel, IRIS_ENGINE_FAULT, |s| {
+        if w.is_null() || hgt.is_null() || (buf.is_null() && cap != 0) {
+            return IRIS_ENGINE_ERROR;
+        }
+        let mut pixels = Vec::new();
+        match s.eng.scanout(head, &mut pixels) {
+            Err(f) => {
+                set_error(s, &f.0);
+                IRIS_ENGINE_FAULT
+            }
+            Ok(size) => {
+                let (fw, fh) = size.unwrap_or((0, 0));
+                unsafe {
+                    *w = fw;
+                    *hgt = fh;
+                }
+                if pixels.len() > cap {
+                    return IRIS_ENGINE_ERROR;
+                }
+                unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), buf, pixels.len()) };
+                IRIS_ENGINE_OK
+            }
+        }
+    })
+}
+
+/// When head `head` next needs `iris_engine_advance`, in ns: 1 with `*when` set, 0 for none.
+///
+/// # Safety
+/// `h` is a live handle and `when` points to a `uint64_t`.
+#[no_mangle]
+pub unsafe extern "C" fn iris_engine_head_deadline(h: *mut IrisEngine, head: u32, when: *mut u64) -> c_int {
+    guard(h, Point::Flags, 0, |s| match s.eng.head_deadline(head) {
+        Some(t) if !when.is_null() => {
+            unsafe { *when = t };
+            1
+        }
+        _ => 0,
+    })
 }
 
 /// A batch of FIFO words into `port`; returns how many were taken.

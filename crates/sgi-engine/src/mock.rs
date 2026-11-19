@@ -45,6 +45,10 @@ pub mod reg {
     /// Queued: publish the 2 or 4 bytes of `DMA_DATA` at the bus address written, as one write.
     pub const PUBLISH16: u32 = 0x40;
     pub const PUBLISH32: u32 = 0x44;
+    /// Queued: stop the stream for good, as a fetch fault stops a command processor.
+    pub const STOP: u32 = 0x48;
+    /// Immediate: the guest's own reset of the stream, which starts it again.
+    pub const STREAM_RESET: u32 = 0x4C;
     /// Reads: wait for queued work. The sum, and the last DMA read.
     pub const SUM: u32 = 0x30;
     pub const DMA_RESULT: u32 = 0x34;
@@ -80,6 +84,7 @@ enum Op {
     Fence(u64, u32),
     Packet(u8, bool),
     Boom,
+    Stop,
     LentStore(usize, u64),
     LentAdd(usize, u64),
 }
@@ -92,6 +97,7 @@ pub struct Mock<M: HostMem> {
     source: Source,
     dma_data: u32,
     held_swap: bool,
+    stopped: bool,
     wait_until: Option<u64>,
     fences: Vec<(u64, u32)>,
     sum: u64,
@@ -104,6 +110,8 @@ pub struct Mock<M: HostMem> {
     dead: AtomicBool,
     pub observed: Vec<(u64, u64)>,
     pub frames: u64,
+    /// The times `write_at` was given, oldest first.
+    pub write_times: Vec<u64>,
 }
 
 impl<M: HostMem> Mock<M> {
@@ -118,6 +126,7 @@ impl<M: HostMem> Mock<M> {
             source: Source::default(),
             dma_data: 0,
             held_swap: false,
+            stopped: false,
             wait_until: None,
             fences: Vec::new(),
             sum: 0,
@@ -130,6 +139,7 @@ impl<M: HostMem> Mock<M> {
             dead: AtomicBool::new(false),
             observed: Vec::new(),
             frames: 0,
+            write_times: Vec::new(),
         }
     }
 
@@ -152,6 +162,8 @@ impl<M: HostMem> Mock<M> {
     fn idle(&self) -> Idle {
         if self.dead() {
             Idle::Faulted
+        } else if self.stopped {
+            Idle::Stopped
         } else if self.queue.is_empty() {
             Idle::Yes
         } else {
@@ -195,6 +207,10 @@ impl<M: HostMem> Mock<M> {
             Op::Fence(addr, val) => self.fences.push((addr, val)),
             Op::Packet(v, level) => self.out.post(Event::Interrupt(Interrupt { sender: 7, widget: 8, addr: 0x1000, vector: v, level })),
             Op::Boom => panic!("the mock board was told to"),
+            Op::Stop => {
+                self.stopped = true;
+                self.queue.clear();
+            }
             Op::LentStore(w, v) => self.lent_put(w, v),
             Op::LentAdd(w, v) => {
                 let old = self.lent_get(w);
@@ -273,7 +289,14 @@ impl<M: HostMem> BoardEngine for Mock<M> {
                 self.dma_data = val as u32;
                 return Write::Done;
             }
+            reg::STREAM_RESET => {
+                self.stopped = false;
+                return Write::Done;
+            }
             _ => {}
+        }
+        if self.stopped {
+            return Write::Done;
         }
         if !self.room(1) {
             return Write::Busy;
@@ -290,12 +313,38 @@ impl<M: HostMem> BoardEngine for Mock<M> {
             reg::PACKET => Op::Packet(val as u8, true),
             reg::PACKET_CLR => Op::Packet(val as u8, false),
             reg::BOOM => Op::Boom,
+            reg::STOP => Op::Stop,
             o if (reg::LENT_STORE..reg::LENT_ADD).contains(&o) => Op::LentStore(((o - reg::LENT_STORE) / 8) as usize, val),
             o if o >= reg::LENT_ADD => Op::LentAdd(((o - reg::LENT_ADD) / 8) as usize, val),
             _ => return Write::Fault,
         };
         self.push(op);
         Write::Done
+    }
+
+    fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
+        self.write_times.push(now_ns);
+        self.write(off, bits, val)
+    }
+
+    fn heads(&self) -> u32 {
+        2
+    }
+
+    fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
+        if let Some(f) = self.fault() {
+            return Err(Fault(f));
+        }
+        out.clear();
+        if head >= 2 {
+            return Ok(None);
+        }
+        out.extend((0..4 * 2).map(|i| (head + 1) << 16 | i));
+        Ok(Some((4, 2)))
+    }
+
+    fn head_deadline(&self, head: u32) -> Option<u64> {
+        (head < 2).then_some(1_000 * (head as u64 + 1))
     }
 
     fn push_words(&mut self, _port: u32, words: &[u32]) -> usize {
@@ -505,6 +554,7 @@ impl<M: HostMem> BoardEngine for Mock<M> {
             return Err(Refused::NotQuiesced);
         }
         self.held_swap = false;
+        self.stopped = false;
         self.wait_until = None;
         self.fences.clear();
         self.sum = 0;

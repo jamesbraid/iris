@@ -31,6 +31,11 @@
 //! `fault`, `irq_levels`, `quiesce` (which still parks) and `reset` keep working.
 //! A panic in an engine thread or a call becomes a fault the same way.
 //!
+//! **A stopped stream.** A board whose command processor stops for good (a
+//! fetch fault) answers `Idle::Stopped`: not a device fault, so every call
+//! still works and `quiesce` parks it, but no queued work runs until the
+//! guest resets the stream or the shell calls `reset`.
+//!
 //! **Quiescence.** `quiesce` before `observe_all`, `save`, `load` and `reset`,
 //! and when the VM stops (the shell does it from its run-state handler, and
 //! `resume`s when it runs again): a worker still draining keeps writing guest
@@ -48,7 +53,8 @@
 //! `conformance` (feature `conformance`): every board's tests implement its
 //! `Subject` and run them.
 //!
-//! **Time.** Passed in on `advance`, `frame` and `wait_idle`; the engine reads
+//! **Time.** Passed in on `advance`, `frame` and `wait_idle`, and on `write_at`
+//! for a store whose effect starts a timer at the write; the engine reads
 //! no host clock but for the host-time `budget_ns` the shell gives.
 
 #[cfg(feature = "conformance")]

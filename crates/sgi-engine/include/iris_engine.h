@@ -107,6 +107,7 @@ extern "C" {
 #define IRIS_ENGINE_STALLED_FRAME   2
 #define IRIS_ENGINE_STALLED_TIME    3
 #define IRIS_ENGINE_FAULTED         4
+#define IRIS_ENGINE_STOPPED         5   /* the command stream stopped for good; not a fault */
 
 /* IrisEngineEvent.kind */
 #define IRIS_ENGINE_EVENT_IRQ           1
@@ -249,6 +250,25 @@ int iris_engine_contains_panics(void);
  */
 int iris_engine_write(IrisEngine *h, uint32_t off, uint32_t bits,
                       uint64_t val);
+
+/* iris_engine_write with the shell's time at the store, in its advance time base. */
+int iris_engine_write_at(IrisEngine *h, uint64_t now_ns, uint32_t off,
+                         uint32_t bits, uint64_t val);
+
+/* The number of scan-out heads iris_engine_scanout takes; 0 for a board with none. */
+uint32_t iris_engine_heads(IrisEngine *h);
+
+/*
+ * Copy head's composed picture, one 0x00RRGGBB word a pixel, rows from the top,
+ * into buf (cap words). *w and *hgt are the frame's size: 0 by 0 while the head
+ * has no mode (OK, nothing copied), and the size needed when cap is too small
+ * (ERROR, nothing copied). FAULT on a faulted engine.
+ */
+int iris_engine_scanout(IrisEngine *h, uint32_t head, uint32_t *buf,
+                        size_t cap, uint32_t *w, uint32_t *hgt);
+
+/* When head next needs iris_engine_advance, in ns: 1 with *when set, 0 for none. */
+int iris_engine_head_deadline(IrisEngine *h, uint32_t head, uint64_t *when);
 
 /* A batch of FIFO words into a port; returns the number taken. */
 size_t iris_engine_push_words(IrisEngine *h, uint32_t port,
