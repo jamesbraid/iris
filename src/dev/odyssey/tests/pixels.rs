@@ -779,6 +779,16 @@ fn a_copy_of_the_largest_rectangle_is_bounded_by_the_planes() {
     assert_eq!(c.size(), (MAX_DIM, MAX_DIM));
 }
 
+/// The GPU unit's copy kernel stages a copy in a fixed scratch; a larger one, such as a guest's
+/// 4096 by 4096, goes to the CPU instead of faulting the unit and stopping the machine.
+#[test]
+fn a_copy_past_the_gpu_scratch_runs_on_the_cpu() {
+    use crate::dev::odyssey::gpu_unit::copy_fits;
+    assert!(copy_fits(2048, 1024));
+    assert!(!copy_fits(2048, 1025));
+    assert!(!copy_fits(MAX_DIM, MAX_DIM));
+}
+
 /// TyrQuake's water and lava: it draws the warped liquid into its
 /// 10:10:10:2 window and copies it into the liquid's 8:8:8:8 texture
 /// (glCopyTexSubImage). The copy's source format byte 0x02 names the
