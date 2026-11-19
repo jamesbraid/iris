@@ -432,13 +432,37 @@ impl KonaBackend {
     /// part way through a primitive or a pixel transfer. The counters, the tile scheduler and
     /// what a frame is composed from are not saved.
     pub fn visit_small<S: stream::Stream>(&mut self, s: &mut S) -> Result<(), String> {
+        if !s.loading() && self.contexts.busy() {
+            return Err("a context is in the middle of a primitive or a pixel transfer".into());
+        }
+        self.visit_tables(s)
+    }
+
+    /// `visit_small`, then the primitives and pixel transfers contexts have part way, which
+    /// `visit_small` refuses to save.
+    pub fn visit_small_open<S: stream::Stream>(&mut self, s: &mut S) -> Result<(), String> {
+        self.visit_tables(s)?;
+        self.contexts.visit_open(s);
+        self.gl.visit_open(s);
+        Ok(())
+    }
+
+    /// `check_small` and `visit_small_open`'s share of it, over throwaway objects.
+    pub fn check_small_open<S: stream::Stream>(s: &mut S) {
+        let (mut tables, mut textport, mut contexts) = (Tables::default(), Textport::default(), Contexts::default());
+        tables.visit(s);
+        textport.visit(s);
+        contexts.visit(s);
+        display::channels::Channels::new(0).visit(s);
+        contexts.visit_open(s);
+        gl::GlPath::new((0, 0)).visit_open(s);
+    }
+
+    fn visit_tables<S: stream::Stream>(&mut self, s: &mut S) -> Result<(), String> {
         if !s.loading() {
             self.drain();
             if !self.swaps.is_empty() {
                 return Err("a swap waits for its retrace".into());
-            }
-            if self.contexts.busy() {
-                return Err("a context is in the middle of a primitive or a pixel transfer".into());
             }
         }
         self.tables.lock().visit(s);

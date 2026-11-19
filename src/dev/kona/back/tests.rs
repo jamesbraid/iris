@@ -1250,6 +1250,55 @@ fn lit_pixels(b: &mut KonaBackend) -> Vec<(u32, u32)> {
     (0..64).flat_map(|y| (0..64u32).map(move |x| (x, y))).filter(|&(x, y)| b.store.read(x, y, 2) != 0).collect()
 }
 
+/// A backend that loaded `b`'s small state with the primitives and pixel transfers part way.
+fn restored(b: &mut KonaBackend) -> KonaBackend {
+    use crate::dev::kona::stream::{Reader, Writer};
+    let mut w = Writer::default();
+    b.visit_small_open(&mut w).unwrap();
+    let mut back = backend();
+    let mut r = Reader::new(&w.out);
+    back.visit_small_open(&mut r).unwrap();
+    r.finish().unwrap();
+    back
+}
+
+/// A snapshot taken between two vertices of a primitive draws the same triangle once the rest of
+/// the primitive arrives as an uninterrupted run does; the plain snapshot refuses the state.
+#[test]
+fn a_primitive_open_at_a_snapshot_draws_after_the_load() {
+    use crate::dev::kona::stream::Writer;
+    let draw = |cut: bool| {
+        let mut b = gl_window();
+        command(&mut b, Grammar::Gl, BEGIN_PRIMITIVE_INDEPENDENT_TRIANGLES, &[0]);
+        let mut vertex = |b: &mut KonaBackend, x: f32, y: f32| command(b, Grammar::Gl, SUBMIT_VERTEX_3_COMPONENTS_SINGLE_FLOAT, &[ndc(x), ndc(y), 0.0f32.to_bits()]);
+        vertex(&mut b, 4.0, 4.0);
+        vertex(&mut b, 60.0, 4.0);
+        if cut {
+            assert!(b.visit_small(&mut Writer::default()).is_err(), "the plain snapshot has nowhere to put an open primitive");
+            b = restored(&mut b);
+        }
+        vertex(&mut b, 4.0, 60.0);
+        command(&mut b, Grammar::Gl, END_OPEN_PRIMITIVE, &[0]);
+        lit_pixels(&mut b)
+    };
+    let whole = draw(false);
+    assert!(whole.len() > 1000, "the triangle covers about half of the window: {}", whole.len());
+    assert_eq!(draw(true), whole);
+}
+
+/// A write that has announced its rows and waits for them takes them after a load.
+#[test]
+fn a_pixel_write_waiting_for_its_rows_takes_them_after_the_load() {
+    let (mut b, mut r) = (backend(), Rig::new());
+    r.x(&mut b, WINDOW_SYSTEM_GRAPHICS_CONTEXT_LOAD, &INDEX_GC);
+    r.x(&mut b, WINDOW_SYSTEM_PIXEL_PATH_SET_UP, &[0, 0, 1, 8, 3, 2, 0]);
+    assert_eq!(r.x(&mut b, WINDOW_SYSTEM_PIXEL_WRITE, &[4, 2]), Reply::Data(2));
+    let mut b = restored(&mut b);
+    r.send(&mut b, Job::Data { grammar: Grammar::Kernel, selector: WINDOW_SYSTEM_PIXEL_WRITE, args: &[4, 2], words: &[0x0102_0300, 0x0405_0600] });
+    assert_eq!([b.store.read(4, 1021, 1), b.store.read(6, 1021, 1), b.store.read(5, 1020, 1)], [0x100, 0x300, 0x500]);
+    assert!(run(&mut b, &["status"]).1.contains("1 writes (0 by DMA), 0 copies, 0 reads, 0 finishes"));
+}
+
 /// A texture through the board: a 2 x 2 image loaded inline, bound by its short bind and
 /// record, and drawn with the replace environment, shows its texels at nearest and
 /// blends them at linear; with the texture off the draw is the vertex colour.

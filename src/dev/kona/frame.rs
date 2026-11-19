@@ -180,6 +180,32 @@ impl Port {
         }
     }
 
+    /// The command open, if any, as the stream module reads and writes it. A word list that does
+    /// not fit the table's entry for its selector is refused, and the framer left idle.
+    pub fn visit<S: super::stream::Stream>(&mut self, s: &mut S) {
+        // Every field is named, so a new one fails to compile until it is saved here or left out on purpose.
+        let Self { table: _, framing: _, selector: _, expected: _, have: _, args: _ } = self;
+        s.bool(&mut self.framing);
+        if !self.framing {
+            self.reset();
+            return;
+        }
+        s.u32(&mut self.selector);
+        let (mut expected, mut have) = (self.expected as u32, self.have as u32);
+        s.u32(&mut expected);
+        s.u32(&mut have);
+        if s.loading() {
+            let entry = self.table.get(self.selector);
+            if !entry.is_some_and(|e| e.argc as u32 == expected) || have >= expected {
+                s.fail("a saved framer holds a command its table does not have");
+                self.reset();
+                return;
+            }
+            (self.expected, self.have) = (expected as usize, have as usize);
+        }
+        s.u32s(&mut self.args[..self.have]);
+    }
+
     /// The command the last `push` completed.
     pub fn packet(&self) -> Packet {
         Packet { selector: self.selector, argc: self.expected, args: self.args }

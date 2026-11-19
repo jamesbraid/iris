@@ -27,14 +27,15 @@ use super::handle::DisplayHandle;
 use super::ident::KonaConfig;
 use super::pipe::{Core, LoadSection};
 use super::regs::{classify, Access};
-use super::stream;
+use super::stream::{self, Stream};
 use crate::chunk_store::CHUNK_SIZE;
 use crate::irq::InterruptController;
 use crate::traits::{BusDevice, BUS_ERR, BUS_OK};
 use crate::SharedGpu;
 
-/// The version of the state `save` writes.
-pub const STATE_VERSION: u32 = 1;
+/// The version of the state `save` writes. Version 1 held only a stream between commands;
+/// 2 adds the commands a guest has part way and the credits they owe. A load takes both.
+pub const STATE_VERSION: u32 = 2;
 
 /// Stores `quiesce` and `wait_idle` run between looks at the clock.
 const SLICE: usize = 1 << 12;
@@ -120,6 +121,14 @@ struct Credits {
     parked: u32,
     /// The sender of the last store, who a settle with no store of its own pays.
     last: u32,
+}
+
+impl Credits {
+    fn visit<S: Stream>(&mut self, s: &mut S) {
+        s.u32(&mut self.held);
+        s.u32(&mut self.parked);
+        s.u32(&mut self.last);
+    }
 }
 
 /// The state's `meta` chunk: the version, the length of the `state` blob that follows it and the
@@ -555,11 +564,12 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         if self.back.swaps_waiting() {
             return Err(Refused::Midway("a swap waits for its retrace".into()));
         }
-        self.core.at_boundary().map_err(Refused::Midway)?;
         let mut w = stream::Writer::default();
         self.host.front.lock().visit(&mut w);
         self.core.visit(&mut w);
-        self.back.visit_small(&mut w).map_err(Refused::Midway)?;
+        self.back.visit_small_open(&mut w).map_err(Refused::Midway)?;
+        self.core.visit_open(&mut w);
+        self.credits.visit(&mut w);
         let meta = Meta { version: STATE_VERSION, state_len: w.out.len() as u32, bulk: self.back.bulk_layout() };
         let put = |sink: &mut dyn StateSink, name: &str, index: u64, bytes: Vec<u8>| sink.put(Chunk { name: name.into(), index, bytes }).map_err(|e| e.0);
         let sent = (|| {
@@ -581,9 +591,10 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
             return Err(bad("state does not start with meta".into()));
         }
         let meta: Meta = postcard::from_bytes(&first.bytes).map_err(|e| bad(format!("meta: {e}")))?;
-        if meta.version != STATE_VERSION {
-            return Err(bad(format!("state version {} is not {STATE_VERSION}", meta.version)));
+        if !(1..=STATE_VERSION).contains(&meta.version) {
+            return Err(bad(format!("state version {} is not 1 to {STATE_VERSION}", meta.version)));
         }
+        let open = meta.version >= 2;
         if meta.state_len as usize > 1 << 28 {
             return Err(bad(format!("a state blob of {} bytes", meta.state_len)));
         }
@@ -606,15 +617,30 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
             let cfg = self.core.cfg.clone();
             let mut r = stream::Reader::new(&blob);
             Front::new(&cfg).visit(&mut r);
-            Core::new(cfg, Flash::fresh()).visit(&mut r);
-            KonaBackend::check_small(&mut r);
+            let mut core = Core::new(cfg, Flash::fresh());
+            core.visit(&mut r);
+            if open {
+                KonaBackend::check_small_open(&mut r);
+                core.visit_open(&mut r);
+                Credits::default().visit(&mut r);
+            } else {
+                KonaBackend::check_small(&mut r);
+            }
             r.finish().map_err(bad)?;
         }
         let mut r = stream::Reader::new(&blob);
         self.host.front.lock().visit(&mut r);
         self.core.visit(&mut r);
-        self.back.visit_small(&mut r).map_err(bad)?;
+        let mut credits = Credits::default();
+        if open {
+            self.back.visit_small_open(&mut r).map_err(bad)?;
+            self.core.visit_open(&mut r);
+            credits.visit(&mut r);
+        } else {
+            self.back.visit_small(&mut r).map_err(bad)?;
+        }
         r.finish().map_err(bad)?;
+        self.credits = credits;
         self.back.apply_chunks(prepared).map_err(bad)?;
         self.host.activity.store(false, Relaxed);
         self.events.out.post(Event::Irq);

@@ -105,6 +105,11 @@ impl XState {
         s.u64(&mut self.loads);
     }
 
+    /// A pixel transfer part way, as the stream module reads and writes it.
+    pub fn visit_open<S: crate::dev::kona::stream::Stream>(&mut self, s: &mut S) {
+        self.pixel.visit_open(s);
+    }
+
     #[cfg(test)]
     /// Power-on state.
     pub fn reset(&mut self) {

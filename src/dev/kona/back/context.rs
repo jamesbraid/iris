@@ -40,6 +40,12 @@ impl Context {
         self.x.busy() || self.gl.busy()
     }
 
+    /// What the context has part way: a primitive and a pixel transfer. Follows `visit`.
+    pub fn visit_open<S: crate::dev::kona::stream::Stream>(&mut self, s: &mut S) {
+        self.gl.visit_open(s);
+        self.x.visit_open(s);
+    }
+
     /// The context's state, as the stream module reads and writes it.
     pub fn visit<S: crate::dev::kona::stream::Stream>(&mut self, s: &mut S) {
         // Every field is named, so a new one fails to compile until it is saved here or left out on purpose.
@@ -113,6 +119,14 @@ impl Contexts {
     /// Whether any context is part way through something a snapshot does not carry.
     pub fn busy(&self) -> bool {
         self.none.busy() || self.slots.iter().flatten().any(|c| c.busy())
+    }
+
+    /// What every context has part way, in the order `visit` lists them. Follows `visit`.
+    pub fn visit_open<S: crate::dev::kona::stream::Stream>(&mut self, s: &mut S) {
+        self.none.visit_open(s);
+        for c in self.slots.iter_mut().flatten() {
+            c.visit_open(s);
+        }
     }
 
     /// Every context, as the stream module reads and writes them: the no-context state,

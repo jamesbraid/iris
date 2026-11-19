@@ -176,6 +176,31 @@ impl FlashOp {
         self.op != 0
     }
 
+    /// The open operation, as the stream module reads and writes it. A saved one that no
+    /// operation of the table could be in is refused and left closed.
+    pub fn visit<S: super::stream::Stream>(&mut self, s: &mut S) {
+        // Every field is named, so a new one fails to compile until it is saved here or left out on purpose.
+        let Self { op: _, need: _, have: _, args: _, data: _, store: _, addr: _, outside: _ } = self;
+        let (mut need, mut have) = (self.need as u32, self.have as u32);
+        s.u32(&mut self.op);
+        s.u32(&mut need);
+        s.u32(&mut have);
+        s.u32s(&mut self.args);
+        s.u32(&mut self.data);
+        s.bool(&mut self.store);
+        s.u64(&mut self.addr);
+        s.bool(&mut self.outside);
+        if s.loading() {
+            let taking = have < need || (self.op == OP_WRITE && self.data > 0);
+            if self.op == 0 || self.op == OP_ERASE_COMBO || self.op as usize >= OP_WORDS.len() || need > self.args.len() as u32 || have > need || !taking {
+                s.fail("a saved flash operation is not one the table has");
+                *self = FlashOp::default();
+                return;
+            }
+            (self.need, self.have) = (need as usize, have as usize);
+        }
+    }
+
     /// The operation number arrived. Op 6 acts at once; an unknown number
     /// takes no more words.
     pub fn begin(&mut self, flash: &mut Flash, op: u32) -> Option<Action> {

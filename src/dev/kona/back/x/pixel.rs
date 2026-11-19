@@ -130,7 +130,7 @@ pub const MAX_WRITE_WORDS: usize = 16 << 20;
 const READ_LIMIT: usize = 0x4000 - 8;
 
 /// A write that has announced its rows and waits for them.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct Pending {
     x: i32,
     y: i32,
@@ -213,6 +213,35 @@ impl Pixel {
         }
     }
 
+    /// The write waiting for its rows and the read bracket open, as the stream module reads and
+    /// writes them. Follows `visit`, which leaves both closed.
+    pub fn visit_open<S: crate::dev::kona::stream::Stream>(&mut self, s: &mut S) {
+        s.opt(&mut self.pending, |s, p| {
+            s.i32(&mut p.x);
+            s.i32(&mut p.y);
+            s.usize(&mut p.words);
+            s.bool(&mut p.dma);
+        });
+        s.opt(&mut self.read_dma, |s, d| {
+            s.u32s(&mut d.descriptor);
+            s.bool(&mut d.refused);
+            s.u32s(&mut d.header);
+            s.bool(&mut d.texels);
+            let mut has = d.data.is_some();
+            s.bool(&mut has);
+            if s.loading() {
+                d.data = has.then(Vec::new);
+            }
+            if let Some(v) = &mut d.data {
+                s.vec_u8(v);
+            }
+        });
+        if s.loading() && self.pending.is_some_and(|p| p.words == 0 || p.words > MAX_WRITE_WORDS) {
+            s.fail("a saved pixel write is longer than the pipe takes");
+            self.pending = None;
+        }
+    }
+
     fn count(&mut self, v: Verdict) {
         match v {
             Verdict::Done => {}
@@ -227,7 +256,7 @@ impl Pixel {
 /// A read bracket the kernel opened with select-feed start: where the host
 /// buffer is and how its lines lie, and, once the read inside it has run, the
 /// bytes waiting for the bracket's finish.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct ReadDma {
     descriptor: [u32; 6],
     refused: bool,
