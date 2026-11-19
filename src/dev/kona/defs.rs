@@ -2200,6 +2200,7 @@ pub mod reply {
     /// (the client truncates it to an integer, so set is 1.0), its exact bit pattern inferred.
     pub const CURRENT_WORDS: usize = 13;
     pub const CURRENT_COLOUR: usize = 0;
+    pub const CURRENT_INDEX: usize = 4;
     pub const CURRENT_NORMAL: usize = 5;
     pub const CURRENT_TEXTURE: usize = 8;
     pub const CURRENT_EDGE_FLAG: usize = 12;

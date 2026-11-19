@@ -419,6 +419,7 @@ pub fn answer(gl: &mut Gl, c: &mut Counts, selector: u32, a: &[u32]) -> Vec<u32>
         (QUERY_CURRENT_VERTEX_ATTRIBUTES, _) => {
             let mut r = [0u32; reply::CURRENT_WORDS];
             r[reply::CURRENT_COLOUR..][..4].copy_from_slice(&floats(&gl.color));
+            r[reply::CURRENT_INDEX] = gl.index.to_bits();
             r[reply::CURRENT_NORMAL..][..3].copy_from_slice(&floats(&gl.normal));
             r[reply::CURRENT_TEXTURE..][..4].copy_from_slice(&floats(&gl.texcoord));
             r[reply::CURRENT_EDGE_FLAG] = (gl.edge_flag as u32 as f32).to_bits();
@@ -774,6 +775,7 @@ mod tests {
         let r = answer(&mut gl, &mut c, QUERY_CURRENT_VERTEX_ATTRIBUTES, &[0]);
         assert_eq!(r.len(), 13);
         assert_eq!(f32::from_bits(r[0]), 0.1);
+        assert_eq!(f32::from_bits(r[4]), 1.0, "the current colour index, 1 until a client sets one");
         assert_eq!([f32::from_bits(r[5]), f32::from_bits(r[6]), f32::from_bits(r[7])], [0.0, 1.0, 0.0], "the normal at byte 20");
         assert_eq!(r.iter().skip(8).take(4).map(|w| f32::from_bits(*w)).collect::<Vec<_>>(), [5.0, 6.0, 7.0, 8.0], "all four texture coordinates at byte 32");
         assert_eq!(r[12], 0, "the edge flag at byte 48, a clear flag the float 0.0");
