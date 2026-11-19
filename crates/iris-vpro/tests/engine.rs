@@ -347,6 +347,27 @@ fn a_faulted_engine_answers_as_the_contract_says_on_every_entry() {
     }
 }
 
+/// A GPU unit's loss, on whatever thread it is reported, names the adapter in a `GpuLost` event,
+/// faults the engine and wakes the shell at once, not at its next pump.
+#[test]
+fn a_gpu_loss_posts_gpu_lost_faults_the_engine_and_wakes_the_shell() {
+    let woken = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let w = woken.clone();
+    let loss = GpuLoss::new();
+    let notify: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        w.fetch_add(1, Ordering::SeqCst);
+    });
+    let mut e = VproEngine::with_gpu(config("v12", Mode::Threaded), None, Shared(Arc::new(Ram::default())), Some(notify), None, loss.clone()).unwrap();
+    let lost = loss.callback();
+    std::thread::spawn(move || lost("NVIDIA GeForce RTX 4090: wgpu device lost (Unknown): gone")).join().unwrap();
+    assert!(woken.load(Ordering::SeqCst) >= 1, "the shell was told without a call into the engine");
+    assert_eq!(e.write(CMD_FIFO, 32, 0), Write::Fault);
+    let seen = drain(&mut e);
+    assert!(seen.contains(&Event::GpuLost("NVIDIA GeForce RTX 4090: wgpu device lost (Unknown): gone".into())), "{seen:?}");
+    assert_eq!(seen.iter().filter(|x| matches!(x, Event::DeviceFault(_))).count(), 1, "{seen:?}");
+    assert!(e.fault().unwrap().contains("RTX 4090"));
+}
+
 /// A handle moves between threads, one call at a time.
 #[test]
 fn an_engine_moves_between_threads() {

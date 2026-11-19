@@ -503,7 +503,7 @@ impl DisplayShared {
             mode: ModeCell::new(),
             vram: OnceLock::new(),
             gpu_scanout: OnceLock::new(),
-            gpu_fault: Arc::new(Mutex::new(None)),
+            gpu_fault: Default::default(),
             covered: Arc::new(AtomicU64::new(u64::MAX)),
             front,
             swaps: AtomicU64::new(0),

@@ -953,7 +953,7 @@ impl GpuRaster {
             stream_now: 0,
             stream: None,
             mirror: VramPtr::null(),
-            fault: Arc::new(parking_lot::Mutex::new(None)),
+            fault: Default::default(),
             gpu_dirty: vec![0; blocks.div_ceil(64)],
             gpu_dirty_any: false,
             dropped: 0,

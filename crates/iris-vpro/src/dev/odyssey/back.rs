@@ -83,7 +83,7 @@ impl VproBack {
     /// the GPU when one is given and on the CPU otherwise.
     pub fn new(vram_bytes: u64, gpu: Option<&Arc<Gpu>>) -> Result<VproBack, String> {
         let mut vram = Vram::new(vram_bytes);
-        let fault: GpuFault = Arc::new(parking_lot::Mutex::new(None));
+        let fault = GpuFault::default();
         let gpu = match gpu {
             Some(g) => {
                 let mut unit = GpuRaster::new(g, vram_bytes, PLANE_SPAN, PLANE_SPAN)?;

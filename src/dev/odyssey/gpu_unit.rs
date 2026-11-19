@@ -7,7 +7,26 @@ use super::view::View;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-pub(super) type GpuFault = Arc<Mutex<Option<String>>>;
+/// The board's first failure, which stays until a reset, and what to tell
+/// when it happens (the engine's shell, which must stop on it).
+#[derive(Default)]
+pub(super) struct FaultCell {
+    text: Mutex<Option<String>>,
+    on_fault: std::sync::OnceLock<Box<dyn Fn(&str) + Send + Sync>>,
+}
+
+pub(super) type GpuFault = Arc<FaultCell>;
+
+impl FaultCell {
+    pub fn lock(&self) -> parking_lot::MutexGuard<'_, Option<String>> {
+        self.text.lock()
+    }
+
+    /// Call `hook` with the message when the first failure is recorded, from the thread that hit it.
+    pub fn on_fault(&self, hook: Box<dyn Fn(&str) + Send + Sync>) {
+        let _ = self.on_fault.set(hook);
+    }
+}
 
 pub(super) fn fail_gpu(fault: &GpuFault, operation: &str, error: impl std::fmt::Display) -> String {
     let message = format!("{operation}: {error}");
@@ -15,6 +34,11 @@ pub(super) fn fail_gpu(fault: &GpuFault, operation: &str, error: impl std::fmt::
     if current.is_none() {
         crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi-odyssey: GPU unit failed: {message}");
         *current = Some(message.clone());
+        drop(current);
+        if let Some(hook) = fault.on_fault.get() {
+            hook(&message);
+        }
+        return message;
     }
     current.clone().unwrap_or(message)
 }
