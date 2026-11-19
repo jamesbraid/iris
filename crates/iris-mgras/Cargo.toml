@@ -13,13 +13,14 @@ doctest = false
 [features]
 default = ["wgpu"]
 wgpu = []
-# Panic injection points for the tests (`inject`).
-fault-injection = []
+# Panic injection points for the tests (`sgi_engine::inject`).
+fault-injection = ["sgi-engine/fault-injection"]
 # `tools/check-header`: cbindgen compares the C header with src/ffi.rs.
 header-check = ["dep:cbindgen"]
 gr4-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]
 
 [dependencies]
+sgi-engine = { path = "../sgi-engine" }
 sgi-gpu-core = { path = "../sgi-gpu-core", default-features = false }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan", "metal", "dx12"] }
 bytemuck = { version = "1", features = ["derive"] }

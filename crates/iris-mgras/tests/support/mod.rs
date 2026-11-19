@@ -11,7 +11,7 @@ use std::thread::ThreadId;
 
 use iris_mgras::dev::mgras::engine::{Board, Config, MgrasEngine, Mode};
 use iris_mgras::dev::mgras::hq3::host;
-use iris_mgras::interface::{BoardEngine, Event, HostMem, MemFault, Read, Swap, Write};
+use sgi_engine::{BoardEngine, Event, HostMem, Idle, MemFault, Read, Swap, Write};
 use parking_lot::Mutex;
 
 macro_rules! replays {
@@ -191,7 +191,7 @@ pub fn put<E: BoardEngine>(e: &mut E, off: u32, bits: u32, val: u64) {
 /// Run the queue (inline) or wait for the worker (threaded).
 pub fn drive<E: BoardEngine>(e: &mut E) {
     e.run(usize::MAX);
-    assert!(e.wait_idle(0, 60_000_000_000), "the engine did not go idle");
+    assert_eq!(e.wait_idle(0, 60_000_000_000), Idle::Yes, "the engine did not go idle");
 }
 
 /// Read, driving the engine while the answer waits on queued work.
@@ -369,7 +369,7 @@ impl Player {
 
     fn collect(&mut self) {
         let mut ev = Vec::new();
-        self.e.drain_events(&mut ev);
+        self.e.drain_events(&mut ev, usize::MAX);
         for x in ev {
             match x {
                 Event::Note(t) => self.notes.push(t),

@@ -5,7 +5,8 @@
 //! Threads, locks and calls:
 //! - The shell calls from one thread at a time (QEMU: the thread holding the
 //!   BQL). The engine takes no shell lock and never calls back into the
-//!   shell, but for the notify hook, which only schedules.
+//!   shell, but for the notify hook, which only schedules. The rest of the
+//!   call contract is in the `sgi_engine` crate docs.
 //! - `write` and `push_words` stage operations on the caller's side; `advance`
 //!   (or a full stage) hands them to the queue. Status reads are answered from
 //!   counters and never wait. Any other read answers `Busy` while work is
@@ -21,10 +22,12 @@
 //! - Events go to an outbox the shell drains. A panic in the worker or in
 //!   `run` becomes a device fault: logged once, the engine stops, and every
 //!   call answers `Fault` until `reset`.
+//! - MGRAS never stalls on the shell: its stream does not wait for a frame or
+//!   a time, so `Idle` is `Yes` or `Working` (and `Faulted`).
 //! - One thread steps both raster engines of a Maximum Impact, so drawing
 //!   does not use two cores as iris's board does.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -43,7 +46,8 @@ use super::quirks::Hq4Quirks;
 use super::rss::{Entry, Rss};
 use super::te1::Te1;
 use crate::display::{Mark, Rect};
-use crate::interface::{BoardEngine, Chunk, Event, Fault, HostMem, Pump, Read, Refused, StateSink, StateSource, Swap, Write, DAMAGE_ANY};
+use sgi_engine::inject::{hit, Point};
+use sgi_engine::{BoardEngine, Chunk, Event, Fault, HostMem, Idle, Outbox, Pump, Read, Refused, StateSink, StateSource, Swap, Write, DAMAGE_ANY};
 use crate::wgpu::Gpu;
 
 /// The boards that share this engine; they differ in the geometry engine
@@ -112,91 +116,6 @@ const STAGE_MAX: usize = 256;
 const BATCH_MAX: usize = 4096;
 /// Distinct damage marks waiting before they degrade to "anything".
 const DAMAGE_MAX: usize = 16;
-/// Distinct notes and DMA-fault pages kept; the rest are dropped.
-const SEEN_MAX: usize = 256;
-
-#[derive(Default)]
-struct OutboxQ {
-    events: Vec<Event>,
-    flags_pending: bool,
-    notes: HashSet<String>,
-    faults: HashSet<(u64, bool)>,
-}
-
-/// Events for the shell, and the hook that tells it some wait.
-struct Outbox {
-    q: Mutex<OutboxQ>,
-    notify: Option<Box<dyn Fn() + Send + Sync>>,
-    notified: AtomicBool,
-}
-
-impl Outbox {
-    fn wake(&self) {
-        if !self.notified.swap(true, Ordering::AcqRel) {
-            if let Some(n) = &self.notify {
-                n();
-            }
-        }
-    }
-
-    fn post(&self, e: Event) {
-        {
-            let mut q = self.q.lock();
-            let fresh = match &e {
-                Event::Flags => !std::mem::replace(&mut q.flags_pending, true),
-                Event::Note(t) => q.notes.len() < SEEN_MAX && q.notes.insert(t.clone()),
-                Event::BusFault { addr, write } => q.faults.len() < SEEN_MAX && q.faults.insert((addr >> 12, *write)),
-                _ => true,
-            };
-            if !fresh {
-                return;
-            }
-            q.events.push(e);
-        }
-        self.wake();
-    }
-
-    fn damage(&self, marks: &[Mark]) {
-        if marks.is_empty() {
-            return;
-        }
-        {
-            let mut q = self.q.lock();
-            for m in marks {
-                let same = |e: &Event| matches!(e, Event::Damage(d) if d.store == m.store && d.planes == m.planes);
-                if let Some(Event::Damage(d)) = q.events.iter_mut().find(|e| same(e)) {
-                    d.rect = d.rect.union(&m.rect);
-                } else if q.events.iter().filter(|e| matches!(e, Event::Damage(_))).count() >= DAMAGE_MAX {
-                    let any = q.events.iter().filter_map(|e| if let Event::Damage(d) = e { Some(d.rect) } else { None }).fold(m.rect, |a, r| a.union(&r));
-                    q.events.retain(|e| !matches!(e, Event::Damage(_)));
-                    q.events.push(Event::Damage(Mark { store: DAMAGE_ANY, planes: !0, rect: any }));
-                } else {
-                    q.events.push(Event::Damage(*m));
-                }
-            }
-        }
-        self.wake();
-    }
-
-    /// Move up to `max` events out, oldest first.
-    fn drain(&self, out: &mut Vec<Event>, max: usize) {
-        let mut q = self.q.lock();
-        let n = q.events.len().min(max);
-        out.extend(q.events.drain(..n));
-        q.flags_pending = q.events.iter().any(|e| matches!(e, Event::Flags));
-        // Cleared under the lock, so a post after this drain wakes again.
-        self.notified.store(!q.events.is_empty(), Ordering::Release);
-    }
-
-    fn pending(&self) -> bool {
-        !self.q.lock().events.is_empty()
-    }
-
-    fn clear(&self) {
-        *self.q.lock() = OutboxQ::default();
-        self.notified.store(false, Ordering::Release);
-    }
-}
 
 /// The registers the shell reads without waiting: the HQ flags and the
 /// enables that gate them. The worker sets flags too.
@@ -205,6 +124,14 @@ struct Front {
     flags: AtomicU32,
     flag_enable: AtomicU32,
     interrupt_enable: AtomicU32,
+}
+
+impl Front {
+    /// The general interrupt line (GIO line 1): up while an enabled flag is
+    /// set. Flags the front derives from the GE11's output are not here.
+    fn irq_levels(&self) -> u64 {
+        (self.flags.load(Ordering::Acquire) & self.interrupt_enable.load(Ordering::Acquire) & host::INTR_CAUSES != 0) as u64
+    }
 }
 
 struct Queue {
@@ -248,7 +175,7 @@ impl<M: HostMem> Shared<M> {
             let r = catch_unwind(AssertUnwindSafe(|| {
                 let mut inner = self.inner.lock();
                 for op in ops.iter() {
-                    crate::inject::hit(crate::inject::Point::Exec);
+                    hit(Point::Exec);
                     inner.exec(*op);
                 }
                 inner.finish_batch();
@@ -263,6 +190,10 @@ impl<M: HostMem> Shared<M> {
         self.done.fetch_add(n, Ordering::Release);
         self.idle_cv.notify_all();
     }
+}
+
+fn mark(m: Mark) -> sgi_engine::Mark {
+    sgi_engine::Mark { store: m.store, planes: m.planes, rect: sgi_engine::Rect::new(m.rect.x0, m.rect.y0, m.rect.x1, m.rect.y1) }
 }
 
 fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
@@ -344,7 +275,8 @@ impl<M: HostMem> Inner<M> {
     /// The end of a run of operations: submit GPU work and post damage.
     fn finish_batch(&mut self) {
         self.core.back.rss[0].gpu_flush();
-        self.core.out.damage(&std::mem::take(&mut self.core.damage));
+        let marks: Vec<sgi_engine::Mark> = std::mem::take(&mut self.core.damage).into_iter().map(mark).collect();
+        self.core.out.damage(&marks);
     }
 
     fn read(&mut self, off: u32, bits: u32) -> u64 {
@@ -448,11 +380,11 @@ impl<M: HostMem> Hq3Sink for Core<M> {
     }
     fn set_flags(&mut self, bits: u32) {
         self.front.flags.fetch_or(bits, Ordering::AcqRel);
-        self.out.post(Event::Flags);
+        self.out.post(Event::Irq);
     }
     fn take_flags(&mut self, mask: u32) -> u32 {
         let was = self.front.flags.fetch_and(!mask, Ordering::AcqRel) & mask;
-        self.out.post(Event::Flags);
+        self.out.post(Event::Irq);
         was
     }
     fn sys_mem(&mut self) -> Option<Arc<dyn DmaMem>> {
@@ -598,8 +530,8 @@ impl<M: HostMem> Inner<M> {
         f.flag_enable.store(meta.flag_enable, Ordering::Release);
         f.interrupt_enable.store(meta.interrupt_enable, Ordering::Release);
         self.core.damage.clear();
-        // Everything on screen may have changed.
-        self.core.out.damage(&[Mark { store: DAMAGE_ANY, planes: !0, rect: Rect::new(0, 0, 4095, 4095) }]);
+        self.core.out.damage_all();
+        self.core.out.post(Event::Irq);
         Ok(())
     }
 }
@@ -625,7 +557,7 @@ impl<M: HostMem> MgrasEngine<M> {
     /// is posted, from any thread, and must only schedule the shell's pump.
     pub fn new(cfg: Config, mem: M, gpu: Option<&Arc<Gpu>>, notify: Option<Box<dyn Fn() + Send + Sync>>) -> Result<Self, String> {
         let mem = Arc::new(mem);
-        let out = Arc::new(Outbox { q: Mutex::new(OutboxQ::default()), notify, notified: AtomicBool::new(false) });
+        let out = Arc::new(Outbox::new(notify));
         let front = Arc::new(Front::default());
         let inner = Inner::new(&cfg, gpu, mem.clone(), out.clone(), front.clone())?;
         let sh = Arc::new(Shared {
@@ -652,17 +584,6 @@ impl<M: HostMem> MgrasEngine<M> {
     /// The time the shell last gave, ns.
     pub fn now(&self) -> u64 {
         self.now
-    }
-
-    /// `drain_events`, at most `max` of them; the rest wait.
-    pub fn drain_events_limit(&mut self, out: &mut Vec<Event>, max: usize) {
-        self.sh.out.drain(out, max);
-    }
-
-    /// Stop the engine with a device fault from outside it, such as a panic
-    /// in the shell's glue.
-    pub fn fail(&self, what: &str) {
-        self.sh.fail(what);
     }
 
     /// The HQ flags as the board holds them.
@@ -758,11 +679,11 @@ impl<M: HostMem> MgrasEngine<M> {
     /// False on timeout or fault.
     fn settle(&mut self, budget: Option<Duration>) -> bool {
         self.flush();
-        if self.worker.is_none() {
-            self.run_ops(usize::MAX);
-            return !self.dead();
-        }
         let deadline = budget.map(|b| Instant::now() + b);
+        if self.worker.is_none() {
+            while self.run_ops(BATCH_MAX) == BATCH_MAX && deadline.is_none_or(|d| Instant::now() < d) {}
+            return self.is_idle() && !self.dead();
+        }
         let mut q = self.sh.q.lock();
         while self.submitted > self.sh.done.load(Ordering::Acquire) {
             match deadline {
@@ -849,12 +770,23 @@ impl<M: HostMem> MgrasEngine<M> {
 
     /// No worker, nothing staged or queued; and, unless `reset` asks, no fault.
     fn need_parked(&self, healthy: bool) -> Result<(), Refused> {
+        match self.fault() {
+            Some(f) if healthy => return Err(Refused::Faulted(f)),
+            _ => {}
+        }
         if self.worker.is_some() || !self.stage.is_empty() || !self.is_idle() {
             return Err(Refused::NotQuiesced);
         }
-        match self.fault() {
-            Some(f) if healthy => Err(Refused::Faulted(f)),
-            _ => Ok(()),
+        Ok(())
+    }
+
+    fn idle(&self) -> Idle {
+        if self.dead() {
+            Idle::Faulted
+        } else if self.is_idle() {
+            Idle::Yes
+        } else {
+            Idle::Working
         }
     }
 }
@@ -897,21 +829,27 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
                     return Write::Busy;
                 }
                 self.sh.front.flags.fetch_or(host::FLAG_CONTEXT_SAVED, Ordering::AcqRel);
-                self.sh.out.post(Event::Flags);
+                self.sh.out.post(Event::Irq);
                 self.stage_op(Op::ContextSwitch);
             }
             host::SET_FLAGS | host::SET_FLAGS_PRIVILEGED => {
                 self.sh.front.flags.fetch_or(lo, Ordering::AcqRel);
-                self.sh.out.post(Event::Flags);
+                self.sh.out.post(Event::Irq);
             }
             host::CLEAR_FLAGS | host::CLEAR_FLAGS_PRIVILEGED => {
                 self.sh.front.flags.fetch_and(!lo, Ordering::AcqRel);
-                self.sh.out.post(Event::Flags);
+                self.sh.out.post(Event::Irq);
             }
             host::FLAG_ENABLE_SET => drop(self.sh.front.flag_enable.fetch_or(lo, Ordering::AcqRel)),
             host::FLAG_ENABLE_CLEAR => drop(self.sh.front.flag_enable.fetch_and(!lo, Ordering::AcqRel)),
-            host::INTERRUPT_ENABLE_SET => drop(self.sh.front.interrupt_enable.fetch_or(lo, Ordering::AcqRel)),
-            host::INTERRUPT_ENABLE_CLEAR => drop(self.sh.front.interrupt_enable.fetch_and(!lo, Ordering::AcqRel)),
+            host::INTERRUPT_ENABLE_SET | host::INTERRUPT_ENABLE_CLEAR => {
+                if off == host::INTERRUPT_ENABLE_SET {
+                    self.sh.front.interrupt_enable.fetch_or(lo, Ordering::AcqRel);
+                } else {
+                    self.sh.front.interrupt_enable.fetch_and(!lo, Ordering::AcqRel);
+                }
+                self.sh.out.post(Event::Irq);
+            }
             0x80000..=0xFFFFF => self.sh.out.post(Event::Note(format!("fast-path command window write at {off:#x}"))),
             host::UCODE..=0x45FFF => {
                 if !self.room(1) {
@@ -948,6 +886,9 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         if self.dead() {
             return Read::Fault;
         }
+        // A guest that polls status with fewer than a full stage staged hands
+        // the worker its work here, so it makes progress without a pump.
+        self.flush();
         match off {
             host::STATUS | host::FIFOSTATUS | host::GIOSTATUS | host::DMABUSY => return Read::Value(self.status(off) as u64),
             host::SET_FLAGS | host::CLEAR_FLAGS | host::SET_FLAGS_PRIVILEGED | host::CLEAR_FLAGS_PRIVILEGED => return Read::Value(self.flags() as u64),
@@ -955,13 +896,12 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
             host::INTERRUPT_ENABLE_SET | host::INTERRUPT_ENABLE_CLEAR => return Read::Value(self.sh.front.interrupt_enable.load(Ordering::Acquire) as u64),
             _ => {}
         }
-        self.flush();
         if !self.is_idle() {
             return Read::Busy;
         }
         let Some(mut inner) = self.sh.inner.try_lock() else { return Read::Busy };
         match catch_unwind(AssertUnwindSafe(|| {
-            crate::inject::hit(crate::inject::Point::Read);
+            hit(Point::Read);
             inner.read(off, bits)
         })) {
             Ok(v) => Read::Value(v),
@@ -974,6 +914,9 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
     }
 
     fn access_waits(&self, off: u32, bits: u32, write: bool) -> bool {
+        if self.dead() {
+            return false;
+        }
         if write {
             let queued = matches!(off, host::CFIFO | 0x70084 | host::CFIFO_GL | host::CFIFO_PRIVILEGED | 0x50084 | host::RASTER..=0x7FFFF | host::CONTEXT_SWITCH | host::UCODE..=0x45FFF);
             return queued && self.pending_ops() + if bits == 64 { 2 } else { 1 } > self.cfg.queue_ops as u64;
@@ -986,24 +929,29 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         if self.worker.is_some() || self.dead() {
             return 0;
         }
-        self.sh.out.notified.store(false, Ordering::Release);
+        self.sh.out.rearm();
         self.run_ops(max_ops)
     }
 
     fn advance(&mut self, now_ns: u64) -> Pump {
         self.now = now_ns;
         self.flush();
-        self.sh.out.notified.store(false, Ordering::Release);
-        Pump { idle: self.is_idle(), events: self.sh.out.pending(), next_deadline: None }
+        self.sh.out.rearm();
+        Pump { idle: self.idle(), events: self.sh.out.pending(), next_deadline: None, irq_levels: self.irq_levels() }
     }
 
-    fn wait_idle(&mut self, now_ns: u64, budget_ns: u64) -> bool {
+    fn wait_idle(&mut self, now_ns: u64, budget_ns: u64) -> Idle {
         self.now = now_ns;
-        self.settle(Some(Duration::from_nanos(budget_ns)))
+        self.settle(Some(Duration::from_nanos(budget_ns)));
+        self.idle()
     }
 
-    fn drain_events(&mut self, out: &mut Vec<Event>) {
-        self.sh.out.drain(out, usize::MAX);
+    fn irq_levels(&self) -> u64 {
+        self.sh.front.irq_levels()
+    }
+
+    fn drain_events(&mut self, out: &mut Vec<Event>, max: usize) {
+        self.sh.out.drain(out, max);
     }
 
     fn observe(&mut self, region: &Region) -> Result<(), Fault> {
@@ -1021,13 +969,16 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         self.sh.inner.lock().core.back.sync().map_err(Refused::Faulted)
     }
 
-    fn quiesce(&mut self) -> Result<(), Fault> {
-        self.flush();
+    fn quiesce(&mut self, budget_ns: u64) -> Result<(), Refused> {
+        let budget = (budget_ns != u64::MAX).then(|| Duration::from_nanos(budget_ns));
+        if !self.settle(budget) && !self.dead() {
+            return Err(Refused::Midway("queued work did not finish within the budget".into()));
+        }
         self.stop_worker();
         self.run_ops(usize::MAX);
         self.parked = true;
         match self.fault() {
-            Some(f) => Err(Fault(f)),
+            Some(f) => Err(Refused::Faulted(f)),
             None => Ok(()),
         }
     }
@@ -1051,6 +1002,10 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         self.sh.inner.lock().load(board, src)
     }
 
+    fn state_version(&self) -> u32 {
+        STATE_VERSION
+    }
+
     fn reset(&mut self) -> Result<(), Refused> {
         self.need_parked(false)?;
         let inner = Inner::new(&self.cfg, self.gpu.as_ref(), self.mem.clone(), self.sh.out.clone(), self.sh.front.clone()).map_err(Refused::Faulted)?;
@@ -1062,11 +1017,16 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         self.sh.out.clear();
         *self.sh.fault.lock() = None;
         self.sh.dead.store(false, Ordering::Release);
+        self.sh.out.post(Event::Irq);
         Ok(())
     }
 
     fn fault(&self) -> Option<String> {
         self.sh.fault.lock().clone().or_else(|| self.sh.inner.try_lock().and_then(|i| i.core.back.fault()))
+    }
+
+    fn fail(&self, why: &str) {
+        self.sh.fail(why);
     }
 }
 
