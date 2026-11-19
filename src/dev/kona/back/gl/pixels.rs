@@ -686,6 +686,21 @@ pub fn unpack(h: &Header, rec: &Record, bytes: &[u8]) -> Option<Image> {
         return None;
     }
     let g = h.geometry(rec)?;
+    let empty = |plane| Some(Image { w: 0, h: 0, plane });
+    // The header is the guest's, so what it names is checked against the bytes there are before any
+    // row is laid out: a height of 2^32 - 1 with no data once reserved and walked that many rows.
+    let words = h.image_words(rec)?;
+    if words as u64 * 4 > bytes.len() as u64 + 3 {
+        return None;
+    }
+    if h.w == 0 || h.h == 0 {
+        return empty(match h.format {
+            FORMAT_COLOUR_INDEX => Plane::Index(Vec::new()),
+            FORMAT_STENCIL => Plane::Stencil(Vec::new()),
+            FORMAT_DEPTH => Plane::Depth(Vec::new()),
+            _ => Plane::Colour(Vec::new()),
+        });
+    }
     let (w, ht) = (h.w as usize, h.h as usize);
     let packed = element_bytes(h.ty).is_some_and(|e| e.1);
     let esize = element_bytes(h.ty).map_or(0, |e| e.0);
@@ -1609,6 +1624,23 @@ mod tests {
         assert_eq!(header(100, 4, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 1).image_words(&rec), None);
         assert!(unpack(&header(100, 4, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 0), &rec, &[0; 2000]).is_none());
         assert_eq!(header(100, 4, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 0).image_words(&Record { row_length: 100, ..Record::default() }), Some(400));
+    }
+
+    /// A header that names more rows than the data holds, or none at all, is refused (or empty) before a
+    /// row is laid out: a height of 2^32 - 1 once reserved and walked that many.
+    #[test]
+    fn a_header_naming_more_than_the_data_holds_is_refused_before_any_row_is_laid_out() {
+        let rec = Record::default();
+        for (w, h) in [(2, u32::MAX), (u32::MAX, 1), (u32::MAX, u32::MAX), (1 << 20, 1 << 20), (3, 3)] {
+            for (format, ty) in [(FORMAT_RGBA, TYPE_UNSIGNED_BYTE), (FORMAT_COLOUR_INDEX, TYPE_BITMAP), (FORMAT_RED, TYPE_FLOAT), (FORMAT_DEPTH, TYPE_UNSIGNED_INT)] {
+                assert!(unpack(&header(w, h, format, ty, 0), &rec, &[0; 8]).is_none(), "{w} by {h}, format {format}, type {ty}");
+            }
+        }
+        // An empty rectangle is no rows at all, whatever the other side says.
+        for (w, h) in [(0, u32::MAX), (u32::MAX, 0), (0, 0)] {
+            let img = unpack(&header(w, h, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 0), &rec, &[]).unwrap();
+            assert_eq!((img.w, img.h), (0, 0), "{w} by {h}");
+        }
     }
 
     fn colours() -> Image {

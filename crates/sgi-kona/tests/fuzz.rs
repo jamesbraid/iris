@@ -41,6 +41,26 @@ fn word(r: &mut Rng) -> u32 {
     }
 }
 
+/// A pixel command with well-formed operands and edge-valued sizes: the framer gives a command its
+/// operand count by its selector, so random words rarely line a size up under the right one.
+fn pixel_command(r: &mut Rng) -> Vec<u32> {
+    let size = |r: &mut Rng| if r.below(3) == 0 { r.below(8) as u32 } else { r.edge() };
+    let (format, ty) = (r.below(14) as u32, r.below(12) as u32);
+    let mut c = Vec::new();
+    if r.below(2) == 0 {
+        c.push(1);
+    }
+    match r.below(6) {
+        0 => c.extend([DRAW_PIXEL_RECTANGLE_FROM_HOST_DATA, size(r), size(r), format, ty, r.below(4) as u32, r.below(2) as u32, r.below(3) as u32, size(r)]),
+        1 => c.extend([READ_PIXEL_RECTANGLE_BACK_TO_HOST, r.edge(), r.edge(), size(r), size(r), format, ty, r.below(5) as u32]),
+        2 => c.extend([DRAW_BITMAP_FROM_DISPLAY_LIST, size(r), size(r), r.edge(), r.edge(), r.edge(), r.edge(), size(r), size(r)]),
+        3 => c.extend([COPY_PIXEL_RECTANGLE_WITHIN_FRAME_BUFFER, r.edge(), r.edge(), size(r), size(r), r.below(4) as u32]),
+        4 => c.extend([SET_PIXEL_ZOOM_FACTORS, r.edge(), r.edge()]),
+        _ => c.extend([SET_PIXEL_STORE_PARAMETER_INTEGER_FORM, r.edge(), r.edge()]),
+    }
+    c
+}
+
 fn run(seed: u64, threads: usize, ops: usize) {
     let mut r = Rng::new(seed);
     let config = KonaConfig::ir2(1).unwrap().with_pool(threads, 32);
@@ -54,6 +74,11 @@ fn run(seed: u64, threads: usize, ops: usize) {
     for i in 0..ops {
         progress(120, || format!("seed {seed:#x} threads {threads} op {i} rng {:#x}", r.0));
         match r.below(8) {
+            0..=4 if r.below(3) == 0 => {
+                for v in pixel_command(&mut r) {
+                    let _ = e.write(COMMAND_PAGE, 32, v as u64);
+                }
+            }
             0..=4 => {
                 for _ in 0..1 + r.below(16) {
                     let v = word(&mut r);

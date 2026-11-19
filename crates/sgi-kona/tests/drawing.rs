@@ -483,3 +483,19 @@ fn a_pixel_read_inside_a_bracket_is_delivered_by_output_dma() {
     r.command(Grammar::Gl, READ_PIXEL_RECTANGLE_BACK_TO_HOST, &[0, 0, 64, 64, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 0]);
     assert_eq!(r.bytes(RETURN_PAGE, 16), [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 }
+
+/// A DrawPixels header whose height is 2^32 - 1 and which carries no data is refused at once: it
+/// once reserved and walked that many rows (an OOM within seconds under a 4 GB cap). The same
+/// numbers as an index bitmap, which shares the decode.
+#[test]
+fn a_draw_header_naming_more_rows_than_the_data_holds_is_refused_at_once() {
+    let started = std::time::Instant::now();
+    for hdr in [[2u32, 0xffff_ffff, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 0, 0, 0, 0], [0xffff_ffff, 1, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 0, 0, 0, 0], [0xffff_ffff, 0xffff_ffff, FORMAT_COLOUR_INDEX, TYPE_BITMAP, 0, 0, 0, 0]] {
+        let mut r = pixel_window();
+        at(&mut r, 10, 20);
+        // Whatever the board asks of the stream, the header with no data behind it draws nothing.
+        let _ = r.command(Grammar::Gl, DRAW_PIXEL_RECTANGLE_FROM_HOST_DATA, &hdr);
+        assert_eq!(colour_at(&mut r, 10, 20), 0, "{hdr:x?}: nothing was drawn");
+    }
+    assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+}
