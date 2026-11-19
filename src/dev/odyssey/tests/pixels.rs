@@ -400,7 +400,40 @@ fn an_index_read_of_the_screen_follows_the_display_mode_of_the_id_under_the_pixe
     assert_eq!(got[..2], [0xa5, 0xa5], "an RGB mode is not an index read");
 }
 
-/// A GL image write by DMA to the draw drawable: the table at `TABLE` names
+/// A read across two windows decodes each pixel by its own window id's display mode, not the first
+/// pixel's: window 0 an index mode, window 1 a packed RGB one, both two-byte fields at unit 6. A
+/// colour-index read returns window 0's index and window 1's red byte, by the screen's address and by
+/// the read sentinel alike. The window id is stored per pixel and the scan-out decodes each pixel by
+/// its own id's mode (odsy frame composition), so a read that decoded all by one mode would mis-read
+/// the other.
+#[test]
+fn a_read_across_two_windows_decodes_each_pixel_by_its_own_display_mode() {
+    use crate::dev::odyssey::field::FIELD_PACKED;
+    let (mut s, ram) = read_window();
+    let screen = s.pbj(crate::dev::odyssey::frame::pbj::PIXEL_BASE);
+    let index_mode = 0x004b_5f10u32;
+    let packed_mode = (index_mode & !(0xf << 9) & !(0x1f << 4)) | 0xb << 9 | ODSY_GAMMA_GROUP << dispmode::GROUP_SHIFT;
+    s.regs().set_dispmode(0, index_mode);
+    s.regs().set_dispmode(1, packed_mode);
+    set_aux(&mut s, 0, 40 * 1280 + 32, 1 << 3);
+    let surface = Surface::new(screen, 80, 4);
+    let index = Field { at: 6, codec: Codec::Texel { bytes: 2, field: crate::dev::odyssey::field::FIELD_INDEX } };
+    let packed = Field { at: 6, codec: Codec::Texel { bytes: 2, field: FIELD_PACKED } };
+    Rows::new(s.vram_ptr(), View::colour(&surface, index, MAX_DIM)).store_word(31, 40, 0x2a);
+    let rgb = Rows::new(s.vram_ptr(), View::colour(&surface, packed, MAX_DIM));
+    rgb.store_word(32, 40, 0xc800_00ff);
+    let red = (rgb.load_word(32, 40).unwrap() >> 24) as u8;
+    let as_index = Rows::new(s.vram_ptr(), View::colour(&surface, index, MAX_DIM)).load_word(32, 40).unwrap();
+    assert_ne!(as_index & 0xff, red as u32, "the two decodings differ, so the test can tell them apart");
+
+    let got = dma_read_from(&mut s, &ram, screen, (31, 40, 2), 0x9333_1008, 1);
+    assert_eq!(got[..3], [0x2a, red, 0xa5], "by the screen's address");
+    let got = dma_read(&mut s, &ram, (31, 40, 2), 0x9333_1008, 1);
+    assert_eq!(got[..3], [0x2a, red, 0xa5], "by the read sentinel");
+}
+
+/// A GL image write by DMA to the draw drawable: the table at
+/// `TABLE` names
 /// `payload` for a `w` x 1 box at (x, y) under word 4 `word4` and word 7's
 /// low bits `code`, four bytes a pixel, rows bottom-up.
 fn dma_write(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: u32, code: u32, payload: &[u8]) {

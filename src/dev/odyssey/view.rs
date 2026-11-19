@@ -58,12 +58,26 @@ impl View {
 
     /// Colour field `f` of surface `s`.
     pub fn colour(s: &Surface, f: Field, height: u32) -> View {
-        let kind = match f.codec {
+        View::of(s, f.at, View::colour_kind(f.codec), height)
+    }
+
+    fn colour_kind(codec: Codec) -> Kind {
+        match codec {
             Codec::Texel { bytes: 4, field: FIELD_FOUR } => Kind::Rgba8,
             Codec::Byte => Kind::Byte,
             c => Kind::Coded(c),
-        };
-        View::of(s, f.at, kind, height)
+        }
+    }
+
+    /// The same field read as `codec`, which covers the same bytes.
+    pub fn with_codec(mut self, codec: Codec) -> View {
+        self.kind = View::colour_kind(codec);
+        self
+    }
+
+    /// The field's first byte inside the pixel.
+    pub fn at(&self) -> u8 {
+        self.at
     }
 
     /// The same field holding its word as codec `c`.
