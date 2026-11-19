@@ -7,15 +7,38 @@
 // and divide here: the quotient of the two mantissas as integers, rounded
 // to nearest even, which is what the host's division gives.
 
-// a / b, correctly rounded, for normal operands; the hardware's quotient
-// for zero, denormal, infinite and NaN ones (the model's range tests
-// drop those fragments either way).
+// IEEE division for an infinite or NaN operand, by bits: Vulkan's native
+// division gives NaN for inf / finite on some hardware (an RTX 4090).
+fn div_special(a: f32, b: f32) -> f32 {
+    let ia = bitcast<u32>(a);
+    let ib = bitcast<u32>(b);
+    let ma = ia & 0x7fffffffu;
+    let mb = ib & 0x7fffffffu;
+    let sign = (ia ^ ib) & 0x80000000u;
+    if ma > 0x7f800000u || mb > 0x7f800000u || (ma == 0x7f800000u && mb == 0x7f800000u) {
+        return bitcast<f32>(0x7fc00000u);
+    }
+    if ma == 0x7f800000u {
+        return bitcast<f32>(sign | 0x7f800000u);
+    }
+    if mb == 0x7f800000u {
+        return bitcast<f32>(sign);
+    }
+    return a / b;
+}
+
+// a / b, correctly rounded, for normal operands; IEEE by bits for infinite
+// and NaN ones; the hardware's quotient for zero and denormal ones (the
+// model's range tests drop those fragments either way).
 fn div_exact(a: f32, b: f32) -> f32 {
     let ia = bitcast<u32>(a);
     let ib = bitcast<u32>(b);
     let ea = (ia >> 23u) & 0xffu;
     let eb = (ib >> 23u) & 0xffu;
-    if ea == 0u || eb == 0u || ea == 255u || eb == 255u {
+    if ea == 255u || eb == 255u {
+        return div_special(a, b);
+    }
+    if ea == 0u || eb == 0u {
         return a / b;
     }
     let ma = (ia & 0x7fffffu) | 0x800000u;
