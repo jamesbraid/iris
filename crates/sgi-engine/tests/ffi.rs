@@ -233,6 +233,22 @@ fn lent_memory_through_the_c_entries() {
     assert_eq!(unsafe { iris_engine_drain_dirty(h, runs.as_mut_ptr(), 4) }, 0);
 }
 
+/// A cap smaller than the runs found must not lose the rest.
+#[test]
+fn drain_dirty_with_a_short_cap_keeps_the_rest_for_the_next_call() {
+    let mut f = Fixture::new(true);
+    let h = f.h;
+    f.lent[5] = 100;
+    assert_eq!(unsafe { iris_engine_cpu_wrote(h, 40, 8) }, IRIS_ENGINE_OK);
+    wr(h, reg::LENT_ADD + 40, 23);
+    wr(h, reg::LENT_STORE + 5000 * 8, 9);
+    assert_eq!(unsafe { iris_engine_quiesce(h, u64::MAX) }, IRIS_ENGINE_OK);
+    assert_eq!(unsafe { iris_engine_observe_lent(h, 40, 8) }, IRIS_ENGINE_OK);
+    let mut run = [IrisEngineRun::default(); 1];
+    let got: Vec<(usize, u64)> = (0..3).map(|_| (unsafe { iris_engine_drain_dirty(h, run.as_mut_ptr(), 1) }, run[0].offset)).collect();
+    assert_eq!(got, [(1, 0), (1, 32 * 1024), (0, 32 * 1024)]);
+}
+
 #[test]
 fn state_streams_through_callbacks_and_refusals_carry_their_reason() {
     let f = Fixture::new(true);

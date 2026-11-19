@@ -216,6 +216,8 @@ struct State {
     eng: Box<dyn DynEngine>,
     fault: Option<CString>,
     error: Option<CString>,
+    /// Dirty runs the engine reported that a short `cap` left for the next call.
+    dirty: Vec<DirtyRun>,
 }
 
 /// The opaque handle.
@@ -386,7 +388,7 @@ pub fn build<E: BoardEngine + Send + 'static>(f: impl FnOnce() -> Option<E>) -> 
         hit(Point::New);
         f()
     })) {
-        Ok(Some(e)) => Box::into_raw(Box::new(IrisEngine { busy: AtomicBool::new(false), state: UnsafeCell::new(State { eng: Box::new(e), fault: None, error: None }) })),
+        Ok(Some(e)) => Box::into_raw(Box::new(IrisEngine { busy: AtomicBool::new(false), state: UnsafeCell::new(State { eng: Box::new(e), fault: None, error: None, dirty: Vec::new() }) })),
         Ok(None) => std::ptr::null_mut(),
         Err(p) => {
             log::error!("engine construction panicked: {}", panic_text(&*p));
@@ -757,17 +759,20 @@ fn runs(out: *mut IrisEngineRun, cap: usize, found: &[DirtyRun]) -> usize {
 }
 
 /// Move the lent-memory runs the engine wrote since the last call into `out`.
-/// Call after `iris_engine_quiesce` too. The runs past `cap` are dropped, so
-/// give room for all or call until it returns less than `cap`.
+/// Call after `iris_engine_quiesce` too. Runs that do not fit in `cap` stay for
+/// the next call: call until it returns less than `cap`.
 ///
 /// # Safety
 /// `h` is a live handle and `out` points to `cap` runs.
 #[no_mangle]
 pub unsafe extern "C" fn iris_engine_drain_dirty(h: *mut IrisEngine, out: *mut IrisEngineRun, cap: usize) -> usize {
     guard(h, Point::DrainDirty, 0, |s| {
-        let mut found = Vec::new();
+        let mut found = std::mem::take(&mut s.dirty);
         s.eng.drain_dirty(&mut found);
-        runs(out, cap, &found)
+        let n = runs(out, cap, &found);
+        found.drain(..n);
+        s.dirty = found;
+        n
     })
 }
 
