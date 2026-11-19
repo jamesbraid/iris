@@ -648,3 +648,18 @@ fn the_alpha_reference_field_is_a_fraction_of_4096() {
     let w = s.fragment_words().shader;
     assert!(w.alpha_func().test(fixed::alpha12(fixed::from_f64(1.0)), w.alpha_ref() as u32), "1.0 passes the top field");
 }
+
+/// The reset pulses the kernels and PROMs store (0x200 and 0x16d) reset the board's registers and
+/// memory and keep its identity and configuration; other values, and 0, do nothing.
+#[test]
+fn a_reset_control_pulse_resets_the_board_and_other_values_do_nothing() {
+    let (mut s, _) = board("v12");
+    let identity = reg_read(&mut s, IDENTITY);
+    for (value, resets) in [(0u32, false), (1, false), (0x200, true), (0x16d, true), (0x100, false)] {
+        reg_write(&mut s, flctl::CONFIG, 0x12345);
+        reg_write(&mut s, ODSY_RESET_CONTROL, value);
+        let want = if resets { flctl::CONFIG_RESET } else { 0x12345 };
+        assert_eq!(reg_read(&mut s, flctl::CONFIG), want, "a store of {value:#x}");
+        assert_eq!(reg_read(&mut s, IDENTITY), identity, "identity survives");
+    }
+}

@@ -38,6 +38,7 @@ use sgi_engine::{GpuLoss, BoardEngine, Chunk, DirtyRun, Event, Fault, HostMem, I
 
 use super::board::{Board, Params};
 use super::gpu_unit::{fail_gpu, Observation};
+use super::consts::{reset_pulse, ODSY_RESET_CONTROL};
 use super::mmio::{access_waits, command_store, fifo_port, level_word, BoardGuard, BoardLocks};
 use super::reader::{DisplayShared, ScanoutReader};
 use super::state::ODYSSEY_SNAPSHOT_VERSION;
@@ -411,6 +412,11 @@ impl BoardEngine for VproEngine {
         }
         if command_store(off as u64, size) {
             self.credits.store(self.source);
+        }
+        if off as u64 == ODSY_RESET_CONTROL && reset_pulse(val) {
+            // The board reset itself; levels may have changed. The store waited for the FIFO to
+            // drain, so credits still owed are for retired stores and go back with the next pump.
+            self.out.post(Event::Irq);
         }
         Write::Done
     }
