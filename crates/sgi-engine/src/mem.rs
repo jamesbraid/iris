@@ -66,28 +66,35 @@ pub struct DirtyRun {
 /// bytes, a whole number of host-endian 64-bit words, valid until the engine
 /// is dropped.
 ///
-/// Who writes what: the engine writes it from any of its threads, through
-/// `store`; the CPU writes it through the shell's mapping, then calls
-/// `cpu_wrote`. Both sides touch it only in whole words, with relaxed atomic
-/// accesses, so a CPU store and an engine store to the same word are a
-/// race the guest made, and the last writer wins at word granularity. The
-/// engine's stores do not mark the shell's dirty bits: it reports them
-/// through `drain_dirty` (`DirtyBlocks` does the bookkeeping).
+/// Who writes what: the engine writes it from any of its threads; the CPU
+/// writes it through the shell's mapping, then calls `cpu_wrote`. The engine's
+/// stores do not mark the shell's dirty bits: it reports them through
+/// `drain_dirty` (`DirtyBlocks` does the bookkeeping).
+///
+/// Access rule. The memory is ordinary shared RAM: the guest's stores through
+/// the shell's mapping are plain host stores of 1 to 8 bytes, and a board's own
+/// units race on it as the hardware's do. `load` and `store` here are relaxed
+/// atomic word accesses, which an engine that uses them gets for free. An engine
+/// that takes `as_ptr` instead takes over the rule: it uses aligned accesses of
+/// at most 8 bytes through raw pointers, and a narrow store is a read-modify-write
+/// of its word that can lose a CPU store to another byte of the same word made at
+/// the same moment. A guest that races the CPU against the board on one word gets
+/// whatever it asked for.
 #[derive(Clone, Copy, Debug)]
 pub struct Lent {
     ptr: *mut u64,
     words: usize,
 }
 
-// SAFETY: every access is a relaxed atomic word access (see `Lent`), and the
-// lender promises the memory outlives the engine.
+// SAFETY: accesses follow the rule on `Lent`, and the lender promises the
+// memory outlives the engine.
 unsafe impl Send for Lent {}
 unsafe impl Sync for Lent {}
 
 impl Lent {
     /// # Safety
     /// `ptr` is 8-aligned and valid for `len` bytes for as long as the engine
-    /// lives, and nothing else accesses it but with atomic word operations.
+    /// lives, and nothing else accesses it but as the rule on `Lent` says.
     pub unsafe fn new(ptr: *mut u8, len: usize) -> Option<Lent> {
         (!ptr.is_null() && ptr as usize % 8 == 0 && len % 8 == 0).then_some(Lent { ptr: ptr.cast(), words: len / 8 })
     }
