@@ -217,6 +217,9 @@ pub struct KonaBackend {
     /// What the display thread completes, and the thread while the board runs.
     clock: Arc<Clock>,
     thread: Option<DisplayThread>,
+    /// The compositor a caller that supplies the frame boundaries itself drives (`attach_manual`), in
+    /// place of the thread.
+    manual: Option<Compositor>,
     /// The window the board shows the guest, which the machine keeps a clone
     /// of (`KonaBackend::display`).
     display: Arc<Display>,
@@ -367,6 +370,7 @@ impl KonaBackend {
             handle: None,
             clock: Arc::default(),
             thread: None,
+            manual: None,
             layouts: 0,
             refused: [0; Refusal::ALL.len()],
             malformed: 0,
@@ -682,6 +686,25 @@ impl KonaBackend {
         self.handle = Some(handle);
     }
 
+    /// As `attach`, with no display thread: retrace requests wait for `frame`, which the caller
+    /// calls at each frame boundary it chooses.
+    pub fn attach_manual(&mut self, handle: DisplayHandle) {
+        let sink = Compositor::new(self.store.clone(), textport::COLOUR_WORD, self.map.clone(), self.tables.clone(), self.display.clone());
+        #[cfg(feature = "wgpu")]
+        let sink = sink.with_scanout(self.scanout.clone());
+        self.manual = Some(sink);
+        self.handle = Some(handle);
+    }
+
+    /// A frame boundary of a back end attached with `attach_manual`: the waiting retrace
+    /// requests complete, the video interrupt rises, and the frame is composed.
+    pub fn frame(&mut self) {
+        if let (Some(h), Some(c)) = (&self.handle, &mut self.manual) {
+            self.clock.frame(h);
+            c.frame();
+        }
+    }
+
     pub fn reset(&mut self) {
         #[cfg(test)]
         if let Some(hook) = &self.hook {
@@ -732,6 +755,7 @@ impl KonaBackend {
         self.display.display_stop().request();
         // The display thread joins first: it may be inside a handle call.
         self.thread = None;
+        self.manual = None;
         self.handle = None;
         self.clock.cancel();
     }
@@ -1196,11 +1220,11 @@ impl KonaBackend {
                 self.gl.command(&mut c.gl, selector, args, packed, &mut self.prims);
                 self.flush();
             }
-            // With the display thread running, a retrace completes at its next
+            // With the display thread running (or frames supplied by `frame`), a retrace completes at its next
             // frame boundary; with none (before the board starts, in a test)
             // there is no boundary, so it completes at once.
             Job::Retrace { tag } => match &self.handle {
-                Some(h) if self.thread.is_some() => self.clock.request(h.epoch(), tag),
+                Some(h) if self.thread.is_some() || self.manual.is_some() => self.clock.request(h.epoch(), tag),
                 _ => port.retrace_done(tag),
             },
             Job::DmaIn { io, physical, lines, per_line, pitch } => return self.dma_rows(port, io, physical, lines, per_line, pitch),
