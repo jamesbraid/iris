@@ -255,6 +255,22 @@ pub fn a_budget_that_runs_out_leaves_the_engine_going<S: Subject>(s: &S) {
     assert_eq!(e.wait_idle(0, 0), Idle::Yes);
 }
 
+pub fn a_budget_of_nothing_still_makes_progress<S: Subject>(s: &S) {
+    let mut e = s.engine(None);
+    put(s, &mut e, 10_000);
+    // Each call runs a slice before it looks at the budget, so calling again finishes the work.
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match e.quiesce(0) {
+            Ok(()) => break,
+            Err(Refused::Midway(m)) => assert!(std::time::Instant::now() < end, "quiesce(0) made no progress in 5 s: {m}"),
+            Err(other) => panic!("a budget of nothing: {other}"),
+        }
+        std::thread::yield_now();
+    }
+    e.resume();
+}
+
 pub fn a_storm_on_one_interrupt_line_stays_one_packet<S: Subject>(s: &S) {
     let mut e = s.engine(None);
     let Some(lines) = s.packet_storm(&mut e) else { return };
@@ -291,6 +307,7 @@ macro_rules! conformance_tests {
             credits_coalesce_per_source_and_events_drain_in_pieces,
             notify_fires_once_until_the_pump_has_drained,
             a_budget_that_runs_out_leaves_the_engine_going,
+            a_budget_of_nothing_still_makes_progress,
             a_storm_on_one_interrupt_line_stays_one_packet,
             observe_brings_a_box_current
         );
