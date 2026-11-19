@@ -1053,6 +1053,25 @@ fn a_read_reply_is_not_padded_by_the_pack_record() {
     assert_eq!(read(&mut b, &[(PACK_BASE + 5, 4), (PACK_BASE + 2, 21), (PACK_BASE + 3, 2), (PACK_BASE + 4, 3)], &args), gl::pixels::Out::Reply(want));
 }
 
+/// A read rectangle is the guest's, 32 bits each way: one past the largest drawable is refused
+/// before anything is built (a read of 0xffffffff by 0xffffffff took a gigabyte a second under the
+/// caller's lock). The old device's read-huge-width and read-negative-width cases expect the refusal.
+#[test]
+fn a_read_rectangle_past_the_largest_drawable_is_refused_before_it_is_built() {
+    use crate::dev::kona::defs::pixel::*;
+    let mut b = pixel_window();
+    let screen = b.gl.screen();
+    let ds = b.contexts.select(None).gl.draw_state(screen);
+    b.arrays(&ds);
+    let c = b.contexts.select(None);
+    let env = gl::pixels::Env { store: &b.store, ds };
+    let huge = [(u32::MAX, u32::MAX), (u32::MAX, 1), (1, u32::MAX), (4097, 4096), (1 << 20, 1 << 20)];
+    for (n, (w, h)) in huge.into_iter().enumerate() {
+        let out = gl::pixels::plane_command(&mut c.gl, &mut b.pix_counts, &env, READ_PIXEL_RECTANGLE_BACK_TO_HOST, &[0, 0, w, h, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 0]);
+        assert_eq!((out, b.pix_counts.refused), (gl::pixels::Out::Nothing, n as u64 + 1), "{w} by {h}");
+    }
+}
+
 /// A pixel draw in a colour-index window writes indices into the colour words (12-bit index,
 /// shifted 4), not a grey or mapped colour: the index shift, offset and index-to-index map apply,
 /// the index wraps to the window's width, and a copy within the window moves indices through the
