@@ -535,3 +535,26 @@ fn the_frame_generation_moves_with_stores_and_holds_when_idle() {
     assert_ne!(BoardEngine::frame_generation(&e, 0), g2, "a CPU write");
     assert_eq!(e.compose_into(0, &0u8, 1280), Ok(None), "no GPU unit, nothing to compose into");
 }
+
+/// A GPU engine's scan-out waits for the GPU and not for the board's queued CPU work: with the board's
+/// thread held inside a slice, the screendump's frame still comes back at once (it took 1.3 s against 45 ms
+/// on the CPU path when it drained the board first). Needs a GPU adapter, and returns early without one.
+#[test]
+fn a_gpu_scanout_does_not_wait_for_a_held_slice() {
+    let mut cfg = config("v12", Mode::Threaded);
+    cfg.gpu = Some("auto".into());
+    let Ok(mut e) = VproEngine::new(cfg, None, Shared(Arc::new(Ram::default())), None) else { return };
+    assert!(e.hold_next_slice(15_000));
+    put(&mut e, CMD_FIFO, 0);
+    let start = std::time::Instant::now();
+    while !e.slice_open() {
+        assert!(start.elapsed().as_secs() < 10, "the held slice did not open");
+        std::thread::yield_now();
+    }
+    let asked = std::time::Instant::now();
+    let frame = e.scanout();
+    let took = asked.elapsed();
+    e.release_hold();
+    assert!(frame.is_some(), "a frame");
+    assert!(took.as_secs_f64() < 7.0, "the scan-out waited {took:?} for a slice held 15 s");
+}
