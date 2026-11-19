@@ -191,7 +191,12 @@ impl Board {
     pub fn drawable_codec(&self, x: i32, y: i32, at: u8) -> Option<Codec> {
         // The id bytes are the front end's own: no wait (Board::id_compare_passes).
         let did = DestMem::of(self.vram_ptr(), &self.dest_views()).did.load1(x, y)? as u32;
-        let mode = self.regs().dispmode((did >> ODSY_DID_MAIN_SHIFT) as usize);
+        self.display_codec(did >> ODSY_DID_MAIN_SHIFT, at)
+    }
+
+    /// The codec window id `id`'s display mode gives the field at byte `at`, None where it names none.
+    pub fn display_codec(&self, id: u32, at: u8) -> Option<Codec> {
+        let mode = self.regs().dispmode(id as usize);
         super::frame::mode_fields(mode).into_iter().find(|f| f.at == at).map(|f| f.codec)
     }
 

@@ -75,6 +75,10 @@ pub(super) struct DmaSource {
     /// Word 0 is the address of the colour buffer the screen shows: an X server's GetImage.
     pub screen: bool,
     pub front: bool,
+    /// What word 4 names the field as, and its size in bytes: a drawable or screen read holds
+    /// each pixel as its own window's display mode says, when that has this size.
+    pub named: Option<super::field::Codec>,
+    pub bytes: u8,
     pub x: i64,
     pub y: i64,
 }
@@ -216,10 +220,8 @@ impl Board {
         // A drawable read holds its colour as its window's display mode
         // says, as the scan-out reads it (Board::drawable_codec()); the
         // format byte is the packing the read asks for, as for a copy.
-        let origin = (
-            ((hdr[dma::HDR_ORIGIN] & 0xffff) as i32).wrapping_add(self.win.read_origin[0]),
-            ((hdr[dma::HDR_ORIGIN] >> 16) as i32).wrapping_add(self.win.read_origin[1]),
-        );
+        let shift = if drawable { self.win.read_origin } else { [0, 0] };
+        let origin = (((hdr[dma::HDR_ORIGIN] & 0xffff) as i32).wrapping_add(shift[0]), ((hdr[dma::HDR_ORIGIN] >> 16) as i32).wrapping_add(shift[1]));
         // A read at the screen's own address (the X server's GetImage) holds its colour the same
         // way: by the display mode of the window id under the pixel.
         let screen_read = !drawable && read && addr == self.pbj(super::frame::pbj::PIXEL_BASE);
@@ -908,6 +910,8 @@ impl Board {
         src.drawable = drawable;
         src.screen = !drawable && (base & ADDR_MASK) == self.pbj(super::frame::pbj::PIXEL_BASE);
         src.front = fmt & dma::FMT_FRONT != 0;
+        src.bytes = 2u8 << ((fmt >> 13) & 7);
+        src.named = Some(super::copy::source_codec(src.bytes, fmt & 0xff));
         src.x = (hdr[dma::HDR_ORIGIN] & 0xffff) as i64;
         src.y = (hdr[dma::HDR_ORIGIN] >> 16) as i64;
         if drawable {
@@ -919,10 +923,17 @@ impl Board {
 
     /// Source pixel (x, y) as the model's word: from a drawable, the field of
     /// the buffer its window shows for a front read (the other for a back),
-    /// otherwise the A field for front and B for back.
-    pub fn dma_read_pixel(&mut self, src: &DmaSource, x: i64, y: i64) -> u32 {
+    /// otherwise the A field for front and B for back. `id` is the pixel's main window
+    /// id for a drawable or screen read, which holds its colour as that window's display
+    /// mode says, so each pixel of a read across windows is decoded by its own.
+    pub fn dma_read_pixel(&mut self, src: &DmaSource, x: i64, y: i64, id: Option<u32>) -> u32 {
         let b = if src.drawable { self.read_buffer(src.front, x, y) as usize } else { (!src.front) as usize };
-        src.fields[b & 1].load_word(x as i32, y as i32).unwrap_or(0)
+        let rows = src.fields[b & 1];
+        let codec = id.and_then(|id| self.display_codec(id, rows.v.at())).filter(|c| super::copy::codec_bytes(*c) == src.bytes).or(src.named);
+        match (id, codec) {
+            (Some(_), Some(codec)) => Rows::new(rows.mem(), rows.v.with_codec(codec)).load_word(x as i32, y as i32).unwrap_or(0),
+            _ => rows.load_word(x as i32, y as i32).unwrap_or(0),
+        }
     }
 
     /// Whether the bound read drawable is off screen (a pixel buffer): the
@@ -1040,13 +1051,15 @@ impl Board {
                     o += n;
                     continue;
                 }
-                let word = self.dma_read_pixel(src, x, y);
                 let mut group = ODSY_GAMMA_GROUP;
+                let mut id = None;
 
                 if src.drawable || src.screen {
-                    let id = self.main_id(x as u32, y as u32);
-                    group = self.display_group(id);
+                    let main = self.main_id(x as u32, y as u32);
+                    group = self.display_group(main);
+                    id = Some(main);
                 }
+                let word = self.dma_read_pixel(src, x, y, id);
                 let indexed = index_read || (index_or_red && group < ODSY_GAMMA_GROUP);
 
                 if indexed && (group >= ODSY_GAMMA_GROUP || word > index_max) {
