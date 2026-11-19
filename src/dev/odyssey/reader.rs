@@ -526,6 +526,12 @@ impl DisplayShared {
         cell.gen.fetch_add(1, Release);
     }
 
+    /// How many times the retrace phase has been asked to restart (a mode, a clock or a reset).
+    #[cfg(test)]
+    pub fn restarts(&self) -> u64 {
+        self.mode.restart.load(Relaxed)
+    }
+
     /// The retrace phase restarts, as for a reset.
     pub fn restart_retrace(&self) {
         self.mode.restart.fetch_add(1, Release);

@@ -677,6 +677,29 @@ mod timing_tests {
         assert_eq!(f.clock.pixel_clock_hz(), Some(129_250_000));
     }
 
+    /// The retrace phase restarts when the timing generator's mode changes (a pixel clock or table
+    /// load that ends with new totals) and not when a load leaves the timing as it was. Real
+    /// hardware's phase across a change is unknown, so this is the model's policy, pinned: a
+    /// restart changes where retraces fall, and so the 0x10d4 sequence a guest reads.
+    #[test]
+    fn a_new_pixel_clock_restarts_the_retrace_phase_and_an_unchanged_one_does_not() {
+        let mut f = fifo();
+        let shared = f.scanout.shared.clone();
+        f.set_scanout_size(1280, 1024);
+        let base = shared.restarts();
+        // A load that ends with the timing as it already is does not restart.
+        f.data(vtg::CONTROL, 1);
+        assert_eq!(shared.restarts(), base, "an unchanged mode keeps its phase");
+        // A new clock changes the rate at the same totals: the load restarts the phase.
+        for (register, value) in [(0, 0x30), (1, 0), (2, 0), (3, 5), (4, 2)] {
+            write_register(&mut f, 0x58, register, value);
+        }
+        f.data(vtg::CONTROL, 1);
+        assert_eq!(shared.restarts(), base + 1, "a new pixel clock restarts it");
+        f.data(vtg::CONTROL, 1);
+        assert_eq!(shared.restarts(), base + 1, "and the same clock again does not");
+    }
+
     #[test]
     fn a_mode_load_sets_the_rate() {
         let mut f = fifo();
