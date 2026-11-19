@@ -11,6 +11,7 @@ use super::device::Gpu;
 use super::shader::{Fragment, Source};
 
 /// `[("A", A as u32), ...]`: consts a kernel reads as defines, by name.
+#[allow(unused_macros)]
 macro_rules! defines {
     ($($name:ident),* $(,)?) => { [$((stringify!($name), $name as u32)),*] };
 }
@@ -193,7 +194,7 @@ impl Scanout {
     /// A `slot` shorter than the buffer rewrites only its first bytes: a
     /// board whose slot starts with a small, often-changing header sends
     /// just that.
-    pub(crate) fn compose_cached(
+    pub fn compose_cached(
         &mut self,
         pipeline: &ScanoutPipeline,
         width: u32,

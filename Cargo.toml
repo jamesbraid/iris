@@ -1,5 +1,5 @@
 [workspace]
-members = ["iris-gui", "iris-hostcall", "iris-checks", "iris-prom", "crates/sgi-gl-math"]
+members = ["iris-gui", "iris-hostcall", "iris-checks", "iris-prom", "crates/sgi-gpu-core", "crates/sgi-gl-math"]
 # iris-hostgl is built only through `--features hostgl`, never by a plain or
 # `--workspace` build: it links the host's OpenGL (OpenGL.framework, libGL), which hosts
 # such as RISC-V boards do not have.
@@ -203,6 +203,7 @@ rex-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelif
 rex-gpu = ["gputrace", "rex-dirty-upload", "wgpu"]
 wgpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu", "dep:ash", "present"]
 # The window-facing half of src/wgpu (src/wgpu/present.rs, the display handle).
+# crates/sgi-gpu-core builds the same files without it.
 present = []
 # Cranelift-based JIT for IMPACT (GR4) raster shaders: RSS/TE1 pixel
 # pipelines monomorphised on a 64-bit key (src/dev/mgras/rss_jit).
@@ -416,7 +417,7 @@ serde_json = "1.0"
 loom = "0.7"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(sgi_gpu_core)"] }
 
 # Every dependency is built optimised in debug and test builds, iris itself is
 # not. The tests spend most of their time in dependencies: Cranelift and
