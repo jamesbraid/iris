@@ -55,6 +55,11 @@
  * final RAM pass runs before devices save. Read drain_dirty after the
  * quiesce.
  *
+ * COMPLETION WORDS. A scalar the board publishes for the guest (a fence
+ * token, a query's completion words) is one ram_write of its whole size, 2, 4
+ * or 8 bytes, aligned: refuse it or store it atomically, and a word that
+ * reaches no RAM is not half written. Block moves split as they like.
+ *
  * RAM CALLBACKS. ram_read and ram_write are called from engine threads and
  * must be lock-free and reach RAM only. In QEMU: address_space_translate
  * under RCU, memory_region_is_ram, a copy, and the dirty marking; return

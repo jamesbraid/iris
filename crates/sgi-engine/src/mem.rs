@@ -34,6 +34,11 @@ pub enum Swap {
 /// RCU, `memory_region_is_ram`, a copy and the dirty marking; never
 /// `address_space_read` or `_write`, which take the BQL for an MMIO target.
 ///
+/// A scalar the board publishes for the guest (a fence token, a query's
+/// completion words) is one `ram_write` of its whole size, 2, 4 or 8 bytes,
+/// aligned, so the shell can refuse it or store it atomically and a word that
+/// reaches no RAM is not half written. Block moves split as they like.
+///
 /// `bus_*` may reach MMIO and take locks, so the engine calls it only on
 /// the caller's thread inside `write`, `read`, `run`, `advance` or
 /// `wait_idle`. The default sends it down the RAM path. An engine that pulls
