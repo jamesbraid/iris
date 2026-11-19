@@ -10,7 +10,30 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::{BoardEngine, Chunk, Event, Idle, Read, Refused, Source, VecSource, Write};
+use crate::{BoardEngine, Chunk, Event, HostMem, Idle, MemFault, Read, Refused, Source, Swap, VecSource, Write};
+
+/// A `HostMem` that keeps every `ram_write`'s address and length and takes the write. A subject
+/// builds its engine over a clone to show how a published word reaches the shell.
+#[derive(Clone, Default)]
+pub struct WriteLog(Arc<parking_lot::Mutex<Vec<(u64, usize)>>>);
+
+impl WriteLog {
+    pub fn writes(&self) -> Vec<(u64, usize)> {
+        self.0.lock().clone()
+    }
+}
+
+impl HostMem for WriteLog {
+    fn ram_read(&self, _: u64, out: &mut [u8], _: Swap) -> Result<(), MemFault> {
+        out.fill(0);
+        Ok(())
+    }
+
+    fn ram_write(&self, addr: u64, data: &[u8], _: Swap) -> Result<(), MemFault> {
+        self.0.lock().push((addr, data.len()));
+        Ok(())
+    }
+}
 
 /// What a board tells the clauses about itself.
 pub trait Subject {
@@ -43,6 +66,11 @@ pub trait Subject {
     /// CPU work). False for a board whose stream runs only under `run` and `wait_idle`.
     fn observe_waits_for_stores(&self) -> bool {
         true
+    }
+    /// Have a fresh engine built over `log` publish scalars for the guest and settle; the (address,
+    /// length) of each, 2, 4 or 8 bytes. Empty for a board that publishes none.
+    fn publish_words(&self, _log: &WriteLog) -> Vec<(u64, usize)> {
+        Vec::new()
     }
     /// Raise one interrupt line over and over without draining, and say how
     /// many distinct lines that was; None for a board with no packets.
@@ -350,6 +378,17 @@ pub fn a_panic_on_a_worker_is_a_fault_and_reset_recovers<S: Subject>(s: &S) {
     let _ = s;
 }
 
+/// A published scalar is one `ram_write` of its own size, so the shell can refuse or store it whole.
+pub fn a_published_word_is_one_write<S: Subject>(s: &S) {
+    let log = WriteLog::default();
+    let words = s.publish_words(&log);
+    let writes = log.writes();
+    for (addr, len) in words {
+        let at: Vec<_> = writes.iter().filter(|w| w.0 < addr + len as u64 && w.0 + w.1 as u64 > addr).collect();
+        assert_eq!(at, [&(addr, len)], "the {len}-byte word at {addr:#x} is one write: {writes:?}");
+    }
+}
+
 pub fn observe_brings_a_box_current<S: Subject>(s: &S) {
     let mut e = s.engine(None);
     put(s, &mut e, 1000);
@@ -378,6 +417,7 @@ macro_rules! conformance_tests {
             a_budget_of_nothing_still_makes_progress,
             a_storm_on_one_interrupt_line_stays_one_packet,
             observe_brings_a_box_current,
+            a_published_word_is_one_write,
             a_panic_on_a_worker_is_a_fault_and_reset_recovers
         );
     };

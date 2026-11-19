@@ -43,6 +43,17 @@ impl Subject for MockBoard {
         true
     }
 
+    fn publish_words(&self, log: &sgi_engine::conformance::WriteLog) -> Vec<(u64, usize)> {
+        use sgi_engine::BoardEngine;
+        let mut e = Mock::new(MockConfig::default(), log.clone(), None);
+        e.write(reg::DMA_DATA, 32, 0xbeef);
+        e.write(reg::PUBLISH16, 32, 0x1002);
+        e.write(reg::DMA_DATA, 32, 0xdead_beef);
+        e.write(reg::PUBLISH32, 32, 0x2004);
+        e.run(usize::MAX);
+        vec![(0x1002, 2), (0x2004, 4)]
+    }
+
     fn packet_storm(&self, e: &mut Mock<Ram>) -> Option<usize> {
         use sgi_engine::BoardEngine;
         for _ in 0..1000 {

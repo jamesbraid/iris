@@ -70,6 +70,19 @@ impl Subject for Vpro {
         self.0 == Mode::Threaded
     }
 
+    /// A fence's 16-bit token is the board's published scalar the engine reaches the shell with.
+    fn publish_words(&self, log: &sgi_engine::conformance::WriteLog) -> Vec<(u64, usize)> {
+        let config = Config { product: "v12".into(), widget: 11, mode: self.0, pool: (0, 0), params: Default::default(), gpu: None };
+        let mut e = VproEngine::new(config, None, log.clone(), None).unwrap();
+        put(&mut e, 0x4034, 0);
+        put(&mut e, 0x403c, 0x10000);
+        e.push_words(CMD_FIFO, &[0x0001_0a5a, 5, 0xbeef]);
+        let mut now = 0;
+        sgi_engine::shell::quiesce(&mut e, &mut now, 1_000_000, 100_000).unwrap();
+        e.advance(now);
+        vec![(0x10000 + 2 * 5, 2)]
+    }
+
     fn credits(&self) -> bool {
         true
     }

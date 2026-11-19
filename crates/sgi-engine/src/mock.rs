@@ -42,6 +42,9 @@ pub mod reg {
     pub const PACKET_CLR: u32 = 0x3C;
     /// Queued: panic when it runs.
     pub const BOOM: u32 = 0x2C;
+    /// Queued: publish the 2 or 4 bytes of `DMA_DATA` at the bus address written, as one write.
+    pub const PUBLISH16: u32 = 0x40;
+    pub const PUBLISH32: u32 = 0x44;
     /// Reads: wait for queued work. The sum, and the last DMA read.
     pub const SUM: u32 = 0x30;
     pub const DMA_RESULT: u32 = 0x34;
@@ -73,6 +76,7 @@ enum Op {
     Wait(u64),
     DmaWrite(u64, u32),
     DmaRead(u64),
+    Publish(u64, u32, usize),
     Fence(u64, u32),
     Packet(u8, bool),
     Boom,
@@ -175,6 +179,12 @@ impl<M: HostMem> Mock<M> {
                     self.bus_fault(addr, true);
                 }
             }
+            Op::Publish(addr, data, size) => {
+                let bytes = data.to_be_bytes();
+                if self.mem.ram_write(addr, &bytes[4 - size..], Swap::None).is_err() {
+                    self.bus_fault(addr, true);
+                }
+            }
             Op::DmaRead(addr) => {
                 let mut b = [0u8; 8];
                 match self.mem.ram_read(addr, &mut b, Swap::None) {
@@ -274,6 +284,8 @@ impl<M: HostMem> BoardEngine for Mock<M> {
             reg::WAIT => Op::Wait(val),
             reg::DMA_WRITE => Op::DmaWrite(val, self.dma_data),
             reg::DMA_READ => Op::DmaRead(val),
+            reg::PUBLISH16 => Op::Publish(val, self.dma_data, 2),
+            reg::PUBLISH32 => Op::Publish(val, self.dma_data, 4),
             reg::FENCE => Op::Fence(val, self.dma_data),
             reg::PACKET => Op::Packet(val as u8, true),
             reg::PACKET_CLR => Op::Packet(val as u8, false),
