@@ -542,11 +542,20 @@ fn the_display_channel_size_sets_the_scanout_mode() {
     assert_eq!(size(&s), (1024, 768));
     assert_eq!(shown(&mut s, 5, 5), 0x112233);
 
+    // A V12's default, 1920x1200 (the shipped timing table selects 1920x1200_60), whole, with
+    // a frame of that size to compose.
+    backend(&mut s, 0x3000_0000 | 0x2802 << 14 | 2);
+    backend(&mut s, 1920);
+    backend(&mut s, 1200);
+    assert_eq!(size(&s), (1920, 1200));
+    let _ = shown(&mut s, 0, 0);
+    assert_eq!((s.reader.frame_width, s.reader.frame_height), (1920, 1200));
+
     // Larger than the modelled planes: kept to them.
     backend(&mut s, 0x3000_0000 | 0x2802 << 14 | 2);
+    backend(&mut s, 2560);
     backend(&mut s, 1600);
-    backend(&mut s, 1200);
-    assert_eq!(size(&s), (1280, 1024));
+    assert_eq!(size(&s), (1920, 1200));
 
     backend_entry(&mut s, ODSY_CHANNEL_HEIGHT, 720);
     s.reset();

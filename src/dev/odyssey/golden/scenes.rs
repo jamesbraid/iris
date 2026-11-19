@@ -1,7 +1,7 @@
 //! The scenes, and the context that draws them.
 
 use crate::dev::odyssey::draw::{RasterOp, RASTER_CLEAR};
-use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use crate::dev::odyssey::board::{Board, ODSY_BOOT_HEIGHT, ODSY_BOOT_WIDTH};
 use crate::dev::odyssey::consts::{colour, gl_cmd, light, write};
 use crate::dev::odyssey::raster_bench::{load_texture, put_texel, Tex, ALPHA, INTENSITY, LUMINANCE, LUMINANCE_ALPHA, RGB, RGBA};
 use crate::dev::odyssey::pipe::encode::{
@@ -234,8 +234,8 @@ impl Ctx {
     }
 }
 
-const BENCH_W_MAX: i32 = ODSY_WIDTH as i32 - 1;
-const BENCH_H_MAX: i32 = ODSY_HEIGHT as i32 - 1;
+const BENCH_W_MAX: i32 = ODSY_BOOT_WIDTH as i32 - 1;
+const BENCH_H_MAX: i32 = ODSY_BOOT_HEIGHT as i32 - 1;
 
 impl Ctx {
     pub fn texture(&mut self, t: &Tex) {

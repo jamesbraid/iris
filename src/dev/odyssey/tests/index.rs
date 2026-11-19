@@ -3,7 +3,7 @@
 //! the index logical operation, and an overlay context's draws and clears
 //! reach the overlay byte of the window-id buffer and nothing else.
 
-use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use crate::dev::odyssey::board::{Board, ODSY_BOOT_HEIGHT, ODSY_BOOT_WIDTH};
 use crate::dev::odyssey::consts::{colour, mode, write, ODSY_DRAW_MASK_BUFFER0, ODSY_DRAW_MASK_BUFFER1};
 use crate::dev::odyssey::gl::gl_index_rgba;
 use crate::dev::odyssey::pipe::encode::{vtx, GL_COLOR_BUFFER_BIT, GL_FLAT, GL_TRIANGLES, LibDraw, LibState};
@@ -87,7 +87,7 @@ fn a_colour_index_triangle_stores_its_index() {
     let (mut s, st) = index_board();
     index_triangle(&mut s, &st, 0x5a3);
     assert_eq!(index_at(&s, 0, 10, 10), 0x5a3);
-    assert_eq!(index_at(&s, 0, ODSY_WIDTH as i32 - 10, ODSY_HEIGHT as i32 - 10), 0, "outside the triangle");
+    assert_eq!(index_at(&s, 0, ODSY_BOOT_WIDTH as i32 - 10, ODSY_BOOT_HEIGHT as i32 - 10), 0, "outside the triangle");
 }
 
 #[test]

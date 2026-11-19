@@ -17,7 +17,7 @@
 //! back-end threads; `VPRO_REPLAY_GPU=1` draws on the GPU raster unit
 //! (with the `wgpu` feature).
 
-use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use crate::dev::odyssey::board::{Board, ODSY_BOOT_HEIGHT, ODSY_BOOT_WIDTH};
 use crate::dev::odyssey::consts::{cmd, gl_cmd, image, reg, ODSY_BUZZ_1};
 use crate::dev::odyssey::clip::ClipRect;
 use crate::dev::odyssey::pixel_dma::{read_guest, GuestMemory};
@@ -574,7 +574,7 @@ fn window(b: &mut Board) {
     // The screen a replay without its own scan-out set-up runs on.
     b.test_screen();
     b.win.clip_kept = 1;
-    b.win.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: ODSY_WIDTH as i32 - 1, y1: ODSY_HEIGHT as i32 - 1 };
+    b.win.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: ODSY_BOOT_WIDTH as i32 - 1, y1: ODSY_BOOT_HEIGHT as i32 - 1 };
 }
 
 /// A glDrawPixels of two pixels by pixel burst, as a store sequence: the same

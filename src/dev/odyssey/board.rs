@@ -55,9 +55,14 @@ pub(super) const ODSY_GL_PROGRAM_REPORTS: u32 = 16;
 /// at 0x738 is the last 0xc7 (prog::WINDOW_BASE).
 pub(super) const ODSY_GL_PROGRAM_ENTRIES: u32 = 2048;
 
-/// The one modeled mode: the desktop target size.
-pub(super) const ODSY_WIDTH: u32 = 1280;
-pub(super) const ODSY_HEIGHT: u32 = 1024;
+/// The planes' extent: the largest mode modelled. IRIX on a V12 defaults to 1920x1200 (the
+/// shipped timing table selects 1920x1200_60) and writes that size to the display channel; a
+/// 1920x1200 frame of 16-byte pixels is 37 MB of the board's 128.
+pub(super) const ODSY_WIDTH: u32 = 1920;
+pub(super) const ODSY_HEIGHT: u32 = 1200;
+/// The mode the board starts in and a reset returns to: the desktop target size.
+pub(super) const ODSY_BOOT_WIDTH: u32 = 1280;
+pub(super) const ODSY_BOOT_HEIGHT: u32 = 1024;
 
 #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct OpenVertex {
@@ -1000,8 +1005,8 @@ impl Board {
         self.prim.restart_armed = false;
         // The clip box, which is always the scissor: the whole window until
         // the client sends one.
-        self.gl_clip_box[0] = clip::BOX_FIELD_MASK & (ODSY_WIDTH - 1);
-        self.gl_clip_box[1] = clip::BOX_FIELD_MASK & (ODSY_HEIGHT - 1);
+        self.gl_clip_box[0] = clip::BOX_FIELD_MASK & (ODSY_BOOT_WIDTH - 1);
+        self.gl_clip_box[1] = clip::BOX_FIELD_MASK & (ODSY_BOOT_HEIGHT - 1);
         self.gl_fog = [0; 6];
         self.gl_matrix_slot = gl_cmd::SLOT_MODELVIEW;
         self.geom.modelview = [0; 16];
@@ -1262,7 +1267,7 @@ impl Board {
         }
 
         // Setting the mode restarts the retrace at the mode's rate.
-        self.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
+        self.set_scanout_size(ODSY_BOOT_WIDTH, ODSY_BOOT_HEIGHT);
         Ok(())
     }
 
@@ -1288,8 +1293,8 @@ impl Board {
         self.stream.poly_marks.fill(0);
         // Back to the boot size, and restart the phase.
         let mode = self.scanout_mode();
-        if mode.width != ODSY_WIDTH || mode.height != ODSY_HEIGHT {
-            self.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
+        if mode.width != ODSY_BOOT_WIDTH || mode.height != ODSY_BOOT_HEIGHT {
+            self.set_scanout_size(ODSY_BOOT_WIDTH, ODSY_BOOT_HEIGHT);
         }
         self.display.restart_retrace();
     }
