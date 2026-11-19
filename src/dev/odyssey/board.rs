@@ -1234,11 +1234,19 @@ impl Board {
         Ok(())
     }
 
-    pub fn allocate(&mut self) -> Result<(), String> {
+    pub fn allocate(&mut self, lent: Option<(*mut u64, u64)>) -> Result<(), String> {
         self.attach_nic()?;
 
         // The board's memory, at the size the strap reports.
-        self.vram = super::vram::Vram::new((self.widget.memory_size.max(32) as u64) << 20);
+        let bytes = (self.widget.memory_size.max(32) as u64) << 20;
+        self.vram = match lent {
+            Some((ptr, lent)) if lent == bytes => {
+                // SAFETY: `Board::new_lent`'s contract.
+                unsafe { super::vram::Vram::lent(ptr, bytes) }
+            }
+            Some((_, lent)) => return Err(format!("the product has {bytes} bytes of board memory, not the {lent} lent")),
+            None => super::vram::Vram::new(bytes),
+        };
 
         let pixels = ODSY_WIDTH as u64 * ODSY_HEIGHT as u64;
         self.stream.poly_marks = vec![0u8; pixels as usize];
@@ -1295,6 +1303,17 @@ impl Board {
     /// one-wire NIC, and the memory the product carries. An error names a
     /// configuration the board cannot have.
     pub fn new(product: &str, slot: u32) -> Result<Box<Board>, String> {
+        // SAFETY: nothing is lent.
+        unsafe { Board::new_lent(product, slot, None) }
+    }
+
+    /// `new`, with board memory the caller lends instead of allocating
+    /// when `lent` is a pointer and a size in bytes.
+    ///
+    /// # Safety
+    /// For a `lent` region: 8-byte aligned, valid for reads and writes of
+    /// its size until the board is dropped, written by nothing else.
+    pub unsafe fn new_lent(product: &str, slot: u32, lent: Option<(*mut u64, u64)>) -> Result<Box<Board>, String> {
         let mut s = Box::new(Board::default());
 
         s.widget.revision = 0xa;
@@ -1306,7 +1325,7 @@ impl Board {
         s.widget.product = product.to_string();
         s.slot = slot;
         s.configure()?;
-        s.allocate()?;
+        s.allocate(lent)?;
         // VPRO_GPU=1 puts every test board on the GPU unit.
         #[cfg(all(test, feature = "wgpu"))]
         if std::env::var("VPRO_GPU").is_ok() {

@@ -178,10 +178,55 @@ impl DirtyBlocks {
     }
 }
 
+/// The memory's words: its own, or a region the shell lent.
+enum Words {
+    Own(Vec<u64>),
+    Lent { ptr: *mut u64, len: usize },
+}
+
+// SAFETY: a lent region outlives the board by the lender's contract
+// (`Vram::lent`) and is reached as `VramPtr` reaches the array.
+unsafe impl Send for Words {}
+unsafe impl Sync for Words {}
+
+impl Default for Words {
+    fn default() -> Self {
+        Words::Own(Vec::new())
+    }
+}
+
+impl Clone for Words {
+    /// A copy is the clone's own, never a second view of the lent region.
+    fn clone(&self) -> Self {
+        Words::Own(self.to_vec())
+    }
+}
+
+impl std::ops::Deref for Words {
+    type Target = [u64];
+    fn deref(&self) -> &[u64] {
+        match self {
+            Words::Own(v) => v,
+            // SAFETY: `Vram::lent`'s contract.
+            Words::Lent { ptr, len } => unsafe { std::slice::from_raw_parts(*ptr, *len) },
+        }
+    }
+}
+
+impl std::ops::DerefMut for Words {
+    fn deref_mut(&mut self) -> &mut [u64] {
+        match self {
+            Words::Own(v) => v,
+            // SAFETY: as above, and the board is the region's only writer.
+            Words::Lent { ptr, len } => unsafe { std::slice::from_raw_parts_mut(*ptr, *len) },
+        }
+    }
+}
+
 /// The board's memory.
 #[derive(Clone, Default)]
 pub(super) struct Vram {
-    words: Vec<u64>,
+    words: Words,
     /// The dirty map, once the memory mirrors the GPU's.
     dirty: Option<Arc<DirtyBlocks>>,
     /// Set by every store: the display composes again when it finds it set
@@ -193,7 +238,18 @@ impl Vram {
     /// Memory of at least size bytes, a power of two, so an address masks
     /// into it.
     pub fn new(size: u64) -> Vram {
-        Vram { words: vec![0; (size.next_power_of_two() / 8).max(1) as usize], dirty: None, written: Arc::default() }
+        Vram { words: Words::Own(vec![0; (size.next_power_of_two() / 8).max(1) as usize]), dirty: None, written: Arc::default() }
+    }
+
+    /// Memory of `bytes` at `ptr`, which the caller owns: the shell lends
+    /// board memory it can map, save and watch.
+    ///
+    /// # Safety
+    /// `ptr` is 8-byte aligned and valid for reads and writes of `bytes`
+    /// until the board is dropped, and nothing else writes it meanwhile.
+    pub unsafe fn lent(ptr: *mut u64, bytes: u64) -> Vram {
+        assert!(bytes.is_power_of_two() && bytes >= 8, "board memory is a power of two");
+        Vram { words: Words::Lent { ptr, len: (bytes / 8) as usize }, dirty: None, written: Arc::default() }
     }
 
     /// Start keeping the dirty map (the GPU instantiation's mirror).
