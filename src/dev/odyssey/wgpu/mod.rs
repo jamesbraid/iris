@@ -444,7 +444,9 @@ fn pack_view(v: &View) -> Result<[u32; 4], Unsupported> {
         Kind::Coded(c) => codec_kind(c)?,
     };
     let (base, pitch, log2, at) = v.parts();
-    if base >= 1 << 32 || pitch >= 1 << 16 || v.width >= 1 << 16 || v.height > MAX_DIM {
+    // The base word reaches 8 GiB and memory is at most 4 GiB, so the kernels' u32 address wraps into
+    // memory exactly as the CPU's does; a base past 4 GiB (a driver's 0xdeadbeef) is not unsupported.
+    if pitch >= 1 << 16 || v.width >= 1 << 16 || v.height > MAX_DIM {
         return Err(Unsupported(format!("a view at {base:#x} of pitch {pitch}, {} x {}", v.width, v.height)));
     }
     Ok([base as u32, pitch | (log2 as u32) << 16 | (at as u32) << 24, kind, v.width | v.height << 16])
