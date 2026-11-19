@@ -209,7 +209,7 @@ fn convert(conv: u32, bytes: u32, data: &[u32]) -> Vec<u32> {
 /// Command FIFO command numbers.
 mod cmd {
     /// Command-processor token: schedule a buffer swap for the next retrace.
-    pub const TOKEN_037: u32 = 0x37;
+    pub const MGRAS_HQ3_CFIFO_CMD_SCHEDULE_SWAP: u32 = 0x37;
     /// Command-processor token: return the state word at a GE address
     /// (the library's return-mode call with the address and 1, 1: glGet*, glIsEnabled, and glFinish,
     /// which is a glGetBooleanv(GL_DITHER) round trip). The host clears
@@ -220,7 +220,7 @@ mod cmd {
     /// state word at the argument's GE address (same readback protocol as
     /// cfifo_cmd_query). Native IRIS GL getcolor() and clear() request address
     /// 4: the current index as a float, not the address itself.
-    pub const TOKEN_0A1: u32 = 0xA1;
+    pub const MGRAS_HQ3_CFIFO_CMD_SPIN_AND_RETURN: u32 = 0xA1;
     /// Kernel token (the window clip validation, current context): a GL window's
     /// raster state, 15 words: origin, window mode, PP1 window mode (the
     /// kernel stores them as one doubleword, window mode high),
@@ -903,13 +903,13 @@ impl Hq3Engine {
     /// enabled, bits 0-3, and kept inside, 4-7), screen masks 1-4 as (x, y)
     /// ranges `min << 16 | max`, the buffer page pointers, and the PP1
     /// window mode (the clip ID to match).
-    fn apply_window(&mut self, origin: u32, mode: u32, masks: [[u32; 2]; 4], drb: u32, reg_f17b: u32, sink: &mut dyn Hq3Sink) {
+    fn apply_window(&mut self, origin: u32, mode: u32, masks: [[u32; 2]; 4], drb: u32, window_mode: u32, sink: &mut dyn Hq3Sink) {
         if sink.tracing() {
             sink.trace(format!(
-                "GL window: origin {origin:#x} mode {mode:#x} masks {masks:x?} DRBpointers {drb:#x} reg_f17b {reg_f17b:#x}"
+                "GL window: origin {origin:#x} mode {mode:#x} masks {masks:x?} DRBpointers {drb:#x} window_mode {window_mode:#x}"
             ));
         }
-        self.gl.window = super::gl::Window { valid: 1, origin, mode, masks, drb, reg_f17b };
+        self.gl.window = super::gl::Window { valid: 1, origin, mode, masks, drb, window_mode };
     }
 
     /// The current context's GL state and the parked contexts, for the
@@ -1192,7 +1192,7 @@ impl Hq3Engine {
                     _ => {}
                 }
             }
-        } else if cmd == cmd::TOKEN_037 {
+        } else if cmd == cmd::MGRAS_HQ3_CFIFO_CMD_SCHEDULE_SWAP {
             // No retrace wait: the swap is reported as soon as the frame
             // before it is drawn. The GE's front and back trade places for
             // the drawing that follows.
@@ -1221,7 +1221,7 @@ impl Hq3Engine {
             // state, so the next switch away need not save it.
             self.stats.cp_tokens[cmd as usize] += 1;
             self.nosave_next = true;
-        } else if cmd == cmd::TOKEN_0A1 {
+        } else if cmd == cmd::MGRAS_HQ3_CFIFO_CMD_SPIN_AND_RETURN {
             self.stats.cp_tokens[cmd as usize] += 1;
             self.gl.end_raster(sink);
             let addr = data.first().copied().unwrap_or(0);
@@ -1250,7 +1250,7 @@ impl Hq3Engine {
                     sink.trace(format!("  converted ({conv:#x}): {:?}", floats.iter().map(|w| f32::from_bits(*w)).collect::<Vec<_>>()));
                 }
                 self.gl.token(cmd, &floats, sink)
-            } else if matches!(cmd, super::gl::tok::TOKEN_080 | super::gl::tok::TOKEN_0CD) {
+            } else if matches!(cmd, super::gl::tok::MGRAS_HQ3_CFIFO_CMD_GE_STATE_BLOCK | super::gl::tok::MGRAS_HQ3_CFIFO_CMD_INIT_PIXEL_STATE_BLOCK) {
                 let data = self.canonical_pixel_state(data);
                 self.gl.token(cmd, &data, sink)
             } else {
@@ -1755,7 +1755,7 @@ fn describe_cmd(port: usize, pixel: bool, cmd: u32, data: &[u32]) -> String {
             let n = (c & 0x7F) as usize;
             format!("{p} dma[{n:#x}] {} = {}", dma_reg_name(n), words(data))
         }
-        cmd::TOKEN_037 => format!("{p} CP TOKEN_037 {}", words(data)),
+        cmd::MGRAS_HQ3_CFIFO_CMD_SCHEDULE_SWAP => format!("{p} CP CFIFO_CMD_SCHEDULE_SWAP {}", words(data)),
         c if c < cmd::TOKEN_LIMIT => format!("{p} CP {} [{c:#x}] ({} words) {}", token_name(c).unwrap_or("token"), data.len(), words(data)),
         c => format!("{p} command {c:#x} ({} words) {}", data.len(), words(data)),
     }
@@ -1770,7 +1770,7 @@ pub fn token_name(t: u32) -> Option<&'static str> {
         0x005 => "TOKEN_005",
         0x006 => "CFIFO_CMD_CONTEXT_OPEN",
         0x008 => "TEX_COORD4F",
-        0x009 => "TOKEN_009",
+        0x009 => "CFIFO_CMD_INIT_RGB_CONTEXT",
         0x00D => "ENABLE_LIGHTING",
         0x00E => "DISABLE_LIGHTING",
         0x00F => "EDGE_FLAG_ENABLE",
@@ -1811,7 +1811,7 @@ pub fn token_name(t: u32) -> Option<&'static str> {
         0x034 => "FRUSTUM",
         0x035 => "ORTHO",
         0x036 => "FLUSH",
-        0x037 => "TOKEN_037",
+        0x037 => "CFIFO_CMD_SCHEDULE_SWAP",
         0x038 => "RASTER_POS4F",
         0x039 => "SCISSOR",
         0x03A => "STENCIL_MASK",
@@ -1830,7 +1830,7 @@ pub fn token_name(t: u32) -> Option<&'static str> {
         0x047 => "SHADE_MODEL",
         0x048 => "DEPTH_RANGE",
         0x049 => "DRAW_BUFFER",
-        0x098 => "TOKEN_098",
+        0x098 => "CFIFO_CMD_VALIDATE_BANKS",
         0x04A => "CLEAR_DEPTH_BUFFER",
         0x04C => "CLEAR_STENCIL_BUFFER",
         0x04D => "POINT_SIZE",
@@ -1850,7 +1850,7 @@ pub fn token_name(t: u32) -> Option<&'static str> {
         0x066 => "DEPTH_TEST_ENABLE",
         0x067 => "DITHER_ENABLE",
         0x06C => "POINT_SMOOTH",
-        0x06E => "TOKEN_06E",
+        0x06E => "CFIFO_CMD_SCISSOR_TEST_ENABLE",
         0x072 => "CULL_FACE_ENABLE",
         0x073 => "CULL_FACE_DISABLE",
         0x071 => "ENABLE_LIGHT_SOURCE",
@@ -1858,36 +1858,36 @@ pub fn token_name(t: u32) -> Option<&'static str> {
         0x07C => "CFIFO_CMD_RASTER_TRIPLES",
         0x07F => "CFIFO_CMD_RASTER_PAIRS",
         0x082 => "CFIFO_CMD_GE_TABLE_LOAD",
-        0x083 => "TOKEN_083",
-        0x085 => "TOKEN_085",
-        0x086 => "TOKEN_086",
-        0x088 => "TOKEN_088",
-        0x089 => "TOKEN_089",
-        0x08B => "TOKEN_08B",
+        0x083 => "CFIFO_CMD_RESET_HISTOGRAM_MEMORY",
+        0x085 => "CFIFO_CMD_INIT_CONVOLVE_2D_STATE",
+        0x086 => "CFIFO_CMD_FAST_COPY_PIXELS",
+        0x088 => "CFIFO_CMD_INIT_FAST_PATH",
+        0x089 => "CFIFO_CMD_INIT_COLOR_TABLE",
+        0x08B => "CFIFO_CMD_RETURN_HISTOGRAM_PIO",
         0x08C => "CFIFO_CMD_CONTEXT_CONFIG",
-        0x08E => "TOKEN_08E",
-        0x091 => "TOKEN_091",
+        0x08E => "CFIFO_CMD_COPY_TILE",
+        0x091 => "CFIFO_CMD_GENERAL_BITMAP",
         0x094 => "BITMAP",
         0x096 => "COPY_COLOR_TABLE_SGI",
-        0x09A => "TOKEN_09A",
-        0x09B => "TOKEN_09B",
-        0x09C => "TOKEN_09C",
+        0x09A => "CFIFO_CMD_INIT_FORMAT_VALUES",
+        0x09B => "CFIFO_CMD_TEXTURE_LOAD",
+        0x09C => "CFIFO_CMD_TEXTURE_LOAD_END",
         0x09D => "TOKEN_CLIENT_GE_DMA_SETUP",
         0x0A0 => "DISABLE_LIGHT_SOURCE",
-        0x0A1 => "TOKEN_0A1",
+        0x0A1 => "CFIFO_CMD_SPIN_AND_RETURN",
         0x0A2 => "CFIFO_CMD_QUERY",
         0x0A5 => "CLIP_PLANE",
         0x0A8 => "POLYGON_MODE",
-        0x0A9 => "TOKEN_0A9",
-        0x0AA => "TOKEN_0AA",
-        0x0AB => "TOKEN_0AB",
-        0x0AC => "TOKEN_0AC",
+        0x0A9 => "CFIFO_CMD_EVAL_MESH_1D",
+        0x0AA => "CFIFO_CMD_EVAL_MESH_2D",
+        0x0AB => "CFIFO_CMD_EVAL_COORD_1D",
+        0x0AC => "CFIFO_CMD_EVAL_COORD_2D",
         0x0AE => "MAP_GRID1D",
         0x0AF => "MAP_GRID2D",
-        0x0B0 => "TOKEN_0B0",
-        0x0B1 => "TOKEN_0B1",
-        0x0B2 => "TOKEN_0B2",
-        0x0B3 => "TOKEN_0B3",
+        0x0B0 => "CFIFO_CMD_CLEAN_UP_1D",
+        0x0B1 => "CFIFO_CMD_CLEAN_UP_2D",
+        0x0B2 => "CFIFO_CMD_SEND_MAP_DATA_1D",
+        0x0B3 => "CFIFO_CMD_SEND_MAP_DATA_2D",
         0x0B7 => "FOG_DENSITY",
         0x0B9 => "FOG_MODE",
         0x0BA => "CLEAR_COLOR",
@@ -1901,28 +1901,28 @@ pub fn token_name(t: u32) -> Option<&'static str> {
         0x0C6 => "POP_NAME",
         0x0C7 => "PUSH_NAME",
         0x0C9 => "RENDER_MODE",
-        0x0CC => "TOKEN_0CC",
-        0x0D2 => "TOKEN_0D2",
-        0x0D3 => "TOKEN_0D3",
-        0x0D4 => "TOKEN_0D4",
-        0x0D5 => "TOKEN_0D5",
-        0x0D6 => "TOKEN_0D6",
-        0x0D7 => "TOKEN_0D7",
+        0x0CC => "CFIFO_CMD_END_GENERIC",
+        0x0D2 => "CFIFO_CMD_SAVE_RASTER_STATE",
+        0x0D3 => "CFIFO_CMD_RESTORE_RASTER_STATE",
+        0x0D4 => "CFIFO_CMD_SEND_HISTOGRAM_FILLS",
+        0x0D5 => "CFIFO_CMD_SEND_MINMAX_FILLS",
+        0x0D6 => "CFIFO_CMD_UPDATE_RASTER_POS",
+        0x0D7 => "CFIFO_CMD_LOAD_RASTER_POS_INFO",
         0x0D9 => "BLEND_COLOR_EXT",
-        0x0DB => "TOKEN_0DB",
+        0x0DB => "CFIFO_CMD_GET_PIXELS",
         0x0DC => "SWAPTMESH",
         0x0E4 => "CFIFO_CMD_WINDOW_CLIP_PACKET",
         0x0DE => "LMCOLOR",
-        0x0E0 => "TOKEN_0E0",
+        0x0E0 => "CFIFO_CMD_DRAW_POINT_SIMPLE",
         0x0E7 => "POLYGON_OFFSET",
-        0x0E9 => "TOKEN_0E9",
-        0x0EA => "TOKEN_0EA",
-        0x0EC => "TOKEN_0EC",
+        0x0E9 => "CFIFO_CMD_SAVE_TEXTURE_MODE",
+        0x0EA => "CFIFO_CMD_RESTORE_TEXTURE_MODE",
+        0x0EC => "CFIFO_CMD_DETAIL_TEXTURE_FUNC",
         0x0ED => "TOKEN_0ED",
         0x0EE => "GET_MATERIALFV",
         0x0EF => "GET_LIGHTFV",
         0x0F2 => "GET_HISTOGRAM_EXT",
-        0x0F0 => "TOKEN_0F0",
+        0x0F0 => "CFIFO_CMD_READ_TEXTURE",
         0x0F3 => "TOKEN_0F3",
         0x0F4 => "TOKEN_0F4",
         0x0F5 => "TOKEN_0F5",

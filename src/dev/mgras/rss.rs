@@ -96,7 +96,7 @@ pub mod reg {
     pub const INDIRECT_DATA: u32 = 0x15D;
     pub const STATUS: u32 = 0x15E;
     pub const PP1FILLMODE: u32 = 0x161;
-    pub const MGRAS_PP1_REG_F17B: u32 = 0x17B;
+    pub const MGRAS_PP1_WINDOW_MODE: u32 = 0x17B;
     /// Plane write mask (low planes, buffer A).
     pub const COLORMASKLSBSA: u32 = 0x163;
     /// Plane write mask (low planes, buffer B).
@@ -105,13 +105,13 @@ pub mod reg {
     pub const DRBPOINTERS: u32 = 0x16D;
     /// Tiles per row: bits 5:2 for 36-bit buffers, 1:0 for the overlay.
     pub const MGRAS_PP1_DRB_SIZE: u32 = 0x16E;
-    pub const MGRAS_PP1_REG_F168: u32 = 0x168;
-    pub const MGRAS_PP1_REG_F165: u32 = 0x165;
-    pub const MGRAS_PP1_REG_F16B: u32 = 0x16B;
-    pub const MGRAS_PP1_REG_F16C: u32 = 0x16C;
-    pub const MGRAS_PP1_REG_F166: u32 = 0x166;
-    pub const MGRAS_PP1_REG_F167: u32 = 0x167;
-    pub const MGRAS_PP1_REG_F169: u32 = 0x169;
+    pub const MGRAS_PP1_DEPTH_MODE: u32 = 0x168;
+    pub const MGRAS_PP1_BLEND_FACTOR: u32 = 0x165;
+    pub const MGRAS_PP1_BLEND_COLOR_RG: u32 = 0x16B;
+    pub const MGRAS_PP1_BLEND_COLOR_BA: u32 = 0x16C;
+    pub const MGRAS_PP1_STENCIL_MODE: u32 = 0x166;
+    pub const MGRAS_PP1_STENCIL_MASK: u32 = 0x167;
+    pub const MGRAS_PP1_ALPHA_TEST_MODE: u32 = 0x169;
     pub const COLORMASKMSBS: u32 = 0x162;
     pub const MGRAS_RE4_AALINE_CONFIG: u32 = 0x146;
     pub const MGRAS_RE4_LINE_STIPPLE_REPEAT: u32 = 0x15B;
@@ -176,31 +176,31 @@ pub const REG_NAMES: [&str; 0x200] = {
     n[0x06D] = "depth_edge_lo";
     n[0x070] = "char_h";
     n[0x071] = "char_l";
-    n[0x080] = "reg_e080";
-    n[0x081] = "reg_e081";
-    n[0x082] = "reg_e082";
-    n[0x083] = "reg_e083";
-    n[0x084] = "reg_e084";
-    n[0x085] = "reg_e085";
-    n[0x086] = "reg_e086";
-    n[0x087] = "reg_e087";
-    n[0x088] = "reg_e088";
-    n[0x089] = "reg_e089";
-    n[0x08A] = "reg_e08a";
-    n[0x08B] = "reg_e08b";
-    n[0x08C] = "reg_e08c";
-    n[0x0C0] = "reg_e0c0";
-    n[0x0C1] = "reg_e0c1";
-    n[0x0C2] = "reg_e0c2";
-    n[0x0C3] = "reg_e0c3";
-    n[0x0C4] = "reg_e0c4";
-    n[0x0C5] = "reg_e0c5";
-    n[0x0C6] = "reg_e0c6";
-    n[0x0C7] = "reg_e0c7";
-    n[0x0C8] = "reg_e0c8";
-    n[0x0C9] = "reg_e0c9";
-    n[0x0CA] = "reg_e0ca";
-    n[0x0CB] = "reg_e0cb";
+    n[0x080] = "texture_s_over_w_upper";
+    n[0x081] = "texture_s_over_w_lower";
+    n[0x082] = "texture_t_over_w_upper";
+    n[0x083] = "texture_t_over_w_lower";
+    n[0x084] = "texture_one_over_w_upper";
+    n[0x085] = "texture_one_over_w_lower";
+    n[0x086] = "texture_one_over_w_edge_step_upper";
+    n[0x087] = "texture_one_over_w_edge_step_lower";
+    n[0x088] = "texture_one_over_w_x_step_upper";
+    n[0x089] = "texture_one_over_w_x_step_lower";
+    n[0x08A] = "texture_one_over_w_y_step_upper";
+    n[0x08B] = "texture_one_over_w_y_step_lower";
+    n[0x08C] = "texture_scale_factor";
+    n[0x0C0] = "texture_s_over_w_edge_step_upper";
+    n[0x0C1] = "texture_s_over_w_edge_step_lower";
+    n[0x0C2] = "texture_t_over_w_edge_step_upper";
+    n[0x0C3] = "texture_t_over_w_edge_step_lower";
+    n[0x0C4] = "texture_s_over_w_x_step_upper";
+    n[0x0C5] = "texture_s_over_w_x_step_lower";
+    n[0x0C6] = "texture_t_over_w_x_step_upper";
+    n[0x0C7] = "texture_t_over_w_x_step_lower";
+    n[0x0C8] = "texture_s_over_w_y_step_upper";
+    n[0x0C9] = "texture_s_over_w_y_step_lower";
+    n[0x0CA] = "texture_t_over_w_y_step_upper";
+    n[0x0CB] = "texture_t_over_w_y_step_lower";
     n[0x0CC] = "reg_e0cc";
     n[0x0CD] = "reg_e0cd";
     n[0x0CE] = "reg_e0ce";
@@ -242,36 +242,36 @@ pub const REG_NAMES: [&str; 0x200] = {
     n[0x15D] = "device_data";
     n[0x15E] = "status";
     n[0x15F] = "re_togglecntx";
-    n[0x160] = "reg_f160";
+    n[0x160] = "pixel_command";
     n[0x161] = "pp1fillmode";
     n[0x162] = "ColorMaskMSBs";
     n[0x163] = "ColorMaskLSBsA";
     n[0x164] = "ColorMaskLSBsB";
-    n[0x165] = "reg_f165";
-    n[0x166] = "reg_f166";
-    n[0x167] = "reg_f167";
-    n[0x168] = "reg_f168";
-    n[0x169] = "reg_f169";
-    n[0x16A] = "reg_f16a";
-    n[0x16B] = "reg_f16b";
-    n[0x16C] = "reg_f16c";
+    n[0x165] = "blend_factor";
+    n[0x166] = "stencil_mode";
+    n[0x167] = "stencil_mask";
+    n[0x168] = "depth_mode";
+    n[0x169] = "alpha_test_mode";
+    n[0x16A] = "accumulation_mode";
+    n[0x16B] = "blend_color_rg";
+    n[0x16C] = "blend_color_ba";
     n[0x16D] = "DRBpointers";
     n[0x16E] = "drb_size";
-    n[0x16F] = "reg_f16f";
-    n[0x170] = "reg_f170";
-    n[0x171] = "reg_f171";
-    n[0x172] = "reg_f172";
-    n[0x173] = "reg_f173";
-    n[0x174] = "reg_f174";
-    n[0x175] = "reg_f175";
-    n[0x176] = "reg_f176";
-    n[0x177] = "reg_f177";
-    n[0x178] = "reg_f178";
-    n[0x179] = "reg_f179";
-    n[0x17A] = "reg_f17a";
-    n[0x17B] = "reg_f17b";
-    n[0x17E] = "reg_f17e";
-    n[0x17F] = "reg_f17f";
+    n[0x16F] = "tag_mode";
+    n[0x170] = "tag_data_red";
+    n[0x171] = "tag_data_green";
+    n[0x172] = "tag_data_blue";
+    n[0x173] = "tag_data_alpha";
+    n[0x174] = "tag_data_depth";
+    n[0x175] = "pixel_coordinate";
+    n[0x176] = "pixel_color_red";
+    n[0x177] = "pixel_color_green";
+    n[0x178] = "pixel_color_blue";
+    n[0x179] = "pixel_color_alpha";
+    n[0x17A] = "pixel_color_accumulation";
+    n[0x17B] = "pp1_window_mode";
+    n[0x17E] = "main_buffer_select";
+    n[0x17F] = "overlay_buffer_select";
     n[0x180] = "texture_mode_drawn";
     n[0x181] = "texture_size";
     n[0x182] = "texture_manager_init";
@@ -286,11 +286,11 @@ pub const REG_NAMES: [&str; 0x200] = {
     n[0x18B] = "texture_read_buffer";
     n[0x18C] = "texture_clamp_size";
     n[0x190] = "texture_level_table_index";
-    n[0x191] = "reg_f191";
+    n[0x191] = "texture_mipmap_levels";
     n[0x192] = "texture_detail_block";
     n[0x193] = "texture_border_block";
     n[0x194] = "detailscale";
-    n[0x195] = "reg_f195";
+    n[0x195] = "texture_toggle_context";
     n[0x196] = "texture_engine_revision";
     n[0x1A0] = "texture_loader_write_buffer";
     n[0x1A1] = "texture_loader_mode";
@@ -300,7 +300,7 @@ pub const REG_NAMES: [&str; 0x200] = {
     n[0x1A5] = "texture_loader_border_block";
     n[0x1A6] = "texture_loader_video_capture_start";
     n[0x1A7] = "texture_loader_base_block";
-    n[0x1A8] = "reg_f1a8";
+    n[0x1A8] = "texture_loader_video_capture_abort";
     n[0x1A9] = "texture_loader_copy_width";
     n[0x1AA] = "texture_loader_copy_height";
     n[0x1AB] = "texture_loader_copy_left";
@@ -329,14 +329,14 @@ pub const OP_DIAG_LINE: u32 = 0x3;
 /// The OpenGL per-fragment state our GE11 HLE programs into the PP1
 /// registers. The real layouts are not known (only GE11 microcode writes
 /// them); these follow the shapes SGI's diagnostics' reset values suggest
-/// (reg_f169 0x7, reg_f166 0x7, reg_f167 0xFFFF, reg_f168 0x0FFFFFF1:
+/// (alpha_test_mode 0x7, stencil_mode 0x7, stencil_mask 0xFFFF, depth_mode 0x0FFFFFF1:
 /// compare function in bits 2:0, masks) and are provisional:
-///   reg_f169 (0x169)   bits 2:0 compare, bit 3 enable, bits 15:4 ref * 4096
-///   reg_f166 (0x166) bits 2:0 compare, bit 3 enable, ops (KEEP ZERO
+///   alpha_test_mode (0x169)   bits 2:0 compare, bit 3 enable, bits 15:4 ref * 4096
+///   stencil_mode (0x166) bits 2:0 compare, bit 3 enable, ops (KEEP ZERO
 ///                       REPLACE INCR DECR INVERT) fail 6:4, zfail 10:8,
 ///                       zpass 14:12, ref 23:16
-///   reg_f167 (0x167) compare mask 7:0, write mask 15:8
-///   reg_f165 (0x165) source 3:0, destination 7:4 (ZERO ONE SRC_COLOR
+///   stencil_mask (0x167) compare mask 7:0, write mask 15:8
+///   blend_factor (0x165) source 3:0, destination 7:4 (ZERO ONE SRC_COLOR
 ///                       ONE_MINUS_SRC_COLOR SRC_ALPHA ONE_MINUS_SRC_ALPHA
 ///                       DST_ALPHA ONE_MINUS_DST_ALPHA DST_COLOR
 ///                       ONE_MINUS_DST_COLOR SRC_ALPHA_SATURATE), bit 8 enable
@@ -352,14 +352,14 @@ pub(super) const BLEND_ENABLE: u32 = 1 << 8;
 /// the GE's business: it becomes PP1's logic op). Only the GE HLE writes
 /// these, so beyond the factors' 4-bit fields the encoding is ours (SGI's
 /// diagnostics set the source and destination blend factors and nothing else):
-///   reg_f165 (0x165) source 3:0, destination 7:4, enable 8, equation
+///   blend_factor (0x165) source 3:0, destination 7:4, enable 8, equation
 ///     11:9 (`BLEND_EQ_*`). Factor codes 0..=10 in OpenGL order (ZERO ONE
 ///     SRC_COLOR ONE_MINUS_SRC_COLOR SRC_ALPHA ONE_MINUS_SRC_ALPHA
 ///     DST_ALPHA ONE_MINUS_DST_ALPHA DST_COLOR ONE_MINUS_DST_COLOR
 ///     SRC_ALPHA_SATURATE), then 11 CONSTANT_COLOR, 12
 ///     ONE_MINUS_CONSTANT_COLOR, 13 CONSTANT_ALPHA, 14
 ///     ONE_MINUS_CONSTANT_ALPHA.
-///   reg_f16b (0x16B) red 27:16, green 11:0; reg_f16c (0x16C) blue
+///   blend_color_rg (0x16B) red 27:16, green 11:0; blend_color_ba (0x16C) blue
 ///     27:16, alpha 11:0: the constant colour, 12 bits a component.
 pub(super) const BLEND_EQ_SHIFT: u32 = 9;
 pub(super) const BLEND_EQ_ADD: u32 = 0;
@@ -368,7 +368,7 @@ pub(super) const BLEND_EQ_REVERSE_SUBTRACT: u32 = 2;
 pub(super) const BLEND_EQ_MIN: u32 = 3;
 pub(super) const BLEND_EQ_MAX: u32 = 4;
 
-/// The constant blend colour, 12.16 (`reg_f16b` / `BA`).
+/// The constant blend colour, 12.16 (`blend_color_rg` / `BA`).
 pub(super) fn blend_const(rg: u32, ba: u32) -> [i32; 4] {
     let c = |v: u32| ((v & 0xFFF) as i32) << 16;
     [c(rg >> 16), c(rg), c(ba >> 16), c(ba)]
@@ -399,7 +399,7 @@ fn blend_factor(code: u32, k: usize, s: &[i32; 4], d: &[i32; 4], kc: &[i32; 4]) 
 }
 
 /// Source `s` blended onto destination `d` (12.16 components) as
-/// reg_f165 `bf` says, the constant colour `kc`; clamped.
+/// blend_factor `bf` says, the constant colour `kc`; clamped.
 pub(super) fn blend_rgba(bf: u32, kc: &[i32; 4], s: &[i32; 4], d: &[i32; 4]) -> [i32; 4] {
     use fixed::mul;
     let (sf, df) = (bf & 0xF, (bf >> 4) & 0xF);
@@ -493,7 +493,7 @@ pub(super) fn draws_a_and_b(f: u32) -> bool {
 }
 pub(super) const DRAW_CID: u32 = 0x50;
 
-/// PP1 window mode (`reg_f17b`; fields: window x and y low bits,
+/// PP1 window mode (`window_mode`; fields: window x and y low bits,
 /// CIDmatch, CIDdata, CIDmask). Bits 3:0 are the window origin's low x and
 /// y bits (not modelled). Bits 7:4 (CIDmatch) are one bit per clip ID:
 /// bit 4 + n lets a pixel whose clip ID is n be drawn; all clear, no
@@ -501,11 +501,11 @@ pub(super) const DRAW_CID: u32 = 0x50;
 /// that X gave clip ID n, else 0. Bits 11:10 (CIDmask, our reading) write
 /// enable the two clip-ID planes: the X server (its clip-ID draw routine) sets 0xC00
 /// to draw clip IDs and leaves it set.
-pub(super) fn cid_match(reg_f17b: u32) -> u32 {
-    (reg_f17b >> 4) & 0xF
+pub(super) fn cid_match(window_mode: u32) -> u32 {
+    (window_mode >> 4) & 0xF
 }
-pub(super) fn cid_write_mask(reg_f17b: u32) -> u8 {
-    ((reg_f17b >> 10) & 3) as u8
+pub(super) fn cid_write_mask(window_mode: u32) -> u8 {
+    ((window_mode >> 10) & 3) as u8
 }
 
 /// PP1 fill mode read-buffer field (bits 25:21), whatever the draw field:
@@ -1090,7 +1090,7 @@ fn gl_keeps(r: usize) -> bool {
     r >= 0x3F0 || r == te_reg::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX as usize || crate::dev::mgras::te1::CONTEXT_REGS.contains(&(r as u32))
 }
 
-/// PP1 reg_f168, as our GE11 HLE uses it (the real layout is not known; SGI's
+/// PP1 depth_mode, as our GE11 HLE uses it (the real layout is not known; SGI's
 /// diagnostics write it as value | 0x0FFFFFF0, which fits bits 27:4 being
 /// a 24-bit Z write mask): bits 2:0 the compare function in OpenGL's order
 /// (NEVER, LESS, EQUAL, LEQUAL, GREATER, NOTEQUAL, GEQUAL, ALWAYS), bit 3
@@ -1209,7 +1209,7 @@ pub struct Rss {
     te_read: [u32; 3],
     /// The clip-ID planes (`CidPlanes`). The X server paints a window's visible region with an ID (1-3)
     /// when its clip is too complex for the four screen masks, and the
-    /// kernel has that window's GL drawing match it (`reg_f17b`). Where
+    /// kernel has that window's GL drawing match it (`window_mode`). Where
     /// the board keeps them in RDRAM is not known (X draws them with
     /// DRBpointers at the main buffer); nothing reads them back, so they
     /// are kept apart here. Separate from the VC3's display IDs.
@@ -1743,7 +1743,7 @@ impl Rss {
                 let size = self.regs[reg::XFRSIZE as usize];
                 self.te_read = [read as u32, size & 0xFFFF, size >> 16];
             }
-            te_reg::MGRAS_TE1_REG_F191 | te_reg::MGRAS_TE1_TEXTURE_BORDER_BLOCK | te_reg::MGRAS_TE1_DETAILSCALE => {
+            te_reg::MGRAS_TE1_TEXTURE_MIPMAP_LEVELS | te_reg::MGRAS_TE1_TEXTURE_BORDER_BLOCK | te_reg::MGRAS_TE1_DETAILSCALE => {
                 let i = self.regs[te_reg::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX as usize];
                 self.te_write(false, |te, _| te.table_write(r, i, val));
                 self.regs[te_reg::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX as usize] = i.wrapping_add(1);
@@ -1805,7 +1805,7 @@ impl Rss {
         if !(0..WIDTH as i32).contains(&x) || !(0..HEIGHT as i32).contains(&y) || !self.owns_row(y) {
             return false;
         }
-        let m = cid_match(self.reg(reg::MGRAS_PP1_REG_F17B));
+        let m = cid_match(self.reg(reg::MGRAS_PP1_WINDOW_MODE));
         if m != 0 && (m >> self.cid[y as usize * WIDTH + x as usize]) & 1 == 0 {
             return false;
         }
@@ -1915,7 +1915,7 @@ impl Rss {
             return;
         }
         if field == DRAW_CID {
-            let m = cid_write_mask(self.reg(reg::MGRAS_PP1_REG_F17B));
+            let m = cid_write_mask(self.reg(reg::MGRAS_PP1_WINDOW_MODE));
             let c = &mut self.cid[y as usize * WIDTH + x as usize];
             *c = (*c & !m) | (v as u8 & m);
             return;
@@ -2398,9 +2398,9 @@ impl Rss {
             [fixt(r, c), dx, de - n1 * dx]
         };
         let tplanes = [
-            tplane(self, te_reg::MGRAS_RE4_REG_E080, te_reg::MGRAS_RE4_REG_E0C0, te_reg::MGRAS_RE4_REG_E0C4),
-            tplane(self, te_reg::MGRAS_RE4_REG_E082, te_reg::MGRAS_RE4_REG_E0C2, te_reg::MGRAS_RE4_REG_E0C6),
-            tplane(self, te_reg::MGRAS_RE4_REG_E084, te_reg::MGRAS_RE4_REG_E086, te_reg::MGRAS_RE4_REG_E088),
+            tplane(self, te_reg::MGRAS_TE1_TEXTURE_S_OVER_W_UPPER, te_reg::MGRAS_TE1_TEXTURE_S_OVER_W_EDGE_STEP_UPPER, te_reg::MGRAS_TE1_TEXTURE_S_OVER_W_X_STEP_UPPER),
+            tplane(self, te_reg::MGRAS_TE1_TEXTURE_T_OVER_W_UPPER, te_reg::MGRAS_TE1_TEXTURE_T_OVER_W_EDGE_STEP_UPPER, te_reg::MGRAS_TE1_TEXTURE_T_OVER_W_X_STEP_UPPER),
+            tplane(self, te_reg::MGRAS_TE1_TEXTURE_ONE_OVER_W_UPPER, te_reg::MGRAS_TE1_TEXTURE_ONE_OVER_W_EDGE_STEP_UPPER, te_reg::MGRAS_TE1_TEXTURE_ONE_OVER_W_X_STEP_UPPER),
         ];
         if texture {
             if let Some((want, have)) = self.te.stale(&self.regs) {
@@ -2559,7 +2559,7 @@ impl Rss {
         // pixel in the edge step registers.
         let fix64t = |r: &Self, n: u32| ((r.reg(n) as u64) << 32 | r.reg(n + 1) as u64) as i64 as f64 / ITER_ONE;
         let q = |c: u32, d: u32| [fix64t(self, c), fix64t(self, d)];
-        let tq = [q(te_reg::MGRAS_RE4_REG_E080, te_reg::MGRAS_RE4_REG_E0C0), q(te_reg::MGRAS_RE4_REG_E082, te_reg::MGRAS_RE4_REG_E0C2), q(te_reg::MGRAS_RE4_REG_E084, te_reg::MGRAS_RE4_REG_E086)];
+        let tq = [q(te_reg::MGRAS_TE1_TEXTURE_S_OVER_W_UPPER, te_reg::MGRAS_TE1_TEXTURE_S_OVER_W_EDGE_STEP_UPPER), q(te_reg::MGRAS_TE1_TEXTURE_T_OVER_W_UPPER, te_reg::MGRAS_TE1_TEXTURE_T_OVER_W_EDGE_STEP_UPPER), q(te_reg::MGRAS_TE1_TEXTURE_ONE_OVER_W_UPPER, te_reg::MGRAS_TE1_TEXTURE_ONE_OVER_W_EDGE_STEP_UPPER)];
         let xmajor = (x1 - x0).abs() >= (y1 - y0).abs();
         let (a0, a1, b0, b1) = if xmajor { (x0, x1, y0, y1) } else { (y0, y1, x0, x1) };
         if a0 == a1 {
@@ -2645,7 +2645,7 @@ impl Rss {
             return;
         }
         let rgba = rgba.map(fixed::clamp);
-        let af = self.reg(reg::MGRAS_PP1_REG_F169);
+        let af = self.reg(reg::MGRAS_PP1_ALPHA_TEST_MODE);
         if af & TEST_ENABLE != 0 && !compare(af & 7, rgba[3] as f64, (((af >> 4) & 0xFFF) << 16) as f64) {
             return;
         }
@@ -2671,14 +2671,14 @@ impl Rss {
     /// the stencil ops and the depth write mask say: whether the fragment
     /// passes. True with both tests off.
     fn depth_stencil(&mut self, ux: u32, uy: u32, z: i64) -> bool {
-        let st = self.reg(reg::MGRAS_PP1_REG_F166);
-        let zm = self.reg(reg::MGRAS_PP1_REG_F168);
+        let st = self.reg(reg::MGRAS_PP1_STENCIL_MODE);
+        let zm = self.reg(reg::MGRAS_PP1_DEPTH_MODE);
         let (sten, ztest) = (st & TEST_ENABLE != 0, zm & ZMODE_TEST != 0);
         let zbuf = Buffer::new(ZST_PAGE, Kind::Wide, self.reg(reg::MGRAS_PP1_DRB_SIZE));
         if sten || ztest {
             let zst = self.mem.get(&zbuf, ux, uy);
             let s_old = ((zst >> 24) & 0xFF) as u32;
-            let masks = self.reg(reg::MGRAS_PP1_REG_F167);
+            let masks = self.reg(reg::MGRAS_PP1_STENCIL_MASK);
             let (cmask, wmask) = (masks & 0xFF, (masks >> 8) & 0xFF);
             let sref = (st >> 16) & 0xFF;
             let z = fixed::zbuf(z);
@@ -2729,7 +2729,7 @@ impl Rss {
         let logic = pp1 & PP1_LOGIC_OP_ENABLE != 0 && (pp1 >> 26) & 0xF != 3;
         let rgb = self.rgb_mode();
         let src = if rgb {
-            let blend = self.reg(reg::MGRAS_PP1_REG_F165);
+            let blend = self.reg(reg::MGRAS_PP1_BLEND_FACTOR);
             let c = if blend & BLEND_ENABLE != 0 && !logic {
                 let d = [0, 8, 16, 24].map(|s| (fixed::widen((dst >> s) & 0xFF, 2) << 16) as i32);
                 blend_rgba(blend, &self.blend_constant(), &rgba, &d)
@@ -2748,7 +2748,7 @@ impl Rss {
 
     /// The constant blend colour (`blend_const`).
     pub(super) fn blend_constant(&self) -> [i32; 4] {
-        blend_const(self.reg(reg::MGRAS_PP1_REG_F16B), self.reg(reg::MGRAS_PP1_REG_F16C))
+        blend_const(self.reg(reg::MGRAS_PP1_BLEND_COLOR_RG), self.reg(reg::MGRAS_PP1_BLEND_COLOR_BA))
     }
 
     /// `fragment_color` into a 12:12:12 buffer: blending reads and the
@@ -2758,7 +2758,7 @@ impl Rss {
         use fixed::{mul, ONE};
         let dst = self.mem.get(&b, ux, uy);
         let logic = pp1 & PP1_LOGIC_OP_ENABLE != 0 && (pp1 >> 26) & 0xF != 3;
-        let blend = self.reg(reg::MGRAS_PP1_REG_F165);
+        let blend = self.reg(reg::MGRAS_PP1_BLEND_FACTOR);
         let c = if blend & BLEND_ENABLE != 0 && !logic {
             let d = unpack36(dst).map(|c| (c << 16) as i32);
             let d = [d[0], d[1], d[2], ONE];
@@ -2960,9 +2960,9 @@ impl Rss {
         if draw_buffer(pp1) == DRAW_CID || draw_buffer(pp1) & 0x70 == 0x40 {
             return false;
         }
-        let zst = self.reg(reg::MGRAS_PP1_REG_F168) & ZMODE_TEST != 0 || self.reg(reg::MGRAS_PP1_REG_F166) & TEST_ENABLE != 0;
+        let zst = self.reg(reg::MGRAS_PP1_DEPTH_MODE) & ZMODE_TEST != 0 || self.reg(reg::MGRAS_PP1_STENCIL_MODE) & TEST_ENABLE != 0;
         let rgb = self.rgb_mode()
-            && (self.reg(reg::MGRAS_PP1_REG_F169) & TEST_ENABLE != 0 || self.reg(reg::MGRAS_PP1_REG_F165) & BLEND_ENABLE != 0);
+            && (self.reg(reg::MGRAS_PP1_ALPHA_TEST_MODE) & TEST_ENABLE != 0 || self.reg(reg::MGRAS_PP1_BLEND_FACTOR) & BLEND_ENABLE != 0);
         zst || rgb
     }
 
@@ -2983,7 +2983,7 @@ impl Rss {
         } else {
             [((v & 0xFFF) << 16) as i32, 0, 0, 0]
         };
-        let af = self.reg(reg::MGRAS_PP1_REG_F169);
+        let af = self.reg(reg::MGRAS_PP1_ALPHA_TEST_MODE);
         if rgb && af & TEST_ENABLE != 0 && !compare(af & 7, rgba[3] as f64, (((af >> 4) & 0xFFF) << 16) as f64) {
             return;
         }
@@ -3008,7 +3008,7 @@ impl Rss {
     /// buffer's top byte, through the stencil write mask.
     fn put_stencil_line(&mut self, x: &Xfer, line: u32, bytes: &[u8]) {
         let zbuf = Buffer::new(ZST_PAGE, Kind::Wide, self.reg(reg::MGRAS_PP1_DRB_SIZE));
-        let wmask = ((self.reg(reg::MGRAS_PP1_REG_F167) >> 8) & 0xFF) as u64;
+        let wmask = ((self.reg(reg::MGRAS_PP1_STENCIL_MASK) >> 8) & 0xFF) as u64;
         for (k, px) in bytes.chunks(x.bpp as usize).enumerate().take(x.width as usize) {
             let (fx, fy) = self.block_px(&x.block, k as i32, line as i32);
             if self.visible(fx, fy) {
@@ -3502,11 +3502,11 @@ mod tests {
         assert_eq!(px(&r, 10, 5) & 0xFF_FFFF, 0x800_800, "A now holds the copy");
         // And back into B with PowerAnimator's whole context (traced).
         for (k, v) in [
-            (reg::MGRAS_PP1_REG_F17B, 1),
-            (reg::MGRAS_PP1_REG_F168, 0),
-            (reg::MGRAS_PP1_REG_F169, 7),
-            (reg::MGRAS_PP1_REG_F166, 7),
-            (reg::MGRAS_PP1_REG_F167, 0xFFFF),
+            (reg::MGRAS_PP1_WINDOW_MODE, 1),
+            (reg::MGRAS_PP1_DEPTH_MODE, 0),
+            (reg::MGRAS_PP1_ALPHA_TEST_MODE, 7),
+            (reg::MGRAS_PP1_STENCIL_MODE, 7),
+            (reg::MGRAS_PP1_STENCIL_MASK, 0xFFFF),
             (crate::dev::mgras::te1::reg::MGRAS_RE4_TEXTURE_MODE_FIRST, 0x40440),
             (reg::PP1FILLMODE, 0x0C00_8404),
             (reg::COLORMASKLSBSA, 0xFFF000),
@@ -3940,15 +3940,15 @@ mod tests {
         r.dma_write_line(0, &[0xFF, 0x50, 0x50, 0x50, 0xFF, 0x50, 0x50, 0x50]);
         assert_eq!(px(&r, 7, 7) & 0xFF_FFFF, 0x50_5050);
         // glAlphaFunc(GL_GEQUAL, 0.9): ref 0.9 of 4095.
-        r.write(reg::MGRAS_PP1_REG_F169, 0xE66 << 4 | TEST_ENABLE | 6, false);
+        r.write(reg::MGRAS_PP1_ALPHA_TEST_MODE, 0xE66 << 4 | TEST_ENABLE | 6, false);
         block(&mut r, 7, 7, 8, 7);
         r.dma_write_line(0, &[0x00, 0x11, 0x11, 0x11, 0xFF, 0x22, 0x22, 0x22]);
         assert_eq!(px(&r, 7, 7) & 0xFF_FFFF, 0x50_5050, "transparent pixel written");
         assert_eq!(px(&r, 8, 7) & 0xFF_FFFF, 0x22_2222, "opaque pixel dropped");
         // Alpha test off, blending on (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA):
         // half alpha mixes 0xD0 into 0x50.
-        r.write(reg::MGRAS_PP1_REG_F169, 7, false);
-        r.write(reg::MGRAS_PP1_REG_F165, BLEND_ENABLE | 5 << 4 | 4, false);
+        r.write(reg::MGRAS_PP1_ALPHA_TEST_MODE, 7, false);
+        r.write(reg::MGRAS_PP1_BLEND_FACTOR, BLEND_ENABLE | 5 << 4 | 4, false);
         r.write(reg::XFRSIZE, 1 << 16 | 1, false);
         block(&mut r, 7, 7, 7, 7);
         r.dma_write_line(0, &[0x80, 0xD0, 0xD0, 0xD0]);
@@ -3972,7 +3972,7 @@ mod tests {
         ] {
             r.write(reg::PP1FILLMODE, pp1, false);
             r.write(reg::COLORMASKLSBSA, mask, false);
-            r.write(reg::MGRAS_PP1_REG_F168, 0, false);
+            r.write(reg::MGRAS_PP1_DEPTH_MODE, 0, false);
             r.write(reg::FILLMODE, 5 << 22, false);
             r.write(reg::XFRMODE, if pp1 & 0x700 == 0x200 { 0x80 } else { 0x01 }, false);
             r.write(reg::XFRSIZE, 1 << 16 | 2, false);
@@ -3984,7 +3984,7 @@ mod tests {
             r.mem.put(&zbuf, 7, fy, 0x40_0000);
             r.mem.put(&zbuf, 8, fy, 0xC0_0000);
             r.write(reg::XFER_Z, 0x80_0000 << 8, false);
-            r.write(reg::MGRAS_PP1_REG_F168, 0xFF_FFFF << 4 | ZMODE_TEST | 1, false);
+            r.write(reg::MGRAS_PP1_DEPTH_MODE, 0xFF_FFFF << 4 | ZMODE_TEST | 1, false);
             block(&mut r, 7, 7, 8, 7);
             let line: Vec<u8> = if pp1 & 0x700 == 0x200 { [b, b].concat() } else { vec![b[0], b[1], b[0], b[1]] };
             r.dma_write_line(0, &line);
@@ -4155,7 +4155,7 @@ mod tests {
     }
 
     /// Clip-ID drawing (draw field 0x50) writes the fill colour's low two
-    /// bits under reg_f17b bits 11:10, not the colour planes; CIDmatch
+    /// bits under window_mode bits 11:10, not the colour planes; CIDmatch
     /// (bits 7:4, one bit per ID) limits other drawing to the IDs it names,
     /// and with no bit set nothing is checked.
     #[test]
@@ -4163,26 +4163,26 @@ mod tests {
         let mut r = x_server();
         r.write(reg::FILLMODE, FILL_FAST, false);
         r.write(reg::PP1FILLMODE, 0x142600, false);
-        r.write(reg::MGRAS_PP1_REG_F17B, 0xC00, false);
+        r.write(reg::MGRAS_PP1_WINDOW_MODE, 0xC00, false);
         r.write(reg::FILL_COLOR_R, 7, false);
         block(&mut r, 10, 5, 12, 5);
         assert_eq!(px(&r, 10, 5), 0, "CID drawing keeps colour planes");
         assert_eq!(r.cid[1018 * WIDTH + 10], 3, "two clip-ID planes");
-        r.write(reg::MGRAS_PP1_REG_F17B, 0x400, false);
+        r.write(reg::MGRAS_PP1_WINDOW_MODE, 0x400, false);
         r.write(reg::FILL_COLOR_R, 0, false);
         block(&mut r, 10, 5, 10, 5);
         assert_eq!(r.cid[1018 * WIDTH + 10], 2, "plane 0 alone written");
-        r.write(reg::MGRAS_PP1_REG_F17B, 0xC00, false);
+        r.write(reg::MGRAS_PP1_WINDOW_MODE, 0xC00, false);
         block(&mut r, 11, 5, 11, 5);
 
         r.write(reg::PP1FILLMODE, 0x0C00_4504, false);
         r.write(reg::COLORMASKLSBSA, 0xFF, false);
         // IDs now 2, 0, 3 at x 10, 11, 12.
-        r.write(reg::MGRAS_PP1_REG_F17B, 1 << (4 + 2) | 1 << (4 + 3), false);
+        r.write(reg::MGRAS_PP1_WINDOW_MODE, 1 << (4 + 2) | 1 << (4 + 3), false);
         r.write(reg::FILL_COLOR_R, 0x55, false);
         block(&mut r, 10, 5, 12, 5);
         assert_eq!((px(&r, 10, 5), px(&r, 11, 5), px(&r, 12, 5)), (0x55, 0, 0x55));
-        r.write(reg::MGRAS_PP1_REG_F17B, 0xC00, false);
+        r.write(reg::MGRAS_PP1_WINDOW_MODE, 0xC00, false);
         block(&mut r, 11, 5, 11, 5);
         assert_eq!(px(&r, 11, 5), 0x55, "no CIDmatch bit: no check");
     }

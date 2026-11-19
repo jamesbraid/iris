@@ -549,7 +549,7 @@ fn bench_interpreter_vs_jit() {
         (reg::XYWIN, 1023 << 16),
         (reg::CONFIG, rss::CONFIG_YFLIP),
         (reg::CLIP_MODE, 0),
-        (reg::MGRAS_PP1_REG_F17B, 0),
+        (reg::MGRAS_PP1_WINDOW_MODE, 0),
     ];
     let run = |p: &mut Pair, name: &str, regs: &Regs, pixels: f64, n: u32, go: &dyn Fn(&mut Rss)| {
         p.apply(&base);
@@ -613,10 +613,10 @@ fn bench_interpreter_vs_jit() {
     let mut tri: Regs = vec![
         (reg::CONFIG, 0),
         (reg::XYWIN, 0),
-        (reg::MGRAS_PP1_REG_F168, 0x0FFF_FFF0 | rss::ZMODE_TEST | 3),
-        (reg::MGRAS_PP1_REG_F169, 0),
-        (reg::MGRAS_PP1_REG_F166, 0),
-        (reg::MGRAS_PP1_REG_F165, 0),
+        (reg::MGRAS_PP1_DEPTH_MODE, 0x0FFF_FFF0 | rss::ZMODE_TEST | 3),
+        (reg::MGRAS_PP1_ALPHA_TEST_MODE, 0),
+        (reg::MGRAS_PP1_STENCIL_MODE, 0),
+        (reg::MGRAS_PP1_BLEND_FACTOR, 0),
         (te::MGRAS_RE4_TEXTURE_MODE_FIRST, 0),
         (reg::FOG_ON, 0),
         (reg::FILLMODE, 0),
@@ -649,12 +649,12 @@ fn bench_interpreter_vs_jit() {
         (te::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX, 0),
     ]);
     for l in 0..16 {
-        ttri.push((te::MGRAS_TE1_REG_F191, l * 4));
+        ttri.push((te::MGRAS_TE1_TEXTURE_MIPMAP_LEVELS, l * 4));
     }
-    hilo(&mut ttri, te::MGRAS_RE4_REG_E084, one as i64);
-    hilo(&mut ttri, te::MGRAS_RE4_REG_E080, 0);
-    hilo(&mut ttri, te::MGRAS_RE4_REG_E082, 0);
-    for (r, v) in [(te::MGRAS_RE4_REG_E0C4, 0.004), (te::MGRAS_RE4_REG_E0C6, 0.0), (te::MGRAS_RE4_REG_E0C0, 0.0), (te::MGRAS_RE4_REG_E0C2, -0.004), (te::MGRAS_RE4_REG_E088, 0.0), (te::MGRAS_RE4_REG_E086, 0.0)] {
+    hilo(&mut ttri, te::MGRAS_TE1_TEXTURE_ONE_OVER_W_UPPER, one as i64);
+    hilo(&mut ttri, te::MGRAS_TE1_TEXTURE_S_OVER_W_UPPER, 0);
+    hilo(&mut ttri, te::MGRAS_TE1_TEXTURE_T_OVER_W_UPPER, 0);
+    for (r, v) in [(te::MGRAS_TE1_TEXTURE_S_OVER_W_X_STEP_UPPER, 0.004), (te::MGRAS_TE1_TEXTURE_T_OVER_W_X_STEP_UPPER, 0.0), (te::MGRAS_TE1_TEXTURE_S_OVER_W_EDGE_STEP_UPPER, 0.0), (te::MGRAS_TE1_TEXTURE_T_OVER_W_EDGE_STEP_UPPER, -0.004), (te::MGRAS_TE1_TEXTURE_ONE_OVER_W_X_STEP_UPPER, 0.0), (te::MGRAS_TE1_TEXTURE_ONE_OVER_W_EDGE_STEP_UPPER, 0.0)] {
         hilo(&mut ttri, r, (v * one) as i64);
     }
     run(&mut p, "GL textured trilinear tri 20k px", &ttri, 20_000.0, 100, &|r| {
@@ -683,7 +683,7 @@ fn bench_overhead() {
         (reg::XYWIN, 1023 << 16),
         (reg::CONFIG, rss::CONFIG_YFLIP),
         (reg::CLIP_MODE, 0),
-        (reg::MGRAS_PP1_REG_F17B, 0),
+        (reg::MGRAS_PP1_WINDOW_MODE, 0),
         (reg::FILLMODE, 1 << 20 | 1 << 22),
         (reg::BLOCKXYSTARTI, xy(10, 10)),
         (reg::BLOCKXYENDI, xy(10, 10)),

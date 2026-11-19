@@ -354,7 +354,7 @@ fn common(rss: &mut Rss) -> PipeKey {
         4..=7 => Pix::Ci12,
         _ => Pix::Plain,
     };
-    let window_mode = rss.reg(reg::MGRAS_PP1_REG_F17B);
+    let window_mode = rss.reg(reg::MGRAS_PP1_WINDOW_MODE);
     c.cidmatch = rss::cid_match(window_mode);
     c.cidwmask = rss::cid_write_mask(window_mode) as u32;
     let mode = rss.reg(reg::CLIP_MODE);
@@ -406,24 +406,24 @@ fn common(rss: &mut Rss) -> PipeKey {
 fn gl_common(rss: &mut Rss, mut k: PipeKey) -> PipeKey {
     let mut c = std::mem::take(&mut rss.jit_ctx.gl);
     k.rgb = rss.rgb_mode();
-    let af = rss.reg(reg::MGRAS_PP1_REG_F169);
+    let af = rss.reg(reg::MGRAS_PP1_ALPHA_TEST_MODE);
     k.alpha = (af & rss::TEST_ENABLE != 0).then_some((af & 7) as u8);
     c.aref = (((af >> 4) & 0xFFF) << 16) as i32;
-    let st = rss.reg(reg::MGRAS_PP1_REG_F166);
+    let st = rss.reg(reg::MGRAS_PP1_STENCIL_MODE);
     k.stencil = (st & rss::TEST_ENABLE != 0).then_some(Stencil {
         func: (st & 7) as u8,
         fail: ((st >> 4) & 7) as u8,
         zfail: ((st >> 8) & 7) as u8,
         zpass: ((st >> 12) & 7) as u8,
     });
-    let masks = rss.reg(reg::MGRAS_PP1_REG_F167);
+    let masks = rss.reg(reg::MGRAS_PP1_STENCIL_MASK);
     c.sref = (st >> 16) & 0xFF;
     c.scmask = masks & 0xFF;
     c.swmask = (masks >> 8) & 0xFF;
-    let zm = rss.reg(reg::MGRAS_PP1_REG_F168);
+    let zm = rss.reg(reg::MGRAS_PP1_DEPTH_MODE);
     k.z = (zm & rss::ZMODE_TEST != 0).then_some((zm & 7) as u8);
     c.zmask = ((zm >> 4) & 0xFF_FFFF) as u64;
-    let bf = rss.reg(reg::MGRAS_PP1_REG_F165);
+    let bf = rss.reg(reg::MGRAS_PP1_BLEND_FACTOR);
     k.blend = (bf & rss::BLEND_ENABLE != 0).then_some(Blend {
         src: (bf & 0xF) as u8,
         dst: ((bf >> 4) & 0xF) as u8,
