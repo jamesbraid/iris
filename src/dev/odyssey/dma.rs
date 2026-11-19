@@ -201,7 +201,7 @@ impl Board {
         let drawable = base & dma::SENTINEL != 0;
         let addr = if drawable { if read { self.read_word } else { self.draw_word } } else { base } & ADDR_MASK;
         let surface = Surface::new(addr, hdr[dma::HDR_WIDTH] & PITCH_MASK, ((fmt >> 16) & 0xf) as u8 + 1);
-        let bytes = 2u8 << ((fmt >> 13) & 7);
+        let bytes = super::copy::field_bytes(fmt >> 13);
         // The field's packing: the pixel mode's when the transfer goes to the
         // surface it selects (the library selects a level before it uploads
         // to it) and the mode's field there is word 4's size, else what word
@@ -910,7 +910,7 @@ impl Board {
         src.drawable = drawable;
         src.screen = !drawable && (base & ADDR_MASK) == self.pbj(super::frame::pbj::PIXEL_BASE);
         src.front = fmt & dma::FMT_FRONT != 0;
-        src.bytes = 2u8 << ((fmt >> 13) & 7);
+        src.bytes = super::copy::field_bytes(fmt >> 13);
         src.named = Some(super::copy::source_codec(src.bytes, fmt & 0xff));
         src.x = (hdr[dma::HDR_ORIGIN] & 0xffff) as i64;
         src.y = (hdr[dma::HDR_ORIGIN] >> 16) as i64;

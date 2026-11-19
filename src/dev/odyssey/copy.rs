@@ -118,7 +118,7 @@ impl CopyOperands {
             stride: w[2] & PITCH_MASK,
             pixel_log2: ((w[4] >> 16) & 0xf) as u8 + 1,
             at: 2 * (if front { (w[4] >> 20) & 0xf } else { (w[4] >> 24) & 0xf }) as u8,
-            bytes: 2 << ((w[4] >> 13) & 7),
+            bytes: field_bytes(w[4] >> 13),
             format: w[4] & 0xff,
         }
     }
@@ -151,7 +151,7 @@ impl CopyOperands {
             stride: (w[2] >> 16) & PITCH_MASK,
             pixel_log2: ((w[7] >> 16) & 0xf) as u8 + 1,
             at: 2 * ((w[2] >> 12) & 0xf) as u8,
-            bytes: 2 << ((w[7] >> 13) & 7),
+            bytes: field_bytes(w[7] >> 13),
             format: 0,
         }
     }
@@ -167,6 +167,13 @@ pub(super) fn codec_bytes(c: Codec) -> u8 {
         Codec::Byte => 1,
         Codec::Texel { bytes, .. } => bytes,
     }
+}
+
+/// A field's size in bytes from the 3-bit size code in bits 2:0 of `v`: 2 << code. The code's top
+/// value (256) does not fit a byte and wrapped to 0, which no codec can hold; every size from 8
+/// bytes up is already the one 8-byte lane field, so 256 reads as the largest, 128.
+pub(super) fn field_bytes(v: u32) -> u8 {
+    (2u32 << (v & 7)).min(128) as u8
 }
 
 pub(super) fn source_codec(bytes: u8, format: u32) -> Codec {
