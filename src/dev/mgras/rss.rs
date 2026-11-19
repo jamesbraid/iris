@@ -327,6 +327,10 @@ pub const OP_GL_LINE: u32 = 0x2;
 pub const OP_DIAG_LINE: u32 = 0x3;
 /// IR bits the diagnostic ORs in for its smooth line (0x63; inferred).
 const IR_SMOOTH: u32 = 0x60;
+/// PP1 fill mode bits the diagnostic's blend write sets (1:0 and 3); with
+/// them its lines blend as source alpha over one minus destination alpha
+/// (inferred from one stored pixel, see `diag_line`).
+const PP1_DIAG_BLEND: u32 = 0xB;
 
 /// The OpenGL per-fragment state our GE11 HLE programs into the PP1
 /// registers. The real layouts are not known (only GE11 microcode writes
@@ -1186,8 +1190,9 @@ pub struct Rss {
     /// Pixels drawn since the GL line stipple was last restarted (line_stipple_repeat).
     pub(super) gl_line_stipple_pos: u32,
     /// The diagnostic line fragment being drawn: its coverage (1..=256,
-    /// 0 none). Not state.
+    /// 0 none) and whether it blends (`diag_line`). Not state.
     diag_cover: u32,
+    diag_blend: u32,
     /// The raster registers as `gl_enter` found them.
     gl_stash: [u32; 0x400],
     /// Fill modes seen with a block, for bring-up logging.
@@ -2567,12 +2572,15 @@ impl Rss {
     /// - A smooth line (IR 0x63) has weight a = 255 - 4 k at k = 64 d, d
     ///   the pixel centre's distance from the line sampled at the major
     ///   pixel, for d < 1; the loader's table is not read.
+    /// - With `PP1_DIAG_BLEND` set a fragment blends as source alpha over
+    ///   one minus destination alpha, and its coverage scales its alpha.
     fn diag_line(&mut self, l: &GlLineSetup) -> bool {
         #[cfg(feature = "wgpu")]
         if self.gpu.get().is_some() {
             log::warn!("mgras: the diagnostic's line is drawn as a plain GL line with a GPU unit");
             return false;
         }
+        let blend = self.reg(reg::PP1FILLMODE) & PP1_DIAG_BLEND == PP1_DIAG_BLEND;
         let smooth = l.diag & DIAG_SMOOTH != 0;
         let mut p = l.p0;
         let mut k = 0i32;
@@ -2587,9 +2595,9 @@ impl Rss {
                 let z = l.zbase.wrapping_add(l.zstep.wrapping_mul(k as i64));
                 let frag = |s: &mut Self, q: i32, cover: u32| {
                     let (wx, wy) = if l.xmajor != 0 { (p, q) } else { (q, p) };
-                    s.diag_cover = if cover < 256 { cover } else { 0 };
+                    (s.diag_cover, s.diag_blend) = if blend || cover < 256 { (cover, blend as u32) } else { (0, 0) };
                     s.gl_fragment(wx, wy, rgba, z);
-                    s.diag_cover = 0;
+                    (s.diag_cover, s.diag_blend) = (0, 0);
                 };
                 if smooth {
                     let b = l.b0 + l.slope * (p as f64 - l.a0);
@@ -2803,7 +2811,7 @@ impl Rss {
             // Pixel pairs quantise (and may dither) later, in `Pair::pack`.
             let t = (b.kind != Kind::Wide || Pair::of(pp1).is_none()).then(|| fixed::dither_at(ux, uy));
             if let (Some(t), true) = (t, self.diag_cover != 0) {
-                return self.put_in(b, ux as i32, uy as i32, self.diag_pixel(rgba, t), back);
+                return self.put_in(b, ux as i32, uy as i32, self.diag_pixel(rgba, dst, t), back);
             }
             let c = if blend & BLEND_ENABLE != 0 && !logic {
                 let d = [0, 8, 16, 24].map(|s| (fixed::widen((dst >> s) & 0xFF, 2) << 16) as i32);
@@ -2820,14 +2828,16 @@ impl Rss {
     }
 
     /// A diagnostic line fragment as 8-8-8-8 bytes: the colour (12 bits,
-    /// rounded) scaled by the coverage `diag_cover` (256 is 1; alpha twice,
-    /// as source alpha over a zero destination), each reduced and dithered
-    /// like the triangles (`fixed::dither12`).
-    fn diag_pixel(&self, rgba: [i32; 4], t: u32) -> u32 {
+    /// rounded) scaled by the coverage `diag_cover` (256 is 1; alpha twice),
+    /// plus with `diag_blend` the destination times one minus its alpha,
+    /// each reduced and dithered like the triangles (`fixed::dither12`).
+    fn diag_pixel(&self, rgba: [i32; 4], dst: u32, t: u32) -> u32 {
         let cover = self.diag_cover;
         let c = rgba.map(|v| ((fixed::clamp(v) + 0x8000) >> 16) as u32);
+        let d = [0, 8, 16, 24].map(|s| fixed::widen((dst >> s) & 0xFF, 2));
         (0..4).fold(0, |w, k| {
-            let v = if k < 3 { c[k] * cover >> 8 } else { c[3] * cover * cover >> 16 };
+            let src = if k < 3 { c[k] * cover >> 8 } else { c[3] * cover * cover >> 16 };
+            let v = if self.diag_blend != 0 { (src + (d[k] * (4095 - d[3]) >> 12)).min(4095) } else { src };
             w | fixed::dither12(v, t) << (8 * k)
         })
     }
