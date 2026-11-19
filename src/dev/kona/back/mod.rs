@@ -309,6 +309,7 @@ impl KonaBackend {
     /// A back end that draws on `gpu` when there is one (`[graphics] raster = "wgpu"`), else on
     /// the CPU. A GPU that cannot hold the screen is an error here, not a quiet CPU back end.
     pub fn with_gpu(cfg: KonaConfig, gpu: Option<crate::SharedGpu>) -> Result<Self, String> {
+        cfg.check_managed()?;
         let tex = TextureStore::with_capacity_bytes(cfg.texture_bytes_per_rm());
         #[cfg(feature = "wgpu")]
         if let Some(gpu) = gpu {

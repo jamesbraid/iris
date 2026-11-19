@@ -561,6 +561,7 @@ fn the_chains_serials_follow_the_slot_and_the_geometry_override() {
     assert_eq!(KonaConfig::host_board_of(&["030-1067-001"], false), Ok(HostBoard::Ktown));
     assert_eq!(KonaConfig::host_board_of(&[], true), Ok(HostBoard::Ktown2));
     assert!(KonaConfig::host_board_of(&["030-0000-000"], false).is_err());
+    assert!(KonaConfig::host_board_of(&["030-1067-001", "030-1067-001"], false).is_err(), "a part twice");
 }
 
 /// +0x9c is the kernel

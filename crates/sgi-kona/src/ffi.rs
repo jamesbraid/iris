@@ -13,6 +13,9 @@ use crate::dev::kona::flash::{fresh_image, FlashSink, FLASH_SIZE};
 use crate::dev::kona::ident::{KonaConfig, Product};
 use crate::wgpu::{Gpu, GpuOptions};
 
+/// The most tile workers a shell may ask for; each is a host thread.
+const MAX_POOL_THREADS: u32 = 256;
+
 /// The KONA configuration: the shared part, then the pipe's.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -33,7 +36,7 @@ pub struct IrisKonaConfig {
     /// The managed area in pixels; 0 for the default 1280 by 1024.
     pub managed_width: u32,
     pub managed_height: u32,
-    /// The tile workers (0: draw on the caller's thread) and tile size in pixels, as `[graphics]`.
+    /// The tile workers (0: draw on the caller's thread; at most 256) and tile size in pixels, as `[graphics]`.
     pub pool_threads: u32,
     pub pool_tile: u32,
     /// The boards. NULL or empty takes the product's own (the display generator's own is the
@@ -105,6 +108,9 @@ pub struct IrisKonaRegion {
 }
 
 fn pipe_config(c: &IrisKonaConfig) -> Result<KonaConfig, String> {
+    if c.pool_threads > MAX_POOL_THREADS {
+        return Err(format!("{} tile workers: at most {MAX_POOL_THREADS}", c.pool_threads));
+    }
     if c.product.is_null() {
         return Err("no product".into());
     }
@@ -118,6 +124,11 @@ fn pipe_config(c: &IrisKonaConfig) -> Result<KonaConfig, String> {
         // SAFETY: the caller's contract: NUL-terminated.
         unsafe { CStr::from_ptr(p) }.to_str().map_err(|e| e.to_string())
     };
+    // The chain holds one part besides the geometry board's; a longer list, or a count with no
+    // list, is refused before anything is built from it.
+    if c.num_parts > 1 || (c.num_parts != 0 && c.parts.is_null()) {
+        return Err(format!("{} one-wire parts: the chain can hold one besides the geometry board's", c.num_parts));
+    }
     let parts: Vec<&str> = (0..c.num_parts as usize).map(|i| if c.parts.is_null() { Ok("") } else { text(unsafe { *c.parts.add(i) }) }).collect::<Result<_, _>>()?;
     let host_board = KonaConfig::host_board_of(&parts, c.ktown2 != 0)?;
     let mut cfg = KonaConfig::new(Product::from_name(name)?, 1)?

@@ -422,7 +422,10 @@ impl KonaConfig {
     /// part number fits the rack's record, and a Ktown2 alone shows the model none.
     pub fn host_board_of(parts: &[&str], ktown2: bool) -> Result<HostBoard, String> {
         let mut board = if ktown2 { HostBoard::Ktown2 } else { HostBoard::Deskside };
-        for &part in parts {
+        for (i, &part) in parts.iter().enumerate() {
+            if parts[..i].contains(&part) {
+                return Err(format!("kona: one-wire part {part:?} is listed twice"));
+            }
             if part != KTOWN_PART {
                 return Err(format!("kona: one-wire part {part:?}: the chain can hold the Ktown, {KTOWN_PART}"));
             }
@@ -589,6 +592,19 @@ impl KonaConfig {
         self.threads = threads;
         self.tile = tile;
         self
+    }
+
+    /// The largest managed area a side may have: the largest drawable the pipe's pixel memory
+    /// addresses. A shell's configuration is checked against it before a store is sized from it.
+    pub const MAX_MANAGED_SIDE: u32 = 4096;
+
+    /// Refuses a managed area that is empty or past `MAX_MANAGED_SIDE` a side.
+    pub fn check_managed(&self) -> Result<(), String> {
+        let (w, h) = self.managed;
+        if w == 0 || h == 0 || w > Self::MAX_MANAGED_SIDE || h > Self::MAX_MANAGED_SIDE {
+            return Err(format!("kona: a managed area of {w}x{h}: each side is 1 to {}", Self::MAX_MANAGED_SIDE));
+        }
+        Ok(())
     }
 
     /// The most words a pixel's record may take at the managed size.
