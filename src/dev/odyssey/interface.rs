@@ -494,7 +494,7 @@ impl HostInterface {
             Some(route::DEST_UPPER) => self.route_dest_upper = value as u32,
             Some(route::DEST_LOWER) => self.route_dest_lower = value as u32,
             Some(route::VECTORS) => self.route_vectors = value as u32,
-            Some(ODSY_IDENTITY | ODSY_STATUS | ODSY_ERROR_ADDR_UPPER | ODSY_ERROR_ADDR_LOWER) => {
+            Some(ODSY_IDENTITY | ODSY_STATUS | ODSY_ERROR_ADDR_UPPER | ODSY_ERROR_ADDR_LOWER | ODSY_STATUS0) => {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: write of {:#x} to the read-only register at {:#x}", value, addr);
             }
             _ => unreachable!("odyssey_front_register() admits only these"),

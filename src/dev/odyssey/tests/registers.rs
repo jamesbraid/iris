@@ -663,3 +663,30 @@ fn a_reset_control_pulse_resets_the_board_and_other_values_do_nothing() {
         assert_eq!(reg_read(&mut s, IDENTITY), identity, "identity survives");
     }
 }
+
+/// Every offset and width the front registers admit takes a read and a write without panicking.
+/// The no-wait list (`front_register`) and the register arms were kept by hand, and a write to
+/// the board status word (0x1064) passed the first and met `unreachable!` in the second: a guest
+/// could panic the engine with one 4-byte store. A write to a status register changes nothing.
+#[test]
+fn every_register_the_front_admits_takes_a_read_and_a_write() {
+    use crate::dev::odyssey::interface::front_register;
+    let (s, _) = board("v12");
+    let mut f = s.front.lock();
+    let status = f.read(ODSY_STATUS0, 4);
+    f.write(ODSY_STATUS0, 0xffff_ffff, 4);
+    assert_eq!(f.read(ODSY_STATUS0, 4), status, "a store to the status word changes nothing");
+    let mut admitted = 0;
+    for addr in (0..0x24_0000u64).step_by(4) {
+        for size in [1, 2, 4, 8] {
+            if front_register(addr, size, true) {
+                f.write(addr, 0xffff_ffff_ffff_ffff, size);
+                admitted += 1;
+            }
+            if front_register(addr, size, false) {
+                f.read(addr, size);
+            }
+        }
+    }
+    assert!(admitted > 20, "{admitted} registers");
+}
