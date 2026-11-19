@@ -432,6 +432,21 @@ fn a_read_across_two_windows_decodes_each_pixel_by_its_own_display_mode() {
     assert_eq!(got[..3], [0x2a, red, 0xa5], "by the read sentinel");
 }
 
+/// A copy or read whose field-size code is 7 names a 256-byte field, which did not fit the byte
+/// that held the size: it wrapped to 0, a field no codec holds, and the copy's store panicked on
+/// the shift. Every size from 8 bytes up is already the one 8-byte lane field, so the largest code
+/// reads as the largest size and the copy runs.
+#[test]
+fn a_field_size_code_of_seven_is_the_largest_field_not_zero() {
+    use crate::dev::odyssey::copy::field_bytes;
+    assert_eq!([0, 1, 2, 3, 4, 7].map(field_bytes), [2, 4, 8, 16, 32, 128]);
+    assert_eq!(field_bytes(15), 128 , "only the low three bits are the code");
+    let (mut s, _) = window();
+    pixel_write(&mut s, 30, 40, 0x1100_00ff);
+    s.draw_mask = 4;
+    copy_block(&mut s, [0x3000_0019, 40 << 16 | 30, 0x0050_2050, 1 << 16 | 1, 0x9263_e042, 0x3000_0010, 70 << 16 | 60, 0x3863_e04b]);
+}
+
 /// A header that places a 4-byte field at byte 6 of the pixel, across two 8-byte words, is a guest
 /// error and must not panic the engine. No odsy evidence places a field there (every named layout has
 /// each field whole inside its word), so the model does not guess: the field reads 0 and a store to
