@@ -33,7 +33,7 @@ use crate::wgpu::{library, ArchShaders, Batch, BatchPipelines, Fragment, Full, G
 
 use super::consts::{dispmode, write, ODSY_DID_MAIN_SHIFT};
 use super::field::Codec;
-use super::gpu_unit::{BlitKey, BlitView, CopyOp, CopySelect, LineWords, Observation};
+use super::gpu_unit::{copy_fits, BlitKey, BlitView, CopyOp, CopySelect, LineWords, Observation, COPY_SCRATCH_PIXELS};
 use super::pipe::backend::{ClearDraw, DestMem};
 use super::pipe::ring::BackQuad;
 use super::pipe::setup::Tri;
@@ -170,9 +170,6 @@ const BLIT_CONST: u32 = 4;
 /// Words the stage buffer holds (the pixels of a batch's blits).
 const STAGE_WORDS: usize = 1 << 20;
 
-/// Pixels the copy kernel's scratch holds (two words each): a larger copy
-/// stays on the CPU.
-const COPY_SCRATCH_PIXELS: u32 = 1 << 21;
 // Copy flags (shaders/copy.wgsl).
 const COPY_MIRROR_X: u32 = 1;
 const COPY_MIRROR_Y: u32 = 2;
@@ -644,7 +641,7 @@ impl CopyKernel {
         let gather = src.compute_pipeline(&gpu.device, "gather", &layouts)?;
         let scatter = src.compute_pipeline(&gpu.device, "scatter", &layouts)?;
         let uniform = gpu.buffer("vpro copy op", size_of::<CopyUniform>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
-        let scratch = gpu.buffer("vpro copy scratch", COPY_SCRATCH_PIXELS as u64 * 8, wgpu::BufferUsages::STORAGE);
+        let scratch = gpu.buffer("vpro copy scratch", COPY_SCRATCH_PIXELS * 8, wgpu::BufferUsages::STORAGE);
         let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vpro copy"),
             layout: &op_layout,
@@ -1346,7 +1343,7 @@ impl GpuRaster {
         if w == 0 || h == 0 {
             return Ok(());
         }
-        if w as u64 * h as u64 > COPY_SCRATCH_PIXELS as u64 {
+        if !copy_fits(w, h) {
             return Err(Unsupported(format!("a {w}x{h} copy exceeds the GPU scratch")));
         }
         let u = CopyUniform::of(op)?;

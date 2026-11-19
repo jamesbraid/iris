@@ -189,6 +189,14 @@ pub(crate) struct CopyWindow {
     pub did: View,
 }
 
+/// Pixels the unit's copy kernel stages (two words each): a larger copy runs on the CPU.
+pub(super) const COPY_SCRATCH_PIXELS: u64 = 1 << 21;
+
+/// Whether the unit can take a copy of `w` by `h` pixels: it fits the scratch.
+pub(super) fn copy_fits(w: u32, h: u32) -> bool {
+    w as u64 * h as u64 <= COPY_SCRATCH_PIXELS
+}
+
 #[cfg(feature = "wgpu")]
 pub(super) use super::wgpu::{GpuRaster, Slot, TexSlot};
 

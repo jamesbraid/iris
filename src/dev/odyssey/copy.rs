@@ -362,7 +362,7 @@ impl Board {
         if gpu {
             // The unit copies within its own memory, in order with the
             // records and with no readback, when it can take the copy.
-            if !fragment {
+            if !fragment && super::gpu_unit::copy_fits(w, h) {
                 let op = self.copy_op(&c, &src, &dst, &from, ab.as_ref(), &to, (ox, oy), (dx0, dy0), (mirror_x, mirror_y), raw, byte_masks, filter);
                 match self.raster.run_now(|ctx| ctx.gpu.as_mut().expect("the unit").copy(&op)) {
                     Ok(()) => return,
@@ -372,8 +372,8 @@ impl Board {
                     }
                 }
             }
-            // Otherwise the source and destination rectangles come back,
-            // current in the mirror, and the CPU copies.
+            // Otherwise (a fragment copy, or one past the unit's scratch) the source and
+            // destination rectangles come back, current in the mirror, and the CPU copies.
             let region = |rows: &Rows, x: i32, y: i32| {
                 self.raster.run_now(|ctx| {
                     if let Some(g) = &mut ctx.gpu {
