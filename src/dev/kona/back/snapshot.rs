@@ -126,6 +126,131 @@ pub fn save(store: &Store, tables: &Tables, cs: &ChunkStore) -> io::Result<Vec<K
     Ok(out)
 }
 
+/// What a streamed snapshot's pieces fill in, sent ahead of them: zero pieces are not sent, so the
+/// arrays, the cursor memory and the texture planes are named here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Layout {
+    pub entries: u32,
+    pub arrays: Vec<u16>,
+    pub cursor_words: u32,
+    /// Each plane holding pages, with the length of its page table.
+    pub planes: Vec<(u16, u32)>,
+}
+
+pub fn layout(store: &Store, tables: &Tables) -> Layout {
+    let cpu = store.cpu();
+    Layout {
+        entries: cpu.width() * cpu.height(),
+        arrays: cpu.allocated().into_iter().map(|w| w as u16).collect(),
+        cursor_words: tables.cursor_words().len() as u32,
+        planes: cpu.texture().used().into_iter().map(|(p, n)| (p, n as u32)).collect(),
+    }
+}
+
+/// Hand `put` each non-zero piece of the bulk state (name, piece number, big-endian bytes), one piece
+/// in memory at a time: `pixel-W` and `cursor-ram` in `CHUNK_SIZE` pieces, `texture-gP` a page a piece.
+pub fn save_stream(store: &Store, tables: &Tables, put: &mut dyn FnMut(&str, u64, Vec<u8>) -> Result<(), String>) -> Result<(), String> {
+    store.observe_all();
+    let store = store.cpu();
+    let mut emit = |name: &str, index: usize, words: &mut dyn Iterator<Item = u32>| {
+        let bytes: Vec<u8> = words.flat_map(u32::to_be_bytes).collect();
+        if bytes.iter().all(|&b| b == 0) { Ok(()) } else { put(name, index as u64, bytes) }
+    };
+    for w in store.allocated() {
+        let a = store.array(w).expect("allocated");
+        for i in 0..a.len().div_ceil(WORDS) {
+            // SAFETY: `k` is below the array's length.
+            emit(&format!("pixel-{w}"), i, &mut (i * WORDS..(i * WORDS + WORDS).min(a.len())).map(|k| unsafe { a.load(k) }))?;
+        }
+    }
+    let cursor = tables.cursor_words();
+    for (i, c) in cursor.chunks(WORDS).enumerate() {
+        emit("cursor-ram", i, &mut c.iter().copied())?;
+    }
+    let tex = store.texture();
+    for (plane, pages) in tex.used() {
+        for pg in 0..pages {
+            if let Some(p) = tex.page(plane, pg) {
+                emit(&format!("texture-g{plane}"), pg, &mut p.iter().copied())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A streamed snapshot's bulk state, filled in as pieces arrive and checked as they do.
+pub struct Loader {
+    entries: usize,
+    data: Vec<(usize, Vec<u32>)>,
+    cursor: Vec<u32>,
+    planes: Vec<(u16, Vec<Option<Box<Page>>>)>,
+}
+
+impl Loader {
+    /// Check `layout` against a store and tables of this configuration, and make room for its pieces.
+    pub fn new(store: &Store, tables: &Tables, layout: &Layout) -> Result<Loader, String> {
+        let store = store.cpu();
+        let entries = store.width() as usize * store.height() as usize;
+        if layout.entries as usize != entries {
+            return Err(format!("the snapshot's store holds {} pixels, this one {entries}", layout.entries));
+        }
+        if layout.cursor_words as usize != tables.cursor_words().len() {
+            return Err("the snapshot's cursor memory is another size".into());
+        }
+        let mut data = Vec::new();
+        for &w in &layout.arrays {
+            if w as usize >= POSITIONS || data.iter().any(|&(q, _)| q == w as usize) {
+                return Err(format!("the layout names word position {w} twice or past the store"));
+            }
+            data.push((w as usize, vec![0; entries]));
+        }
+        let mut planes: Vec<(u16, Vec<Option<Box<Page>>>)> = Vec::new();
+        for &(p, n) in &layout.planes {
+            if p as usize >= PLANES || planes.iter().any(|&(q, _)| q == p) || n as usize > store.texture().plane_pages() {
+                return Err(format!("the layout names texture plane {p} twice, past the planes or longer than a bank"));
+            }
+            planes.push((p, (0..n).map(|_| None).collect()));
+        }
+        Ok(Loader { entries, data, cursor: vec![0; tables.cursor_words().len()], planes })
+    }
+
+    /// Take one piece: where it goes and how long it is are checked against the layout.
+    pub fn put(&mut self, name: &str, index: u64, bytes: &[u8]) -> Result<(), String> {
+        let bad = |why: &str| Err(format!("{name} piece {index}: {why}"));
+        let words = |bytes: &[u8]| -> Vec<u32> { bytes.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect() };
+        let at = |len: usize| (index as usize).checked_mul(WORDS).filter(|&a| a < len);
+        let want = |at: usize, len: usize| (len - at).min(WORDS) * 4;
+        if let Some(Ok(w)) = name.strip_prefix("pixel-").map(str::parse::<usize>) {
+            let Some((_, a)) = self.data.iter_mut().find(|(q, _)| *q == w) else { return bad("no such array in the layout") };
+            let Some(at) = at(self.entries).filter(|&at| want(at, self.entries) == bytes.len()) else { return bad("out of range or the wrong length") };
+            a[at..at + bytes.len() / 4].copy_from_slice(&words(bytes));
+        } else if name == "cursor-ram" {
+            let Some(at) = at(self.cursor.len()).filter(|&at| want(at, self.cursor.len()) == bytes.len()) else { return bad("out of range or the wrong length") };
+            self.cursor[at..at + bytes.len() / 4].copy_from_slice(&words(bytes));
+        } else if let Some(Ok(p)) = name.strip_prefix("texture-g").map(str::parse::<u16>) {
+            let Some((_, pages)) = self.planes.iter_mut().find(|(q, _)| *q == p) else { return bad("no such plane in the layout") };
+            let Some(slot) = pages.get_mut(index as usize) else { return bad("past the plane's page table") };
+            if bytes.len() != PAGE_WORDS * 4 {
+                return bad("not one page long");
+            }
+            *slot = Some(Box::<Page>::try_from(words(bytes).into_boxed_slice()).map_err(|_| "a page is not PAGE_WORDS long".to_string())?);
+        } else {
+            return Err(format!("unknown piece {name}"));
+        }
+        Ok(())
+    }
+
+    /// The state, once every piece is in: refused when it holds more texture pages than the product's memory does.
+    pub fn finish(self, store: &Store) -> Result<Prepared, String> {
+        let store = store.cpu();
+        let held: usize = self.planes.iter().map(|(_, p)| p.iter().flatten().count()).sum();
+        if held > store.texture().cap_pages() {
+            return Err(format!("{held} texture pages saved, past the {} the product's memory holds", store.texture().cap_pages()));
+        }
+        Ok(Prepared { data: self.data, cursor: self.cursor, planes: self.planes })
+    }
+}
+
 /// A snapshot's bulk state read into memory and checked, ready to apply.
 pub struct Prepared {
     data: Vec<(usize, Vec<u32>)>,
@@ -251,6 +376,31 @@ mod tests {
         assert_eq!(b.store.allocated(), a.store.allocated());
         assert_eq!(b.store.read(7, 9, 1), 0xff12_3456);
         assert_eq!(b.save_chunks(&cs).unwrap(), first, "save, load, save");
+    }
+
+    /// The streamed form: zero pieces are not sent, the layout names every array and plane, and the
+    /// pieces restore a fresh board to the same store and texture memory.
+    #[test]
+    fn a_streamed_snapshot_restores_into_a_fresh_board() {
+        let mut a = drawn();
+        assert!(a.store.texture().ex().set(2, 70_000, 0xff0a_0b0c));
+        let layout = a.bulk_layout();
+        let mut pieces = Vec::new();
+        a.save_stream(&mut |n, i, b| Ok(pieces.push((n.to_string(), i, b)))).unwrap();
+        assert!(layout.arrays.contains(&(POPUP_PLANE as u16)), "an all-zero array is named");
+        assert!(pieces.iter().all(|(n, _, b)| n != &format!("pixel-{POPUP_PLANE}") && b.iter().any(|&x| x != 0)), "and sends nothing");
+        let mut b = board();
+        let mut load = b.bulk_loader(&layout).unwrap();
+        for (n, i, bytes) in &pieces {
+            load.put(n, *i, bytes).unwrap();
+        }
+        let prepared = b.finish_loader(load).unwrap();
+        b.apply_chunks(prepared).unwrap();
+        assert_eq!((b.store.checksum(), b.store.allocated()), (a.store.checksum(), a.store.allocated()));
+        assert_eq!(b.store.texture().get(2, 70_000), 0xff0a_0b0c);
+        // A piece the layout does not name, or of the wrong length, is refused.
+        let mut load = board().bulk_loader(&layout).unwrap();
+        assert!(load.put("pixel-9", 0, &[0; 4]).is_err() && load.put("pixel-1", 0, &[0; 4]).is_err() && load.put("pixel-1", 1 << 40, &[]).is_err());
     }
 
     /// A chunk of zeros is not written, and its place holds the zero hash.

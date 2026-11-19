@@ -483,6 +483,27 @@ impl KonaBackend {
         self.apply_chunks(p)
     }
 
+    /// The layout of the bulk state `save_stream` sends, for a snapshot that streams it.
+    pub fn bulk_layout(&mut self) -> snapshot::Layout {
+        self.drain();
+        snapshot::layout(&self.store, &self.tables.lock())
+    }
+
+    /// Send the bulk state's non-zero pieces to `put`, a piece at a time.
+    pub fn save_stream(&mut self, put: &mut dyn FnMut(&str, u64, Vec<u8>) -> Result<(), String>) -> Result<(), String> {
+        self.drain();
+        snapshot::save_stream(&self.store, &self.tables.lock(), put)
+    }
+
+    /// A loader for a streamed snapshot of `layout`; `apply_chunks` takes what it finishes.
+    pub fn bulk_loader(&self, layout: &snapshot::Layout) -> Result<snapshot::Loader, String> {
+        snapshot::Loader::new(&self.store, &self.tables.lock(), layout)
+    }
+
+    pub fn finish_loader(&self, l: snapshot::Loader) -> Result<snapshot::Prepared, String> {
+        l.finish(&self.store)
+    }
+
     /// Wire the machine's status-bar inputs into the display.
     pub fn set_status(&self, status: Arc<crate::disp::StatusSource>) {
         // The same window, whether the machine took `display()` before or after.
