@@ -186,6 +186,14 @@ impl Engine {
     /// Returns the time of the next retrace, if the mode has one.
     pub fn advance(&self, now_ns: i64) -> Option<i64> {
         self.now.store(now_ns, Ordering::Relaxed);
+        if self.mode == Mode::Inline {
+            // The GPU unit sends its mirror's changes up and submits its
+            // open batch at the end of a run of stores; inline there is
+            // no such end but this call. A board with no GPU unit does
+            // nothing.
+            // SAFETY: inline, the caller's thread is the board's only one.
+            unsafe { &*self.locks.board.get() }.gpu_upload_tick(true);
+        }
         let mut r = self.reader.lock();
         r.attach(&self.locks.shared);
         r.poll(now_ns);
@@ -228,9 +236,14 @@ impl Engine {
     }
 
     /// The scan-out composed from board memory as the registers describe
-    /// it, 0x00RRGGBB, `(width, height, pixels)`; None with no mode. Call
-    /// it with the board idle (`quiesce`).
+    /// it, 0x00RRGGBB, `(width, height, pixels)`; None with no mode or a
+    /// board that stays busy. Drains the board first, and with the GPU
+    /// unit brings all of its memory back to the host's copy.
     pub fn frame(&self) -> Option<(u32, u32, Vec<u32>)> {
+        let g = self.locks.quiesce(std::time::Duration::from_secs(5))?;
+        g.gpu_upload_tick(true);
+        g.gpu_sync();
+        drop(g);
         let mut r = self.reader.lock();
         r.attach(&self.locks.shared);
         r.recompose();
@@ -238,6 +251,13 @@ impl Engine {
         // The reader composes 0xAABBGGRR; this API hands out 0x00RRGGBB.
         let rgb = |p: &u32| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16) & 0xff;
         (r.frame_width != 0).then(|| (r.frame_width, r.frame_height, r.frame.iter().map(rgb).collect()))
+    }
+
+    /// The GPU unit's counters (batches, records, waits, readbacks) as
+    /// text; None without a GPU unit or while the board is busy.
+    pub fn gpu_report(&self) -> Option<String> {
+        let g = self.locks.quiesce(std::time::Duration::from_secs(5))?;
+        g.raster.run_now(|ctx| ctx.gpu.as_ref().map(|u| u.report()))
     }
 
     /// The buffers the scan-out shows, one bit per window id.
