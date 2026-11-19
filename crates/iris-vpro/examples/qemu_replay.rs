@@ -2,7 +2,7 @@
 //! `analyze command-port-trace --head sgi-odyssey` writes) into the VPro
 //! engine, inline, and reports what it cost and how the last frame compares.
 //!
-//! Usage: qemu_replay [--gpu BACKEND] [--ns-per-record N] [--dump FILE.ppm] [--ref FILE.ppm] FILE.replay
+//! Usage: qemu_replay [--threaded] [--gpu BACKEND] [--ns-per-record N] [--dump FILE.ppm] [--ref FILE.ppm] FILE.replay
 //!
 //! The recording has no time. A read that differs from the recorded value
 //! moves the engine's clock on by one frame period and reads again, up to
@@ -126,11 +126,24 @@ fn write_ppm(path: &str, w: u32, h: u32, px: &[u32]) {
     }
 }
 
+/// A load, retried while the bus answers busy (threaded mode).
+fn read_wait(engine: &Engine, off: u32, size: u8, busy: &mut u64) -> u64 {
+    loop {
+        if let Some(v) = engine.read(off as u64, size as u32) {
+            return v;
+        }
+        *busy += 1;
+        std::thread::yield_now();
+    }
+}
+
 fn main() {
     let (mut dump, mut reference, mut file, mut ns_per_record, mut gpu) = (None, None, None, 0i64, None);
+    let mut threaded = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--threaded" => threaded = true,
             "--gpu" => gpu = args.next(),
             "--dump" => dump = args.next(),
             "--ref" => reference = args.next(),
@@ -153,7 +166,7 @@ fn main() {
     // SAFETY: board_mem outlives the engine (dropped after it) and nothing else touches it.
     let engine = unsafe {
         Engine::new(
-            Config { product: product.into(), widget: 11, mode: Mode::Inline, pool: (0, 0), gpu },
+            Config { product: product.into(), widget: 11, mode: if threaded { Mode::Threaded } else { Mode::Inline }, pool: (0, 0), gpu },
             Some(Lent { ptr: board_mem.as_mut_ptr(), bytes }),
             guest.clone(),
         )
@@ -179,8 +192,10 @@ fn main() {
                     fifo_words += if size == 8 { 2 } else { 1 };
                     seg_w += if size == 8 { 2 } else { 1 };
                 }
-                if !engine.write(off as u64, size as u32, val) {
+                // Threaded, the bus answers busy while the ring is full or the store waits.
+                while !engine.write(off as u64, size as u32, val) {
                     busy += 1;
+                    std::thread::yield_now();
                 }
                 if ns_per_record != 0 {
                     now += ns_per_record;
@@ -189,12 +204,12 @@ fn main() {
             }
             Cmd::Read { size, off, val, mask } => {
                 reads += 1;
-                let mut got = engine.read(off as u64, size as u32).unwrap_or(!val);
+                let mut got = read_wait(&engine, off, size, &mut busy);
                 let mut tries = 0;
                 while (got ^ val) & mask != 0 && tries < 4 {
                     now += frame_ns;
                     engine.advance(now);
-                    got = engine.read(off as u64, size as u32).unwrap_or(!val);
+                    got = read_wait(&engine, off, size, &mut busy);
                     tries += 1;
                     retries += 1;
                 }
