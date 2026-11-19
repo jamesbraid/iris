@@ -494,7 +494,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
             return Ok(None);
         }
         let lent = KonaEngine::lend_frame(self).map_err(Fault)?;
-        Ok(lent.map(|f| sgi_engine::LentFrame { width: f.width, height: f.height, buffer: Arc::new(f.buffer) }))
+        Ok(lent.map(|f| sgi_engine::LentFrame { width: f.width, height: f.height, stride: f.width, words: sgi_engine::FrameWords::Abgr, generation: 0, buffer: Arc::new(f.buffer) }))
     }
 
     fn write(&mut self, off: u32, bits: u32, val: u64) -> Write {

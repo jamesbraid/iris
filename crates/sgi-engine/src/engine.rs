@@ -211,23 +211,39 @@ pub enum Event {
     Credits { source: u32, retired: u32 },
 }
 
+/// How the words of a frame the GPU holds are laid out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameWords {
+    /// `0xAABBGGRR` with alpha set, red in the low byte: what a board's scan-out kernel writes and
+    /// a presenter's texture reads. `lend_frame`'s buffer.
+    Abgr,
+    /// `0x00RRGGBB`: what `scanout` copies and `compose_into` writes.
+    Rgb,
+}
+
 /// A composed frame left on the GPU for a scan-out on the same device to
 /// read in place, with no readback.
 ///
 /// `buffer` holds the board's `wgpu::Buffer` (an `Arc<wgpu::Buffer>`, as a
 /// `dyn Any`, since this crate has no GPU dependency): the shell downcasts
-/// it. The words are `0xAABBGGRR`, rows from the top, `width` by `height`.
-/// The buffer is valid until the next `lend_frame` of the same head.
+/// it. The words are laid out as `words` says, `stride` words a row (at
+/// least `width`), `width` by `height`, rows from the top. The buffer is
+/// valid until the next `lend_frame` of the same head. `generation` is the
+/// head's `frame_generation` as this frame was composed; 0 when the board
+/// keeps none.
 #[derive(Clone)]
 pub struct LentFrame {
     pub width: u32,
     pub height: u32,
+    pub stride: u32,
+    pub words: FrameWords,
+    pub generation: u64,
     pub buffer: std::sync::Arc<dyn std::any::Any + Send + Sync>,
 }
 
 impl fmt::Debug for LentFrame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LentFrame").field("width", &self.width).field("height", &self.height).finish_non_exhaustive()
+        f.debug_struct("LentFrame").field("width", &self.width).field("height", &self.height).field("stride", &self.stride).field("words", &self.words).field("generation", &self.generation).finish_non_exhaustive()
     }
 }
 
@@ -305,6 +321,20 @@ pub trait BoardEngine {
     /// host; `None` where the board has no GPU scan-out (use `scanout`).
     fn lend_frame(&mut self, _head: u32) -> Result<Option<LentFrame>, Fault> {
         Ok(None)
+    }
+    /// The same picture composed straight into the caller's buffer (`dst`: an `Arc<wgpu::Buffer>` or
+    /// `wgpu::Buffer` on the board's device, as a `dyn Any`) as `0x00RRGGBB`, `stride_words` a row, rows
+    /// from the top: the buffer a display exports is then the compose target, with no second pass.
+    /// `(width, height)`; `None` where the board has no GPU scan-out, no such head or no frame. A
+    /// buffer too small for `stride_words * height` or a stride under the width is a fault.
+    fn compose_into(&mut self, _head: u32, _dst: &dyn std::any::Any, _stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
+        Ok(None)
+    }
+    /// A number that changes whenever the picture of `head` may have: any store, retrace swap, CPU
+    /// write, load or reset. A shell that composed at generation `g` and reads `g` again can skip the
+    /// call. 0 for a board that keeps none (compose every time). Cheap; waits for nothing.
+    fn frame_generation(&self, _head: u32) -> u64 {
+        0
     }
     /// When `head` next needs `advance` (its next retrace), `None` for a board
     /// whose head has no timer of its own.

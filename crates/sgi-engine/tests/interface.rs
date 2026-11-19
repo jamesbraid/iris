@@ -515,3 +515,28 @@ fn heads_scan_out_and_each_has_its_own_deadline() {
     e.fail("gone");
     assert_eq!(e.scanout(0, &mut px), Err(Fault("gone".into())));
 }
+
+#[test]
+fn a_frame_composes_into_the_callers_buffer_and_the_generation_says_when_it_changed() {
+    let (mut e, _) = mock(MockConfig::default());
+    let g0 = e.frame_generation(0);
+    assert_eq!(e.frame_generation(0), g0, "nothing happened");
+    assert_eq!(e.frame_generation(2), 0, "no such head keeps none");
+    let buf = parking_lot::Mutex::new(vec![0u32; 16]);
+    assert_eq!(e.compose_into(1, &buf, 8), Ok(Some((4, 2))));
+    {
+        let words = buf.lock();
+        assert_eq!((words[8 + 1] >> 16, words[3] & 0xffff, words[4..8].to_vec()), (2, 3, vec![0; 4]), "rows of the caller's stride, the padding untouched");
+    }
+    assert_eq!(e.compose_into(2, &buf, 8), Ok(None));
+    assert!(e.compose_into(0, &buf, 2).is_err(), "a stride under the width");
+    assert!(e.compose_into(0, &parking_lot::Mutex::new(vec![0u32; 3]), 4).is_err(), "a buffer too small");
+    assert_eq!(e.write(reg::DATA, 32, 1), Write::Done);
+    assert_ne!(e.frame_generation(0), g0, "a store changes it");
+    let g1 = e.frame_generation(0);
+    e.quiesce(u64::MAX).unwrap();
+    e.reset().unwrap();
+    assert_ne!(e.frame_generation(0), g1, "and so does a reset");
+    let lent = LentFrame { width: 4, height: 2, stride: 4, words: FrameWords::Abgr, generation: 7, buffer: Arc::new(0u8) };
+    assert_eq!((lent.words, lent.generation), (FrameWords::Abgr, 7));
+}
