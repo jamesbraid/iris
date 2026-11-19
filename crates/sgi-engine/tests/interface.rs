@@ -424,7 +424,7 @@ fn lent_refuses_a_bad_region() {
     let mut buf = vec![0u64; 4];
     let p = buf.as_mut_ptr().cast::<u8>();
     unsafe {
-        assert!(Lent::new(p, 32).is_some());
+        assert_eq!(Lent::new(p, 32).unwrap().as_ptr().cast::<u8>(), p);
         assert!(Lent::new(p, 31).is_none(), "not whole words");
         assert!(Lent::new(p.add(1), 24).is_none(), "not aligned");
         assert!(Lent::new(std::ptr::null_mut(), 8).is_none());
