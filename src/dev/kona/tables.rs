@@ -412,200 +412,201 @@ pub(super) const GL: &[Selector] = &[
 ];
 
 /// The video command table: the data words each command carries between its
-/// number and its checksum (established for all 93 requests).
+/// number and its checksum (established for all 93 requests). Each entry's comment is the
+/// request's name in the kona repo's generated `dispreq` unit.
 pub(super) const VIDEO: &[Option<u16>] = &[
-    Some(1), // 0x00 Test
-    Some(2), // 0x01 VCWrite
-    Some(1), // 0x02 VCRead
-    Some(10), // 0x03 DiagXmapColor
-    Some(1), // 0x04 DisableDiagXmapColor
-    Some(4), // 0x05 VCBusTrace
-    Some(4107), // 0x06 DiagCursorFromImage
-    Some(1), // 0x07 DebugMask
-    Some(3), // 0x08 SetupFrameBuffer
-    Some(1), // 0x09 InputSync
-    Some(1), // 0x0a GetInputSync
-    Some(2), // 0x0b HPhase
-    Some(1), // 0x0c GetHPhase
-    Some(1), // 0x0d VPhase
-    Some(1), // 0x0e GetVPhase
-    Some(2), // 0x0f ChannelGammaMap
-    Some(1), // 0x10 GetChannelGammaMap
-    Some(1), // 0x11 Fetal
-    Some(1), // 0x12 GetBoardConfig
-    Some(1), // 0x13 GetChannelConfig
-    Some(8), // 0x14 Resize
-    Some(1), // 0x15 GetResize
-    Some(383), // 0x16 LoadFormat
-    Some(3), // 0x17 EnableChannel
-    Some(1), // 0x18 DisableChannel
-    Some(16), // 0x19 LoadGenlockParams
-    Some(1), // 0x1a EnableGenlock
-    Some(2), // 0x1b CursorPosition
-    Some(1), // 0x1c CursorChannel
-    Some(1), // 0x1d CursorType
-    Some(2), // 0x1e CursorPriority
-    Some(2), // 0x1f ChannelBlanking
-    Some(1), // 0x20 GetChannelBlanking
-    Some(2), // 0x21 OutputGain
-    Some(1), // 0x22 GetOutputGain
-    Some(4), // 0x23 SyncSelects
-    Some(1), // 0x24 GetSyncSelects
-    Some(2), // 0x25 OutputPedestal
-    Some(1), // 0x26 GetOutputPedestal
-    Some(1), // 0x27 InitTextport
-    Some(1), // 0x28 LoadTextportGlyph
-    Some(4), // 0x29 LoadTextportColorIndex
-    Some(1), // 0x2a EnableVocReadback
-    Some(1), // 0x2b MasterClockSelect
-    Some(1), // 0x2c GetMasterClockSelect
-    Some(1), // 0x2d AutoInit
-    Some(1), // 0x2e LoadEncoder
-    Some(1), // 0x2f EncoderOutputGain
-    Some(1), // 0x30 GetEncoderOutputGain
-    Some(1), // 0x31 SCHPhase
-    Some(1), // 0x32 GetSCHPhase
-    Some(1), // 0x33 EncoderTestPattern
-    Some(2), // 0x34 BindChannelToXWid
-    Some(1328), // 0x35 LoadPabXilinx
-    Some(4), // 0x36 LoadPabSizeRegs
-    Some(2), // 0x37 LoadPabCtrlRegs
-    Some(263), // 0x38 LoadDacCursor
-    Some(7), // 0x39 VampireAndFieldDominance
-    Some(1), // 0x3a GetVampire
-    Some(1), // 0x3b FastlistChunksize
-    Some(1), // 0x3c TempBlankAllChannels
-    Some(1), // 0x3d GetDGInterruptState
-    Some(1), // 0x3e XMapClockSelect
-    Some(1), // 0x3f GetXMapClockSelect
-    Some(3), // 0x40 ChannelResetRatios
-    Some(1), // 0x41 ResetRMBoards
-    Some(1), // 0x42 GetChannelEnables
-    Some(9), // 0x43 PlacementRes
-    Some(1), // 0x44 GenlockSwitching
-    Some(1), // 0x45 GetGenlockSwitching
-    Some(2), // 0x46 ChannelFieldDominance
-    Some(1), // 0x47 GetChannelFieldDominance
-    Some(1), // 0x48 BoardResetRatio
-    Some(1), // 0x49 GetBoardResetRatio
-    Some(1), // 0x4a GetChannelFormatInfo
-    Some(5), // 0x4b ChannelGammaMapState
-    Some(1), // 0x4c GetChannelGammaMapState
-    Some(1), // 0x4d EnableEncoder
-    Some(2), // 0x4e ResizeSyncType
-    Some(7), // 0x4f Vampire
-    Some(1), // 0x50 QueryMonitorName
-    Some(34), // 0x51 MonitorCommand
-    Some(6), // 0x52 LoadXilinx
-    Some(1), // 0x53 XServerVideoInit
-    Some(1), // 0x54 InternalGenlock
-    Some(1), // 0x55 GetInternalGenlock
-    Some(3), // 0x56 BufferParams
-    Some(1), // 0x57 GetBufferParams
-    Some(3), // 0x58 DataFormat
-    Some(1), // 0x59 GetDataFormat
-    Some(1), // 0x5a DVPMult2Freq
-    Some(42), // 0x5b VBOBCommand
-    Some(1), // 0x5c GetVBOBReply
+    Some(1), // 0x00 DISPREQ_LOOP_BACK_TEST
+    Some(2), // 0x01 DISPREQ_WRITE_A_DISPLAY_BUS_WORD
+    Some(1), // 0x02 DISPREQ_READ_A_DISPLAY_BUS_WORD
+    Some(10), // 0x03 DISPREQ_DIAGNOSTIC_SUBSTITUTE_COLOUR_SET
+    Some(1), // 0x04 DISPREQ_DIAGNOSTIC_SUBSTITUTE_COLOUR_OFF
+    Some(4), // 0x05 DISPREQ_BUS_TRACE
+    Some(4107), // 0x06 DISPREQ_DIAGNOSTIC_CURSOR_FROM_IMAGE
+    Some(1), // 0x07 DISPREQ_FIRMWARE_DEBUG_PRINT_MASK
+    Some(3), // 0x08 DISPREQ_FRAME_BUFFER_TILE_SET_UP
+    Some(1), // 0x09 DISPREQ_INPUT_SYNC_SOURCE_SELECT
+    Some(1), // 0x0a DISPREQ_INPUT_SYNC_SOURCE_READ
+    Some(2), // 0x0b DISPREQ_HORIZONTAL_PHASE_SET
+    Some(1), // 0x0c DISPREQ_HORIZONTAL_PHASE_READ
+    Some(1), // 0x0d DISPREQ_VERTICAL_PHASE_SET
+    Some(1), // 0x0e DISPREQ_VERTICAL_PHASE_READ
+    Some(2), // 0x0f DISPREQ_CHANNEL_GAMMA_MAP_SELECT
+    Some(1), // 0x10 DISPREQ_CHANNEL_GAMMA_MAP_READ
+    Some(1), // 0x11 DISPREQ_REBUILD_DEFAULT_DISPLAY_STATE
+    Some(1), // 0x12 DISPREQ_BOARD_CONFIGURATION_READ
+    Some(1), // 0x13 DISPREQ_CHANNEL_CONFIGURATION_READ
+    Some(8), // 0x14 DISPREQ_CHANNEL_RESIZE
+    Some(1), // 0x15 DISPREQ_CHANNEL_RESIZE_READ
+    Some(383), // 0x16 DISPREQ_LOAD_A_VIDEO_FORMAT
+    Some(3), // 0x17 DISPREQ_ENABLE_A_CHANNEL
+    Some(1), // 0x18 DISPREQ_DISABLE_A_CHANNEL
+    Some(16), // 0x19 DISPREQ_LOAD_GENLOCK_PARAMETERS
+    Some(1), // 0x1a DISPREQ_ENABLE_GENLOCK
+    Some(2), // 0x1b DISPREQ_CURSOR_POSITION
+    Some(1), // 0x1c DISPREQ_CURSOR_CHANNEL_SELECT
+    Some(1), // 0x1d DISPREQ_CURSOR_TYPE
+    Some(2), // 0x1e DISPREQ_CURSOR_PRIORITY
+    Some(2), // 0x1f DISPREQ_CHANNEL_BLANKING_SET
+    Some(1), // 0x20 DISPREQ_CHANNEL_BLANKING_READ
+    Some(2), // 0x21 DISPREQ_OUTPUT_GAIN_SET
+    Some(1), // 0x22 DISPREQ_OUTPUT_GAIN_READ
+    Some(4), // 0x23 DISPREQ_SYNC_OUTPUT_SELECT
+    Some(1), // 0x24 DISPREQ_SYNC_OUTPUT_READ
+    Some(2), // 0x25 DISPREQ_OUTPUT_PEDESTAL_SET
+    Some(1), // 0x26 DISPREQ_OUTPUT_PEDESTAL_READ
+    Some(1), // 0x27 DISPREQ_TEXT_PORT_ID_ENTRY_INITIALISE
+    Some(1), // 0x28 DISPREQ_TEXT_PORT_GLYPH_LOAD
+    Some(4), // 0x29 DISPREQ_TEXT_PORT_COLOUR_INDEX_LOAD
+    Some(1), // 0x2a DISPREQ_VIDEO_OUTPUT_CHIP_READ_BACK_ENABLE
+    Some(1), // 0x2b DISPREQ_MASTER_CLOCK_SELECT
+    Some(1), // 0x2c DISPREQ_MASTER_CLOCK_SELECT_READ
+    Some(1), // 0x2d DISPREQ_AUTO_INITIALISE_FROM_STORED_COMBINATION
+    Some(1), // 0x2e DISPREQ_ENCODER_LOAD
+    Some(1), // 0x2f DISPREQ_ENCODER_OUTPUT_GAIN
+    Some(1), // 0x30 DISPREQ_ENCODER_OUTPUT_GAIN_READ
+    Some(1), // 0x31 DISPREQ_SUB_CARRIER_PHASE_SET
+    Some(1), // 0x32 DISPREQ_SUB_CARRIER_PHASE_READ
+    Some(1), // 0x33 DISPREQ_ENCODER_TEST_PATTERN
+    Some(2), // 0x34 DISPREQ_BIND_A_CHANNEL_TO_A_WINDOW_ID
+    Some(1328), // 0x35 DISPREQ_LOAD_BOARD_LOGIC_SERIALLY
+    Some(4), // 0x36 DISPREQ_OPTION_BOARD_SIZE_REGISTERS
+    Some(2), // 0x37 DISPREQ_OPTION_BOARD_CONTROL_REGISTERS
+    Some(263), // 0x38 DISPREQ_DAC_CURSOR_LOAD
+    Some(7), // 0x39 DISPREQ_FIELD_DOMINANCE_AND_COPY_FLAGS
+    Some(1), // 0x3a DISPREQ_COPY_CHANNEL_INFORMATION_READ
+    Some(1), // 0x3b DISPREQ_FAST_LIST_CHUNK_SIZE
+    Some(1), // 0x3c DISPREQ_TEMPORARY_BLANK_ALL_CHANNELS
+    Some(1), // 0x3d DISPREQ_DISPLAY_INTERRUPT_STATE_READ
+    Some(1), // 0x3e DISPREQ_XMAP_CLOCK_SELECT
+    Some(1), // 0x3f DISPREQ_XMAP_CLOCK_SELECT_READ
+    Some(3), // 0x40 DISPREQ_CHANNEL_RESET_RATIOS
+    Some(1), // 0x41 DISPREQ_RESET_THE_RASTER_BOARDS
+    Some(1), // 0x42 DISPREQ_CHANNEL_ENABLES_READ
+    Some(9), // 0x43 DISPREQ_PLACEMENT_RESOLUTION
+    Some(1), // 0x44 DISPREQ_GENLOCK_SWITCHING_SET
+    Some(1), // 0x45 DISPREQ_GENLOCK_SWITCHING_READ
+    Some(2), // 0x46 DISPREQ_CHANNEL_FIELD_DOMINANCE_SET
+    Some(1), // 0x47 DISPREQ_CHANNEL_FIELD_DOMINANCE_READ
+    Some(1), // 0x48 DISPREQ_BOARD_RESET_RATIO_SET
+    Some(1), // 0x49 DISPREQ_BOARD_RESET_RATIO_READ
+    Some(1), // 0x4a DISPREQ_CHANNEL_FORMAT_INFORMATION_READ
+    Some(5), // 0x4b DISPREQ_CHANNEL_GAMMA_MAP_STATE_SET
+    Some(1), // 0x4c DISPREQ_CHANNEL_GAMMA_MAP_STATE_READ
+    Some(1), // 0x4d DISPREQ_ENCODER_ENABLE
+    Some(2), // 0x4e DISPREQ_RESIZE_SYNC_TYPE
+    Some(7), // 0x4f DISPREQ_COPY_ANOTHER_CHANNEL_OUTPUT
+    Some(1), // 0x50 DISPREQ_MONITOR_IDENTITY_QUERY
+    Some(34), // 0x51 DISPREQ_MONITOR_COMMAND
+    Some(6), // 0x52 DISPREQ_OPTION_BOARD_LOGIC_IMAGE_LOAD
+    Some(1), // 0x53 DISPREQ_WINDOW_SYSTEM_VIDEO_INITIALISE
+    Some(1), // 0x54 DISPREQ_INTERNAL_GENLOCK_SET
+    Some(1), // 0x55 DISPREQ_INTERNAL_GENLOCK_READ
+    Some(3), // 0x56 DISPREQ_BUFFER_PARAMETERS
+    Some(1), // 0x57 DISPREQ_BUFFER_PARAMETERS_READ
+    Some(3), // 0x58 DISPREQ_DATA_FORMAT_SET
+    Some(1), // 0x59 DISPREQ_DATA_FORMAT_READ
+    Some(1), // 0x5a DISPREQ_DOUBLE_FREQUENCY_PIXEL_OPTION
+    Some(42), // 0x5b DISPREQ_OPTION_BOARD_TWO_WIRE_PACKET
+    Some(1), // 0x5c DISPREQ_OPTION_BOARD_REPLY_READ
 ];
 
 /// The reply each video command waits for, by command number: the reply id and the bytes of data
 /// after it, or `None` for a command nobody waits on. Established for all 93 requests (32 of them
 /// reply; the monitor command, which carries a payload, does not).
 pub(super) const VIDEO_REPLY: &[Option<(u8, u8)>] = &[
-    Some((0, 4)), // 0x00 Test
-    None, // 0x01 VCWrite
-    Some((1, 4)), // 0x02 VCRead
-    None, // 0x03 DiagXmapColor
-    None, // 0x04 DisableDiagXmapColor
-    None, // 0x05 VCBusTrace
-    None, // 0x06 DiagCursorFromImage
-    None, // 0x07 DebugMask
-    None, // 0x08 SetupFrameBuffer
-    None, // 0x09 InputSync
-    Some((2, 4)), // 0x0a GetInputSync
-    None, // 0x0b HPhase
-    Some((3, 4)), // 0x0c GetHPhase
-    None, // 0x0d VPhase
-    Some((4, 4)), // 0x0e GetVPhase
-    None, // 0x0f ChannelGammaMap
-    Some((5, 4)), // 0x10 GetChannelGammaMap
-    None, // 0x11 Fetal
-    Some((6, 20)), // 0x12 GetBoardConfig
-    Some((7, 76)), // 0x13 GetChannelConfig
-    None, // 0x14 Resize
-    Some((8, 72)), // 0x15 GetResize
-    None, // 0x16 LoadFormat
-    None, // 0x17 EnableChannel
-    None, // 0x18 DisableChannel
-    None, // 0x19 LoadGenlockParams
-    None, // 0x1a EnableGenlock
-    None, // 0x1b CursorPosition
-    None, // 0x1c CursorChannel
-    None, // 0x1d CursorType
-    None, // 0x1e CursorPriority
-    None, // 0x1f ChannelBlanking
-    Some((9, 4)), // 0x20 GetChannelBlanking
-    None, // 0x21 OutputGain
-    Some((10, 4)), // 0x22 GetOutputGain
-    None, // 0x23 SyncSelects
-    Some((11, 24)), // 0x24 GetSyncSelects
-    None, // 0x25 OutputPedestal
-    Some((12, 4)), // 0x26 GetOutputPedestal
-    None, // 0x27 InitTextport
-    None, // 0x28 LoadTextportGlyph
-    None, // 0x29 LoadTextportColorIndex
-    None, // 0x2a EnableVocReadback
-    None, // 0x2b MasterClockSelect
-    Some((13, 4)), // 0x2c GetMasterClockSelect
-    None, // 0x2d AutoInit
-    None, // 0x2e LoadEncoder
-    None, // 0x2f EncoderOutputGain
-    Some((14, 4)), // 0x30 GetEncoderOutputGain
-    None, // 0x31 SCHPhase
-    Some((15, 4)), // 0x32 GetSCHPhase
-    None, // 0x33 EncoderTestPattern
-    None, // 0x34 BindChannelToXWid
-    None, // 0x35 LoadPabXilinx
-    None, // 0x36 LoadPabSizeRegs
-    None, // 0x37 LoadPabCtrlRegs
-    None, // 0x38 LoadDacCursor
-    None, // 0x39 VampireAndFieldDominance
-    Some((16, 24)), // 0x3a GetVampire
-    None, // 0x3b FastlistChunksize
-    None, // 0x3c TempBlankAllChannels
-    Some((17, 12)), // 0x3d GetDGInterruptState
-    None, // 0x3e XMapClockSelect
-    Some((18, 4)), // 0x3f GetXMapClockSelect
-    None, // 0x40 ChannelResetRatios
-    None, // 0x41 ResetRMBoards
-    Some((19, 8)), // 0x42 GetChannelEnables
-    None, // 0x43 PlacementRes
-    None, // 0x44 GenlockSwitching
-    Some((20, 4)), // 0x45 GetGenlockSwitching
-    None, // 0x46 ChannelFieldDominance
-    Some((21, 4)), // 0x47 GetChannelFieldDominance
-    None, // 0x48 BoardResetRatio
-    Some((22, 4)), // 0x49 GetBoardResetRatio
-    Some((23, 20)), // 0x4a GetChannelFormatInfo
-    None, // 0x4b ChannelGammaMapState
-    Some((24, 16)), // 0x4c GetChannelGammaMapState
-    None, // 0x4d EnableEncoder
-    None, // 0x4e ResizeSyncType
-    None, // 0x4f Vampire
-    Some((25, 68)), // 0x50 QueryMonitorName
-    None, // 0x51 MonitorCommand
-    Some((27, 4)), // 0x52 LoadXilinx
-    None, // 0x53 XServerVideoInit
-    None, // 0x54 InternalGenlock
-    Some((28, 4)), // 0x55 GetInternalGenlock
-    None, // 0x56 BufferParams
-    Some((29, 8)), // 0x57 GetBufferParams
-    None, // 0x58 DataFormat
-    Some((30, 8)), // 0x59 GetDataFormat
-    None, // 0x5a DVPMult2Freq
-    None, // 0x5b VBOBCommand
-    Some((31, 164)), // 0x5c GetVBOBReply
+    Some((0, 4)), // 0x00 DISPREQ_LOOP_BACK_TEST
+    None, // 0x01 DISPREQ_WRITE_A_DISPLAY_BUS_WORD
+    Some((1, 4)), // 0x02 DISPREQ_READ_A_DISPLAY_BUS_WORD
+    None, // 0x03 DISPREQ_DIAGNOSTIC_SUBSTITUTE_COLOUR_SET
+    None, // 0x04 DISPREQ_DIAGNOSTIC_SUBSTITUTE_COLOUR_OFF
+    None, // 0x05 DISPREQ_BUS_TRACE
+    None, // 0x06 DISPREQ_DIAGNOSTIC_CURSOR_FROM_IMAGE
+    None, // 0x07 DISPREQ_FIRMWARE_DEBUG_PRINT_MASK
+    None, // 0x08 DISPREQ_FRAME_BUFFER_TILE_SET_UP
+    None, // 0x09 DISPREQ_INPUT_SYNC_SOURCE_SELECT
+    Some((2, 4)), // 0x0a DISPREQ_INPUT_SYNC_SOURCE_READ
+    None, // 0x0b DISPREQ_HORIZONTAL_PHASE_SET
+    Some((3, 4)), // 0x0c DISPREQ_HORIZONTAL_PHASE_READ
+    None, // 0x0d DISPREQ_VERTICAL_PHASE_SET
+    Some((4, 4)), // 0x0e DISPREQ_VERTICAL_PHASE_READ
+    None, // 0x0f DISPREQ_CHANNEL_GAMMA_MAP_SELECT
+    Some((5, 4)), // 0x10 DISPREQ_CHANNEL_GAMMA_MAP_READ
+    None, // 0x11 DISPREQ_REBUILD_DEFAULT_DISPLAY_STATE
+    Some((6, 20)), // 0x12 DISPREQ_BOARD_CONFIGURATION_READ
+    Some((7, 76)), // 0x13 DISPREQ_CHANNEL_CONFIGURATION_READ
+    None, // 0x14 DISPREQ_CHANNEL_RESIZE
+    Some((8, 72)), // 0x15 DISPREQ_CHANNEL_RESIZE_READ
+    None, // 0x16 DISPREQ_LOAD_A_VIDEO_FORMAT
+    None, // 0x17 DISPREQ_ENABLE_A_CHANNEL
+    None, // 0x18 DISPREQ_DISABLE_A_CHANNEL
+    None, // 0x19 DISPREQ_LOAD_GENLOCK_PARAMETERS
+    None, // 0x1a DISPREQ_ENABLE_GENLOCK
+    None, // 0x1b DISPREQ_CURSOR_POSITION
+    None, // 0x1c DISPREQ_CURSOR_CHANNEL_SELECT
+    None, // 0x1d DISPREQ_CURSOR_TYPE
+    None, // 0x1e DISPREQ_CURSOR_PRIORITY
+    None, // 0x1f DISPREQ_CHANNEL_BLANKING_SET
+    Some((9, 4)), // 0x20 DISPREQ_CHANNEL_BLANKING_READ
+    None, // 0x21 DISPREQ_OUTPUT_GAIN_SET
+    Some((10, 4)), // 0x22 DISPREQ_OUTPUT_GAIN_READ
+    None, // 0x23 DISPREQ_SYNC_OUTPUT_SELECT
+    Some((11, 24)), // 0x24 DISPREQ_SYNC_OUTPUT_READ
+    None, // 0x25 DISPREQ_OUTPUT_PEDESTAL_SET
+    Some((12, 4)), // 0x26 DISPREQ_OUTPUT_PEDESTAL_READ
+    None, // 0x27 DISPREQ_TEXT_PORT_ID_ENTRY_INITIALISE
+    None, // 0x28 DISPREQ_TEXT_PORT_GLYPH_LOAD
+    None, // 0x29 DISPREQ_TEXT_PORT_COLOUR_INDEX_LOAD
+    None, // 0x2a DISPREQ_VIDEO_OUTPUT_CHIP_READ_BACK_ENABLE
+    None, // 0x2b DISPREQ_MASTER_CLOCK_SELECT
+    Some((13, 4)), // 0x2c DISPREQ_MASTER_CLOCK_SELECT_READ
+    None, // 0x2d DISPREQ_AUTO_INITIALISE_FROM_STORED_COMBINATION
+    None, // 0x2e DISPREQ_ENCODER_LOAD
+    None, // 0x2f DISPREQ_ENCODER_OUTPUT_GAIN
+    Some((14, 4)), // 0x30 DISPREQ_ENCODER_OUTPUT_GAIN_READ
+    None, // 0x31 DISPREQ_SUB_CARRIER_PHASE_SET
+    Some((15, 4)), // 0x32 DISPREQ_SUB_CARRIER_PHASE_READ
+    None, // 0x33 DISPREQ_ENCODER_TEST_PATTERN
+    None, // 0x34 DISPREQ_BIND_A_CHANNEL_TO_A_WINDOW_ID
+    None, // 0x35 DISPREQ_LOAD_BOARD_LOGIC_SERIALLY
+    None, // 0x36 DISPREQ_OPTION_BOARD_SIZE_REGISTERS
+    None, // 0x37 DISPREQ_OPTION_BOARD_CONTROL_REGISTERS
+    None, // 0x38 DISPREQ_DAC_CURSOR_LOAD
+    None, // 0x39 DISPREQ_FIELD_DOMINANCE_AND_COPY_FLAGS
+    Some((16, 24)), // 0x3a DISPREQ_COPY_CHANNEL_INFORMATION_READ
+    None, // 0x3b DISPREQ_FAST_LIST_CHUNK_SIZE
+    None, // 0x3c DISPREQ_TEMPORARY_BLANK_ALL_CHANNELS
+    Some((17, 12)), // 0x3d DISPREQ_DISPLAY_INTERRUPT_STATE_READ
+    None, // 0x3e DISPREQ_XMAP_CLOCK_SELECT
+    Some((18, 4)), // 0x3f DISPREQ_XMAP_CLOCK_SELECT_READ
+    None, // 0x40 DISPREQ_CHANNEL_RESET_RATIOS
+    None, // 0x41 DISPREQ_RESET_THE_RASTER_BOARDS
+    Some((19, 8)), // 0x42 DISPREQ_CHANNEL_ENABLES_READ
+    None, // 0x43 DISPREQ_PLACEMENT_RESOLUTION
+    None, // 0x44 DISPREQ_GENLOCK_SWITCHING_SET
+    Some((20, 4)), // 0x45 DISPREQ_GENLOCK_SWITCHING_READ
+    None, // 0x46 DISPREQ_CHANNEL_FIELD_DOMINANCE_SET
+    Some((21, 4)), // 0x47 DISPREQ_CHANNEL_FIELD_DOMINANCE_READ
+    None, // 0x48 DISPREQ_BOARD_RESET_RATIO_SET
+    Some((22, 4)), // 0x49 DISPREQ_BOARD_RESET_RATIO_READ
+    Some((23, 20)), // 0x4a DISPREQ_CHANNEL_FORMAT_INFORMATION_READ
+    None, // 0x4b DISPREQ_CHANNEL_GAMMA_MAP_STATE_SET
+    Some((24, 16)), // 0x4c DISPREQ_CHANNEL_GAMMA_MAP_STATE_READ
+    None, // 0x4d DISPREQ_ENCODER_ENABLE
+    None, // 0x4e DISPREQ_RESIZE_SYNC_TYPE
+    None, // 0x4f DISPREQ_COPY_ANOTHER_CHANNEL_OUTPUT
+    Some((25, 68)), // 0x50 DISPREQ_MONITOR_IDENTITY_QUERY
+    None, // 0x51 DISPREQ_MONITOR_COMMAND
+    Some((27, 4)), // 0x52 DISPREQ_OPTION_BOARD_LOGIC_IMAGE_LOAD
+    None, // 0x53 DISPREQ_WINDOW_SYSTEM_VIDEO_INITIALISE
+    None, // 0x54 DISPREQ_INTERNAL_GENLOCK_SET
+    Some((28, 4)), // 0x55 DISPREQ_INTERNAL_GENLOCK_READ
+    None, // 0x56 DISPREQ_BUFFER_PARAMETERS
+    Some((29, 8)), // 0x57 DISPREQ_BUFFER_PARAMETERS_READ
+    None, // 0x58 DISPREQ_DATA_FORMAT_SET
+    Some((30, 8)), // 0x59 DISPREQ_DATA_FORMAT_READ
+    None, // 0x5a DISPREQ_DOUBLE_FREQUENCY_PIXEL_OPTION
+    None, // 0x5b DISPREQ_OPTION_BOARD_TWO_WIRE_PACKET
+    Some((31, 164)), // 0x5c DISPREQ_OPTION_BOARD_REPLY_READ
 ];
 
 #[cfg(test)]
