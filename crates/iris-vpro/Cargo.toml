@@ -11,6 +11,7 @@ test = false
 doctest = false
 
 [dependencies]
+sgi-engine = { path = "../sgi-engine" }
 sgi-gpu-core = { path = "../sgi-gpu-core", default-features = false }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan", "metal", "dx12"] }
 bytemuck = { version = "1", features = ["derive"] }
