@@ -10,7 +10,8 @@ struct ScanoutHeader {
     width: u32,
     height: u32,
     stride: u32,
-    pad: u32,
+    // 0: 0xAABBGGRR words; 1: the board's own 0x00RRGGBB.
+    format: u32,
 }
 
 @group(0) @binding(0) var<uniform> scan: ScanoutHeader;
@@ -22,5 +23,9 @@ fn scanout(@builtin(global_invocation_id) g: vec3<u32>) {
         return;
     }
     let p = scanout_pixel(g.x, g.y);
+    if scan.format == 1u {
+        scan_out[g.y * scan.stride + g.x] = p & 0xffffffu;
+        return;
+    }
     scan_out[g.y * scan.stride + g.x] = 0xff000000u | ((p & 0xffu) << 16u) | (p & 0xff00u) | ((p >> 16u) & 0xffu);
 }
