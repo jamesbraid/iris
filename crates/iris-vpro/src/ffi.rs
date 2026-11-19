@@ -8,7 +8,8 @@ use sgi_engine::ffi::{build, call, host_parts, read_config, IrisEngine, IrisEngi
 use sgi_engine::inject::Point;
 use sgi_engine::{BoardEngine, GpuLoss, Rect};
 
-use crate::dev::odyssey::engine::{memory_bytes, Config, Mode, VproEngine};
+use crate::dev::odyssey::board::Params;
+use crate::dev::odyssey::engine::{memory_bytes_for, Config, Mode, VproEngine};
 use crate::wgpu::{Gpu, GpuOptions};
 
 /// The VPro configuration: the shared part, then the board's.
@@ -16,10 +17,23 @@ use crate::wgpu::{Gpu, GpuOptions};
 #[derive(Clone, Copy)]
 pub struct IrisVproConfig {
     pub common: IrisEngineConfig,
-    /// The product: `v12`, `v10`, `v8` or `v6`, NUL-terminated. NULL is refused.
+    /// The product: `v12`, `v10`, `v8` or `v6`, NUL-terminated. It overrides the revision, memory
+    /// size, banks and back-end version; NULL or empty uses the properties below as given.
     pub product: *const c_char,
+    /// The NIC's record text; NULL or empty for the product's.
+    pub nic_record: *const c_char,
+    /// The NIC's serial (48 bits); 0 for the synthetic one.
+    pub nic_serial: u64,
     /// The widget number the board answers as.
     pub widget: u32,
+    pub revision: u32,
+    /// megabytes: 32, 64 or 128
+    pub memory_size: u32,
+    /// 2 or 4
+    pub memory_banks: u32,
+    /// 2 or 3
+    pub cas_latency: u32,
+    pub backend_version: u32,
     /// The fragment pool's workers and tile size in pixels, as `[graphics]`; 0 for a default.
     pub pool_threads: u32,
     pub pool_tile: u32,
@@ -30,14 +44,31 @@ fn c_str<'a>(p: *const c_char) -> Option<&'a str> {
     (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_str().ok()).flatten()
 }
 
-/// Bytes of board memory the product carries: the length to lend in the shared
-/// configuration. 0 for a product that does not exist.
+/// The board properties `c` gives and the product it names (empty for none), or why not.
+fn board(c: &IrisVproConfig) -> Result<(String, Params), String> {
+    let text = |p: *const c_char| if p.is_null() { Ok("") } else { c_str(p).ok_or("a string that is not UTF-8") };
+    let params = Params {
+        revision: c.revision,
+        memory_size: c.memory_size,
+        memory_banks: c.memory_banks,
+        cas_latency: c.cas_latency,
+        backend_version: c.backend_version,
+        nic_serial: if c.nic_serial == 0 { Params::default().nic_serial } else { c.nic_serial },
+        nic_record: text(c.nic_record)?.to_string(),
+    };
+    Ok((text(c.product)?.to_string(), params))
+}
+
+/// Bytes of board memory the configuration's product (or its memory size, with no product)
+/// carries: the length to lend in `common`. 0 for a configuration the board cannot have.
 ///
 /// # Safety
-/// `product` is NULL or a NUL-terminated string.
+/// `cfg` is NULL or points to an `IrisVproConfig` whose strings are NULL or NUL-terminated.
 #[no_mangle]
-pub unsafe extern "C" fn iris_vpro_memory_bytes(product: *const c_char) -> u64 {
-    c_str(product).and_then(|p| memory_bytes(p).ok()).unwrap_or(0)
+pub unsafe extern "C" fn iris_vpro_memory_bytes(cfg: *const IrisVproConfig) -> u64 {
+    // SAFETY: the caller's contract.
+    let Some(c) = (unsafe { cfg.as_ref() }) else { return 0 };
+    board(c).and_then(|(p, params)| memory_bytes_for(&p, &params)).unwrap_or(0)
 }
 
 /// Start an engine. NULL if the arguments are wrong or the engine cannot be built.
@@ -50,11 +81,14 @@ pub unsafe extern "C" fn iris_vpro_new(cfg: *const IrisVproConfig, host: *const 
     build(|| {
         let c = unsafe { read_config(cfg) }?;
         let (mem, notify) = unsafe { host_parts(host) }?;
-        let Some(name) = c_str(c.product) else {
-            log::error!("iris_vpro_new: no product");
-            return None;
+        let (name, params) = match board(&c) {
+            Ok(b) => b,
+            Err(e) => {
+                log::error!("iris_vpro_new: {e}");
+                return None;
+            }
         };
-        let config = Config { product: name.to_string(), widget: c.widget, mode: if c.common.threaded() { Mode::Threaded } else { Mode::Inline }, pool: (c.pool_threads as usize, c.pool_tile), gpu: None };
+        let config = Config { product: name, params, widget: c.widget, mode: if c.common.threaded() { Mode::Threaded } else { Mode::Inline }, pool: (c.pool_threads as usize, c.pool_tile), gpu: None };
         let loss = GpuLoss::new();
         let gpu = match unsafe { c.common.gpu_request() } {
             None => None,

@@ -37,7 +37,7 @@ impl Subject for Vpro {
     type Engine = VproEngine;
 
     fn engine(&self, notify: Option<Box<dyn Fn() + Send + Sync>>) -> VproEngine {
-        let config = Config { product: "v12".into(), widget: 11, mode: self.0, pool: (0, 0), gpu: None };
+        let config = Config { product: "v12".into(), widget: 11, mode: self.0, pool: (0, 0), params: Default::default(), gpu: None };
         VproEngine::new(config, None, Ram, notify).unwrap()
     }
 

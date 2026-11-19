@@ -36,7 +36,7 @@ use std::time::Duration;
 use sgi_engine::inject::{hit, Point};
 use sgi_engine::{GpuLoss, BoardEngine, Chunk, DirtyRun, Event, Fault, HostMem, Idle, Interrupt, Lent, MemFault, Outbox, Pump, Read, Rect, Refused, Source, StateSink, StateSource, Swap, Write, DIRTY_BLOCK};
 
-use super::board::Board;
+use super::board::{Board, Params};
 use super::gpu_unit::{fail_gpu, Observation};
 use super::mmio::{access_waits, command_store, fifo_port, level_word, BoardGuard, BoardLocks};
 use super::reader::{DisplayShared, ScanoutReader};
@@ -55,11 +55,13 @@ pub enum Mode {
 }
 
 pub struct Config {
-    /// `v12`, `v10`, `v8` or `v6`.
+    /// `v12`, `v10`, `v8` or `v6`; empty uses `params` as given.
     pub product: String,
     /// The widget number the board answers as (its identity register).
     pub widget: u32,
     pub mode: Mode,
+    /// The board properties; a product overrides some (`Params`).
+    pub params: Params,
     /// The CPU raster unit's workers and tile size, as iris's `[graphics]`.
     pub pool: (usize, u32),
     /// Draw on the GPU through this wgpu backend name ("auto", "vulkan"...).
@@ -68,12 +70,17 @@ pub struct Config {
 
 /// Board memory the product carries, in bytes, for a shell that lends it.
 pub fn memory_bytes(product: &str) -> Result<u64, String> {
+    memory_bytes_for(product, &Params::default())
+}
+
+/// Board memory of `product` (or of the properties `params` give, with no product), in bytes.
+pub fn memory_bytes_for(product: &str, params: &Params) -> Result<u64, String> {
     let mut b = Box::new(Board::default());
-    b.widget.revision = 0xa;
-    b.widget.memory_size = 128;
-    b.widget.memory_banks = 4;
-    b.widget.cas_latency = 3;
-    b.widget.backend_version = 1;
+    b.widget.revision = params.revision;
+    b.widget.memory_size = params.memory_size;
+    b.widget.memory_banks = params.memory_banks;
+    b.widget.cas_latency = params.cas_latency;
+    b.widget.backend_version = params.backend_version;
     b.widget.product = product.to_string();
     b.configure()?;
     Ok((b.widget.memory_size.max(32) as u64) << 20)
@@ -235,7 +242,7 @@ impl VproEngine {
         let region = lent.map(|l| (l.as_ptr(), l.len()));
         // SAFETY: `Lent`'s contract: aligned, valid until the engine drops,
         // and touched by nothing but the engine and the shell's `cpu_wrote` protocol.
-        let mut b = unsafe { Board::new_lent(&config.product, config.widget, region)? };
+        let mut b = unsafe { Board::new_params(&config.product, config.widget, &config.params, region)? };
         b.raster.set_pool(config.pool.0, config.pool.1);
         let has_gpu = gpu.is_some();
         if let Some(gpu) = &gpu {

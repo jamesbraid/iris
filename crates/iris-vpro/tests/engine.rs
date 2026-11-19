@@ -94,7 +94,7 @@ impl HostMem for Shared {
 }
 
 fn config(product: &str, mode: Mode) -> Config {
-    Config { product: product.into(), widget: WIDGET, mode, pool: (0, 0), gpu: None }
+    Config { product: product.into(), widget: WIDGET, mode, pool: (0, 0), params: Default::default(), gpu: None }
 }
 
 fn engine(mode: Mode) -> (VproEngine, Arc<Ram>) {

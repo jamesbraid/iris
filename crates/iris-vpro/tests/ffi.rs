@@ -25,7 +25,14 @@ fn config(product: *const std::ffi::c_char, mode: u32) -> IrisVproConfig {
     IrisVproConfig {
         common: IrisEngineConfig { abi_version: IRIS_ENGINE_ABI_VERSION, struct_size: std::mem::size_of::<IrisVproConfig>() as u32, mode, queue_ops: 0, gpu: 0, gpu_backend: null(), lent_ptr: null_mut(), lent_len: 0, reserved: [0; 4] },
         product,
+        nic_record: null(),
+        nic_serial: 0,
         widget: 11,
+        revision: 0xa,
+        memory_size: 128,
+        memory_banks: 4,
+        cas_latency: 3,
+        backend_version: 1,
         pool_threads: 0,
         pool_tile: 0,
     }
@@ -50,7 +57,6 @@ fn the_constructor_builds_an_engine_the_shared_entries_drive() {
 #[test]
 fn the_constructor_refuses_what_it_cannot_build_and_the_memory_size_follows_the_product() {
     let (v12, bogus) = (CString::new("v12").unwrap(), CString::new("v99").unwrap());
-    assert!(unsafe { iris_vpro_new(&config(null(), 0), &host()) }.is_null(), "no product");
     assert!(unsafe { iris_vpro_new(&config(bogus.as_ptr(), 0), &host()) }.is_null(), "no such product");
     let mut c = config(v12.as_ptr(), 0);
     c.common.abi_version = 2;
@@ -62,6 +68,37 @@ fn the_constructor_refuses_what_it_cannot_build_and_the_memory_size_follows_the_
     assert!(unsafe { iris_vpro_new(&c, &host()) }.is_null(), "a misaligned lent region");
     assert!(unsafe { iris_vpro_new(std::ptr::null(), &host()) }.is_null());
     assert!(unsafe { iris_vpro_new(&config(v12.as_ptr(), 0), std::ptr::null()) }.is_null());
-    assert_eq!(unsafe { iris_vpro_memory_bytes(v12.as_ptr()) }, memory_bytes("v12").unwrap());
-    assert_eq!((unsafe { iris_vpro_memory_bytes(bogus.as_ptr()) }, unsafe { iris_vpro_memory_bytes(null()) }), (0, 0));
+    assert_eq!(unsafe { iris_vpro_memory_bytes(&config(v12.as_ptr(), 0)) }, memory_bytes("v12").unwrap());
+    assert_eq!((unsafe { iris_vpro_memory_bytes(&config(bogus.as_ptr(), 0)) }, unsafe { iris_vpro_memory_bytes(null()) }), (0, 0));
+}
+
+/// With no product the properties are the board's, checked; a product overrides the ones it names.
+#[test]
+fn the_board_properties_configure_the_board_and_a_product_overrides_them() {
+    let mut c = config(null(), 0);
+    c.revision = 3;
+    c.memory_size = 32;
+    c.memory_banks = 2;
+    c.cas_latency = 2;
+    c.nic_serial = 0x1234;
+    let record = CString::new("Name:SHELLBOARD").unwrap();
+    c.nic_record = record.as_ptr();
+    assert_eq!(unsafe { iris_vpro_memory_bytes(&c) }, 32 << 20);
+    let h = unsafe { iris_vpro_new(&c, &host()) };
+    assert!(!h.is_null());
+    let mut id = 0u64;
+    assert_eq!(unsafe { iris_engine_read(h, 0x4, 32, &mut id) }, IRIS_ENGINE_OK);
+    assert_eq!(id >> 28, 3, "the revision property reaches the identity register");
+    unsafe { iris_engine_free(h) };
+
+    let v12 = CString::new("v12").unwrap();
+    c.product = v12.as_ptr();
+    assert_eq!(unsafe { iris_vpro_memory_bytes(&c) }, 128 << 20, "the product's memory size wins");
+
+    let cases: [(&str, fn(&mut IrisVproConfig)); 5] = [("banks", |c| c.memory_banks = 3), ("cas latency", |c| c.cas_latency = 1), ("memory size", |c| c.memory_size = 48), ("revision", |c| c.revision = 16), ("serial", |c| c.nic_serial = 1 << 48)];
+    for (what, bad) in cases {
+        let mut c = config(null(), 0);
+        bad(&mut c);
+        assert!(unsafe { iris_vpro_new(&c, &host()) }.is_null(), "{what} is refused");
+    }
 }
