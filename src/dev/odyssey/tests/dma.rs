@@ -178,6 +178,40 @@ fn a_page_table_transfer_lands_across_pages_and_raises_dma_done() {
     assert_eq!(object_word(&mut s, page1_len / 4 - 1), 0xbb00_0000 | (page1_len / 4 - 1));
 }
 
+/// An object upload takes the library's format and type pair (word 7 bits 4:0 and 8:5) as a write
+/// to the draw sentinel does, not only the 8-bit source codes it already decodes: the pair gives
+/// the texel from the bytes sent, whatever the pixel size, with a component the source lacks full
+/// scale for alpha. odsy devices/buzz/pixel-paths.md, "Host-to-board table"
+/// (`__glOdysseyImageCalcXferWriteParams`, established): the pair is in word 7 for texture classes
+/// too; the host bytes a pixel follow the kernel's table. That the board converts the pair into
+/// the texel is inferred from the names.
+#[test]
+fn an_object_upload_takes_the_librarys_format_and_type_pair() {
+    // (format, type, pixel size code in word 7 bits 18:16, source bytes, texel)
+    let words = [0x1111_1111u32, 0x2222_2222, 0x3333_3333, 0x4444_4444].map(u32::to_be_bytes).concat();
+    let cases: [(u32, u32, u32, &[u8], u32); 5] = [
+        (0xb, 4, 3, &words, 0x1122_3344),
+        (4, 2, 5, &[0x80], 0x8000_00ff),
+        (9, 0xa, 0, &[0xf8, 0x10], 0xff00_84ff),
+        (0xb, 8, 1, &[0xff, 0xc0, 0x08, 0x02], 0xff00_80aa),
+        (0x11, 2, 1, &[0x33, 0x22, 0x11, 0x44], 0x1122_3344),
+    ];
+    for (i, (format, ty, size, bytes, texel)) in cases.into_iter().enumerate() {
+        let (mut s, _, ram) = board_with_ram();
+        ram.put(PAGE_A, bytes);
+        let mut header = object_header(1, false);
+        header[1] = i as u32;
+        header[2] = 1;
+        header[3] = 1 << 16 | 1;
+        header[6] = bytes.len() as u32;
+        header[7] = 0x3a00_0000 | size << 16 | ty << 5 | format;
+        put_table(&ram, TABLE, header, &[pte(PAGE_A, bytes.len() as u32)]);
+        object_destination(&mut s);
+        descriptor(&mut s, TABLE);
+        assert_eq!(object_word(&mut s, i as u32), texel, "format {format:#x} type {ty:#x}, {} bytes", bytes.len());
+    }
+}
+
 /// A descriptor whose entries disagree with its header, one entry
 /// claiming more bytes than the header's rectangle, fails the transfer
 /// before anything lands. The board still consumed the descriptor, so the

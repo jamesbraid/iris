@@ -316,7 +316,13 @@ impl Board {
         let mut pos: u64 = 0;
 
         let raw = raw || (obj.is_some() && dma_raw64(hdr, bpp));
-        if bpp != 4 && bpp != 3 && bpp != 1 && !texel12 && !lum_alpha && !raw {
+        // The library's format and type pair (word 7 bits 4:0 and 8:5, as for a write to the
+        // draw sentinel) for a source the codes above do not name: one the table takes and whose
+        // pixel is this many bytes. The 8-bit codes above are the same pairs for the cases they
+        // already decode.
+        let known = pixel_bytes(hdr[dma::HDR_CONTROL] & image::CODE_MASK) == bpp || texel12 || lum_alpha || raw;
+        let form = if obj.is_some() && !known { write_form(hdr[dma::HDR_CONTROL] & write::CODE_MASK).filter(|f| f.bytes == bpp) } else { None };
+        if bpp != 4 && bpp != 3 && bpp != 1 && !texel12 && !lum_alpha && !raw && form.is_none() {
             if !self.diag.dma_bpp_reported {
                 self.diag.dma_bpp_reported = true;
                 crate::dlog!(
@@ -328,7 +334,7 @@ impl Board {
             }
             return;
         }
-        let code = if texel12 || raw {
+        let code = if texel12 || raw || form.is_some() {
             hdr[dma::HDR_CONTROL] & image::CODE_MASK
         } else {
             self.dma_code(hdr, bpp)
@@ -388,6 +394,10 @@ impl Board {
                     }
                     if let (true, Some(())) = (texel12, obj) {
                         to.store_word(ox, oy, decode_texel12(code, px, bpp != comps));
+                        continue;
+                    }
+                    if let (Some(form), true) = (&form, obj.is_some()) {
+                        to.store_word(ox, oy, form.decode(px));
                         continue;
                     }
                     if obj.is_some() {
