@@ -60,12 +60,12 @@ const GREEN: &[(u32, u32)] = &[(0x5f, 0x00ff_f000), (0x62, 0x0011_1000), (0x63, 
 const BLUE: &[(u32, u32)] = &[(0x5e, 0x007f_f800), (0x5f, 0x00ff_f000), (0x64, 0xfff7_7800), (0x65, 0x0008_87ff)];
 
 /// One line of the five: end then start vertex, the increments, and a colour.
+/// Stippled lines write the repeat word to 0x15b and the pattern to 0x15a.
 fn line(w: &mut Vec<u32>, end: (f64, f64), start: (f64, f64), inc: (u32, u32), colour: &[(u32, u32)], stipple: bool, smooth: bool) {
     regs(w, &[(0xc, coord(end.0)), (0xd, coord(end.1)), (0xe, coord(start.0)), (0xf, coord(start.1)), (0x10, inc.0), (0x11, inc.1), (0x12, 0)]);
+    reg(w, 0x110, 0x7000);
     if stipple {
-        regs(w, &[(0x110, 0x70a0), (0x15b, 0xa987_6543), (0x15a, 0)]);
-    } else {
-        reg(w, 0x110, 0x7000);
+        regs(w, &[(0x110, 0x70a0), (0x15b, 0x000f_0000), (0x15a, 0xa987_6543)]);
     }
     regs(w, &[(0x60, 0), (0x62, 0), (0x64, 0), (0x66, 0)]);
     regs(w, &(0x5c..=0x5f).map(|r| (r, colour.iter().find(|c| c.0 == r).map_or(0, |c| c.1))).collect::<Vec<_>>());
@@ -75,9 +75,9 @@ fn line(w: &mut Vec<u32>, end: (f64, f64), start: (f64, f64), inc: (u32, u32), c
         (0..2).for_each(|_| (0..64).for_each(|i| reg(w, 0x15d, 0xff - 4 * i)));
         reg(w, 0x15c, 0xb000_0080);
         (0..32).for_each(|_| reg(w, 0x15d, 0x100));
-        // gr4 logs 0x161 as 0x0c00000b from a zero shadow; the stored words are
-        // 8-8-8-8, so the pixel type bits of the earlier 0x4200 stay (inferred).
-        regs(w, &[(0x110, 0x7100), (0x165, 0x8000_0074), (0x165, 0x7880_c8c4), (0x161, 0x0c00_420b), (0x116, 1), (0x116, 1)]);
+        // The fill mode's written bits are 1:0 and 3; the rest is the register's
+        // earlier value, so the 8-8-8-8 type of 0x4200 stays (inferred).
+        regs(w, &[(0x110, 0x7100), (0x165, 0x8000_0074), (0x165, 0x7880_c8c4), (0x161, 0x0c00_420b), (0x116, 1)]);
         reg(w, 0x445, 0x63);
     } else {
         reg(w, 0x445, 3);
@@ -87,10 +87,10 @@ fn line(w: &mut Vec<u32>, end: (f64, f64), start: (f64, f64), inc: (u32, u32), c
 fn lines(w: &mut Vec<u32>) {
     let (a, b) = ((0x40_0000, 0x100_0000), (0x100_0000, 0));
     line(w, (0.0, 0.0), (4.0, 16.0), a, &[(0x5c, 0xff_f000), (0x5f, 0xff_f000)], false, false);
-    line(w, (5.0, 0.0), (9.0, 16.0), a, &[(0x5d, 0xff_f000), (0x5f, 0xff_f000)], false, false);
+    line(w, (5.0, 0.0), (9.0, 16.0), a, &[(0x5d, 0xff_f000), (0x5f, 0xff_f000)], false, true);
     line(w, (0.0, 5.0), (5.0, 5.0), b, &[(0x5e, 0xff_f000), (0x5f, 0xff_f000)], true, false);
     line(w, (5.0, 5.0), (10.0, 5.0), b, &[(0x5e, 0xff_f000), (0x5f, 0xff_f000)], true, false);
-    line(w, (12.0, 0.0), (12.0, 10.0), (0, 0x100_0000), &[(0x5c, 0x7f_f800), (0x5e, 0x7f_f800), (0x5f, 0xff_f000)], false, true);
+    line(w, (12.0, 0.0), (12.0, 10.0), (0, 0x100_0000), &[(0x5c, 0x7f_f800), (0x5e, 0x7f_f800), (0x5f, 0xff_f000)], false, false);
 }
 
 /// Send the words, then read `rows` by `cols` back from (0, 0) of the draw page.
@@ -179,14 +179,17 @@ fn the_engine_stores_what_the_diagnostic_stores() {
 }
 
 /// What gr4 reads from the stored lines table without keeping it: the
-/// steep red line moves one column every four rows, and the purple
-/// vertical line at column 12 alternates 0x80 and 0x7f by row (127.5
-/// dithered). The diagnostic's opcode 3 draws both.
+/// steep red line moves one column every four rows, the stippled blue
+/// lines lie on row 5, and the purple vertical line at column 12
+/// alternates 0x80 and 0x7f by row (127.5 dithered).
 #[test]
 fn the_lines_draw_the_stored_tables_steps() {
     let px = readback(Board::High, Mode::Inline, None, &scene(lines), 17, 14);
     let at = |r: usize, c: usize| px[r * 14 + c];
-    for r in 0..16 {
+    // The two stippled blue lines share row 5 and cover some of its pixels.
+    let blue = (0..14).filter(|&c| at(5, c) == 0xffff_0000).count();
+    assert!((1..10).contains(&blue), "blue dots on row 5: {blue}");
+    for r in (0..16).filter(|&r| r != 5) {
         assert_eq!(at(r, r / 4), 0xff00_00ff, "red, row {r}");
         assert_eq!(at(r, 5 + r / 4), 0xff00_ff00, "green, row {r}");
     }
@@ -196,12 +199,10 @@ fn the_lines_draw_the_stored_tables_steps() {
     }
 }
 
-/// The lines' stored sum is not met: the stipple register the diagnostic's
-/// decode names (0x15b) is the scroll register in a real 6.5.30 recording,
-/// so lines 3 and 4 draw nothing, and the table's green weights are not in
-/// any captured write. Kept as the open acceptance.
+/// The lines' stored sum is not met: the stipple dots and the smooth line's
+/// weights differ from the stored table. Kept as the open acceptance.
 #[test]
-#[ignore = "the lines' stipple and green weights are not decoded"]
+#[ignore = "the lines' stipple dot order and smooth weights are not matched"]
 fn the_engine_stores_the_diagnostics_lines() {
     let got = sum(&readback(Board::High, Mode::Inline, None, &scene(lines), 17, 14));
     assert_eq!(got, 0xc584_ed6b, "five lines: sum {got:#010x}");
