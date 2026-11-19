@@ -280,6 +280,26 @@ fn concurrent_packets_all_reach_the_controller() {
     assert_eq!(f.host.sent().len(), 401);
 }
 
+/// A controller that routes packets for other widgets takes them, and they are not counted.
+#[test]
+fn a_controller_that_routes_foreign_packets_takes_them() {
+    use super::super::front::{Front, Host, InterruptPacket};
+    use std::sync::atomic::Ordering;
+    struct Router(Mutex<Vec<(u8, u64, u32)>>);
+    impl crate::irq::InterruptController for Router {
+        fn set_line(&self, _line: u32, _level: bool) {}
+        fn foreign_packet(&self, widget: u8, address: u64, line: u32, _level: bool) -> bool {
+            self.0.lock().push((widget, address, line));
+            true
+        }
+    }
+    let (t, router) = (TestHost::new(), Arc::new(Router(Mutex::new(Vec::new()))));
+    let host = Host::new(Front::new(&test_cfg()), router.clone(), t);
+    host.deliver(InterruptPacket { widget: 3, address: 0x80, vector: 0x11 });
+    assert_eq!(*router.0.lock(), [(3, 0x80, 0x11)]);
+    assert_eq!(host.unrouted.load(Ordering::Relaxed), 0);
+}
+
 /// A packet for a widget other than the host's is counted and not delivered.
 #[test]
 fn unrouted_packets_are_counted_and_not_delivered() {
