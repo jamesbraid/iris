@@ -779,6 +779,26 @@ fn a_copy_of_the_largest_rectangle_is_bounded_by_the_planes() {
     assert_eq!(c.size(), (MAX_DIM, MAX_DIM));
 }
 
+/// A board with a GPU unit starts no raster thread in threaded mode (the front end alone touches the
+/// unit), so `gpu_sync_result`, which the engine's `observe` and `observe_lent` use, does read the
+/// GPU's draws back. Runs with `VPRO_GPU=1` on a host with an adapter.
+#[test]
+fn a_gpu_board_started_for_threads_has_no_raster_thread_and_reads_its_draws_back() {
+    use crate::dev::odyssey::gpu_unit::Observation;
+    if !super::gpu_unit_tests() {
+        return;
+    }
+    let (mut s, _) = window();
+    s.raster.start();
+    assert!(!s.raster.threaded() && s.gpu_unit(), "the unit takes the place of the raster thread");
+    s.fill_rect(10, 10, 4, 4, false, 0x0012_3456);
+    assert_eq!(screen_field(&s, 0).load_word(11, 11), Some(0), "the draw is on the GPU, not in the mirror yet");
+    s.gpu_sync_result(Observation::Frontend).unwrap();
+    let drawn = screen_field(&s, 0).load_word(11, 11);
+    assert_ne!(drawn, Some(0), "the readback brought it into the mirror");
+    assert_eq!(drawn, Some(pixel(&s, 0, 11, 11)));
+}
+
 /// The GPU unit's copy kernel stages a copy in a fixed scratch; a larger one, such as a guest's
 /// 4096 by 4096, goes to the CPU instead of faulting the unit and stopping the machine.
 #[test]
