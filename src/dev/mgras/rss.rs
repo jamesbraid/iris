@@ -1662,7 +1662,7 @@ impl Rss {
                 self.device.insert(self.regs[reg::INDIRECT_ADDR as usize], val);
                 if self.device.overflowed {
                     self.device.overflowed = false;
-                    eprintln!("mgras: raster device space full, write to {:#x} dropped", self.regs[reg::INDIRECT_ADDR as usize]);
+                    log::warn!("mgras: raster device space full, write to {:#x} dropped", self.regs[reg::INDIRECT_ADDR as usize]);
                 }
             }
             reg::IR_ALIAS => self.regs[reg::IR as usize] = val,
@@ -3149,7 +3149,7 @@ impl Rss {
                 if let Some(fault) = unsafe { self.gpu_fault.as_ref() } {
                     let mut fault = fault.lock();
                     if fault.is_none() {
-                        eprintln!("mgras: GPU raster unit failed: {message}");
+                        log::warn!("mgras: GPU raster unit failed: {message}");
                         *fault = Some(message.clone());
                     }
                     Err(fault.as_ref().unwrap().clone())

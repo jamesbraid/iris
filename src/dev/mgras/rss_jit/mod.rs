@@ -709,6 +709,17 @@ pub(super) fn xfer_line(rss: &mut Rss, x: &Xfer, line: u32, bytes: &[u8]) -> boo
 
 pub type Store = shader_store::Store<compiler::Compiler>;
 
+/// The first failed compile says so once and that the interpreter draws
+/// what the shader would have; later ones are only for debugging.
+fn compile_failed(why: &str) {
+    static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    if FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        log::warn!("GR4 JIT: {why}; the interpreter draws what its shaders cover (later failures log at debug)");
+    } else {
+        log::debug!("GR4 JIT: {why}");
+    }
+}
+
 pub fn store() -> &'static Store {
     static STORE: OnceLock<Store> = OnceLock::new();
     STORE.get_or_init(Store::new)
@@ -724,7 +735,7 @@ impl shader_store::Compile for compiler::Compiler {
     }
 
     fn compile_key(&mut self, key: u64) -> Option<(ShaderFn, u32)> {
-        self.compile(key)
+        self.compile(key).map_err(|why| compile_failed(&why)).ok()
     }
 
     fn key_text(key: u64) -> String {

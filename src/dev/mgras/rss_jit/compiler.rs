@@ -68,9 +68,13 @@ impl Compiler {
         Compiler { ctx: module.make_context(), module, fctx: FunctionBuilderContext::new(), n: 0 }
     }
 
-    /// Compile the shader for a packed key: its entry and code size.
-    pub fn compile(&mut self, packed: u64) -> Option<(ShaderFn, u32)> {
+    /// Compile the shader for a packed key: its entry and code size, or why
+    /// it failed.
+    pub fn compile(&mut self, packed: u64) -> Result<(ShaderFn, u32), String> {
         let key = PipeKey::unpack(packed);
+        if std::env::var_os("GR4_JIT_INJECT_FAIL").is_some() {
+            return Err("compile failure injected by GR4_JIT_INJECT_FAIL".into());
+        }
         let ptr = self.module.target_config().pointer_type();
         let name = format!("gr4_{packed:016x}_{}", self.n);
         self.n += 1;
@@ -79,10 +83,7 @@ impl Compiler {
         self.ctx.func.signature.params.push(AbiParam::new(ptr));
         let id = match self.module.declare_function(&name, Linkage::Local, &self.ctx.func.signature) {
             Ok(id) => id,
-            Err(e) => {
-                eprintln!("GR4 JIT: declare_function: {e}");
-                return None;
-            }
+            Err(e) => return Err(format!("declare_function: {e}")),
         };
         {
             let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
@@ -108,25 +109,23 @@ impl Compiler {
         let disasm = std::env::var_os("GR4_JIT_DISASM").is_some();
         self.ctx.set_disasm(disasm);
         if let Err(err) = self.module.define_function(id, &mut self.ctx) {
-            eprintln!("GR4 JIT: define_function failed for {key}: {err}");
-            eprintln!("--- Cranelift IR ---\n{}", self.ctx.func.display());
+            log::debug!("GR4 JIT: IR of the shader {key} that failed:\n{}", self.ctx.func.display());
             self.module.clear_context(&mut self.ctx);
-            return None;
+            return Err(format!("define_function for {key}: {err}"));
         }
         let bytes = self.ctx.compiled_code().map(|c| c.code_buffer().len() as u32).unwrap_or(0);
         if disasm {
             if let Some(v) = self.ctx.compiled_code().and_then(|c| c.vcode.as_ref()) {
-                eprintln!("GR4 JIT: {key} ({bytes} bytes)\n{v}");
+                log::info!("GR4 JIT: {key} ({bytes} bytes)\n{v}");
             }
         }
         self.module.clear_context(&mut self.ctx);
         if let Err(err) = self.module.finalize_definitions() {
-            eprintln!("GR4 JIT: finalize_definitions: {err}");
-            return None;
+            return Err(format!("finalize_definitions: {err}"));
         }
         let code = self.module.get_finalized_function(id);
         // SAFETY: the function was built with the ShaderFn signature.
-        Some((unsafe { std::mem::transmute::<*const u8, ShaderFn>(code) }, bytes))
+        Ok((unsafe { std::mem::transmute::<*const u8, ShaderFn>(code) }, bytes))
     }
 }
 
