@@ -60,7 +60,13 @@ fn replay(back: &mut ImpactBack, stream: &[&str]) {
         let f: Vec<&str> = l.split_whitespace().collect();
         match f[0] {
             "w" => {
-                back.write(number(f[1]), number(f[2]), f[3] == "1");
+                let (r, mut v) = (number(f[1]), number(f[2]));
+                // The streams are a one-engine board's: say two engines in
+                // DRBSIZE when two draw.
+                if r == reg::DRBSIZE && back.engines() == 2 {
+                    v |= 0x40;
+                }
+                back.write(r, v, f[3] == "1");
             }
             "enter" => back.gl_enter(),
             "leave" => back.gl_leave(),
@@ -133,5 +139,20 @@ fn gpu_stores_what_the_cpu_stores() {
         assert!(records > 0, "{case}: nothing reached the GPU");
         assert_eq!(pixels(&back), pixels(&cpu), "{case}: GPU and CPU words differ");
         assert_eq!(differing(case, &pixels(&back)), 0, "{case}: pixels differ from the board");
+    }
+}
+
+/// Two engines stepped on one thread, each drawing its own scanlines, store
+/// what one drawing them all does.
+#[test]
+fn two_stepped_engines_draw_what_one_does() {
+    for (case, stream) in streams() {
+        let mut one = ImpactBack::new(None).expect("one engine");
+        let mut two = ImpactBack::with_engines(None, 2).expect("two engines");
+        replay(&mut one, &stream);
+        replay(&mut two, &stream);
+
+        assert!(pixels(&two).iter().any(|&p| p != 0), "{case} drew nothing");
+        assert_eq!(pixels(&two), pixels(&one), "{case}");
     }
 }

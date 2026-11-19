@@ -119,10 +119,12 @@ impl Engine {
             hq.kick_starts_read = true;
             hq.board = Some(Box::new(Hq4Quirks) as Box<dyn Hq3Board>);
         }
-        let mut back = ImpactBack::new(gpu)?;
+        let mut back = ImpactBack::with_engines(gpu, if cfg.board == Board::Max && gpu.is_none() { 2 } else { 1 })?;
         #[cfg(feature = "gr4-jit")]
         if let Some(m) = cfg.jit {
-            back.rss.jit.mode = m;
+            for r in &mut back.rss {
+                r.jit.mode = m;
+            }
         }
         Ok(Engine {
             hq,
@@ -219,7 +221,7 @@ impl Engine {
             self.exec(op);
             n += 1;
         }
-        self.core.back.rss.gpu_flush();
+        self.core.back.rss[0].gpu_flush();
         if !self.core.events.is_empty() {
             self.wake();
         }
@@ -321,22 +323,23 @@ impl Engine {
     }
 
     fn read_now(&mut self, off: u32, bits: u32) -> u64 {
-        let rss = &mut self.core.back.rss;
         match off {
             host::RASTER_IF_CONTEXT..=0x50228 => self.hq.raster_if_regs[((off - host::RASTER_IF_CONTEXT) / 4) as usize] as u64,
             host::DMA_CONTEXT..=0x504FF => self.hq.dma_regs[((off - host::DMA_CONTEXT) / 4) as usize] as u64,
             host::PIO_READ_HI => {
+                let rss = &mut self.core.back.rss[0];
                 let _ = rss.gpu_sync_transfer(super::wgpu::Observation::PioRead);
                 let v = rss.pio_peek_hi();
-                rss.pio_read_hi();
+                self.core.back.run(Entry::PioAdvance);
                 v as u64
             }
-            host::PIO_READ_LO => rss.pio_read_lo() as u64,
+            host::PIO_READ_LO => self.core.back.rss[0].pio_read_lo() as u64,
             host::GE_READBACK_HI | host::GE_READBACK_LO => match self.hq.ge_return {
                 Some(r) => r[(off == host::GE_READBACK_LO) as usize] as u64,
                 None => self.core.regs.ge_readback[(off == host::GE_READBACK_LO) as usize] as u64,
             },
             host::RASTER..=0x7FFFF => {
+                let rss = &mut self.core.back.rss[0];
                 let r = (off & 0xFFC) >> 2;
                 if bits == 64 {
                     ((rss.read(r) as u64) << 32) | rss.read(r + 1) as u64
@@ -400,7 +403,7 @@ impl Engine {
     /// and no shader covers.
     #[cfg(feature = "gr4-jit")]
     pub fn jit_counts(&self) -> (u64, u64, u64) {
-        let j = &self.core.back.rss.jit;
+        let j = &self.core.back.rss[0].jit;
         (j.hits, j.misses, j.declined)
     }
 
@@ -438,7 +441,7 @@ impl Core {
     /// iris's board: the destination RE gate, then the write.
     #[inline]
     fn rss_write(&mut self, r: u32, val: u32, exec: bool) {
-        if self.back.rss.run_entry(Entry::Write { reg: r, val, exec }) {
+        if self.back.run(Entry::Write { reg: r, val, exec }) {
             self.drawn();
         }
     }
@@ -446,13 +449,15 @@ impl Core {
     fn drawn(&mut self) {
         let mut rect: Option<Rect> = None;
         let touched = &mut self.touched;
-        self.back.rss.drawn(|b, _, r| {
-            rect = Some(rect.map_or(r, |u| union(u, r)));
-            match touched.iter_mut().find(|(t, _)| t.ptr == b.ptr && t.kind == b.kind) {
-                Some((_, u)) => *u = union(*u, r),
-                None => touched.push((b, r)),
-            }
-        });
+        for rss in &self.back.rss {
+            rss.drawn(|b, _, r| {
+                rect = Some(rect.map_or(r, |u| union(u, r)));
+                match touched.iter_mut().find(|(t, _)| t.ptr == b.ptr && t.kind == b.kind) {
+                    Some((_, u)) => *u = union(*u, r),
+                    None => touched.push((b, r)),
+                }
+            });
+        }
         if let Some(r) = rect {
             self.damage = Some(self.damage.map_or(r, |u| union(u, r)));
             if !self.damage_pending {
@@ -472,22 +477,22 @@ impl Hq3Sink for Core {
         Core::rss_write(self, r, val, exec);
     }
     fn transfer(&mut self) -> Option<(bool, (u32, u32))> {
-        let rss = &*self.back.rss;
+        let rss = &*self.back.rss[0];
         Some((rss.transfer_armed()?, rss.transfer_shape()?))
     }
     fn dma_write_line(&mut self, line: u32, bytes: &[u8]) {
-        self.back.rss.run_entry(Entry::DmaLine { line, bytes });
+        self.back.run(Entry::DmaLine { line, bytes });
         self.drawn();
     }
     fn dma_read_line(&mut self, line: u32) -> Vec<u8> {
-        let _ = self.back.rss.gpu_sync_transfer(super::wgpu::Observation::DmaRead);
-        self.back.rss.dma_read_line(line)
+        let _ = self.back.rss[0].gpu_sync_transfer(super::wgpu::Observation::DmaRead);
+        self.back.rss[0].dma_read_line(line)
     }
     fn gl_bracket(&mut self, enter: bool) {
-        self.back.rss.run_entry(if enter { Entry::GlEnter } else { Entry::GlLeave });
+        self.back.run(if enter { Entry::GlEnter } else { Entry::GlLeave });
     }
     fn finish_raster(&mut self) {
-        self.back.rss.gpu_flush();
+        self.back.rss[0].gpu_flush();
     }
     fn set_flags(&mut self, bits: u32) {
         Core::set_flags(self, bits);

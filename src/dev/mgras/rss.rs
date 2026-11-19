@@ -1119,6 +1119,7 @@ pub struct Planes {
 
 /// An entry of the stream the raster engines read: what the HQ3 parser
 /// sends them.
+#[derive(Clone, Copy)]
 pub enum Entry<'a> {
     /// A raster register write; `exec` runs the primitive after it. Dropped
     /// when `CONFIG.DestRE` routes it to the other engine.
@@ -1191,6 +1192,9 @@ pub struct Rss {
     /// writes made so far.
     pub te_shared: u32,
     te_writes: u64,
+    /// The engines run one entry at a time on one thread (`step_te`), so
+    /// they have nothing to wait for.
+    te_stepped: bool,
     /// Diagnostic: stale texture samples seen, and the last one's (want,
     /// have) (`Te1::stale`).
     pub stale_events: u32,
@@ -1521,10 +1525,21 @@ impl Rss {
     pub fn share_te(&mut self, engines: u32) {
         self.te_shared = if engines > 1 { engines } else { 0 };
         self.te_writes = 0;
+        self.te_stepped = false;
         for a in &self.te_sync.arrived {
             a.store(0, std::sync::atomic::Ordering::Release);
         }
         self.te_sync.done.store(0, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Share `Te1` among `engines` engines that one thread steps through
+    /// each entry in turn, in any order: every engine has finished the
+    /// previous entry when the next starts, so engine 0 makes a write
+    /// without waiting for the others and none waits for it. Call with
+    /// the engines stopped, on each.
+    pub fn step_te(&mut self, engines: u32) {
+        self.share_te(engines);
+        self.te_stepped = true;
     }
 
     /// Change the texture engine's state (a table write, a texel load).
@@ -1541,8 +1556,10 @@ impl Rss {
         if let Some(g) = self.gpu.get() {
             g.before_tram_write(&mut self.te);
         }
-        if self.te_shared == 0 {
-            f(&mut self.te, &self.regs);
+        if self.te_shared == 0 || self.te_stepped {
+            if self.te_shared == 0 || self.engine == 0 {
+                f(&mut self.te, &self.regs);
+            }
             return;
         }
         self.te_writes += 1;
