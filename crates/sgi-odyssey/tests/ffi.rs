@@ -153,3 +153,17 @@ fn the_cursor_accessor_answers_the_registers_and_refuses_a_null_out() {
     assert_eq!(unsafe { sgi_odyssey_cursor(h, null_mut(), &mut y, &mut shown) }, IRIS_ENGINE_ERROR);
     unsafe { iris_engine_free(h) };
 }
+
+/// A Rust shell that owns the process's GPU device builds the engine on it: the GPU unit is there
+/// without the configuration asking for one, and the device's loss callback is the engine's.
+#[test]
+fn an_engine_built_on_the_shells_device_has_a_gpu_unit_on_it() {
+    let loss = sgi_engine::GpuLoss::new();
+    let Ok(gpu) = sgi_odyssey::wgpu::Gpu::new(&sgi_odyssey::wgpu::GpuOptions::default(), loss.callback()) else { return };
+    let v12 = CString::new("v12").unwrap();
+    let h = unsafe { new_on(&config(v12.as_ptr(), 0), &host(), gpu, loss) };
+    assert!(!h.is_null());
+    let mut counters = IrisVproGpuCounters::default();
+    assert_eq!(unsafe { sgi_odyssey_gpu_counters(h, &mut counters) }, IRIS_ENGINE_OK, "a GPU unit, though gpu was 0 in the configuration");
+    unsafe { iris_engine_free(h) };
+}

@@ -163,3 +163,24 @@ fn the_constructor_refuses_what_it_cannot_build() {
     assert!(unsafe { sgi_kona_new(&c, &host()) }.is_null(), "another ABI version");
     assert!(unsafe { sgi_kona_new(std::ptr::null(), &host()) }.is_null());
 }
+
+/// A Rust shell that owns the process's GPU device builds the pipe on it: the lent frame is a buffer
+/// of that device, and the loss callback it gave is the engine's.
+#[test]
+fn an_engine_built_on_the_shells_device_lends_a_buffer_of_that_device() {
+    let loss = sgi_engine::GpuLoss::new();
+    let Ok(gpu) = sgi_kona::wgpu::Gpu::new(&sgi_kona::wgpu::GpuOptions::default(), loss.callback()) else { return };
+    let ir2 = CString::new("ir2").unwrap();
+    let h = unsafe { new_on(&config(ir2.as_ptr()), &host(), gpu.clone(), loss) };
+    assert!(!h.is_null());
+    assert_eq!(unsafe { iris_engine_write(h, 0, 32, 1) }, IRIS_ENGINE_OK);
+    let dst = gpu.buffer("test destination", 1280 * 1024 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+    let done = unsafe { call_compose(h, &dst) };
+    assert_eq!(done, Some((1280, 1024)), "composed into a buffer of the shell's device");
+    unsafe { iris_engine_free(h) };
+}
+
+unsafe fn call_compose(h: *mut IrisEngine, dst: &wgpu::Buffer) -> Option<(u32, u32)> {
+    use sgi_engine::ffi::call;
+    unsafe { call::<sgi_kona::dev::kona::engine::KonaEngine<sgi_engine::ffi::CMem>, _>(h, sgi_engine::inject::Point::Pixel, None, |e| sgi_engine::BoardEngine::compose_into(e, 0, dst, 1280).ok().flatten()) }
+}

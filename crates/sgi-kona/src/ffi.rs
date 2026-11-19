@@ -3,6 +3,7 @@
 //! `tools/check-header` compares it with cbindgen's.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
+use std::sync::Arc;
 
 use sgi_engine::ffi::{build, call, host_parts, read_config, CMem, IrisEngine, IrisEngineConfig, IrisEngineHost, IRIS_ENGINE_FAULT, IRIS_ENGINE_OK};
 use sgi_engine::inject::Point;
@@ -12,6 +13,7 @@ use crate::dev::kona::engine::{FlashDrive, KonaEngine, Options, Region};
 use crate::dev::kona::flash::{fresh_image, FlashSink, FLASH_SIZE};
 use crate::dev::kona::ident::{KonaConfig, Product};
 use crate::wgpu::{Gpu, GpuOptions};
+use crate::SharedGpu;
 
 /// The most tile workers a shell may ask for; each is a host thread.
 const MAX_POOL_THREADS: u32 = 256;
@@ -163,6 +165,21 @@ fn pipe_config(c: &IrisKonaConfig) -> Result<KonaConfig, String> {
 /// until `iris_engine_free`.
 #[no_mangle]
 pub unsafe extern "C" fn sgi_kona_new(cfg: *const IrisKonaConfig, host: *const IrisEngineHost) -> *mut IrisEngine {
+    unsafe { new_with(cfg, host, None) }
+}
+
+/// As `sgi_kona_new` for a Rust shell that already owns the process's GPU device: the pipe draws and
+/// composes on `gpu`, so a buffer it lends or composes into is on the device the shell's own display
+/// uses. `loss` is the target of that device's loss callback; the configuration's `gpu` request is not
+/// read.
+///
+/// # Safety
+/// As `sgi_kona_new`.
+pub unsafe fn new_on(cfg: *const IrisKonaConfig, host: *const IrisEngineHost, gpu: SharedGpu, loss: Arc<GpuLoss>) -> *mut IrisEngine {
+    unsafe { new_with(cfg, host, Some((gpu, loss))) }
+}
+
+unsafe fn new_with(cfg: *const IrisKonaConfig, host: *const IrisEngineHost, given: Option<(SharedGpu, Arc<GpuLoss>)>) -> *mut IrisEngine {
     build(|| {
         let c = unsafe { read_config(cfg) }?;
         let (mem, notify) = unsafe { host_parts(host) }?;
@@ -177,16 +194,22 @@ pub unsafe extern "C" fn sgi_kona_new(cfg: *const IrisKonaConfig, host: *const I
             log::error!("sgi_kona_new: KONA has its own memory and takes none lent");
             return None;
         }
-        let loss = GpuLoss::new();
-        let gpu = match unsafe { c.common.gpu_request() } {
-            None => None,
-            Some((backend, software)) => match Gpu::new(&GpuOptions { backend, software, ..Default::default() }, loss.callback()) {
-                Ok(g) => Some(g),
-                Err(e) => {
-                    log::error!("sgi_kona_new: GPU: {e}");
-                    return None;
-                }
-            },
+        let (gpu, loss) = match given {
+            Some((gpu, loss)) => (Some(gpu), loss),
+            None => {
+                let loss = GpuLoss::new();
+                let gpu = match unsafe { c.common.gpu_request() } {
+                    None => None,
+                    Some((backend, software)) => match Gpu::new(&GpuOptions { backend, software, ..Default::default() }, loss.callback()) {
+                        Ok(g) => Some(g),
+                        Err(e) => {
+                            log::error!("sgi_kona_new: GPU: {e}");
+                            return None;
+                        }
+                    },
+                };
+                (gpu, loss)
+            }
         };
         let mut opts = Options { gpu, ..Options::default() };
         let user = User(c.user);

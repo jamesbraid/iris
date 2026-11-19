@@ -3,6 +3,7 @@
 //! written by hand; `tools/check-header` compares it with cbindgen's.
 
 use std::ffi::{c_char, c_int, CStr};
+use std::sync::Arc;
 
 use sgi_engine::ffi::{build, call, host_parts, read_config, IrisEngine, IrisEngineConfig, IrisEngineHost, IRIS_ENGINE_ERROR, IRIS_ENGINE_FAULT, IRIS_ENGINE_OK};
 use sgi_engine::inject::Point;
@@ -78,6 +79,21 @@ pub unsafe extern "C" fn sgi_odyssey_memory_bytes(cfg: *const IrisVproConfig) ->
 /// the lent memory stay valid until `iris_engine_free`.
 #[no_mangle]
 pub unsafe extern "C" fn sgi_odyssey_new(cfg: *const IrisVproConfig, host: *const IrisEngineHost) -> *mut IrisEngine {
+    unsafe { new_with(cfg, host, None) }
+}
+
+/// As `sgi_odyssey_new` for a Rust shell that already owns the process's GPU device: the engine draws
+/// and composes on `gpu`, so a buffer it lends or composes into is on the device the shell's own
+/// display uses (a wgpu buffer cannot cross devices). `loss` is the target of that device's loss
+/// callback; the configuration's `gpu` request is not read.
+///
+/// # Safety
+/// As `sgi_odyssey_new`.
+pub unsafe fn new_on(cfg: *const IrisVproConfig, host: *const IrisEngineHost, gpu: Arc<Gpu>, loss: Arc<GpuLoss>) -> *mut IrisEngine {
+    unsafe { new_with(cfg, host, Some((gpu, loss))) }
+}
+
+unsafe fn new_with(cfg: *const IrisVproConfig, host: *const IrisEngineHost, given: Option<(Arc<Gpu>, Arc<GpuLoss>)>) -> *mut IrisEngine {
     build(|| {
         let c = unsafe { read_config(cfg) }?;
         let (mem, notify) = unsafe { host_parts(host) }?;
@@ -89,16 +105,22 @@ pub unsafe extern "C" fn sgi_odyssey_new(cfg: *const IrisVproConfig, host: *cons
             }
         };
         let config = Config { product: name, params, widget: c.widget, mode: if c.common.threaded() { Mode::Threaded } else { Mode::Inline }, pool: (c.pool_threads as usize, c.pool_tile), gpu: None };
-        let loss = GpuLoss::new();
-        let gpu = match unsafe { c.common.gpu_request() } {
-            None => None,
-            Some((backend, software)) => match Gpu::new(&GpuOptions { backend, software, ..Default::default() }, loss.callback()) {
-                Ok(g) => Some(g),
-                Err(e) => {
-                    log::error!("sgi_odyssey_new: GPU: {e}");
-                    return None;
-                }
-            },
+        let (gpu, loss) = match given {
+            Some((gpu, loss)) => (Some(gpu), loss),
+            None => {
+                let loss = GpuLoss::new();
+                let gpu = match unsafe { c.common.gpu_request() } {
+                    None => None,
+                    Some((backend, software)) => match Gpu::new(&GpuOptions { backend, software, ..Default::default() }, loss.callback()) {
+                        Ok(g) => Some(g),
+                        Err(e) => {
+                            log::error!("sgi_odyssey_new: GPU: {e}");
+                            return None;
+                        }
+                    },
+                };
+                (gpu, loss)
+            }
         };
         let lent = unsafe { c.common.lent() };
         if (c.common.lent_len != 0) != lent.is_some() {
