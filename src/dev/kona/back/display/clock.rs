@@ -111,10 +111,9 @@ impl Head for Scan {
         !self.clock.paused.load(Acquire) && self.sink.lock().drawn()
     }
 
-    fn compose(&self, screen: &mut crate::disp::Rex3Screen, _want: Want) -> Composed {
+    fn compose(&self, screen: &mut crate::disp::Rex3Screen, want: Want) -> Composed {
         let _busy = self.clock.busy.lock();
-        self.sink.lock().compose(screen);
-        Composed::Frame
+        self.sink.lock().compose(screen, want)
     }
 }
 
@@ -176,8 +175,8 @@ mod tests {
     /// A compositor over a tiny store, for a thread that has nothing to show.
     fn quiet() -> crate::dev::kona::back::display::Compositor {
         use crate::dev::kona::back::display::{Compositor, screen::Display, tables::Tables};
-        use crate::dev::kona::back::store::PixelStore;
-        Compositor::new(Arc::new(PixelStore::new(4, 4)), 1, Arc::default(), Arc::new(Mutex::new(Tables::default())), Arc::new(Display::detached()))
+        use crate::dev::kona::back::store::Store;
+        Compositor::new(Arc::new(Store::new(4, 4)), 1, Arc::default(), Arc::new(Mutex::new(Tables::default())), Arc::new(Display::detached()))
     }
 
     /// A started board whose back end holds the handle; the board's host to read

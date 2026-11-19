@@ -62,10 +62,14 @@
 pub mod channels;
 pub mod clock;
 pub mod dac_cursor;
+#[cfg(feature = "wgpu")]
+pub mod scanout;
 pub mod screen;
 pub mod tables;
 
-use super::store::{PixelStore, DID_PLANE};
+use super::store::{PixelStore, Store, DID_PLANE};
+use crate::display::{Composed, Want};
+use super::raster::Rect;
 use super::store::{OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE};
 use crate::dev::kona::defs::{OVERLAY_ID_FIRST, POPUP_ID};
 use tables::{Baked, Tables, Window};
@@ -249,18 +253,38 @@ fn compose_layers(store: &PixelStore, tables: &Baked, row: &mut [u32], src: usiz
 /// half-drawn store is replaced by the next, because whoever finishes
 /// drawing raises the store's flag after its writes.
 pub struct Compositor {
-    store: Arc<PixelStore>,
+    store: Arc<Store>,
     word: usize,
     map: Arc<Mutex<ColourMap>>,
     tables: Arc<Mutex<Tables>>,
     display: Arc<Display>,
     frame: Vec<u32>,
+    /// The scan-out on the GPU, when the machine gave the board one. Then the
+    /// frame is composed there and the CPU compose is not run.
+    #[cfg(feature = "wgpu")]
+    scanout: scanout::Shared,
 }
 
 impl Compositor {
-    pub fn new(store: Arc<PixelStore>, word: usize, map: Arc<Mutex<ColourMap>>, tables: Arc<Mutex<Tables>>, display: Arc<Display>) -> Compositor {
-        let n = store.width() as usize * store.height() as usize;
-        Compositor { store, word, map, tables, display, frame: vec![0; n] }
+    pub fn new(store: Arc<Store>, word: usize, map: Arc<Mutex<ColourMap>>, tables: Arc<Mutex<Tables>>, display: Arc<Display>) -> Compositor {
+        let n = store.cpu().width() as usize * store.cpu().height() as usize;
+        Compositor {
+            store,
+            word,
+            map,
+            tables,
+            display,
+            frame: vec![0; n],
+            #[cfg(feature = "wgpu")]
+            scanout: Arc::default(),
+        }
+    }
+
+    /// Compose on `scanout` while it holds one.
+    #[cfg(feature = "wgpu")]
+    pub fn with_scanout(mut self, scanout: scanout::Shared) -> Compositor {
+        self.scanout = scanout;
+        self
     }
 
     /// The window the frames go to.
@@ -271,17 +295,43 @@ impl Compositor {
     /// Whether something drew since the last call. The flag is cleared
     /// before the pixels are read.
     pub fn drawn(&mut self) -> bool {
-        self.store.take_touched()
+        self.store.cpu().take_touched()
     }
 
-    /// Compose the frame into `screen`.
-    pub fn compose(&mut self, screen: &mut crate::disp::Rex3Screen) {
+    /// Compose the frame into `screen`, or on the GPU when the board has a
+    /// scan-out there and the thread takes a GPU frame. A GPU that fails has
+    /// stopped the machine, and no frame comes from the CPU in its place.
+    pub fn compose(&mut self, screen: &mut crate::disp::Rex3Screen, want: Want) -> Composed {
         // The tables are copied once per frame, under their lock; the store
         // is read as it is, without waiting for drawing.
         let map = self.map.lock().clone();
-        let (w, h) = (self.store.width() as usize, self.store.height() as usize);
+        let (w, h) = (self.store.cpu().width() as usize, self.store.cpu().height() as usize);
         let tables = self.tables.lock().snapshot();
-        compose(&self.store, self.word, &map, &tables, &mut self.frame, w);
+        #[cfg(feature = "wgpu")]
+        if let Some(sc) = self.scanout.lock().as_mut() {
+            if let Err(e) = sc.compose(&self.store, self.word, &map, &tables) {
+                sc.fail(&e);
+                return Composed::NotReady;
+            }
+            if want.gpu {
+                screen.width = w;
+                screen.height = h;
+                return Composed::Gpu { frame: sc.output().clone(), width: w as u32, height: h as u32 };
+            }
+            if let Err(e) = sc.read(&mut self.frame) {
+                sc.fail(&e);
+                return Composed::NotReady;
+            }
+            return self.copy_frame(screen, w, h);
+        }
+        let _ = want;
+        // A store that keeps the planes on the GPU brings back what changed since the last frame.
+        self.store.observe_all();
+        compose(self.store.cpu(), self.word, &map, &tables, &mut self.frame, w);
+        self.copy_frame(screen, w, h)
+    }
+
+    fn copy_frame(&self, screen: &mut crate::disp::Rex3Screen, w: usize, h: usize) -> Composed {
         let stride = crate::disp::FB_STRIDE;
         let width = w.min(stride);
         let height = h.min(screen.fb_rgb.len() / stride);
@@ -291,6 +341,7 @@ impl Compositor {
         screen.width = width;
         screen.height = height;
         screen.prebuilt = true;
+        Composed::Frame
     }
 }
 
@@ -299,30 +350,27 @@ impl Compositor {
 /// they run while the command stream does and never hold it up (a screenshot
 /// composes 1.3 million pixels, and the pipe's state is not taken out for that).
 pub struct Pixels {
-    store: Arc<PixelStore>,
+    store: Arc<Store>,
     map: Arc<parking_lot::Mutex<ColourMap>>,
     tables: Arc<parking_lot::Mutex<Tables>>,
 }
 
 impl Pixels {
-    pub fn new(store: Arc<PixelStore>, map: Arc<parking_lot::Mutex<ColourMap>>, tables: Arc<parking_lot::Mutex<Tables>>) -> Pixels {
+    pub fn new(store: Arc<Store>, map: Arc<parking_lot::Mutex<ColourMap>>, tables: Arc<parking_lot::Mutex<Tables>>) -> Pixels {
         Pixels { store, map, tables }
-    }
-
-    /// Word `w` of the pixel at (x, y) as the planes hold it.
-    pub fn word(&self, x: u32, y: u32, w: usize) -> u32 {
-        self.store.observe(w, Rect { x0: x as i32, y0: y as i32, x1: x as i32 + 1, y1: y as i32 + 1 });
-        self.store.cpu().read(x, y, w)
     }
 
     /// The words of one pixel that have an array, as the planes hold them.
     fn pix(&self, x: u32, y: u32, w: &mut dyn Write) -> io::Result<()> {
-        if self.store.word_slot(x, y, 0).is_none() {
-            return writeln!(w, "({x}, {y}) is outside the {} x {} managed area", self.store.width(), self.store.height());
+        let store = self.store.cpu();
+        if store.word_slot(x, y, 0).is_none() {
+            return writeln!(w, "({x}, {y}) is outside the {} x {} managed area", store.width(), store.height());
         }
-        let words = self.store.allocated();
+        let words = store.allocated();
+        let here = Rect { x0: x as i32, y0: y as i32, x1: x as i32 + 1, y1: y as i32 + 1 };
         for i in &words {
-            writeln!(w, "word {i:2}  {:#010x}", self.store.read(x, y, *i))?;
+            self.store.observe(*i, here);
+            writeln!(w, "word {i:2}  {:#010x}", store.read(x, y, *i))?;
         }
         writeln!(w, "{} word arrays allocated", words.len())
     }
@@ -331,17 +379,18 @@ impl Pixels {
     /// stands, without waiting for a display thread: rows from the top, one word a
     /// pixel (0xAABBGGRR).
     pub fn frame(&self) -> Vec<u32> {
-        let w = self.store.width() as usize;
-        let mut frame = vec![0u32; w * self.store.height() as usize];
+        let w = self.store.cpu().width() as usize;
+        let mut frame = vec![0u32; w * self.store.cpu().height() as usize];
+        self.store.observe_all();
         let map = self.map.lock().clone();
         let tables = self.tables.lock().snapshot();
-        compose(&self.store, super::textport::COLOUR_WORD, &map, &tables, &mut frame, w);
+        compose(self.store.cpu(), super::textport::COLOUR_WORD, &map, &tables, &mut frame, w);
         frame
     }
 
     /// The frame written as a PNG.
     fn shot(&self, path: &str) -> Result<(usize, usize), String> {
-        let (w, h) = (self.store.width() as usize, self.store.height() as usize);
+        let (w, h) = (self.store.cpu().width() as usize, self.store.cpu().height() as usize);
         crate::hostinput::save_png(path, &self.frame(), w, h, None)
     }
 }
@@ -350,7 +399,10 @@ impl Pixels {
     /// A pixel monitor command; false if `args` is not one.
     pub fn read(&self, args: &[&str], w: &mut dyn Write) -> io::Result<bool> {
         match args {
-            ["hash"] => writeln!(w, "{:016x}", self.store.checksum())?,
+            ["hash"] => {
+                self.store.observe_all();
+                writeln!(w, "{:016x}", self.store.cpu().checksum())?
+            }
             ["shot", path] => match self.shot(path) {
                 Ok((w_, h_)) => writeln!(w, "{path}: {w_} x {h_}")?,
                 Err(e) => writeln!(w, "kona: {e}")?,
@@ -374,13 +426,13 @@ mod tests {
     #[test]
     fn only_a_touched_store_is_composed_again() {
         use crate::gfx_display::GfxDisplay;
-        let store = Arc::new(PixelStore::new(4, 3));
+        let store = Arc::new(Store::new(4, 3));
         let display = Arc::new(Display::detached());
         let mut c = Compositor::new(store.clone(), 1, Arc::default(), Arc::default(), display.clone());
         assert!(c.drawn(), "a new store is shown once");
         {
             let mut screen = display.screen().lock();
-            c.compose(&mut screen);
+            c.compose(&mut screen, Want::default());
             assert_eq!((screen.width, screen.height), (4, 3));
         }
         assert!(!c.drawn(), "nothing drew");
@@ -409,7 +461,7 @@ mod tests {
     /// The frame is top row first: the store's bottom row is the frame's last.
     #[test]
     fn the_frame_is_composed_top_row_first_through_the_colour_map() {
-        let s = PixelStore::new(4, 3);
+        let s = Store::new(4, 3);
         let mut m = ColourMap::default();
         m.load(&[1, 1020, 0, 0]); // red
         m.load(&[2, 0, 1020, 0]); // green
@@ -434,7 +486,7 @@ mod tests {
     /// With no array the whole frame is index 0.
     #[test]
     fn an_unallocated_word_position_is_index_zero() {
-        let s = PixelStore::new(3, 2);
+        let s = Store::new(3, 2);
         let mut m = ColourMap::default();
         m.load(&[0, 400, 800, 100]);
         let mut out = vec![0u32; 6];
@@ -447,7 +499,7 @@ mod tests {
     /// colour, a window the model does not read, or (with no entry) the textport.
     #[test]
     fn the_display_id_picks_how_a_word_becomes_a_colour() {
-        let s = PixelStore::new(6, 1);
+        let s = Store::new(6, 1);
         let mut t = Tables::default();
         t.load_colours(0x100, &[0x3ff << 20, 0, 0x3ff << 10]);
         t.load_colours(0x200, &[0, 0x3ff]);
@@ -486,7 +538,7 @@ mod tests {
     /// RAM, only once channel 0's control register enables it in X11 mode.
     #[test]
     fn the_dac_cursor_is_drawn_after_the_frame() {
-        let s = PixelStore::new(8, 2);
+        let s = Store::new(8, 2);
         let mut t = Tables::default();
         let mut m = ColourMap::default();
         m.load(&[0, 1020, 1020, 1020]);
@@ -516,7 +568,7 @@ mod tests {
     /// A blanked frame is black and leaves the store alone; showing it again restores the frame.
     #[test]
     fn blanking_blacks_the_frame_and_leaves_the_store() {
-        let s = PixelStore::new(8, 2);
+        let s = Store::new(8, 2);
         let mut t = Tables::default();
         let mut m = ColourMap::default();
         m.load(&[0, 1020, 1020, 1020]);
@@ -543,7 +595,7 @@ mod tests {
     #[test]
     fn the_popup_lies_over_the_overlay_over_the_main_window() {
         use crate::dev::kona::back::store::{OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE};
-        let s = PixelStore::new(6, 1);
+        let s = Store::new(6, 1);
         let mut t = Tables::default();
         // Main window ID 1: direct colour. Overlay ID 64 + 2, 4 planes, map at 0x100; popup ID 63, map at 0x200.
         t.load_mode(1, 4);
@@ -587,7 +639,7 @@ mod tests {
     /// With no table loaded the composition is the default one.
     #[test]
     fn with_no_tables_the_frame_is_the_default() {
-        let s = PixelStore::new(3, 1);
+        let s = Store::new(3, 1);
         s.write(1, 0, 1, 2);
         let mut m = ColourMap::default();
         m.load(&[2, 1020, 0, 0]);

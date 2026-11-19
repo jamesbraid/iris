@@ -21,11 +21,14 @@ pub struct Display {
     home: Mutex<Option<Arc<MachineStatus>>>,
     status: Mutex<Arc<MachineStatus>>,
     tables: std::sync::OnceLock<Arc<Mutex<super::tables::Tables>>>,
+    /// The device the board composes on, so a window on it shows the GPU's frames as they are.
+    #[cfg(feature = "wgpu")]
+    gpu: std::sync::OnceLock<Arc<crate::wgpu::Gpu>>,
 }
 
 impl Display {
     pub fn new(status: Arc<MachineStatus>) -> Display {
-        Display { head: std::sync::OnceLock::new(), home: Mutex::new(None), status: Mutex::new(status), tables: std::sync::OnceLock::new() }
+        Display { head: std::sync::OnceLock::new(), home: Mutex::new(None), status: Mutex::new(status), tables: std::sync::OnceLock::new(), #[cfg(feature = "wgpu")] gpu: std::sync::OnceLock::new() }
     }
 
     /// The machine's status-bar inputs, known once the machine is.
@@ -34,6 +37,12 @@ impl Display {
             head.set_status(status.clone());
         }
         *self.status.lock() = status;
+    }
+
+    /// Say which device the board composes on.
+    #[cfg(feature = "wgpu")]
+    pub fn set_gpu(&self, gpu: crate::SharedGpu) {
+        let _ = self.gpu.set(gpu);
     }
 
     pub fn set_tables(&self, tables: Arc<Mutex<super::tables::Tables>>) {
@@ -66,6 +75,8 @@ impl GfxDisplay for Display {
         // Read live from the registers, not from the last composed frame.
         self.tables.get()?.lock().snapshot().hw_cursor()
     }
+    #[cfg(feature = "wgpu")]
+    fn gpu(&self) -> Option<Arc<crate::wgpu::Gpu>> { self.gpu.get().cloned() }
     fn request_frame(&self) { self.head().request_frame(); }
     fn frame_pending(&self) -> bool { self.head().frame_pending() }
     fn set_capture(&self, on: bool) { self.head().set_capture(on); }
