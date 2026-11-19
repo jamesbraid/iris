@@ -606,3 +606,24 @@ fn a_cpu_store_announced_with_cpu_wrote_reaches_a_gpu_scanout() {
     let after = e.scanout().expect("a frame");
     assert_ne!(after.2[at], 0, "the CPU's store is in the frame");
 }
+
+/// A shell sizes its display buffer from `frame_size`, and a destination too small for the frame is an error of
+/// the call, not a fault: the GPU unit and the engine go on (it stopped the machine before). Needs an adapter.
+#[test]
+fn a_destination_too_small_for_the_frame_is_an_error_and_not_a_fault() {
+    use sgi_odyssey::wgpu::{Gpu, GpuOptions};
+    let (cpu, _) = engine(Mode::Inline);
+    assert_eq!((BoardEngine::frame_size(&cpu, 0), BoardEngine::frame_size(&cpu, 1)), (Some((1280, 1024)), None));
+    let loss = GpuLoss::new();
+    let Ok(gpu) = Gpu::new(&GpuOptions::default(), loss.callback()) else { return };
+    let mut e = VproEngine::with_gpu(config("v12", Mode::Inline), None, Shared(Arc::new(Ram::default())), None, Some(gpu.clone()), loss).unwrap();
+    let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;
+    for (what, dst, stride) in [("too small", gpu.buffer("small", 4096, usage), 1280), ("a stride under the width", gpu.buffer("narrow", 1280 * 1024 * 4, usage), 1000), ("no storage usage", gpu.buffer("no storage", 1280 * 1024 * 4, wgpu::BufferUsages::COPY_SRC), 1280)] {
+        let r = BoardEngine::compose_into(&mut e, 0, &dst, stride);
+        assert!(matches!(r, Err(Fault(ref why)) if why.starts_with("compose_into:")), "{what}: {r:?}");
+        assert_eq!(e.fault(), None, "{what}: the engine goes on");
+    }
+    let fits = gpu.buffer("fits", 1280 * 1024 * 4, usage);
+    assert!(BoardEngine::compose_into(&mut e, 0, &fits, 1280).is_ok(), "and takes a destination that fits");
+    assert_eq!(e.fault(), None);
+}

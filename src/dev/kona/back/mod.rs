@@ -798,6 +798,8 @@ impl KonaBackend {
             (None, Some(b)) => b.as_ref(),
             (None, None) => return Err("compose_into: the destination is not a wgpu buffer".into()),
         };
+        // A destination that cannot hold the frame is refused before the device is touched.
+        crate::wgpu::Scanout::check_into(self.store.cpu().width() as u32, self.store.cpu().height() as u32, dst, stride_words)?;
         self.drain();
         let map = self.map.lock().clone();
         let tables = self.tables.lock().snapshot();

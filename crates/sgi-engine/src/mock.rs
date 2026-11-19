@@ -335,6 +335,10 @@ impl<M: HostMem> BoardEngine for Mock<M> {
         2
     }
 
+    fn frame_size(&self, head: u32) -> Option<(u32, u32)> {
+        (head < 2).then_some((4, 2))
+    }
+
     fn frame_generation(&self, head: u32) -> u64 {
         if head < 2 { self.generation } else { 0 }
     }

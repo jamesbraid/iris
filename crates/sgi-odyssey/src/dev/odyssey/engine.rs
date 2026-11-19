@@ -486,6 +486,11 @@ impl BoardEngine for VproEngine {
         }))
     }
 
+    fn frame_size(&self, head: u32) -> Option<(u32, u32)> {
+        let size = self.locks.shared.mode_size();
+        (head == 0 && size.0 != 0 && size.1 != 0).then_some(size)
+    }
+
     fn frame_generation(&self, head: u32) -> u64 {
         if head != 0 {
             return 0;
@@ -523,17 +528,25 @@ impl BoardEngine for VproEngine {
             (None, Some(b)) => b.as_ref(),
             (None, None) => return Err(Fault("compose_into: the destination is not a wgpu buffer".into())),
         };
+        // The destination is checked against the mode's size, which no frame exceeds, before the board
+        // or the device is touched: an error of the call, not a fault.
+        if let Some((w, h)) = BoardEngine::frame_size(self, 0) {
+            crate::wgpu::Scanout::check_into(w, h, dst, stride_words).map_err(|why| Fault(format!("compose_into: {why}")))?;
+        }
         {
             let g = self.settle()?;
             g.gpu_upload_tick(true);
         }
         let r = &mut self.reader;
         r.attach(&self.locks.shared);
-        let composed = r.update_into_gpu(dst, stride_words);
-        if let Some(f) = self.fault() {
-            return Err(Fault(f));
+        // A refused destination is an error of the call; a fault after it is the device's.
+        let composed = r.update_into_gpu(dst, stride_words).map_err(|why| Fault(format!("compose_into: {why}")));
+        if composed.is_ok() {
+            if let Some(f) = self.fault() {
+                return Err(Fault(f));
+            }
         }
-        Ok(composed)
+        composed
     }
 
     fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
@@ -806,3 +819,4 @@ impl Drop for VproEngine {
         }
     }
 }
+

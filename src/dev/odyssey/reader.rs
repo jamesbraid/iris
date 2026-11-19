@@ -541,6 +541,11 @@ impl DisplayShared {
         cell.gen.fetch_add(1, Release);
     }
 
+    /// The video mode's size, 0 by 0 while there is none.
+    pub fn mode_size(&self) -> (u32, u32) {
+        (self.mode.width.load(Relaxed), self.mode.height.load(Relaxed))
+    }
+
     /// How many times the retrace phase has been asked to restart (a mode, a clock or a reset).
     #[cfg(test)]
     pub fn restarts(&self) -> u64 {
@@ -686,8 +691,20 @@ impl ScanoutReader {
     /// As `update_on_gpu`, composing into the caller's `dst` as 0x00RRGGBB words of `stride` a row
     /// (`VproScanout::compose_into`): the size, or None as there.
     #[cfg(feature = "wgpu")]
-    pub fn update_into_gpu(&mut self, dst: &wgpu::Buffer, stride: u32) -> Option<(u32, u32)> {
-        self.compose_on_gpu(|sc, frame, snap, w, h| sc.compose_into(frame, snap, w, h, dst, stride).map(|_| ((), w, h))).map(|(_, w, h)| (w, h))
+    pub fn update_into_gpu(&mut self, dst: &wgpu::Buffer, stride: u32) -> Result<Option<(u32, u32)>, String> {
+        // A destination that cannot hold the frame is refused before the device is touched.
+        let mut refused = None;
+        let composed = self.compose_on_gpu(|sc, frame, snap, w, h| {
+            if let Err(e) = GpuScanout::check_into(w, h, dst, stride) {
+                refused = Some(e);
+                return Ok(((), w, h));
+            }
+            sc.compose_into(frame, snap, w, h, dst, stride).map(|_| ((), w, h))
+        });
+        match refused {
+            Some(e) => Err(e),
+            None => Ok(composed.map(|(_, w, h)| (w, h))),
+        }
     }
 
     #[cfg(feature = "wgpu")]

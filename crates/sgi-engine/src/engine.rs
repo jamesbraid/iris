@@ -326,9 +326,15 @@ pub trait BoardEngine {
     /// `wgpu::Buffer` on the board's device, as a `dyn Any`) as `0x00RRGGBB`, `stride_words` a row, rows
     /// from the top: the buffer a display exports is then the compose target, with no second pass.
     /// `(width, height)`; `None` where the board has no GPU scan-out, no such head or no frame. A
-    /// buffer too small for `stride_words * height` or a stride under the width is a fault.
+    /// buffer too small for `(height - 1) * stride_words + width` words, or a stride under the width, is an `Err` that leaves the engine and its GPU running (not a device fault: `fault()` stays `None`).
     fn compose_into(&mut self, _head: u32, _dst: &dyn std::any::Any, _stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
         Ok(None)
+    }
+    /// The size of the picture of `head` (`scanout`, `lend_frame` and `compose_into` give frames no larger):
+    /// the video mode's, so a shell can size a display buffer without composing; `None` for no such head or
+    /// while it has no mode. Cheap; waits for nothing.
+    fn frame_size(&self, _head: u32) -> Option<(u32, u32)> {
+        None
     }
     /// A number that changes whenever the picture of `head` may have: any store, retrace swap, CPU
     /// write, load or reset. A shell that composed at generation `g` and reads `g` again can skip the

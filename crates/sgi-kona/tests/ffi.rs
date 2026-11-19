@@ -177,6 +177,11 @@ fn an_engine_built_on_the_shells_device_lends_a_buffer_of_that_device() {
     let dst = gpu.buffer("test destination", 1280 * 1024 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
     let done = unsafe { call_compose(h, &dst) };
     assert_eq!(done, Some((1280, 1024)), "composed into a buffer of the shell's device");
+    // A destination too small for the frame is an error of the call: the device and the pipe go on.
+    let small = gpu.buffer("test small", 4096, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+    assert_eq!(unsafe { call_compose(h, &small) }, None, "refused");
+    assert_eq!(unsafe { iris_engine_fault(h) }, std::ptr::null(), "no fault");
+    assert_eq!(unsafe { call_compose(h, &dst) }, Some((1280, 1024)), "and the next call works");
     unsafe { iris_engine_free(h) };
 }
 
