@@ -317,8 +317,8 @@ impl Odyssey {
             let _ = writeln!(out, "VPro identity {:#010x}, widget control {:#010x}", f.identity, f.widget_control);
             let _ = writeln!(
                 out,
-                "  interrupts: flags {:#010x} enable {:#010x} asserted {} held {}  routed {} dest {:#x}:{:#x} vectors {:#010x}",
-                f.intr_flags, f.intr_enable, f.interrupt_asserted, f.flag_held, f.routed(), f.route_dest_upper, f.route_dest_lower, f.route_vectors
+                "  interrupts: flags {:#010x} enable {:#010x} asserted {}  routed {} dest {:#x}:{:#x} vectors {:#010x}",
+                f.intr_flags, f.intr_enable, f.interrupt_asserted, f.routed(), f.route_dest_upper, f.route_dest_lower, f.route_vectors
             );
             let _ = writeln!(
                 out,
@@ -474,7 +474,7 @@ impl Odyssey {
             let f = self.state.front.lock();
             let _ = writeln!(out, "host interface (no wait):");
             let _ = writeln!(out, "  identity {:#010x}  widget control {:#010x}  xt req timeout {:#x}  error command {:#x}", f.identity, f.widget_control, f.xt_req_timeout, f.error_command);
-            let _ = writeln!(out, "  int dest {:#010x}:{:#010x}  flags {:#010x}  enable {:#010x}  asserted {}  held {}", f.int_dest_upper, f.int_dest_lower, f.intr_flags, f.intr_enable, f.interrupt_asserted, f.flag_held);
+            let _ = writeln!(out, "  int dest {:#010x}:{:#010x}  flags {:#010x}  enable {:#010x}  asserted {}", f.int_dest_upper, f.int_dest_lower, f.intr_flags, f.intr_enable, f.interrupt_asserted);
             let _ = writeln!(out, "  route dest {:#010x}:{:#010x}  vectors {:#010x} (softsync {} retrace {} dma {} flag {})  routed {}",
                 f.route_dest_upper, f.route_dest_lower, f.route_vectors, (f.route_vectors >> 24) & 0xff, (f.route_vectors >> 16) & 0xff, (f.route_vectors >> 8) & 0xff, f.route_vectors & 0xff, f.routed());
             let _ = writeln!(out, "  swap arm {:#x} pending {:#x} control {:#x} companion {:#x} set {:#x} clear {:#x}  displayed {:#010x}{}",
