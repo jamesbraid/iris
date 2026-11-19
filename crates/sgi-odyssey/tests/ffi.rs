@@ -121,3 +121,24 @@ fn the_scanout_tells_the_size_when_the_buffer_is_short_and_copies_when_it_fits()
     assert_eq!(unsafe { sgi_odyssey_scanout(h, null_mut(), 0, null_mut(), &mut hgt) }, IRIS_ENGINE_ERROR);
     unsafe { iris_engine_free(h) };
 }
+
+/// The counters exist with a GPU unit and are refused without one.
+#[test]
+fn the_gpu_counters_are_there_with_a_gpu_unit_and_refused_without() {
+    let v12 = CString::new("v12").unwrap();
+    let mut counters = IrisVproGpuCounters::default();
+    let h = unsafe { sgi_odyssey_new(&config(v12.as_ptr(), 0), &host()) };
+    assert_eq!(unsafe { sgi_odyssey_gpu_counters(h, &mut counters) }, IRIS_ENGINE_ERROR, "no GPU unit");
+    assert_eq!(unsafe { sgi_odyssey_gpu_counters(h, null_mut()) }, IRIS_ENGINE_ERROR);
+    unsafe { iris_engine_free(h) };
+
+    let mut cfg = config(v12.as_ptr(), 0);
+    cfg.common.gpu = IRIS_ENGINE_GPU_AUTO;
+    let h = unsafe { sgi_odyssey_new(&cfg, &host()) };
+    if h.is_null() {
+        return; // no GPU adapter on this host
+    }
+    assert_eq!(unsafe { sgi_odyssey_gpu_counters(h, &mut counters) }, IRIS_ENGINE_OK);
+    assert_eq!((counters.faults, counters.rejections), (0, 0));
+    unsafe { iris_engine_free(h) };
+}

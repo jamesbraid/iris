@@ -1180,6 +1180,12 @@ impl GpuRaster {
         self.waits_by = on.then(std::collections::BTreeMap::new);
     }
 
+    /// The counters a shell can assert on: records, batches, copies, readbacks, rejections, faults.
+    pub fn counters(&self) -> [u64; 6] {
+        let (batches, records) = self.counts();
+        [records, batches, self.copies, self.readbacks, self.rejections, self.faults]
+    }
+
     /// The unit's counters as text for the monitor (`vpro status`, `vpro
     /// gpu`): batches and records, how the batches were submitted, bytes
     /// each way, waits and readbacks, and the readbacks by cause when

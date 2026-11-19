@@ -234,6 +234,10 @@ mod stub {
             match *self {}
         }
 
+        pub fn counters(&self) -> [u64; 6] {
+            match *self {}
+        }
+
         pub fn wait(&mut self) -> Result<(), String> {
             match *self {}
         }
