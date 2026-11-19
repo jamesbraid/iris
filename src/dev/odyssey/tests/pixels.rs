@@ -628,6 +628,17 @@ fn a_gl_copy_between_the_drawables_moves_the_rectangle() {
     assert_eq!(got, [0x1100_00ff, 0x2200_00ff, 0x1100_00ff, 0x2200_00ff, 0x3300_00ff, 0x4400_00ff]);
 }
 
+/// A float colour channel is stored as floor(256 c) limited to 255, as the rasterizer stores it
+/// (odsy devices/buzz/raster.md, "Colour as stored": rounding 255 c moves 7020 pixels): 0.75 is
+/// 0xc0, where 255 c + 0.5 gave 0xbf, and 0.1 is 0x19.
+#[test]
+fn a_float_colour_channel_is_stored_as_floor_of_256_times_it() {
+    use crate::dev::odyssey::dma::float_channel;
+    for (bits, want) in [(0x3f40_0000u32, 0xc0), (0x3e80_0000, 0x40), (0x3f00_0000, 0x80), (0x3dcc_cccd, 0x19), (0x3f80_0000, 0xff), (0, 0)] {
+        assert_eq!(float_channel(bits), want, "{bits:#x}");
+    }
+}
+
 /// A copy rectangle the operands give 16 bits each way is bounded by the planes before the copy
 /// stages it: 65535 by 65535 asked for 17 GB and aborted the process.
 #[test]
