@@ -720,12 +720,18 @@ impl KonaBackend {
         self.contexts.swapped(id, bank);
     }
 
+    /// The buffer display id `id` shows once the swaps issued so far have taken effect: what a
+    /// draw or a window placed now must treat as the front buffer.
+    fn drawn_bank(&self, id: u32) -> u8 {
+        self.swaps.iter().rev().find(|s| s.0 == id).map_or_else(|| self.tables.lock().bank(id), |s| s.1)
+    }
+
     /// A frame boundary of a back end attached with `attach_manual`: the waiting swaps show, so
     /// that a swap ahead of a retrace request shows in the frame that completes it, then the
     /// waiting retrace requests complete, the video interrupt rises, and the frame is composed.
     pub fn frame(&mut self) {
         for (id, bank) in std::mem::take(&mut self.swaps) {
-            self.show_bank(id, bank);
+            self.tables.lock().load_bank(id, bank);
         }
         if let (Some(h), Some(c)) = (&self.handle, &mut self.manual) {
             self.clock.frame(h);
@@ -1343,7 +1349,7 @@ impl KonaBackend {
                     // origin, 4 to 7 the clip rectangle (origin and size), each a halfword;
                     // words 2 and 3 hold the window's own size, which no draw reads.
                     (WINDOW_CLIP_SETUP, a) if a.len() == 11 => {
-                        let shown = self.tables.lock().bank(a[9]);
+                        let shown = self.drawn_bank(a[9]);
                         let (signed, size) = (|w: u32| w as u16 as i16 as i32, |w: u32| w as u16 as i32);
                         let clip = Rect { x0: signed(a[4]), y0: signed(a[5]), x1: signed(a[4]) + size(a[6]), y1: signed(a[5]) + size(a[7]) };
                         {
@@ -1372,7 +1378,10 @@ impl KonaBackend {
                     // byte is inferred from the recorded swaps, which set it to 0 and 1
                     // alternately.
                     (DISPLAY_MODE_BYTE, &[window, id, mode]) if window != 0 => {
+                        // A latched swap shows at the retrace, but the pipe is past it: draws after
+                        // it already go to the other buffer.
                         if self.latch {
+                            self.contexts.swapped(id, (mode & 1) as u8);
                             self.swaps.push((id, (mode & 1) as u8));
                         } else {
                             self.show_bank(id, (mode & 1) as u8);
