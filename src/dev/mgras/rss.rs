@@ -121,8 +121,8 @@ pub mod reg {
     pub const FILL_COLOR_B: u32 = 0x178;
 }
 
-/// Raster register names (MGRAS.h `rss_single`; TE registers 0x80-0xCB in
-/// their non-warp meaning). Unnamed registers are empty.
+/// Raster register names (gr4's devices/mgras and devices/re4; TE registers
+/// 0x80-0xCB in their non-warp meaning). Unnamed registers are empty.
 pub const REG_NAMES: [&str; 0x200] = {
     let mut n = [""; 0x200];
     n[0x000] = "tri_x_major";
