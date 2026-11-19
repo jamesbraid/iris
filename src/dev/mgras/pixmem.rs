@@ -6,7 +6,7 @@
 //! buffer, four to a 36-bit word. A buffer is a run of pages starting at a
 //! page pointer (`DRBpointers` for drawing, the XMAP DIB pointer for
 //! scanout); pixel (x, y) is in page `ptr + (y / 16) * xtiles + x / tile
-//! width`, `xtiles` coming from `drb_size`. See ignore/gr4/PP1.h for how the
+//! width`, `xtiles` coming from `drb_size`. See gr4's devices/pp1 for how the
 //! real board spreads a page over its chips; only the raw RDRAM window
 //! (the RE4's indirect device space) could see that order, so here a page
 //! is 3072 words in plain row order and an overlay word holds four

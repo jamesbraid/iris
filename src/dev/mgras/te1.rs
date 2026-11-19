@@ -2,7 +2,7 @@
 //!
 //! TE1 sits in the raster subsystem between the RE4's rasteriser and its
 //! fragment colouring. Its registers are RSS registers (`reg`); what is known
-//! of them is in `ignore/gr4/TE1.h`.
+//! of them is in gr4's devices/te1.
 //!
 //! - **Download.** TRAM has no address/data port. Texels arrive through the
 //!   raster engine's transfer engine with `XFRCONTROL` pointing at the

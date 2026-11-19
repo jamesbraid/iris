@@ -1658,8 +1658,8 @@ impl Hq3Engine {
 }
 
 /// The formatter's work on DMA'd pixel bytes (mode register 0xC00, see
-/// HQ3.h): within each pixel of N components of 1, 2 or 4 bytes, swap the
-/// bytes of each component (bit 6) and reverse the components (bit 7,
+/// gr4's devices/hq3): within each pixel of N components of 1, 2 or 4
+/// bytes, swap the bytes of each component (bit 6) and reverse the components (bit 7,
 /// "swizzle": libGLcore loads GL_ABGR_EXT textures with 0xE8D, byte
 /// components, and 0xE8E, shorts). The same reordering undoes itself, so
 /// reads use it too. Nibble components and the endian modes are not done.
@@ -1761,8 +1761,8 @@ fn describe_cmd(port: usize, pixel: bool, cmd: u32, data: &[u32]) -> String {
     }
 }
 
-/// Command-processor token names (ignore/gr4/HQ3.h): the OpenGL protocol as
-/// libGLcore sends it, SGI's diagnostic CP_* tokens, and kernel tokens.
+/// Command-processor token names (gr4's devices/hq3): the OpenGL protocol as
+/// libGLcore sends it, the diagnostics' tokens, and kernel tokens.
 pub fn token_name(t: u32) -> Option<&'static str> {
     Some(match t {
         0x000 => "VERTEX4F",

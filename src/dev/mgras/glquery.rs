@@ -8,7 +8,7 @@
 //! recorded and split by `tools/mgras-statemap.py`, and from `mgras probe`
 //! runs (`tools/mgras-probe-states.py`): the GE answers chosen words and
 //! glstate shows how libGLcore decodes them (IRIX 6.5.22, 2026-10-13).
-//! ignore/gr4/GE11.h "STATE READBACK" has the table.
+//! gr4's devices/ge11 has the table (its state readback section).
 //!
 //! The render state keeps derived values (lights in eye space and folded,
 //! blend factors as PP1 codes); `Query` keeps what the program set, in the
