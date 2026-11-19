@@ -925,7 +925,7 @@ impl Board {
 /// alpha rather than 255.
 ///
 /// ESTABLISHED: the library sends
-/// the source's alpha bytes unchanged under 0x4b, 0x48, 0x6b, 0x4c and
+/// the source's alpha bytes unchanged under 0x4b, 0x48, 0x68, 0x6b, 0x4c and
 /// 0x6c, and no header bit asks the board to replace them. INFERRED:
 /// the board stores that alpha. The write mask's alpha enable (block
 /// 0x052) is not applied to image writes in this model.
@@ -940,6 +940,7 @@ pub(super) fn code_carries_alpha(code: u32) -> bool {
         code,
         image::CODE_RGBA
             | image::CODE_LUM_ALPHA
+            | image::CODE_LUM_ALPHA12
             | image::CODE_ABGR
             | image::CODE_RGBA12
             | image::CODE_ABGR12
