@@ -9,7 +9,7 @@ use sgi_engine::inject::Point;
 use sgi_engine::{BoardEngine, GpuLoss, Rect};
 
 use crate::dev::kona::engine::{KonaEngine, Options, Region};
-use crate::dev::kona::ident::{KonaConfig, Product};
+use crate::dev::kona::ident::{HostBoard, KonaConfig, Product};
 use crate::wgpu::{Gpu, GpuOptions};
 
 /// The KONA configuration: the shared part, then the pipe's.
@@ -19,7 +19,7 @@ pub struct IrisKonaConfig {
     pub common: IrisEngineConfig,
     /// The product: `ir2`, `ir2e` or `ir3`, NUL-terminated. NULL is refused.
     pub product: *const c_char,
-    /// Raster managers, 1 or 2.
+    /// Raster managers, 1 or 2, or 4 behind a host board.
     pub rm_count: u32,
     /// The pipe slot the machine puts this on, 0 to 3.
     pub identity_index: u32,
@@ -35,6 +35,19 @@ pub struct IrisKonaConfig {
     /// The tile workers (0: draw on the caller's thread) and tile size in pixels, as `[graphics]`.
     pub pool_threads: u32,
     pub pool_tile: u32,
+    /// The boards. NULL or empty takes the product's own (the display generator's own is the
+    /// DG5-8, or the DG5-2 behind a host board).
+    pub geometry: *const c_char,
+    pub rm_type: *const c_char,
+    pub display: *const c_char,
+    /// `small` or `medium`; NULL is small.
+    pub pixel_depth: *const c_char,
+    /// 0 or the product's own texture memory per raster manager, in MB.
+    pub texture_mb: u32,
+    /// 0 or the display generator's channel count.
+    pub channels: u32,
+    /// The host board: 0 none (the Onyx2 deskside), 1 an Onyx2 rack's Ktown, 2 an Onyx 3400's Ktown2.
+    pub host_board: u32,
 }
 
 /// A box of pixels in one word position of the store.
@@ -54,7 +67,27 @@ fn pipe_config(c: &IrisKonaConfig) -> Result<KonaConfig, String> {
     // SAFETY: the caller's contract: NUL-terminated.
     let name = unsafe { CStr::from_ptr(c.product) }.to_str().map_err(|e| e.to_string())?;
     let byte = |v: u32, what: &str| u8::try_from(v).map_err(|_| format!("{what} {v} does not fit"));
-    let mut cfg = KonaConfig::new(Product::from_name(name)?, c.rm_count)?
+    let text = |p: *const c_char| -> Result<&str, String> {
+        if p.is_null() {
+            return Ok("");
+        }
+        // SAFETY: the caller's contract: NUL-terminated.
+        unsafe { CStr::from_ptr(p) }.to_str().map_err(|e| e.to_string())
+    };
+    let host_board = match c.host_board {
+        0 => HostBoard::Deskside,
+        1 => HostBoard::Ktown,
+        2 => HostBoard::Ktown2,
+        n => return Err(format!("host board {n}: 0 none, 1 Ktown, 2 Ktown2")),
+    };
+    let mut cfg = KonaConfig::new(Product::from_name(name)?, 1)?
+        .with_host_board(host_board)
+        .with_rm_count(c.rm_count)?
+        .with_geometry(text(c.geometry)?)?
+        .with_rm_type(text(c.rm_type)?)?
+        .with_texture_mb(c.texture_mb)?
+        .with_display(text(c.display)?, c.channels)?
+        .with_pixel_depth(text(c.pixel_depth)?)?
         .in_slot(byte(c.identity_index, "identity index")?)?
         .with_host_widget(byte(c.host_widget, "host widget")?)?
         .with_widget(byte(c.widget, "widget")?)?

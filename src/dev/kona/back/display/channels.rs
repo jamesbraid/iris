@@ -158,6 +158,8 @@ pub struct Channels {
     /// A setter raised the error flag, which stops a stored combination.
     pub error: bool,
     rm_count: u32,
+    /// The channels the display board has, at most `CHANNELS`: those past it do not exist.
+    count: usize,
 }
 
 impl Channels {
@@ -174,16 +176,27 @@ impl Channels {
         c.loaded = true;
         c.format = FB;
         c.input = [0, FB.1 - 1, FB.0, FB.1];
-        Channels { channel, blanked: false, frame: FB, error: false, rm_count }
+        Channels { channel, blanked: false, frame: FB, error: false, rm_count, count: CHANNELS }
+    }
+
+    /// The same display generator with a board of `count` channels, 1 to `CHANNELS`.
+    pub fn with_count(mut self, count: usize) -> Channels {
+        self.count = count.clamp(1, CHANNELS);
+        self
+    }
+
+    /// The channels the board has.
+    pub fn count(&self) -> usize {
+        self.count
     }
 
     pub fn reset(&mut self) {
-        *self = Channels::new(self.rm_count);
+        *self = Channels::new(self.rm_count).with_count(self.count);
     }
 
     /// The state, as the stream module reads and writes it.
     pub fn visit<S: Stream>(&mut self, s: &mut S) {
-        let Self { channel: _, blanked: _, frame: _, error: _, rm_count: _ } = self;
+        let Self { channel: _, blanked: _, frame: _, error: _, rm_count: _, count: _ } = self;
         self.channel.iter_mut().for_each(|c| c.visit(s));
         s.bool(&mut self.blanked);
         s.u32(&mut self.frame.0);
@@ -224,7 +237,7 @@ impl Channels {
     pub fn reply(&self, command: u32, data: &[u32]) -> Option<Vec<u8>> {
         let (id, bytes) = crate::dev::kona::tables::VIDEO_REPLY.get(command as usize).copied().flatten()?;
         let channel = if names_channel(command) { data.first().copied().unwrap_or(0) as usize } else { 0 };
-        if channel >= CHANNELS {
+        if channel >= self.count {
             crate::dlog!(LogModule::Kona, "kona: unsupported video channel {channel} for {command:#x}");
             return None;
         }
@@ -249,7 +262,7 @@ impl Channels {
             }
         };
         match command {
-            VIDEO_GET_BOARD_CONFIG => put(0, &[1, (1u32 << CHANNELS) - 1]),
+            VIDEO_GET_BOARD_CONFIG => put(0, &[1, (1u32 << self.count) - 1]),
             VIDEO_GET_CHANNEL_CONFIG => {
                 put(0, &[1 | if channel == 0 { 2 } else { 0 } | if ch.enabled { 0xc } else { 0 }]);
                 put(1, &ch.name);
@@ -330,7 +343,7 @@ impl Channels {
             VIDEO_SETUP_FRAME_BUFFER => self.setup_frame_buffer(d(0), d(1), d(2)),
             VIDEO_DISABLE_CHANNEL | VIDEO_LOAD_FORMAT | VIDEO_ENABLE_CHANNEL | VIDEO_RESIZE | VIDEO_CHANNEL_BLANKING | VIDEO_CHANNEL_GAMMA_MAP | VIDEO_CURSOR_PRIORITY | VIDEO_VAMPIRE | VIDEO_BIND_TO_X_WINDOW | VIDEO_PLACEMENT_RES => {
                 let channel = d(0) as usize;
-                if channel >= CHANNELS {
+                if channel >= self.count {
                     crate::dlog!(LogModule::Kona, "kona: unsupported video channel {channel} for {command:#x}");
                     return;
                 }
@@ -628,6 +641,19 @@ mod tests {
         // Reply id 6, five data words (version, board mask, three zeros), id plus data.
         assert_eq!(words(&r), [6, 1, 0xff, 0, 0, 0, 0x106]);
         assert_eq!(r.len(), 28);
+    }
+
+    /// A board of two channels answers for those and refuses the rest, in the mask and in the sets.
+    #[test]
+    fn a_board_of_two_channels_has_two() {
+        let mut c = Channels::new(2).with_count(2);
+        assert_eq!(words(&c.reply(VIDEO_GET_BOARD_CONFIG, &[0]).unwrap()), [6, 1, 0x3, 0, 0, 0, 0xa]);
+        assert!(c.reply(VIDEO_GET_CHANNEL_BLANKING, &[2]).is_none());
+        c.set(VIDEO_CURSOR_PRIORITY, &[2, 7]);
+        c.set(VIDEO_CURSOR_PRIORITY, &[1, 7]);
+        assert_eq!((c.channel[2].cursor_priority, c.channel[1].cursor_priority), (0, 7));
+        c.reset();
+        assert!(c.reply(VIDEO_GET_CHANNEL_BLANKING, &[2]).is_none(), "a reset keeps the board");
     }
 
     #[test]
