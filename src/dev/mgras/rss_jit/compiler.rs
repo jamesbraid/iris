@@ -1685,7 +1685,7 @@ impl<'a> E<'a> {
                 let idx = self.b.ins().bor(row, xi);
                 let sh = self.b.ins().ishl_imm_s(idx, 2);
                 let sh = self.b.ins().uextend(I64, sh);
-                let m = self.i64c(fixed::DITHER as i64);
+                let m = self.i64c(BAYER_PACKED as i64);
                 let t = self.b.ins().ushr(m, sh);
                 let t = self.b.ins().ireduce(I32, t);
                 self.b.ins().band_imm_s(t, 0xF)
@@ -1694,7 +1694,8 @@ impl<'a> E<'a> {
             for (kk, v) in c.iter().enumerate() {
                 let q = match thr {
                     Some(t) => {
-                        let v12 = self.b.ins().ushr_imm_s(*v, 16);
+                        let vr = self.b.ins().iadd_imm_s(*v, 0x8000);
+                        let v12 = self.b.ins().ushr_imm_s(vr, 16);
                         let hi = self.b.ins().ushr_imm_s(v12, 8);
                         let y = self.b.ins().isub(v12, hi);
                         let d = self.b.ins().ushr_imm_s(y, 4);
@@ -2370,7 +2371,7 @@ struct Row {
     z: Option<(Value, Value)>,
     /// Dithering: the Bayer matrix row, (fy & 3) << 2.
     bayer: Option<Value>,
-    /// The same row of the 8-8-8-8 store's thresholds (`fixed::DITHER`).
+    /// The same row of the 8-8-8-8 store's thresholds (`fixed::dither_at`).
     dither: Option<Value>,
 }
 
