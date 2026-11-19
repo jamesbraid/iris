@@ -62,6 +62,17 @@ IrisEngine *iris_vpro_new(const IrisVproConfig *cfg,
 int iris_vpro_observe(IrisEngine *h, int32_t x0, int32_t y0, int32_t x1,
                       int32_t y1);
 
+/*
+ * Copy the composed scan-out into buf (cap 32-bit words): 0x00RRGGBB a pixel,
+ * row by row from the top. *w and *hgt are set to the frame's size: 0 by 0
+ * while no video mode is set (OK, nothing copied), or the size needed when
+ * cap is too small (ERROR, nothing copied). FAULT on a faulted engine. Without
+ * a GPU unit nothing waits for the board, so a drawing in progress may show
+ * for one frame; with one, the call drains the board and reads its memory back.
+ */
+int iris_vpro_scanout(IrisEngine *h, uint32_t *buf, size_t cap, uint32_t *w,
+                      uint32_t *hgt);
+
 #ifdef __cplusplus
 }
 #endif

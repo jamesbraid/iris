@@ -102,3 +102,22 @@ fn the_board_properties_configure_the_board_and_a_product_overrides_them() {
         assert!(unsafe { iris_vpro_new(&c, &host()) }.is_null(), "{what} is refused");
     }
 }
+
+/// A short buffer is refused with the frame's size, and a buffer of that size gets the frame.
+#[test]
+fn the_scanout_tells_the_size_when_the_buffer_is_short_and_copies_when_it_fits() {
+    let v12 = CString::new("v12").unwrap();
+    let h = unsafe { iris_vpro_new(&config(v12.as_ptr(), 0), &host()) };
+    assert!(!h.is_null());
+    let (mut w, mut hgt) = (0u32, 0u32);
+    let mut small = [0xdead_beefu32; 4];
+    assert_eq!(unsafe { iris_vpro_scanout(h, small.as_mut_ptr(), small.len(), &mut w, &mut hgt) }, IRIS_ENGINE_ERROR, "a short buffer is refused");
+    assert!(w > 0 && hgt > 0 && small.iter().all(|&p| p == 0xdead_beef), "with the size, and nothing copied");
+    let mut frame = vec![0xdead_beefu32; w as usize * hgt as usize];
+    let (mut w2, mut h2) = (0u32, 0u32);
+    assert_eq!(unsafe { iris_vpro_scanout(h, frame.as_mut_ptr(), frame.len(), &mut w2, &mut h2) }, IRIS_ENGINE_OK);
+    assert_eq!((w2, h2), (w, hgt));
+    assert!(frame.iter().all(|&p| p >> 24 == 0), "0x00RRGGBB: no pixel keeps the sentinel");
+    assert_eq!(unsafe { iris_vpro_scanout(h, null_mut(), 0, null_mut(), &mut hgt) }, IRIS_ENGINE_ERROR);
+    unsafe { iris_engine_free(h) };
+}
