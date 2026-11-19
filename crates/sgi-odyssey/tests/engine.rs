@@ -26,6 +26,9 @@ const RETRACE_VECTOR: u8 = 20;
 const SOFTSYNC_VECTOR: u8 = 21;
 const HEART: u8 = 8;
 const WIDGET: u32 = 11;
+/// The display back end's word FIFO, and the display-mode table in its register file.
+const BACKEND_SELECT: u32 = 0x400000;
+const DISPMODE_BASE: u32 = 0x2900;
 
 /// Guest RAM, big-endian bytes in sparse pages, with one address a writer can be held at
 /// and a size past which nothing is mapped.
@@ -557,4 +560,49 @@ fn a_gpu_scanout_does_not_wait_for_a_held_slice() {
     e.release_hold();
     assert!(frame.is_some(), "a frame");
     assert!(took.as_secs_f64() < 7.0, "the scan-out waited {took:?} for a slice held 15 s");
+}
+
+/// A CPU store into lent memory, announced with `cpu_wrote`, is in the next scan-out of a GPU engine: the
+/// call submits it to the unit before it composes, as it did before it stopped settling the board (the
+/// regression: the frame stayed as the unit last drew it). Needs a GPU adapter; returns early without one.
+#[test]
+fn a_cpu_store_announced_with_cpu_wrote_reaches_a_gpu_scanout() {
+    let bytes = memory_bytes("v12").unwrap() as usize;
+    let mut buf = vec![0u64; bytes / 8];
+    let lent = unsafe { Lent::new(buf.as_mut_ptr().cast(), bytes) }.unwrap();
+    let mut cfg = config("v12", Mode::Inline);
+    cfg.gpu = Some("auto".into());
+    let Ok(mut e) = VproEngine::new(cfg, Some(lent), Shared(Arc::new(Ram::default())), None) else { return };
+    let word = |e: &mut VproEngine, w: u32| assert_eq!(e.write(BACKEND_SELECT, 32, w as u64), Write::Done);
+    let entry = |e: &mut VproEngine, index: u32, v: u32| {
+        word(e, 0x3000_0000 | index << 14 | 1);
+        word(e, v);
+    };
+    // What the X server programs: an RGB display mode for window id 0, the identity gamma ramp, and
+    // the scan-out's buffers (a 1280 by 1024 frame of 16-byte pixels at 0x2000).
+    entry(&mut e, DISPMODE_BASE, 0x0096_55a6);
+    word(&mut e, 0x3000_0000 | 0x1a00 << 14 | 0x600);
+    for i in 0..0x600u32 {
+        let v = if i < 0x200 { i >> 2 } else if i < 0x400 { ((i - 0x200) >> 1) + 0x80 } else { (i - 0x300) + 0x100 };
+        word(&mut e, v << 20 | v << 10 | v);
+    }
+    for (i, v) in [(0, 0x14_2000), (1, 0x2000), (2, 1280), (3, 1024), (7, 80), (9, 3)] {
+        entry(&mut e, 0x2800 + i, v);
+    }
+    e.quiesce(u64::MAX).unwrap();
+    e.cpu_wrote(0, bytes as u64);
+    assert!(e.lend_frame(0).unwrap().is_some(), "the GPU scan-out is the one composing");
+    let before = e.scanout().expect("a frame");
+    assert_eq!((before.0, before.1), (1280, 1024));
+    let at = 50 * 1280 + 100;
+    assert_eq!(before.2[at], 0, "nothing at (100, 50) yet");
+
+
+    // The CPU fills the frame buffer's 20 MB with ones straight in the lent memory, as the shell's CPU
+    // access does, and announces it.
+    let (from, len) = (0x2_0000usize, 1280 * 1024 * 16);
+    buf[from / 8..(from + len) / 8].fill(u64::MAX);
+    e.cpu_wrote(from as u64, len as u64);
+    let after = e.scanout().expect("a frame");
+    assert_ne!(after.2[at], 0, "the CPU's store is in the frame");
 }

@@ -440,12 +440,19 @@ impl VproEngine {
             return None;
         }
         // The GPU scan-out composes from the unit's own memory, in order behind the work submitted so
-        // far, so it waits for the GPU and not for the board's queued CPU work. Without one (the GPU
-        // cannot hold the frame) the CPU compose reads the mirror, which the readback brings current.
-        if self.gpu && self.locks.shared.gpu_scanout.get().is_none() {
-            let g = self.settle().ok()?;
-            g.gpu_upload_tick(true);
-            g.gpu_sync();
+        // far, so it waits for the GPU and not for the board's queued CPU work. The unit takes the
+        // CPU's stores (`cpu_wrote`) and submits its open batch at a tick, which needs the board: done
+        // when the board is idle now, skipped (not waited for) while it runs a slice. Without a GPU
+        // scan-out (the GPU cannot hold the frame) the CPU compose reads the mirror, which the
+        // readback brings current.
+        if self.gpu {
+            if self.locks.shared.gpu_scanout.get().is_none() {
+                let g = self.settle().ok()?;
+                g.gpu_upload_tick(true);
+                g.gpu_sync();
+            } else if let Some(g) = self.locks.quiesce(Duration::ZERO) {
+                g.gpu_upload_tick(true);
+            }
         }
         let r = &mut self.reader;
         r.attach(&self.locks.shared);
