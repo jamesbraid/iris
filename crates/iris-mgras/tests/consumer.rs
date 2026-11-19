@@ -62,8 +62,8 @@ fn replay(back: &mut ImpactBack, stream: &[&str]) {
             "w" => {
                 let (r, mut v) = (number(f[1]), number(f[2]));
                 // The streams are a one-engine board's: say two engines in
-                // DRBSIZE when two draw.
-                if r == reg::DRBSIZE && back.engines() == 2 {
+                // drb_size when two draw.
+                if r == reg::MGRAS_PP1_DRB_SIZE && back.engines() == 2 {
                     v |= 0x40;
                 }
                 back.write(r, v, f[3] == "1");
@@ -77,7 +77,7 @@ fn replay(back: &mut ImpactBack, stream: &[&str]) {
 }
 
 fn pixels(back: &ImpactBack) -> Vec<u32> {
-    let buffer = Buffer::new(MAIN_PAGE, Kind::Wide, back.reg(reg::DRBSIZE));
+    let buffer = Buffer::new(MAIN_PAGE, Kind::Wide, back.reg(reg::MGRAS_PP1_DRB_SIZE));
     (0..H).flat_map(|y| (0..W).map(move |x| (x, y))).map(|(x, y)| back.pixel(&buffer, x as u32, y as u32) as u32 & 0xFF_FFFF).collect()
 }
 

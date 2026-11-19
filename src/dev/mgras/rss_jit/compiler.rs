@@ -2135,7 +2135,7 @@ impl<'a> E<'a> {
             let p = e.b.ins().iadd(e.ctx, i);
             e.b.ins().load(I32, e.mr, p, off!(gl.smp.detail.table))
         };
-        // From the TXLOD index on, no detail (`Sampler::detail_weight`).
+        // From the texture_lod index on, no detail (`Sampler::detail_weight`).
         let last = self.b.ins().load(I32, self.mr, self.ctx, off!(gl.smp.detail.last));
         let cut = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, last);
         let t0 = entry(self, idx);

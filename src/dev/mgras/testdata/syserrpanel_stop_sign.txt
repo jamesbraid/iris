@@ -4,7 +4,7 @@
 # bkgrd_ba 0x700). Hardware shows a red sign.
 # One RSS register write per line: name value, "x" for the execute address.
 xywin 0x2ff0000
-winmode 0x0
+window_mode 0x0
 pp1fillmode 0xc008004
 ColorMaskLSBsA 0xfff000
 ColorMaskLSBsB 0xfff000
@@ -15,91 +15,91 @@ bkgrd_ba 0x700
 DRBpointers 0xb81c0
 fillmode 0x60
 ir_alias 0x15
-lscrl 0xf0000
-lspat 0x55555555
-xline_xystarti 0x30c010a
-xline_xyendi 0x30f010a x
-lspat 0xaaaaaaaa
-xline_xystarti 0x30a010b
-xline_xyendi 0x310010b x
-lspat 0x55555555
-xline_xystarti 0x308010c
-xline_xyendi 0x311010c x
-lspat 0x55555555
-xline_xystarti 0x305010d
-xline_xyendi 0x312010d x
-lspat 0xaaaaaaaa
-xline_xystarti 0x305010e
-xline_xyendi 0x313010e x
-lspat 0xaaaaaaaa
-xline_xystarti 0x304010f
-xline_xyendi 0x313010f x
-lspat 0x55555555
-xline_xystarti 0x3040110
-xline_xyendi 0x3130110 x
-lspat 0x55555555
-xline_xystarti 0x3030111
-xline_xyendi 0x3130111 x
-lspat 0xaaaaaaaa
-xline_xystarti 0x3030112
-xline_xyendi 0x3130112 x
-lspat 0xaaaaaaaa
-xline_xystarti 0x3020113
-xline_xyendi 0x3130113 x
-lspat 0x55555555
-xline_xystarti 0x3020114
-xline_xyendi 0x3130114 x
-lspat 0x55555555
-xline_xystarti 0x3010115
-xline_xyendi 0x3130115 x
-lspat 0xaaaaaaaa
-xline_xystarti 0x3010116
-xline_xyendi 0x3130116 x
-lspat 0xaaaaaaaa
-xline_xystarti 0x3000117
-xline_xyendi 0x3130117 x
-lspat 0xaaaaaaaa
-xline_xystarti 0x2ff0118
-xline_xyendi 0x3130118 x
-lspat 0x55555555
-xline_xystarti 0x2ff0119
-xline_xyendi 0x3130119 x
-lspat 0xaaaaaaaa
-xline_xystarti 0x2ff011a
-xline_xyendi 0x312011a x
-lspat 0x55555555
-xline_xystarti 0x2ff011b
-xline_xyendi 0x312011b x
-lspat 0xaaaaaaaa
-xline_xystarti 0x2ff011c
-xline_xyendi 0x311011c x
-lspat 0x55555555
-xline_xystarti 0x2ff011d
-xline_xyendi 0x311011d x
-lspat 0xaaaaaaaa
-xline_xystarti 0x2ff011e
-xline_xyendi 0x310011e x
-lspat 0x55555555
-xline_xystarti 0x2ff011f
-xline_xyendi 0x310011f x
-lspat 0xaaaaaaaa
-xline_xystarti 0x2ff0120
-xline_xyendi 0x30f0120 x
-lspat 0x55555555
-xline_xystarti 0x2ff0121
-xline_xyendi 0x30f0121 x
-lspat 0xaaaaaaaa
-xline_xystarti 0x2ff0122
-xline_xyendi 0x30e0122 x
-lspat 0x55555555
-xline_xystarti 0x3010123
-xline_xyendi 0x30d0123 x
-lspat 0x55555555
-xline_xystarti 0x3020124
-xline_xyendi 0x30b0124 x
-lspat 0x55555555
-xline_xystarti 0x3030125
-xline_xyendi 0x3090125 x
-lspat 0x55555555
-xline_xystarti 0x3040126
-xline_xyendi 0x3070126 x
+line_stipple_repeat 0xf0000
+line_stipple_pattern 0x55555555
+line_xy_start 0x30c010a
+line_xy_end 0x30f010a x
+line_stipple_pattern 0xaaaaaaaa
+line_xy_start 0x30a010b
+line_xy_end 0x310010b x
+line_stipple_pattern 0x55555555
+line_xy_start 0x308010c
+line_xy_end 0x311010c x
+line_stipple_pattern 0x55555555
+line_xy_start 0x305010d
+line_xy_end 0x312010d x
+line_stipple_pattern 0xaaaaaaaa
+line_xy_start 0x305010e
+line_xy_end 0x313010e x
+line_stipple_pattern 0xaaaaaaaa
+line_xy_start 0x304010f
+line_xy_end 0x313010f x
+line_stipple_pattern 0x55555555
+line_xy_start 0x3040110
+line_xy_end 0x3130110 x
+line_stipple_pattern 0x55555555
+line_xy_start 0x3030111
+line_xy_end 0x3130111 x
+line_stipple_pattern 0xaaaaaaaa
+line_xy_start 0x3030112
+line_xy_end 0x3130112 x
+line_stipple_pattern 0xaaaaaaaa
+line_xy_start 0x3020113
+line_xy_end 0x3130113 x
+line_stipple_pattern 0x55555555
+line_xy_start 0x3020114
+line_xy_end 0x3130114 x
+line_stipple_pattern 0x55555555
+line_xy_start 0x3010115
+line_xy_end 0x3130115 x
+line_stipple_pattern 0xaaaaaaaa
+line_xy_start 0x3010116
+line_xy_end 0x3130116 x
+line_stipple_pattern 0xaaaaaaaa
+line_xy_start 0x3000117
+line_xy_end 0x3130117 x
+line_stipple_pattern 0xaaaaaaaa
+line_xy_start 0x2ff0118
+line_xy_end 0x3130118 x
+line_stipple_pattern 0x55555555
+line_xy_start 0x2ff0119
+line_xy_end 0x3130119 x
+line_stipple_pattern 0xaaaaaaaa
+line_xy_start 0x2ff011a
+line_xy_end 0x312011a x
+line_stipple_pattern 0x55555555
+line_xy_start 0x2ff011b
+line_xy_end 0x312011b x
+line_stipple_pattern 0xaaaaaaaa
+line_xy_start 0x2ff011c
+line_xy_end 0x311011c x
+line_stipple_pattern 0x55555555
+line_xy_start 0x2ff011d
+line_xy_end 0x311011d x
+line_stipple_pattern 0xaaaaaaaa
+line_xy_start 0x2ff011e
+line_xy_end 0x310011e x
+line_stipple_pattern 0x55555555
+line_xy_start 0x2ff011f
+line_xy_end 0x310011f x
+line_stipple_pattern 0xaaaaaaaa
+line_xy_start 0x2ff0120
+line_xy_end 0x30f0120 x
+line_stipple_pattern 0x55555555
+line_xy_start 0x2ff0121
+line_xy_end 0x30f0121 x
+line_stipple_pattern 0xaaaaaaaa
+line_xy_start 0x2ff0122
+line_xy_end 0x30e0122 x
+line_stipple_pattern 0x55555555
+line_xy_start 0x3010123
+line_xy_end 0x30d0123 x
+line_stipple_pattern 0x55555555
+line_xy_start 0x3020124
+line_xy_end 0x30b0124 x
+line_stipple_pattern 0x55555555
+line_xy_start 0x3030125
+line_xy_end 0x3090125 x
+line_stipple_pattern 0x55555555
+line_xy_start 0x3040126
+line_xy_end 0x3070126 x

@@ -127,7 +127,7 @@ impl Frame {
         // buffer B. The window-ID runs are decoded below; this pass needs
         // them first, so decode them before the planes.
         let select = dcb.xmap.buf_select();
-        let back = Buffer::new(dcb.xmap.dib_pointers() >> 10, Kind::Wide, rss.reg(rss::reg::DRBSIZE));
+        let back = Buffer::new(dcb.xmap.dib_pointers() >> 10, Kind::Wide, rss.reg(rss::reg::MGRAS_PP1_DRB_SIZE));
         for did in 0..32u32 {
             let m = dcb.xmap.main_mode(did);
             self.main_mode[did as usize] = MainMode::of(m);
@@ -400,7 +400,7 @@ pub fn compose_direct(rss: &Rss, dcb: &Dcb, out: &mut [u32]) -> (usize, usize) {
     }
     let (main, overlay) = scanout_buffers(rss, dcb);
     let select = dcb.xmap.buf_select();
-    let back = Buffer::new(dcb.xmap.dib_pointers() >> 10, Kind::Wide, rss.reg(rss::reg::DRBSIZE));
+    let back = Buffer::new(dcb.xmap.dib_pointers() >> 10, Kind::Wide, rss.reg(rss::reg::MGRAS_PP1_DRB_SIZE));
     // The gamma table a channel, each entry in its byte of the pixel.
     let mut gamma = [[0u32; 256]; 3];
     for (v, g) in dcb.dac.gamma.iter().enumerate() {
@@ -530,7 +530,7 @@ pub fn compose_direct(rss: &Rss, dcb: &Dcb, out: &mut [u32]) -> (usize, usize) {
 /// its pointer differs, the overlay.
 pub fn scanout_buffers(rss: &Rss, dcb: &Dcb) -> (Buffer, Option<Buffer>) {
     let dib = dcb.xmap.dib_pointers();
-    let drbsize = rss.reg(rss::reg::DRBSIZE);
+    let drbsize = rss.reg(rss::reg::MGRAS_PP1_DRB_SIZE);
     let main = Buffer::new(dib, Kind::Wide, drbsize);
     let overlay = Buffer::new(dib >> 20, Kind::Overlay, drbsize);
     (main, (overlay.ptr != main.ptr).then_some(overlay))
@@ -776,7 +776,7 @@ mod tests {
         let mut want = vec![0u32; OUT_STRIDE * H];
         let mut got = vec![0u32; OUT_STRIDE * H];
         for trial in 0..12 {
-            r.write(rss::reg::DRBSIZE, (rng.chance(0.5) as u32) << 6 | (5 + rng.below(3) as u32) << 2 | 2, false);
+            r.write(rss::reg::MGRAS_PP1_DRB_SIZE, (rng.chance(0.5) as u32) << 6 | (5 + rng.below(3) as u32) << 2 | 2, false);
             for did in 0..32 {
                 let format = match rng.below(6) {
                     0 => 1,

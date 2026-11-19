@@ -196,7 +196,7 @@ pub struct Stencil {
     pub zpass: u8,
 }
 
-/// Blend factors, 0..=14 in BlendFactor's order (`rss::blend_rgba`; 15
+/// Blend factors, 0..=14 in reg_f165's order (`rss::blend_rgba`; 15
 /// acts as ONE and is folded into 1), and the equation (`rss::BLEND_EQ_*`,
 /// 0..=4; MIN and MAX ignore the factors, which fold to 0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -206,10 +206,10 @@ pub struct Blend {
     pub eq: u8,
 }
 
-/// Texturing: the environment (TEXMODE1 bits 2:1), components (1..=4),
+/// Texturing: the environment (texture_mode_first bits 2:1), components (1..=4),
 /// select slot for one- and two-component textures, texel class (1 alpha,
 /// 2 luminance, 3 intensity, 0 the rest), filters and wrap modes
-/// (TEXMODE2), and component depth in nibbles (1..=3).
+/// (texture_mode_drawn), and component depth in nibbles (1..=3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Tex {
     pub env: u8,
@@ -225,7 +225,7 @@ pub struct Tex {
     pub gl_clamp: bool,
     pub no_border: bool,
     pub depth: u8,
-    /// A detail texture adds to magnified samples (TEXMODE2 bit 9).
+    /// A detail texture adds to magnified samples (texture_mode_drawn bit 9).
     pub detail: bool,
     /// The texture colour tables on (any of TEXMODE1 bits 15:13, for a
     /// texel class that goes through them). Which ones is context data
@@ -335,7 +335,7 @@ impl Tex {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct PipeKey {
     pub prim: Prim,
-    /// Clip-ID test on (`pp1winmode` CIDmatch nonzero).
+    /// Clip-ID test on (`reg_f17b` CIDmatch nonzero).
     pub cid_test: bool,
     /// Enabled screen masks, packed into the context's first `nclip` slots.
     pub nclip: u8,

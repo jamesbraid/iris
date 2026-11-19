@@ -29,11 +29,11 @@ const FILLMODE: u32 = 0x110;
 const CONFIG: u32 = 0x112;
 const XYWIN: u32 = 0x115;
 const DRBPOINTERS: u32 = 0x16D;
-const DRBSIZE: u32 = 0x16E;
+const MGRAS_PP1_DRB_SIZE: u32 = 0x16E;
 const XFRSIZE: u32 = 0x153;
 const XFRMODE: u32 = 0x159;
 const PP1FILLMODE: u32 = 0x161;
-const PP1WINMODE: u32 = 0x17B;
+const MGRAS_PP1_REG_F17B: u32 = 0x17B;
 const FILL_COLOR_R: u32 = 0x176;
 const FILL_FAST: u32 = 1 << 20;
 
@@ -61,7 +61,7 @@ fn x_server(m: &Mgras) {
     direct_rss(m, CONFIG, 0xCAC, false);
     direct_rss(m, XYWIN, 1023 << 16, false);
     // The PROM's 1280x1024 layout: draw into the main buffer at page 0x240.
-    direct_rss(m, DRBSIZE, 0x31E, false);
+    direct_rss(m, MGRAS_PP1_DRB_SIZE, 0x31E, false);
     direct_rss(m, DRBPOINTERS, 0x240, false);
     // A colour-index window's buffer A, planes 11:0 (the X server's CI8
     // windows write through 0xFF; colour index takes no other planes, see
@@ -837,7 +837,7 @@ fn switch_to_gl_context(m: &Mgras, id: u32, x: u32, y: u32, w: u32, h: u32) {
     switch_to_gl_context_cid(m, id, x, y, w, h, 0);
 }
 
-/// The same, the window's PP1 window mode (image word 4) `pp1winmode`.
+/// The same, the window's PP1 window mode (image word 4) `reg_f17b`.
 fn switch_to_gl_context_cid(m: &Mgras, id: u32, x: u32, y: u32, w: u32, h: u32, pp1winmode: u32) {
     // Clear the switch-done flag first: left set by the last switch, the
     // wait below would return before this one ran (and a test's next
@@ -899,8 +899,8 @@ fn gl_state_and_window_follow_the_context() {
 
 /// A window whose visible region is too complex for the screen masks: the
 /// X server paints it with a clip ID (mgrasDrawCID: draw field 0x50, the ID
-/// in the fill colour, pp1winmode 0xC00, left set), and the kernel has the
-/// window's GL drawing match that ID (pp1winmode 1 << (4 + id)). The clear
+/// in the fill colour, reg_f17b 0xC00, left set), and the kernel has the
+/// window's GL drawing match that ID (reg_f17b 1 << (4 + id)). The clear
 /// lands only on the window's pixels with the ID; a window without one, and
 /// the X server, draw everywhere.
 #[test]
@@ -908,10 +908,10 @@ fn gl_draws_only_where_the_clip_id_matches() {
     let m = live_board();
     x_server(&m);
     let x_fillmode = 0x0C00_4504;
-    direct_rss(&m, PP1WINMODE, 0, false);
+    direct_rss(&m, MGRAS_PP1_REG_F17B, 0, false);
     // Clip ID 0 over the screen, then 1 over the window's left half
     // (screen rows top-down: GL rows 0..99 are 924..1023).
-    direct_rss(&m, PP1WINMODE, 0xC00, false);
+    direct_rss(&m, MGRAS_PP1_REG_F17B, 0xC00, false);
     direct_rss(&m, PP1FILLMODE, 0x14_2600, false);
     fifo_rss(&m, FILLMODE, FILL_FAST, false);
     fifo_rss(&m, FILL_COLOR_R, 0, false);
@@ -934,7 +934,7 @@ fn gl_draws_only_where_the_clip_id_matches() {
     fifo_token(&m, 0x15, &[]);
     assert_eq!(at(50, 50), 0xFF_0000, "no clip ID to match: all of it");
 
-    // The X server draws anywhere with its pp1winmode back.
+    // The X server draws anywhere with its reg_f17b back.
     fifo_rss(&m, FILLMODE, FILL_FAST, false);
     fifo_rss(&m, FILL_COLOR_R, 0x2A, false);
     block(&m, 60, 1000, 60, 1000);
@@ -2375,7 +2375,7 @@ fn gl_root_painter_respects_clipping_ids_after_iconify() {
     use super::rss::reg;
     let m = live_board();
     x_server(&m);
-    direct_rss(&m, reg::PP1WINMODE, 0xC00, false);
+    direct_rss(&m, reg::MGRAS_PP1_REG_F17B, 0xC00, false);
     direct_rss(&m, FILLMODE, FILL_FAST, false);
     direct_rss(&m, FILL_COLOR_R, 0x77, false);
     block(&m, 0, 724, 399, 1023);
@@ -2480,7 +2480,7 @@ fn gl_tex_level_as(m: &Mgras, level: u32, n: u32, dest: u32, texels: &[u32], ele
     gl_tex_level_tm(m, level, n, dest, texels, elem, scale, tl_mode, 0x40858);
 }
 
-/// `gl_tex_level_as` with TEXMODE1 `texmode1` in the context while the
+/// `gl_tex_level_as` with texture_mode_first `texture_mode_first` in the context while the
 /// level loads (libGLcore leaves whatever texture was bound before).
 #[allow(clippy::too_many_arguments)]
 fn gl_tex_level_tm(m: &Mgras, level: u32, n: u32, dest: u32, texels: &[u32], elem: u32, scale: f32, tl_mode: u32, texmode1: u32) {
@@ -2638,8 +2638,8 @@ fn gl_texture_rows_are_send_pixels_words_0_and_1() {
 }
 
 /// SGIS_texture_select (traced, TyrQuake's lightmaps): one-component
-/// textures share cells, each in the slot TL_MODE bits 4:3 give at load
-/// and TEXMODE1 bits 8:7 when drawn. Two luminance textures on the same
+/// textures share cells, each in the slot texture_loader_mode bits 4:3 give at load
+/// and texture_mode_first bits 8:7 when drawn. Two luminance textures on the same
 /// page keep their own texels.
 #[test]
 fn gl_texture_select_slots_share_a_page() {
@@ -2658,34 +2658,34 @@ fn gl_texture_select_slots_share_a_page() {
 
 /// One-component host texels (GL_ALPHA, GL_LUMINANCE, GL_INTENSITY data,
 /// one byte each) into a one-component texture are the texels, whatever
-/// TEXMODE1's class says during the load: libGLcore writes the new
-/// texture's TEXMODE1 after loading it, so the class there is often the
+/// texture_mode_first's class says during the load: libGLcore writes the new
+/// texture's texture_mode_first after loading it, so the class there is often the
 /// previous texture's. An alpha class used to store 0xFF for every texel
 /// (Discord Messenger's glyphs drew as solid boxes), and a luminance load
 /// after an alpha one inherited that.
 #[test]
 fn gl_texture_one_component_bytes_are_the_texels() {
-    // TEXMODE1 at load: alpha, luminance and RGBA classes.
+    // texture_mode_first at load: alpha, luminance and RGBA classes.
     for texmode1 in [0x40246, 0x40440, 0x40858] {
         let m = gl_board([0.0, 0.0, 0.0]);
         gl_tex_level_tm(&m, 0, 4, 0, &[0x00FF_40C0; 4], 1, 0.0, 0x34020, texmode1);
         let _sub = m.submit.lock();
         m.wait_idle();
         let rss = unsafe { &*m.rss.get() };
-        // 8-bit components (TL_MODE 6:5 = 1): 32-bit cells, slot 0 first,
+        // 8-bit components (texture_loader_mode 6:5 = 1): 32-bit cells, slot 0 first,
         // low nibble first.
         let off = super::te1::small_offset(4);
         let texel = |s: usize| {
             let h: Vec<char> = rss.te.nibbles_hex((off + s) * 8, 2).chars().collect();
             u32::from_str_radix(&format!("{}{}", h[1], h[0]), 16).unwrap()
         };
-        assert_eq!([texel(0), texel(1), texel(2), texel(3)], [0x00, 0xFF, 0x40, 0xC0], "TEXMODE1 {texmode1:#x} at load");
+        assert_eq!([texel(0), texel(1), texel(2), texel(3)], [0x00, 0xFF, 0x40, 0xC0], "texture_mode_first {texmode1:#x} at load");
         drop(_sub);
         m.stop_engines();
     }
 }
 
-/// An RGBA level loaded while TEXMODE1 still holds an alpha texture's
+/// An RGBA level loaded while texture_mode_first still holds an alpha texture's
 /// class (the texture drawn before it) keeps its four components: the
 /// class only picks alpha out for one-component textures. It used to store
 /// [alpha, 0, 0, 0], and Dear ImGui's glyphs, added to its RGBA atlas after
@@ -2707,7 +2707,7 @@ fn gl_texture_rgba_load_ignores_a_stale_alpha_class() {
 }
 
 /// The select bits mean nothing for textures that fill the cell: TyrQuake
-/// draws RGBA textures with TEXMODE1 0x409D9 (bits 8:7 = 3).
+/// draws RGBA textures with texture_mode_first 0x409D9 (bits 8:7 = 3).
 #[test]
 fn gl_texture_select_ignored_for_rgba() {
     let m = gl_board([1.0, 0.5, 0.75]);
@@ -2753,7 +2753,7 @@ fn gl_texture_modulate_and_off() {
     m.stop_engines();
 }
 
-/// Bilinear magnification (TEXMODE2 bit 7): halfway between two texel
+/// Bilinear magnification (texture_mode_drawn bit 7): halfway between two texel
 /// centres is their average; at a centre, the texel.
 #[test]
 fn gl_texture_bilinear_magnification() {
@@ -2893,7 +2893,7 @@ fn near(v: u32, want: [i32; 3]) -> bool {
     [v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF].iter().zip(want).all(|(&c, w)| (c as i32 - w).abs() <= 3)
 }
 
-/// GL_CLAMP with linear filtering and no border (TEXMODE2 0x15984,
+/// GL_CLAMP with linear filtering and no border (texture_mode_drawn 0x15984,
 /// traced): left of s = 0 the filter blends texel 0 half and half with the
 /// border colour (TXBCOLOR, green here).
 #[test]
@@ -3119,7 +3119,7 @@ fn gl_texgen_repeats_past_one() {
 }
 
 /// glGetTexImage as libGLcore sends it (traced): SAVE_RSS, the sampler at
-/// the level (TXSIZE, TXMIPMAP), READ_TEXTURE (0x0F0), the host DMA armed,
+/// the level (texture_size, reg_f191), READ_TEXTURE (0x0F0), the host DMA armed,
 /// then raster interface register 5 = 0x400D starts the read. The texels
 /// reach host memory as RGBA bytes, row by row.
 #[test]
@@ -3131,8 +3131,8 @@ fn gl_texture_readback_to_host_memory() {
 
 /// The texture manager moving a texture (traced, SGI quake): it saves
 /// TRAM pages raw (0xE5 with the sampler on the page, 64 texels of 32 bits
-/// a row) and restores them elsewhere through the loader (0x9D, TL_MODE
-/// 0x4026, TL_SPEC 64 x 8192, no destination level) from a list-mode
+/// a row) and restores them elsewhere through the loader (0x9D, texture_loader_mode
+/// 0x4026, texture_loader_level_spec 64 x 8192, no destination level) from a list-mode
 /// host DMA. The texture then samples the same from its new page.
 #[test]
 fn gl_texture_save_and_restore_pages() {
@@ -3280,7 +3280,7 @@ fn gl_draw_pixels_rgb16_padded_rows() {
     m.stop_engines();
 }
 
-/// GL_CLAMP_TO_BORDER_SGIS (TEXMODE2 clamp bits without bit 14, libGLcore's
+/// GL_CLAMP_TO_BORDER_SGIS (texture_mode_drawn clamp bits without bit 14, libGLcore's
 /// mapping): past the edge the samples are all border colour, where
 /// GL_CLAMP gives half border, half edge texel.
 #[test]

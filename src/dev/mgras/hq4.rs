@@ -1616,7 +1616,7 @@ mod tests {
         fn x_server(&self) {
             self.direct(0x112, 0xCAC); // CONFIG
             self.direct(0x115, 1023 << 16); // XYWIN
-            self.direct(0x16E, 0x31E); // DRBSIZE
+            self.direct(0x16E, 0x31E); // drb_size
             self.direct(0x16D, 0x240); // DRBPOINTERS
             self.direct(0x163, 0xFFF);
             self.direct(0x161, 0x0C00_4504); // PP1FILLMODE

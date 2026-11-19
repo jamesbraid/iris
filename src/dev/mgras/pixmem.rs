@@ -6,7 +6,7 @@
 //! buffer, four to a 36-bit word. A buffer is a run of pages starting at a
 //! page pointer (`DRBpointers` for drawing, the XMAP DIB pointer for
 //! scanout); pixel (x, y) is in page `ptr + (y / 16) * xtiles + x / tile
-//! width`, `xtiles` coming from `DRBsize`. See ignore/gr4/PP1.h for how the
+//! width`, `xtiles` coming from `drb_size`. See ignore/gr4/PP1.h for how the
 //! real board spreads a page over its chips; only the raw RDRAM window
 //! (the RE4's indirect device space) could see that order, so here a page
 //! is 3072 words in plain row order and an overlay word holds four
@@ -16,7 +16,7 @@
 //! scanlines alternate between them (y % 2), and each lays out its own
 //! rows (y / 2) in pages exactly as one engine lays out all of them, so a
 //! buffer takes half the pages per engine and the same page pointers name
-//! the same buffer on both. DRBsize bits 7:6 hold the engine count - 1.
+//! the same buffer on both. drb_size bits 7:6 hold the engine count - 1.
 //! The memory here always has room for two; a one-engine board leaves the
 //! second half zero.
 
@@ -34,13 +34,13 @@ pub const WORD_MASK: u64 = 0xF_FFFF_FFFF;
 /// Words behind one raster engine.
 pub const RE_WORDS: usize = PAGES * PAGE_WORDS;
 
-/// log2 of the raster engine count, from `DRBsize` bits 7:6 (engines - 1):
+/// log2 of the raster engine count, from `drb_size` bits 7:6 (engines - 1):
 /// what y shifts by to give an engine's row.
 pub fn re_shift(drbsize: u32) -> u32 {
     ((drbsize >> 6) & 3 != 0) as u32
 }
 
-/// `DRBsize` bits 1:0: overlay tiles per row; bits 5:2: 36-bit tiles per
+/// `drb_size` bits 1:0: overlay tiles per row; bits 5:2: 36-bit tiles per
 /// row.
 pub fn xtiles(drbsize: u32) -> (u32, u32) {
     match ((drbsize >> 2) & 0xF, drbsize & 3) {
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn two_engines_alternate_scanlines() {
-        // Maximum Impact at 1024x768 (6.5.22's DRBsize 0x9000025A: 6 and 2
+        // Maximum Impact at 1024x768 (6.5.22's drb_size 0x9000025A: 6 and 2
         // tiles, two engines): a buffer is 6 * 24 = 144 pages per engine.
         let b = Buffer::new(736, Kind::Wide, 0x9000_025A);
         assert_eq!((b.xtiles, b.yshift), (6, 1));

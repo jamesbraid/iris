@@ -96,7 +96,7 @@ pub mod reg {
     pub const INDIRECT_DATA: u32 = 0x15D;
     pub const STATUS: u32 = 0x15E;
     pub const PP1FILLMODE: u32 = 0x161;
-    pub const PP1WINMODE: u32 = 0x17B;
+    pub const MGRAS_PP1_REG_F17B: u32 = 0x17B;
     /// Plane write mask (low planes, buffer A).
     pub const COLORMASKLSBSA: u32 = 0x163;
     /// Plane write mask (low planes, buffer B).
@@ -104,17 +104,17 @@ pub mod reg {
     /// Page pointer of the buffer drawn into (bits 9:0).
     pub const DRBPOINTERS: u32 = 0x16D;
     /// Tiles per row: bits 5:2 for 36-bit buffers, 1:0 for the overlay.
-    pub const DRBSIZE: u32 = 0x16E;
-    pub const ZMODE: u32 = 0x168;
-    pub const BLENDFACTOR: u32 = 0x165;
-    pub const BLENDCOLOR_RG: u32 = 0x16B;
-    pub const BLENDCOLOR_BA: u32 = 0x16C;
-    pub const STENCILMODE: u32 = 0x166;
-    pub const STENCILMASK: u32 = 0x167;
-    pub const AFUNCMODE: u32 = 0x169;
+    pub const MGRAS_PP1_DRB_SIZE: u32 = 0x16E;
+    pub const MGRAS_PP1_REG_F168: u32 = 0x168;
+    pub const MGRAS_PP1_REG_F165: u32 = 0x165;
+    pub const MGRAS_PP1_REG_F16B: u32 = 0x16B;
+    pub const MGRAS_PP1_REG_F16C: u32 = 0x16C;
+    pub const MGRAS_PP1_REG_F166: u32 = 0x166;
+    pub const MGRAS_PP1_REG_F167: u32 = 0x167;
+    pub const MGRAS_PP1_REG_F169: u32 = 0x169;
     pub const COLORMASKMSBS: u32 = 0x162;
-    pub const GLINECONFIG: u32 = 0x146;
-    pub const LSCRL: u32 = 0x15B;
+    pub const MGRAS_RE4_AALINE_CONFIG: u32 = 0x146;
+    pub const MGRAS_RE4_LINE_STIPPLE_REPEAT: u32 = 0x15B;
     /// Fast-fill colour: one 12-bit component each, or the index in R.
     pub const FILL_COLOR_R: u32 = 0x176;
     pub const FILL_COLOR_G: u32 = 0x177;
@@ -125,186 +125,186 @@ pub mod reg {
 /// their non-warp meaning). Unnamed registers are empty.
 pub const REG_NAMES: [&str; 0x200] = {
     let mut n = [""; 0x200];
-    n[0x000] = "tri_x0";
-    n[0x001] = "tri_x1";
-    n[0x002] = "tri_x2";
-    n[0x003] = "tri_ymax";
-    n[0x004] = "tri_ymid";
-    n[0x005] = "tri_ymin";
-    n[0x006] = "tri_dxdy0";
-    n[0x007] = "tri_dxdy0_low";
-    n[0x008] = "tri_dxdy1_hi";
-    n[0x009] = "tri_dxdy1_low";
-    n[0x00A] = "tri_dxdy2_hi";
-    n[0x00B] = "tri_dxdy2_low";
-    n[0x00C] = "gline_xstartf";
-    n[0x00D] = "gline_ystartf";
-    n[0x00E] = "gline_xendf";
-    n[0x00F] = "gline_yendf";
-    n[0x010] = "gline_dx";
-    n[0x011] = "gline_dy";
-    n[0x012] = "gline_adjust";
+    n[0x000] = "tri_x_major";
+    n[0x001] = "tri_x_upper";
+    n[0x002] = "tri_x_lower";
+    n[0x003] = "tri_y_top";
+    n[0x004] = "tri_y_mid";
+    n[0x005] = "tri_y_bottom";
+    n[0x006] = "tri_slope_major_hi";
+    n[0x007] = "tri_slope_major_lo";
+    n[0x008] = "tri_slope_upper_hi";
+    n[0x009] = "tri_slope_upper_lo";
+    n[0x00A] = "tri_slope_lower_hi";
+    n[0x00B] = "tri_slope_lower_lo";
+    n[0x00C] = "aaline_x_start";
+    n[0x00D] = "aaline_y_start";
+    n[0x00E] = "aaline_x_end";
+    n[0x00F] = "aaline_y_end";
+    n[0x010] = "aaline_dx";
+    n[0x011] = "aaline_dy";
+    n[0x012] = "aaline_adjust";
     n[0x013] = "ir";
-    n[0x040] = "xline_xystarti";
-    n[0x041] = "xline_xyendi";
-    n[0x042] = "xline_inc1";
-    n[0x043] = "xline_inc2";
-    n[0x044] = "xline_error_oct";
+    n[0x040] = "line_xy_start";
+    n[0x041] = "line_xy_end";
+    n[0x042] = "line_step_a";
+    n[0x043] = "line_step_b";
+    n[0x044] = "line_error_octant";
     n[0x045] = "ir_alias";
     n[0x046] = "block_xystarti";
     n[0x047] = "block_xyendi";
-    n[0x048] = "block_xymove";
-    n[0x049] = "block_xsaveoct";
+    n[0x048] = "block_xy_move";
+    n[0x049] = "block_saved_octant";
     n[0x05B] = "packed_color";
     n[0x05C] = "red";
     n[0x05D] = "green";
     n[0x05E] = "blue";
     n[0x05F] = "alpha";
-    n[0x060] = "dre";
-    n[0x061] = "drx";
-    n[0x062] = "dge";
-    n[0x063] = "dgx";
-    n[0x064] = "dbe";
-    n[0x065] = "dbx";
-    n[0x066] = "dae";
-    n[0x067] = "dax";
-    n[0x068] = "z_hi";
-    n[0x069] = "z_low";
-    n[0x06A] = "dzx_hi";
-    n[0x06B] = "dzx_low";
-    n[0x06C] = "dze_hi";
-    n[0x06D] = "dze_low";
+    n[0x060] = "color_red_edge";
+    n[0x061] = "color_red_span";
+    n[0x062] = "color_green_edge";
+    n[0x063] = "color_green_span";
+    n[0x064] = "color_blue_edge";
+    n[0x065] = "color_blue_span";
+    n[0x066] = "color_alpha_edge";
+    n[0x067] = "color_alpha_span";
+    n[0x068] = "depth_hi";
+    n[0x069] = "depth_lo";
+    n[0x06A] = "depth_span_hi";
+    n[0x06B] = "depth_span_lo";
+    n[0x06C] = "depth_edge_hi";
+    n[0x06D] = "depth_edge_lo";
     n[0x070] = "char_h";
     n[0x071] = "char_l";
-    n[0x080] = "sw_u";
-    n[0x081] = "sw_l";
-    n[0x082] = "tw_dtx_u";
-    n[0x083] = "tw_dtx_l";
-    n[0x084] = "wi_u";
-    n[0x085] = "wi_l";
-    n[0x086] = "dwie_u";
-    n[0x087] = "dwie_l";
-    n[0x088] = "dwix_u";
-    n[0x089] = "dwix_l";
-    n[0x08A] = "dwiy_u";
-    n[0x08B] = "dwiy_l";
-    n[0x08C] = "txscale";
-    n[0x0C0] = "dswe_u";
-    n[0x0C1] = "dswe_l";
-    n[0x0C2] = "dtwe_u";
-    n[0x0C3] = "dtwe_l";
-    n[0x0C4] = "dswx_u";
-    n[0x0C5] = "dswx_l";
-    n[0x0C6] = "dtwx_u";
-    n[0x0C7] = "dtwx_l";
-    n[0x0C8] = "dswy_u";
-    n[0x0C9] = "dswy_l";
-    n[0x0CA] = "dtwy_u";
-    n[0x0CB] = "dtwy_l";
-    n[0x0CC] = "dsex_u";
-    n[0x0CD] = "dsex_l";
-    n[0x0CE] = "dtex_u";
-    n[0x0CF] = "dtex_l";
-    n[0x100] = "xfrabort";
+    n[0x080] = "reg_e080";
+    n[0x081] = "reg_e081";
+    n[0x082] = "reg_e082";
+    n[0x083] = "reg_e083";
+    n[0x084] = "reg_e084";
+    n[0x085] = "reg_e085";
+    n[0x086] = "reg_e086";
+    n[0x087] = "reg_e087";
+    n[0x088] = "reg_e088";
+    n[0x089] = "reg_e089";
+    n[0x08A] = "reg_e08a";
+    n[0x08B] = "reg_e08b";
+    n[0x08C] = "reg_e08c";
+    n[0x0C0] = "reg_e0c0";
+    n[0x0C1] = "reg_e0c1";
+    n[0x0C2] = "reg_e0c2";
+    n[0x0C3] = "reg_e0c3";
+    n[0x0C4] = "reg_e0c4";
+    n[0x0C5] = "reg_e0c5";
+    n[0x0C6] = "reg_e0c6";
+    n[0x0C7] = "reg_e0c7";
+    n[0x0C8] = "reg_e0c8";
+    n[0x0C9] = "reg_e0c9";
+    n[0x0CA] = "reg_e0ca";
+    n[0x0CB] = "reg_e0cb";
+    n[0x0CC] = "reg_e0cc";
+    n[0x0CD] = "reg_e0cd";
+    n[0x0CE] = "reg_e0ce";
+    n[0x0CF] = "reg_e0cf";
+    n[0x100] = "xfer_abort";
     n[0x102] = "xfrcontrol";
     n[0x110] = "fillmode";
-    n[0x111] = "texmode1";
+    n[0x111] = "texture_mode_first";
     n[0x112] = "config";
-    n[0x113] = "scissorx";
-    n[0x114] = "scissory";
+    n[0x113] = "scissor_x";
+    n[0x114] = "scissor_y";
     n[0x115] = "xywin";
     n[0x140] = "bkgrd_rg";
     n[0x141] = "bkgrd_ba";
-    n[0x142] = "txenv_rg";
-    n[0x143] = "txenv_b";
+    n[0x142] = "texenv_rg";
+    n[0x143] = "texenv_b";
     n[0x144] = "fog_rg";
     n[0x145] = "fog_b";
-    n[0x146] = "glineconfig";
-    n[0x147] = "scrmsk1x";
-    n[0x148] = "scrmsk1y";
-    n[0x149] = "scrmsk2x";
-    n[0x14A] = "scrmsk2y";
-    n[0x14B] = "scrmsk3x";
-    n[0x14C] = "scrmsk3y";
-    n[0x14D] = "scrmsk4x";
-    n[0x14E] = "scrmsk4y";
-    n[0x14F] = "winmode";
+    n[0x146] = "aaline_config";
+    n[0x147] = "screen_mask1_x";
+    n[0x148] = "screen_mask1_y";
+    n[0x149] = "screen_mask2_x";
+    n[0x14A] = "screen_mask2_y";
+    n[0x14B] = "screen_mask3_x";
+    n[0x14C] = "screen_mask3_y";
+    n[0x14D] = "screen_mask4_x";
+    n[0x14E] = "screen_mask4_y";
+    n[0x14F] = "window_mode";
     n[0x153] = "xfrsize";
-    n[0x154] = "xfrinitfactor";
-    n[0x155] = "xfrfactor";
-    n[0x156] = "xfrmasklow";
-    n[0x157] = "xfrmaskhigh";
+    n[0x154] = "xfer_zoom_init";
+    n[0x155] = "xfer_zoom_step";
+    n[0x156] = "xfer_mask_lo";
+    n[0x157] = "xfer_mask_hi";
     n[0x158] = "xfrcounters";
     n[0x159] = "xfrmode";
-    n[0x15A] = "lspat";
-    n[0x15B] = "lscrl";
+    n[0x15A] = "line_stipple_pattern";
+    n[0x15B] = "line_stipple_repeat";
     n[0x15C] = "device_addr";
     n[0x15D] = "device_data";
     n[0x15E] = "status";
     n[0x15F] = "re_togglecntx";
-    n[0x160] = "PixCmd";
+    n[0x160] = "reg_f160";
     n[0x161] = "pp1fillmode";
     n[0x162] = "ColorMaskMSBs";
     n[0x163] = "ColorMaskLSBsA";
     n[0x164] = "ColorMaskLSBsB";
-    n[0x165] = "BlendFactor";
-    n[0x166] = "Stencilmode";
-    n[0x167] = "Stencilmask";
-    n[0x168] = "Zmode";
-    n[0x169] = "Afuncmode";
-    n[0x16A] = "Accmode";
-    n[0x16B] = "BlendcolorRG";
-    n[0x16C] = "BlendcolorBA";
+    n[0x165] = "reg_f165";
+    n[0x166] = "reg_f166";
+    n[0x167] = "reg_f167";
+    n[0x168] = "reg_f168";
+    n[0x169] = "reg_f169";
+    n[0x16A] = "reg_f16a";
+    n[0x16B] = "reg_f16b";
+    n[0x16C] = "reg_f16c";
     n[0x16D] = "DRBpointers";
-    n[0x16E] = "DRBsize";
-    n[0x16F] = "TAGmode";
-    n[0x170] = "TAGdata_R";
-    n[0x171] = "TAGdata_G";
-    n[0x172] = "TAGdata_B";
-    n[0x173] = "TAGdata_A";
-    n[0x174] = "TAGdata_Z";
-    n[0x175] = "PixCoordinate";
-    n[0x176] = "PIXcolorR";
-    n[0x177] = "PIXcolorG";
-    n[0x178] = "PIXcolorB";
-    n[0x179] = "PIXcolorA";
-    n[0x17A] = "PIXcolorAcc";
-    n[0x17B] = "pp1winmode";
-    n[0x17E] = "MainBufSel";
-    n[0x17F] = "OlayBufSel";
-    n[0x180] = "texmode2";
-    n[0x181] = "txsize";
-    n[0x182] = "txtile";
-    n[0x183] = "txlod";
-    n[0x184] = "txbcolor_rg";
-    n[0x185] = "txbcolor_ba";
-    n[0x186] = "txbase";
-    n[0x187] = "tram_cntrl";
+    n[0x16E] = "drb_size";
+    n[0x16F] = "reg_f16f";
+    n[0x170] = "reg_f170";
+    n[0x171] = "reg_f171";
+    n[0x172] = "reg_f172";
+    n[0x173] = "reg_f173";
+    n[0x174] = "reg_f174";
+    n[0x175] = "reg_f175";
+    n[0x176] = "reg_f176";
+    n[0x177] = "reg_f177";
+    n[0x178] = "reg_f178";
+    n[0x179] = "reg_f179";
+    n[0x17A] = "reg_f17a";
+    n[0x17B] = "reg_f17b";
+    n[0x17E] = "reg_f17e";
+    n[0x17F] = "reg_f17f";
+    n[0x180] = "texture_mode_drawn";
+    n[0x181] = "texture_size";
+    n[0x182] = "texture_manager_init";
+    n[0x183] = "texture_lod";
+    n[0x184] = "texture_border_color_rg";
+    n[0x185] = "texture_border_color_ba";
+    n[0x186] = "texture_base";
+    n[0x187] = "texture_ram_control";
     n[0x188] = "max_pixel_rg";
     n[0x189] = "max_pixel_ba";
-    n[0x18A] = "mddma_cntrl";
-    n[0x18B] = "texrbuffer";
-    n[0x18C] = "txclampsize";
-    n[0x190] = "txaddr";
-    n[0x191] = "txmipmap";
-    n[0x192] = "txdetail";
-    n[0x193] = "txborder";
+    n[0x18A] = "multi_dimensional_texture_addressing";
+    n[0x18B] = "texture_read_buffer";
+    n[0x18C] = "texture_clamp_size";
+    n[0x190] = "texture_level_table_index";
+    n[0x191] = "reg_f191";
+    n[0x192] = "texture_detail_block";
+    n[0x193] = "texture_border_block";
     n[0x194] = "detailscale";
-    n[0x195] = "te_togglecntx";
-    n[0x196] = "teversion";
-    n[0x1A0] = "tl_wbuffer";
-    n[0x1A1] = "tl_mode";
-    n[0x1A2] = "tl_spec";
-    n[0x1A3] = "tl_addr";
-    n[0x1A4] = "tl_mipmap";
-    n[0x1A5] = "tl_border";
-    n[0x1A6] = "tl_vidcntrl";
-    n[0x1A7] = "tl_base";
-    n[0x1A8] = "tl_vidabort";
-    n[0x1A9] = "tl_s_size";
-    n[0x1AA] = "tl_t_size";
-    n[0x1AB] = "tl_s_left";
-    n[0x1AC] = "tl_t_bottom";
+    n[0x195] = "reg_f195";
+    n[0x196] = "texture_engine_revision";
+    n[0x1A0] = "texture_loader_write_buffer";
+    n[0x1A1] = "texture_loader_mode";
+    n[0x1A2] = "texture_loader_level_spec";
+    n[0x1A3] = "texture_loader_index";
+    n[0x1A4] = "texture_loader_mipmap_block";
+    n[0x1A5] = "texture_loader_border_block";
+    n[0x1A6] = "texture_loader_video_capture_start";
+    n[0x1A7] = "texture_loader_base_block";
+    n[0x1A8] = "reg_f1a8";
+    n[0x1A9] = "texture_loader_copy_width";
+    n[0x1AA] = "texture_loader_copy_height";
+    n[0x1AB] = "texture_loader_copy_left";
+    n[0x1AC] = "texture_loader_copy_bottom";
     n[0x1AF] = "reserved";
     n
 };
@@ -312,7 +312,7 @@ pub const REG_NAMES: [&str; 0x200] = {
 /// IR opcodes: a line between two points, and a block (rectangle).
 const OP_LINE: u32 = 0x5;
 const OP_BLOCK: u32 = 0x8;
-/// IR opcode: a point at xline_xystarti, drawn by each execute of it (X
+/// IR opcode: a point at line_xy_start, drawn by each execute of it (X
 /// PolyPoint).
 const OP_POINT: u32 = 0x4;
 /// IR opcodes: a triangle (area) whose spans run left to right (the major
@@ -330,14 +330,14 @@ pub const OP_DIAG_LINE: u32 = 0x3;
 /// The OpenGL per-fragment state our GE11 HLE programs into the PP1
 /// registers. The real layouts are not known (only GE11 microcode writes
 /// them); these follow the shapes SGI's diagnostics' reset values suggest
-/// (Afuncmode 0x7, Stencilmode 0x7, Stencilmask 0xFFFF, Zmode 0x0FFFFFF1:
+/// (reg_f169 0x7, reg_f166 0x7, reg_f167 0xFFFF, reg_f168 0x0FFFFFF1:
 /// compare function in bits 2:0, masks) and are provisional:
-///   Afuncmode (0x169)   bits 2:0 compare, bit 3 enable, bits 15:4 ref * 4096
-///   Stencilmode (0x166) bits 2:0 compare, bit 3 enable, ops (KEEP ZERO
+///   reg_f169 (0x169)   bits 2:0 compare, bit 3 enable, bits 15:4 ref * 4096
+///   reg_f166 (0x166) bits 2:0 compare, bit 3 enable, ops (KEEP ZERO
 ///                       REPLACE INCR DECR INVERT) fail 6:4, zfail 10:8,
 ///                       zpass 14:12, ref 23:16
-///   Stencilmask (0x167) compare mask 7:0, write mask 15:8
-///   BlendFactor (0x165) source 3:0, destination 7:4 (ZERO ONE SRC_COLOR
+///   reg_f167 (0x167) compare mask 7:0, write mask 15:8
+///   reg_f165 (0x165) source 3:0, destination 7:4 (ZERO ONE SRC_COLOR
 ///                       ONE_MINUS_SRC_COLOR SRC_ALPHA ONE_MINUS_SRC_ALPHA
 ///                       DST_ALPHA ONE_MINUS_DST_ALPHA DST_COLOR
 ///                       ONE_MINUS_DST_COLOR SRC_ALPHA_SATURATE), bit 8 enable
@@ -353,14 +353,14 @@ pub(super) const BLEND_ENABLE: u32 = 1 << 8;
 /// the GE's business: it becomes PP1's logic op). Only the GE HLE writes
 /// these, so beyond the factors' 4-bit fields the encoding is ours (SGI's
 /// diagnostics set BlendSfactor / BlendDfactor and nothing else):
-///   BlendFactor (0x165) source 3:0, destination 7:4, enable 8, equation
+///   reg_f165 (0x165) source 3:0, destination 7:4, enable 8, equation
 ///     11:9 (`BLEND_EQ_*`). Factor codes 0..=10 in OpenGL order (ZERO ONE
 ///     SRC_COLOR ONE_MINUS_SRC_COLOR SRC_ALPHA ONE_MINUS_SRC_ALPHA
 ///     DST_ALPHA ONE_MINUS_DST_ALPHA DST_COLOR ONE_MINUS_DST_COLOR
 ///     SRC_ALPHA_SATURATE), then 11 CONSTANT_COLOR, 12
 ///     ONE_MINUS_CONSTANT_COLOR, 13 CONSTANT_ALPHA, 14
 ///     ONE_MINUS_CONSTANT_ALPHA.
-///   BlendcolorRG (0x16B) red 27:16, green 11:0; BlendcolorBA (0x16C) blue
+///   reg_f16b (0x16B) red 27:16, green 11:0; reg_f16c (0x16C) blue
 ///     27:16, alpha 11:0: the constant colour, 12 bits a component.
 pub(super) const BLEND_EQ_SHIFT: u32 = 9;
 pub(super) const BLEND_EQ_ADD: u32 = 0;
@@ -369,7 +369,7 @@ pub(super) const BLEND_EQ_REVERSE_SUBTRACT: u32 = 2;
 pub(super) const BLEND_EQ_MIN: u32 = 3;
 pub(super) const BLEND_EQ_MAX: u32 = 4;
 
-/// The constant blend colour, 12.16 (`BlendcolorRG` / `BA`).
+/// The constant blend colour, 12.16 (`reg_f16b` / `BA`).
 pub(super) fn blend_const(rg: u32, ba: u32) -> [i32; 4] {
     let c = |v: u32| ((v & 0xFFF) as i32) << 16;
     [c(rg >> 16), c(rg), c(ba >> 16), c(ba)]
@@ -400,7 +400,7 @@ fn blend_factor(code: u32, k: usize, s: &[i32; 4], d: &[i32; 4], kc: &[i32; 4]) 
 }
 
 /// Source `s` blended onto destination `d` (12.16 components) as
-/// BlendFactor `bf` says, the constant colour `kc`; clamped.
+/// reg_f165 `bf` says, the constant colour `kc`; clamped.
 pub(super) fn blend_rgba(bf: u32, kc: &[i32; 4], s: &[i32; 4], d: &[i32; 4]) -> [i32; 4] {
     use fixed::mul;
     let (sf, df) = (bf & 0xF, (bf >> 4) & 0xF);
@@ -497,7 +497,7 @@ pub(super) fn draws_a_and_b(f: u32) -> bool {
 }
 pub(super) const DRAW_CID: u32 = 0x50;
 
-/// PP1 window mode (`pp1winmode`; SGI's fields WINxLSBs, WINyLSBs,
+/// PP1 window mode (`reg_f17b`; SGI's fields WINxLSBs, WINyLSBs,
 /// CIDmatch, CIDdata, CIDmask). Bits 3:0 are the window origin's low x and
 /// y bits (not modelled). Bits 7:4 (CIDmatch) are one bit per clip ID:
 /// bit 4 + n lets a pixel whose clip ID is n be drawn; all clear, no
@@ -1094,10 +1094,10 @@ pub struct RssStats {
 /// keeps loaded across batches (it reloads them only when another context
 /// may have used the TE), and the model-private ones from 0x3F0.
 fn gl_keeps(r: usize) -> bool {
-    r >= 0x3F0 || r == te_reg::TXADDR as usize || crate::dev::mgras::te1::CONTEXT_REGS.contains(&(r as u32))
+    r >= 0x3F0 || r == te_reg::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX as usize || crate::dev::mgras::te1::CONTEXT_REGS.contains(&(r as u32))
 }
 
-/// PP1 Zmode, as our GE11 HLE uses it (the real layout is not known; SGI's
+/// PP1 reg_f168, as our GE11 HLE uses it (the real layout is not known; SGI's
 /// diagnostics write it as value | 0x0FFFFFF0, which fits bits 27:4 being
 /// a 24-bit Z write mask): bits 2:0 the compare function in OpenGL's order
 /// (NEVER, LESS, EQUAL, LEQUAL, GREATER, NOTEQUAL, GEQUAL, ALWAYS), bit 3
@@ -1190,7 +1190,7 @@ pub struct Rss {
     stipple: Slot<Stipple>,
     xfer: Slot<Xfer>,
     pub stats: RssStats,
-    /// Pixels drawn since the GL line stipple was last restarted (lscrl).
+    /// Pixels drawn since the GL line stipple was last restarted (line_stipple_repeat).
     pub(super) gl_line_stipple_pos: u32,
     /// The raster registers as `gl_enter` found them.
     gl_stash: [u32; 0x400],
@@ -1218,7 +1218,7 @@ pub struct Rss {
     te_read: [u32; 3],
     /// The clip-ID planes (`CidPlanes`). The X server paints a window's visible region with an ID (1-3)
     /// when its clip is too complex for the four screen masks, and the
-    /// kernel has that window's GL drawing match it (`pp1winmode`). Where
+    /// kernel has that window's GL drawing match it (`reg_f17b`). Where
     /// the board keeps them in RDRAM is not known (X draws them with
     /// DRBpointers at the main buffer); nothing reads them back, so they
     /// are kept apart here. Separate from the VC3's display IDs.
@@ -1454,7 +1454,7 @@ impl Rss {
     /// Registers kept common because this model has one TE1/TRAM shared by
     /// both RE4s instead of one texture subsystem per engine.
     pub fn uses_shared_texture_state(r: u32) -> bool {
-        matches!(r, reg::XFRCONTROL | reg::XFRSIZE | reg::XFRMODE | te_reg::TXADDR)
+        matches!(r, reg::XFRCONTROL | reg::XFRSIZE | reg::XFRMODE | te_reg::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX)
             || super::te1::CONTEXT_REGS.contains(&r)
             || super::te1::TABLE_REGS.contains(&r)
     }
@@ -1763,7 +1763,7 @@ impl Rss {
                 }
             }
             reg::IR_ALIAS => self.regs[reg::IR as usize] = val,
-            reg::LSCRL => self.gl_line_stipple_pos = 0,
+            reg::MGRAS_RE4_LINE_STIPPLE_REPEAT => self.gl_line_stipple_pos = 0,
             reg::XFRCONTROL if val == 0 => {
                 self.xfer.set(None);
                 self.te_load = 0;
@@ -1776,10 +1776,10 @@ impl Rss {
                 let size = self.regs[reg::XFRSIZE as usize];
                 self.te_read = [read as u32, size & 0xFFFF, size >> 16];
             }
-            te_reg::TXMIPMAP | te_reg::TXBORDER | te_reg::DETAILSCALE => {
-                let i = self.regs[te_reg::TXADDR as usize];
+            te_reg::MGRAS_TE1_REG_F191 | te_reg::MGRAS_TE1_TEXTURE_BORDER_BLOCK | te_reg::MGRAS_TE1_DETAILSCALE => {
+                let i = self.regs[te_reg::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX as usize];
                 self.te_write(false, |te, _| te.table_write(r, i, val));
-                self.regs[te_reg::TXADDR as usize] = i.wrapping_add(1);
+                self.regs[te_reg::MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX as usize] = i.wrapping_add(1);
             }
             _ => {}
         }
@@ -1838,7 +1838,7 @@ impl Rss {
         if !(0..WIDTH as i32).contains(&x) || !(0..HEIGHT as i32).contains(&y) || !self.owns_row(y) {
             return false;
         }
-        let m = cid_match(self.reg(reg::PP1WINMODE));
+        let m = cid_match(self.reg(reg::MGRAS_PP1_REG_F17B));
         if m != 0 && (m >> self.cid[y as usize * WIDTH + x as usize]) & 1 == 0 {
             return false;
         }
@@ -1906,7 +1906,7 @@ impl Rss {
         f(b, self.planes_drawn(b, draws_b(field)), rect);
         if draws_a_and_b(field) {
             if let Some(p) = self.second_buffer() {
-                let b2 = Buffer::new(p, Kind::Wide, self.reg(reg::DRBSIZE));
+                let b2 = Buffer::new(p, Kind::Wide, self.reg(reg::MGRAS_PP1_DRB_SIZE));
                 f(b2, self.planes_drawn(b2, true), rect);
             }
         }
@@ -1930,7 +1930,7 @@ impl Rss {
             Some(b) if kind == Kind::Wide && draws_b(draw_buffer(pp1)) && !rgb12_pair(pp1) && !ci_pixtype(pp1) => b,
             _ => drb,
         };
-        Buffer::new(ptr, kind, self.reg(reg::DRBSIZE))
+        Buffer::new(ptr, kind, self.reg(reg::MGRAS_PP1_DRB_SIZE))
     }
 
     /// DRBpointers' second buffer page (bits 19:10), if any.
@@ -1948,7 +1948,7 @@ impl Rss {
             return;
         }
         if field == DRAW_CID {
-            let m = cid_write_mask(self.reg(reg::PP1WINMODE));
+            let m = cid_write_mask(self.reg(reg::MGRAS_PP1_REG_F17B));
             let c = &mut self.cid[y as usize * WIDTH + x as usize];
             *c = (*c & !m) | (v as u8 & m);
             return;
@@ -1957,7 +1957,7 @@ impl Rss {
         self.put_in(b, x, y, v, draws_b(field));
         if draws_a_and_b(field) && !(b.kind == Kind::Wide && (rgb12_pair(self.reg(reg::PP1FILLMODE)) || ci_pixtype(self.reg(reg::PP1FILLMODE)))) {
             if let Some(p) = self.second_buffer() {
-                let b2 = Buffer::new(p, Kind::Wide, self.reg(reg::DRBSIZE));
+                let b2 = Buffer::new(p, Kind::Wide, self.reg(reg::MGRAS_PP1_DRB_SIZE));
                 // The 12-bit X visuals can give A and B the same page.
                 // Applying an XOR twice there would erase the drawing.
                 if b2 != b {
@@ -2041,7 +2041,7 @@ impl Rss {
         self.put_in36(b, x, y, v, draws_b(field));
         if draws_a_and_b(field) {
             if let Some(p) = self.second_buffer() {
-                let b2 = Buffer::new(p, Kind::Wide, self.reg(reg::DRBSIZE));
+                let b2 = Buffer::new(p, Kind::Wide, self.reg(reg::MGRAS_PP1_DRB_SIZE));
                 if b2 != b {
                     self.put_in36(b2, x, y, v, true);
                 }
@@ -2064,7 +2064,7 @@ impl Rss {
             READ_B if !rgb12_pair(pp1) && !ci_pixtype(pp1) => (self.second_buffer().unwrap_or(drb), Kind::Wide),
             _ => (drb, Kind::Wide),
         };
-        Buffer::new(ptr, kind, self.reg(reg::DRBSIZE))
+        Buffer::new(ptr, kind, self.reg(reg::MGRAS_PP1_DRB_SIZE))
     }
 
     /// The read source's word at (x, y), undecoded.
@@ -2226,7 +2226,7 @@ impl Rss {
             OP_GL_LINE | OP_DIAG_LINE => {
                 let pos = |n: u32| f32::from_bits(self.reg(n)) - 49151.5;
                 format!("GL LINE ({}, {})-({}, {}) config={:#x} {target}",
-                    pos(0x00C), pos(0x00D), pos(0x00E), pos(0x00F), self.reg(reg::GLINECONFIG))
+                    pos(0x00C), pos(0x00D), pos(0x00E), pos(0x00F), self.reg(reg::MGRAS_RE4_AALINE_CONFIG))
             }
             op => format!("IR {ir:#x} (opcode {op:#x} not modelled) fm={fm:#x} {target}"),
         }
@@ -2316,10 +2316,10 @@ impl Rss {
     /// middle, bottom (min y); positions as floats biased by 49151.5
     /// (window coordinates, y up); edge slopes dx per unit of y going down,
     /// s.24 fixed point in hi/lo pairs:
-    ///   tri_x0/x1   major / upper minor edge x at y = floor(ymax)
-    ///   tri_x2      lower minor edge x at y = floor(ymid)
-    ///   tri_ymax, tri_ymid, tri_ymin
-    ///   tri_dxdy0/1/2  major, upper minor, lower minor slopes
+    ///   tri_x_major/x1   major / upper minor edge x at y = floor(ymax)
+    ///   tri_x_lower      lower minor edge x at y = floor(ymid)
+    ///   tri_y_top, tri_y_mid, tri_y_bottom
+    ///   tri_slope_major_hi/1/2  major, upper minor, lower minor slopes
     /// Colours: 12.12 fixed (1.0 = 0xFFF000), the value at the first pixel
     /// of the first span (x = ceil(x0) left to right, floor(x0) right to
     /// left; y = floor(ymax)), dx per pixel along the span (negated right to
@@ -2419,7 +2419,7 @@ impl Rss {
             [fix64(self, 0x068), dzx, dze - n1 * dzx]
         };
         // Texture: S/W, T/W and 1/W, the same plane rule at 2^32 (te1.rs).
-        let texture = self.reg(te_reg::TEXMODE1) & TEXMODE1_ENABLE != 0;
+        let texture = self.reg(te_reg::MGRAS_RE4_TEXTURE_MODE_FIRST) & TEXMODE1_ENABLE != 0;
         let fixt = |r: &Self, n: u32| ((r.reg(n) as u64) << 32 | r.reg(n + 1) as u64) as i64 as f64 / ITER_ONE;
         let tplane = |r: &Self, c: u32, de: u32, dx: u32| -> [f64; 3] {
             let dx_reg = fixt(r, dx);
@@ -2431,9 +2431,9 @@ impl Rss {
             [fixt(r, c), dx, de - n1 * dx]
         };
         let tplanes = [
-            tplane(self, te_reg::SW, te_reg::DSWE, te_reg::DSWX),
-            tplane(self, te_reg::TW, te_reg::DTWE, te_reg::DTWX),
-            tplane(self, te_reg::WI, te_reg::DWIE, te_reg::DWIX),
+            tplane(self, te_reg::MGRAS_RE4_REG_E080, te_reg::MGRAS_RE4_REG_E0C0, te_reg::MGRAS_RE4_REG_E0C4),
+            tplane(self, te_reg::MGRAS_RE4_REG_E082, te_reg::MGRAS_RE4_REG_E0C2, te_reg::MGRAS_RE4_REG_E0C6),
+            tplane(self, te_reg::MGRAS_RE4_REG_E084, te_reg::MGRAS_RE4_REG_E086, te_reg::MGRAS_RE4_REG_E088),
         ];
         if texture {
             if let Some((want, have)) = self.te.stale(&self.regs) {
@@ -2501,12 +2501,12 @@ impl Rss {
             fixed::deriv(dy(d[0], s), y, n, smp.ls),
             fixed::deriv(dy(d[1], t), y, n, smp.lt),
         );
-        let mode1 = self.reg(te_reg::TEXMODE1);
+        let mode1 = self.reg(te_reg::MGRAS_RE4_TEXTURE_MODE_FIRST);
         let mut texel = smp.sample(&self.te, s, t, lambda);
         if mode1 & te1::TEXMODE1_LUT != 0 {
             texel = te1::tex_lut(mode1, &self.tex_lut, texel);
         }
-        tex_env(mode1, self.reg(te_reg::TXENV_RG), self.reg(te_reg::TXENV_B), rgba, texel)
+        tex_env(mode1, self.reg(te_reg::MGRAS_RE4_TEXENV_RG), self.reg(te_reg::MGRAS_RE4_TEXENV_B), rgba, texel)
     }
 
     /// Fog applied to a fragment whose fog depth (`fog_pair_offset`) is
@@ -2521,16 +2521,16 @@ impl Rss {
         [0, 1, 2, 3].map(|k| if k < 3 { mul(f, rgba[k]).wrapping_add(mul(ONE - f, fc[k])) } else { rgba[3] })
     }
 
-    /// A GL line (our GE11 HLE, IR `OP_GL_LINE`): from gline_xstartf/ystartf
-    /// to gline_xendf/yendf (biased floats, as the triangle positions);
-    /// colours (red..alpha) and Z (z_hi/low) at the start, their steps per
+    /// A GL line (our GE11 HLE, IR `OP_GL_LINE`): from aaline_x_start/ystartf
+    /// to aaline_x_end/yendf (biased floats, as the triangle positions);
+    /// colours (red..alpha) and Z (depth_hi/low) at the start, their steps per
     /// pixel along the major axis in dre/dge/dbe/dae and dze. Pixels whose
     /// far edge along the major axis lies in (start, end] in the direction
     /// of travel (`gl_line_setup`; OpenGL's diamond exit near the pixel
-    /// centres, as a real High IMPACT draws), `glineconfig` + 1
+    /// centres, as a real High IMPACT draws), `aaline_config` + 1
     /// pixels wide across the major axis. With line stipple (fill mode bit
-    /// 5), lspat holds the 16-bit pattern, first bit in bit 15, and lscrl
-    /// the repeat count less one; the position carries on until lscrl is
+    /// 5), line_stipple_pattern holds the 16-bit pattern, first bit in bit 15, and line_stipple_repeat
+    /// the repeat count less one; the position carries on until line_stipple_repeat is
     /// written again.
     fn gl_line(&mut self) -> bool {
         let Some(l) = self.gl_line_setup() else { return true };
@@ -2595,14 +2595,14 @@ impl Rss {
         // pixel in the edge step registers.
         let fix64t = |r: &Self, n: u32| ((r.reg(n) as u64) << 32 | r.reg(n + 1) as u64) as i64 as f64 / ITER_ONE;
         let q = |c: u32, d: u32| [fix64t(self, c), fix64t(self, d)];
-        let tq = [q(te_reg::SW, te_reg::DSWE), q(te_reg::TW, te_reg::DTWE), q(te_reg::WI, te_reg::DWIE)];
+        let tq = [q(te_reg::MGRAS_RE4_REG_E080, te_reg::MGRAS_RE4_REG_E0C0), q(te_reg::MGRAS_RE4_REG_E082, te_reg::MGRAS_RE4_REG_E0C2), q(te_reg::MGRAS_RE4_REG_E084, te_reg::MGRAS_RE4_REG_E086)];
         let xmajor = (x1 - x0).abs() >= (y1 - y0).abs();
         let (a0, a1, b0, b1) = if xmajor { (x0, x1, y0, y1) } else { (y0, y1, x0, x1) };
         if a0 == a1 {
             return None;
         }
         let dir = if a1 > a0 { 1 } else { -1 };
-        let width = (self.reg(reg::GLINECONFIG) & 0xFF) as i64 + 1;
+        let width = (self.reg(reg::MGRAS_RE4_AALINE_CONFIG) & 0xFF) as i64 + 1;
         // First and one-past-last pixel along the major axis, by OpenGL's
         // diamond exit, as a real High IMPACT draws: a pixel is drawn when
         // the line leaves its diamond within (a0, a1]. The diamond's far
@@ -2656,14 +2656,14 @@ impl Rss {
             a0,
             b0,
             slope: (b1 - b0) / (a1 - a0),
-            width: (self.reg(reg::GLINECONFIG) & 0xFF) as i32 + 1,
+            width: (self.reg(reg::MGRAS_RE4_AALINE_CONFIG) & 0xFF) as i32 + 1,
             dir,
             p0,
             p1,
             xmajor: xmajor as u32,
             pattern: self.reg(reg::LINE_STIPPLE) & 0xFFFF,
-            repeat: (self.reg(reg::LSCRL) & 0xFF) + 1,
-            tex: (self.reg(te_reg::TEXMODE1) & TEXMODE1_ENABLE != 0) as u32,
+            repeat: (self.reg(reg::MGRAS_RE4_LINE_STIPPLE_REPEAT) & 0xFF) + 1,
+            tex: (self.reg(te_reg::MGRAS_RE4_TEXTURE_MODE_FIRST) & TEXMODE1_ENABLE != 0) as u32,
             fog: (self.reg(reg::FOG_ON) != 0) as u32,
             stipple: (self.reg(reg::FILLMODE) & FILL_LINE_STIPPLE != 0) as u32,
         })
@@ -2681,7 +2681,7 @@ impl Rss {
             return;
         }
         let rgba = rgba.map(fixed::clamp);
-        let af = self.reg(reg::AFUNCMODE);
+        let af = self.reg(reg::MGRAS_PP1_REG_F169);
         if af & TEST_ENABLE != 0 && !compare(af & 7, rgba[3] as f64, (((af >> 4) & 0xFFF) << 16) as f64) {
             return;
         }
@@ -2694,7 +2694,7 @@ impl Rss {
         self.fragment_color(b, ux, uy, rgba, pp1, draws_b(draw_buffer(pp1)));
         if draws_a_and_b(draw_buffer(pp1)) && !rgb12_pair(pp1) && !ci_pixtype(pp1) {
             if let Some(p) = self.second_buffer() {
-                let b2 = Buffer::new(p, Kind::Wide, self.reg(reg::DRBSIZE));
+                let b2 = Buffer::new(p, Kind::Wide, self.reg(reg::MGRAS_PP1_DRB_SIZE));
                 if b2 != b {
                     self.fragment_color(b2, ux, uy, rgba, pp1, true);
                 }
@@ -2707,14 +2707,14 @@ impl Rss {
     /// the stencil ops and the depth write mask say: whether the fragment
     /// passes. True with both tests off.
     fn depth_stencil(&mut self, ux: u32, uy: u32, z: i64) -> bool {
-        let st = self.reg(reg::STENCILMODE);
-        let zm = self.reg(reg::ZMODE);
+        let st = self.reg(reg::MGRAS_PP1_REG_F166);
+        let zm = self.reg(reg::MGRAS_PP1_REG_F168);
         let (sten, ztest) = (st & TEST_ENABLE != 0, zm & ZMODE_TEST != 0);
-        let zbuf = Buffer::new(ZST_PAGE, Kind::Wide, self.reg(reg::DRBSIZE));
+        let zbuf = Buffer::new(ZST_PAGE, Kind::Wide, self.reg(reg::MGRAS_PP1_DRB_SIZE));
         if sten || ztest {
             let zst = self.mem.get(&zbuf, ux, uy);
             let s_old = ((zst >> 24) & 0xFF) as u32;
-            let masks = self.reg(reg::STENCILMASK);
+            let masks = self.reg(reg::MGRAS_PP1_REG_F167);
             let (cmask, wmask) = (masks & 0xFF, (masks >> 8) & 0xFF);
             let sref = (st >> 16) & 0xFF;
             let z = fixed::zbuf(z);
@@ -2765,7 +2765,7 @@ impl Rss {
         let logic = pp1 & PP1_LOGIC_OP_ENABLE != 0 && (pp1 >> 26) & 0xF != 3;
         let rgb = self.rgb_mode();
         let src = if rgb {
-            let blend = self.reg(reg::BLENDFACTOR);
+            let blend = self.reg(reg::MGRAS_PP1_REG_F165);
             let c = if blend & BLEND_ENABLE != 0 && !logic {
                 let d = [0, 8, 16, 24].map(|s| (fixed::widen((dst >> s) & 0xFF, 2) << 16) as i32);
                 blend_rgba(blend, &self.blend_constant(), &rgba, &d)
@@ -2784,7 +2784,7 @@ impl Rss {
 
     /// The constant blend colour (`blend_const`).
     pub(super) fn blend_constant(&self) -> [i32; 4] {
-        blend_const(self.reg(reg::BLENDCOLOR_RG), self.reg(reg::BLENDCOLOR_BA))
+        blend_const(self.reg(reg::MGRAS_PP1_REG_F16B), self.reg(reg::MGRAS_PP1_REG_F16C))
     }
 
     /// `fragment_color` into a 12:12:12 buffer: blending reads and the
@@ -2794,7 +2794,7 @@ impl Rss {
         use fixed::{mul, ONE};
         let dst = self.mem.get(&b, ux, uy);
         let logic = pp1 & PP1_LOGIC_OP_ENABLE != 0 && (pp1 >> 26) & 0xF != 3;
-        let blend = self.reg(reg::BLENDFACTOR);
+        let blend = self.reg(reg::MGRAS_PP1_REG_F165);
         let c = if blend & BLEND_ENABLE != 0 && !logic {
             let d = unpack36(dst).map(|c| (c << 16) as i32);
             let d = [d[0], d[1], d[2], ONE];
@@ -2970,7 +2970,7 @@ impl Rss {
             if x.format == DEPTH_FORMAT {
                 // Depth into the depth buffer, its stencil kept.
                 if self.visible(fx, fy) {
-                    let zbuf = Buffer::new(ZST_PAGE, Kind::Wide, self.reg(reg::DRBSIZE));
+                    let zbuf = Buffer::new(ZST_PAGE, Kind::Wide, self.reg(reg::MGRAS_PP1_DRB_SIZE));
                     let old = self.mem.get(&zbuf, fx as u32, fy as u32);
                     self.mem.put(&zbuf, fx as u32, fy as u32, (old & !0xFF_FFFF) | from_host(x.format, v) as u64);
                 }
@@ -2996,9 +2996,9 @@ impl Rss {
         if draw_buffer(pp1) == DRAW_CID || draw_buffer(pp1) & 0x70 == 0x40 {
             return false;
         }
-        let zst = self.reg(reg::ZMODE) & ZMODE_TEST != 0 || self.reg(reg::STENCILMODE) & TEST_ENABLE != 0;
+        let zst = self.reg(reg::MGRAS_PP1_REG_F168) & ZMODE_TEST != 0 || self.reg(reg::MGRAS_PP1_REG_F166) & TEST_ENABLE != 0;
         let rgb = self.rgb_mode()
-            && (self.reg(reg::AFUNCMODE) & TEST_ENABLE != 0 || self.reg(reg::BLENDFACTOR) & BLEND_ENABLE != 0);
+            && (self.reg(reg::MGRAS_PP1_REG_F169) & TEST_ENABLE != 0 || self.reg(reg::MGRAS_PP1_REG_F165) & BLEND_ENABLE != 0);
         zst || rgb
     }
 
@@ -3019,7 +3019,7 @@ impl Rss {
         } else {
             [((v & 0xFFF) << 16) as i32, 0, 0, 0]
         };
-        let af = self.reg(reg::AFUNCMODE);
+        let af = self.reg(reg::MGRAS_PP1_REG_F169);
         if rgb && af & TEST_ENABLE != 0 && !compare(af & 7, rgba[3] as f64, (((af >> 4) & 0xFFF) << 16) as f64) {
             return;
         }
@@ -3032,7 +3032,7 @@ impl Rss {
         self.fragment_color(b, ux, uy, rgba, pp1, draws_b(draw_buffer(pp1)));
         if draws_a_and_b(draw_buffer(pp1)) && !rgb12_pair(pp1) && !ci_pixtype(pp1) {
             if let Some(p) = self.second_buffer() {
-                let b2 = Buffer::new(p, Kind::Wide, self.reg(reg::DRBSIZE));
+                let b2 = Buffer::new(p, Kind::Wide, self.reg(reg::MGRAS_PP1_DRB_SIZE));
                 if b2 != b {
                     self.fragment_color(b2, ux, uy, rgba, pp1, true);
                 }
@@ -3043,8 +3043,8 @@ impl Rss {
     /// Stencil indices (the transfer's low byte a pixel) into the ZST
     /// buffer's top byte, through the stencil write mask.
     fn put_stencil_line(&mut self, x: &Xfer, line: u32, bytes: &[u8]) {
-        let zbuf = Buffer::new(ZST_PAGE, Kind::Wide, self.reg(reg::DRBSIZE));
-        let wmask = ((self.reg(reg::STENCILMASK) >> 8) & 0xFF) as u64;
+        let zbuf = Buffer::new(ZST_PAGE, Kind::Wide, self.reg(reg::MGRAS_PP1_DRB_SIZE));
+        let wmask = ((self.reg(reg::MGRAS_PP1_REG_F167) >> 8) & 0xFF) as u64;
         for (k, px) in bytes.chunks(x.bpp as usize).enumerate().take(x.width as usize) {
             let (fx, fy) = self.block_px(&x.block, k as i32, line as i32);
             if self.visible(fx, fy) {
@@ -3368,7 +3368,7 @@ mod tests {
         let mut r = Rss::new_boxed();
         r.write(reg::CONFIG, 0xCAC, false);
         r.write(reg::XYWIN, 1023 << 16, false);
-        r.write(reg::DRBSIZE, 0x31E, false);
+        r.write(reg::MGRAS_PP1_DRB_SIZE, 0x31E, false);
         r.write(reg::DRBPOINTERS, 0x240, false);
         // A colour-index window's buffer A, planes 11:0 (the X server's CI8
         // windows write through 0xFF; colour index takes no other planes,
@@ -3570,12 +3570,12 @@ mod tests {
         assert_eq!(px(&r, 10, 5) & 0xFF_FFFF, 0x800_800, "A now holds the copy");
         // And back into B with PowerAnimator's whole context (traced).
         for (k, v) in [
-            (reg::PP1WINMODE, 1),
-            (reg::ZMODE, 0),
-            (reg::AFUNCMODE, 7),
-            (reg::STENCILMODE, 7),
-            (reg::STENCILMASK, 0xFFFF),
-            (crate::dev::mgras::te1::reg::TEXMODE1, 0x40440),
+            (reg::MGRAS_PP1_REG_F17B, 1),
+            (reg::MGRAS_PP1_REG_F168, 0),
+            (reg::MGRAS_PP1_REG_F169, 7),
+            (reg::MGRAS_PP1_REG_F166, 7),
+            (reg::MGRAS_PP1_REG_F167, 0xFFFF),
+            (crate::dev::mgras::te1::reg::MGRAS_RE4_TEXTURE_MODE_FIRST, 0x40440),
             (reg::PP1FILLMODE, 0x0C00_8404),
             (reg::COLORMASKLSBSA, 0xFFF000),
             (reg::COLORMASKLSBSB, 0xFFF000),
@@ -3601,7 +3601,7 @@ mod tests {
         r.write(reg::DRBPOINTERS, (r.reg(reg::DRBPOINTERS) & !0xF_FFFF) | b_page << 10 | a, false);
         let ci = (r.reg(reg::PP1FILLMODE) & !((0x7F << 14) | 0x700)) | 0x600;
         let word = |r: &Rss, page: u32| {
-            let buf = Buffer::new(page, Kind::Wide, r.reg(reg::DRBSIZE));
+            let buf = Buffer::new(page, Kind::Wide, r.reg(reg::MGRAS_PP1_DRB_SIZE));
             r.mem.get(&buf, 10, (SCREEN_H - 1 - 5) as u32) as u32
         };
         r.write(reg::FILLMODE, FILL_FAST, false);
@@ -3639,7 +3639,7 @@ mod tests {
         r.write(reg::COLORMASKLSBSA, u32::MAX, false);
         r.write(reg::COLORMASKLSBSB, u32::MAX, false);
         let read = |r: &Rss, page: u32, x: u32, y: u32| {
-            let buf = Buffer::new(page, Kind::Wide, r.reg(reg::DRBSIZE));
+            let buf = Buffer::new(page, Kind::Wide, r.reg(reg::MGRAS_PP1_DRB_SIZE));
             r.mem.get(&buf, x, (SCREEN_H - 1 - y as usize) as u32) as u32 & 0xFF
         };
         r.write(reg::FILLMODE, FILL_FAST, false);
@@ -3663,8 +3663,8 @@ mod tests {
         let a = 0x240;
         let b = 0x140;
         r.write(reg::DRBPOINTERS, a | b << 10, false);
-        let ba = Buffer::new(a, Kind::Wide, r.reg(reg::DRBSIZE));
-        let bb = Buffer::new(b, Kind::Wide, r.reg(reg::DRBSIZE));
+        let ba = Buffer::new(a, Kind::Wide, r.reg(reg::MGRAS_PP1_DRB_SIZE));
+        let bb = Buffer::new(b, Kind::Wide, r.reg(reg::MGRAS_PP1_DRB_SIZE));
         r.mem.put(&ba, 10, 1018, 0x123456);
         r.mem.put(&bb, 10, 1018, 0x654321);
         r.write(reg::FILLMODE, 2 << 22, false);
@@ -3685,7 +3685,7 @@ mod tests {
         let mut r = x_server();
         let a = 0x240;
         r.write(reg::DRBPOINTERS, a | a << 10, false);
-        let ba = Buffer::new(a, Kind::Wide, r.reg(reg::DRBSIZE));
+        let ba = Buffer::new(a, Kind::Wide, r.reg(reg::MGRAS_PP1_DRB_SIZE));
         r.mem.put(&ba, 10, 1018, 0x4433_2211);
         r.write(reg::FILLMODE, 2 << 22, false);
         r.write(reg::XFRSIZE, 1 << 16 | 1, false);
@@ -3704,7 +3704,7 @@ mod tests {
     fn readback_bytes_are_stable_for_every_format() {
         let mut r = x_server();
         r.write(reg::DRBPOINTERS, 0x240 | 0x240 << 10, false);
-        let buf = Buffer::new(0x240, Kind::Wide, r.reg(reg::DRBSIZE));
+        let buf = Buffer::new(0x240, Kind::Wide, r.reg(reg::MGRAS_PP1_DRB_SIZE));
         let mut seed = 0x9E37_79B9_7F4A_7C15u64;
         for y in 0..3u32 {
             for x in 0..5u32 {
@@ -3825,7 +3825,7 @@ mod tests {
         fill(&mut r, 1, 0xFFF, [0xF00, 0, 0]);
         fill(&mut r, 2, 0xFFF000, [0, 0, 0xF00]);
         assert_eq!(px(&r, 10, 5), 0xF00_00F, "B blue high, A red low");
-        let page_b = Buffer::new(0x140, Kind::Wide, r.reg(reg::DRBSIZE));
+        let page_b = Buffer::new(0x140, Kind::Wide, r.reg(reg::MGRAS_PP1_DRB_SIZE));
         assert_eq!(r.mem.get(&page_b, 10, (SCREEN_H - 1 - 5) as u32), 0, "the second page is not B");
         let y = (SCREEN_H - 1 - 5) as i32;
         assert_eq!(r.get(10, y), 0xFF, "read field 0: A");
@@ -3941,8 +3941,8 @@ mod tests {
         r.write(reg::PP1FILLMODE, 0x0C00_C204, false);
         r.write(reg::COLORMASKLSBSA, 0xFF, false);
         r.write(reg::COLORMASKLSBSB, 0xFF_0000, false);
-        let a = Buffer::new(0x240, Kind::Wide, r.reg(reg::DRBSIZE));
-        let b = Buffer::new(0x140, Kind::Wide, r.reg(reg::DRBSIZE));
+        let a = Buffer::new(0x240, Kind::Wide, r.reg(reg::MGRAS_PP1_DRB_SIZE));
+        let b = Buffer::new(0x140, Kind::Wide, r.reg(reg::MGRAS_PP1_DRB_SIZE));
         r.mem.put(&a, 10, 1018, 0x123456);
         r.mem.put(&b, 10, 1018, 0x654321);
         r.gl_fragment(10, 5, [fixed::colour(1.0); 4], 0);
@@ -4078,15 +4078,15 @@ mod tests {
         r.dma_write_line(0, &[0xFF, 0x50, 0x50, 0x50, 0xFF, 0x50, 0x50, 0x50]);
         assert_eq!(px(&r, 7, 7) & 0xFF_FFFF, 0x50_5050);
         // glAlphaFunc(GL_GEQUAL, 0.9): ref 0.9 of 4095.
-        r.write(reg::AFUNCMODE, 0xE66 << 4 | TEST_ENABLE | 6, false);
+        r.write(reg::MGRAS_PP1_REG_F169, 0xE66 << 4 | TEST_ENABLE | 6, false);
         block(&mut r, 7, 7, 8, 7);
         r.dma_write_line(0, &[0x00, 0x11, 0x11, 0x11, 0xFF, 0x22, 0x22, 0x22]);
         assert_eq!(px(&r, 7, 7) & 0xFF_FFFF, 0x50_5050, "transparent pixel written");
         assert_eq!(px(&r, 8, 7) & 0xFF_FFFF, 0x22_2222, "opaque pixel dropped");
         // Alpha test off, blending on (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA):
         // half alpha mixes 0xD0 into 0x50.
-        r.write(reg::AFUNCMODE, 7, false);
-        r.write(reg::BLENDFACTOR, BLEND_ENABLE | 5 << 4 | 4, false);
+        r.write(reg::MGRAS_PP1_REG_F169, 7, false);
+        r.write(reg::MGRAS_PP1_REG_F165, BLEND_ENABLE | 5 << 4 | 4, false);
         r.write(reg::XFRSIZE, 1 << 16 | 1, false);
         block(&mut r, 7, 7, 7, 7);
         r.dma_write_line(0, &[0x80, 0xD0, 0xD0, 0xD0]);
@@ -4101,7 +4101,7 @@ mod tests {
     #[test]
     fn transfers_take_the_raster_depth() {
         let mut r = x_server();
-        let zbuf = Buffer::new(ZST_PAGE, Kind::Wide, r.reg(reg::DRBSIZE));
+        let zbuf = Buffer::new(ZST_PAGE, Kind::Wide, r.reg(reg::MGRAS_PP1_DRB_SIZE));
         let fy = (SCREEN_H - 1 - 7) as u32;
         let zat = |r: &Rss, x: u32| r.mem.get(&zbuf, x, fy) & 0xFF_FFFF;
         for (pp1, mask, near, far, a, b) in [
@@ -4110,7 +4110,7 @@ mod tests {
         ] {
             r.write(reg::PP1FILLMODE, pp1, false);
             r.write(reg::COLORMASKLSBSA, mask, false);
-            r.write(reg::ZMODE, 0, false);
+            r.write(reg::MGRAS_PP1_REG_F168, 0, false);
             r.write(reg::FILLMODE, 5 << 22, false);
             r.write(reg::XFRMODE, if pp1 & 0x700 == 0x200 { 0x80 } else { 0x01 }, false);
             r.write(reg::XFRSIZE, 1 << 16 | 2, false);
@@ -4122,7 +4122,7 @@ mod tests {
             r.mem.put(&zbuf, 7, fy, 0x40_0000);
             r.mem.put(&zbuf, 8, fy, 0xC0_0000);
             r.write(reg::XFER_Z, 0x80_0000 << 8, false);
-            r.write(reg::ZMODE, 0xFF_FFFF << 4 | ZMODE_TEST | 1, false);
+            r.write(reg::MGRAS_PP1_REG_F168, 0xFF_FFFF << 4 | ZMODE_TEST | 1, false);
             block(&mut r, 7, 7, 8, 7);
             let line: Vec<u8> = if pp1 & 0x700 == 0x200 { [b, b].concat() } else { vec![b[0], b[1], b[0], b[1]] };
             r.dma_write_line(0, &line);
@@ -4250,7 +4250,7 @@ mod tests {
         assert_eq!((200..205).map(|x| px(&r, x, 10)).collect::<Vec<_>>(), [7, 3, 7, 3, 0]);
     }
 
-    /// X PolyPoint: IR opcode 4, then each execute of xline_xystarti draws
+    /// X PolyPoint: IR opcode 4, then each execute of line_xy_start draws
     /// one pixel there.
     #[test]
     fn points_draw_at_the_line_start_register() {
@@ -4293,7 +4293,7 @@ mod tests {
     }
 
     /// Clip-ID drawing (draw field 0x50) writes the fill colour's low two
-    /// bits under pp1winmode bits 11:10, not the colour planes; CIDmatch
+    /// bits under reg_f17b bits 11:10, not the colour planes; CIDmatch
     /// (bits 7:4, one bit per ID) limits other drawing to the IDs it names,
     /// and with no bit set nothing is checked.
     #[test]
@@ -4301,26 +4301,26 @@ mod tests {
         let mut r = x_server();
         r.write(reg::FILLMODE, FILL_FAST, false);
         r.write(reg::PP1FILLMODE, 0x142600, false);
-        r.write(reg::PP1WINMODE, 0xC00, false);
+        r.write(reg::MGRAS_PP1_REG_F17B, 0xC00, false);
         r.write(reg::FILL_COLOR_R, 7, false);
         block(&mut r, 10, 5, 12, 5);
         assert_eq!(px(&r, 10, 5), 0, "CID drawing keeps colour planes");
         assert_eq!(r.cid[1018 * WIDTH + 10], 3, "two clip-ID planes");
-        r.write(reg::PP1WINMODE, 0x400, false);
+        r.write(reg::MGRAS_PP1_REG_F17B, 0x400, false);
         r.write(reg::FILL_COLOR_R, 0, false);
         block(&mut r, 10, 5, 10, 5);
         assert_eq!(r.cid[1018 * WIDTH + 10], 2, "plane 0 alone written");
-        r.write(reg::PP1WINMODE, 0xC00, false);
+        r.write(reg::MGRAS_PP1_REG_F17B, 0xC00, false);
         block(&mut r, 11, 5, 11, 5);
 
         r.write(reg::PP1FILLMODE, 0x0C00_4504, false);
         r.write(reg::COLORMASKLSBSA, 0xFF, false);
         // IDs now 2, 0, 3 at x 10, 11, 12.
-        r.write(reg::PP1WINMODE, 1 << (4 + 2) | 1 << (4 + 3), false);
+        r.write(reg::MGRAS_PP1_REG_F17B, 1 << (4 + 2) | 1 << (4 + 3), false);
         r.write(reg::FILL_COLOR_R, 0x55, false);
         block(&mut r, 10, 5, 12, 5);
         assert_eq!((px(&r, 10, 5), px(&r, 11, 5), px(&r, 12, 5)), (0x55, 0, 0x55));
-        r.write(reg::PP1WINMODE, 0xC00, false);
+        r.write(reg::MGRAS_PP1_REG_F17B, 0xC00, false);
         block(&mut r, 11, 5, 11, 5);
         assert_eq!(px(&r, 11, 5), 0x55, "no CIDmatch bit: no check");
     }

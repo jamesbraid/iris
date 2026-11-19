@@ -475,7 +475,7 @@ pub(super) mod tests {
         // MGRAS_REPLAY_INIT=<reg>=<val>,...: raster registers to write
         // before the stream (hex), for a recording that starts mid-session
         // after the X server set up registers it never writes again
-        // (DRBsize, 0x16e).
+        // (drb_size, 0x16e).
         if let Ok(init) = std::env::var("MGRAS_REPLAY_INIT") {
             for kv in init.split(',').filter(|s| !s.is_empty()) {
                 let (r, v) = kv.split_once('=').ok_or(format!("MGRAS_REPLAY_INIT: {kv}"))?;
@@ -585,8 +585,8 @@ pub(super) mod tests {
         if let Some(t) = unsafe { &*m.rss.get() }.gpu.get().and_then(|g| g.timing_report()) {
             eprintln!("{path}: {t}");
         }
-        let (drbsize, drb) = unsafe { ((*m.rss.get()).reg(crate::dev::mgras::rss::reg::DRBSIZE), (*m.rss.get()).reg(crate::dev::mgras::rss::reg::DRBPOINTERS)) };
-        eprintln!("{path}: at the end DRBsize {drbsize:#x}, DRBpointers {drb:#x}");
+        let (drbsize, drb) = unsafe { ((*m.rss.get()).reg(crate::dev::mgras::rss::reg::MGRAS_PP1_DRB_SIZE), (*m.rss.get()).reg(crate::dev::mgras::rss::reg::DRBPOINTERS)) };
+        eprintln!("{path}: at the end drb_size {drbsize:#x}, DRBpointers {drb:#x}");
         eprintln!(
             "{path}: {kind:?} with {} raster engine(s), {:.3} s, final state {}, primitives by IR opcode {:?}",
             m.nrss,

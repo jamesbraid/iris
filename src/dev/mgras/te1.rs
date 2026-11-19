@@ -17,7 +17,7 @@
 //!   in the RE (`tex_env`): the environment registers are RE registers.
 //!
 //! TRAM layout is ours. libGLcore's texture manager hands out 16 KB pages
-//! (4 TRAMs; `TXMIPMAP` / `TL_MIPMAP` hold a page and a bank bit per level),
+//! (4 TRAMs; `reg_f191` / `texture_loader_mipmap_block` hold a page and a bank bit per level),
 //! and every texel's address must follow from what the registers say. A
 //! level starts at its page. Levels of 16x16 texels and smaller share one
 //! page, as libGLcore packs them, each at a fixed offset by size. A texel
@@ -32,15 +32,15 @@
 //! - **Save and restore.** libGLcore's texture manager moves textures by
 //!   saving TRAM pages to host memory and loading them back elsewhere,
 //!   through a view of TRAM as a level 64 texels wide in the texture's own
-//!   format (`read_raw`, and a load with TL_SPEC 64 x 8192). It saves and
+//!   format (`read_raw`, and a load with texture_loader_level_spec 64 x 8192). It saves and
 //!   restores in runs of whole pages, so a page here must hold exactly the
 //!   texels a page holds on the board.
 //!
 //! A level's border texels (GL borders, and libGLcore's own) go to its
-//! border page (TXBORDER per level, TL_BORDER at load), in the page's
+//! border page (texture_border_block per level, texture_loader_border_block at load), in the page's
 //! upper half. GL_CLAMP clamps coordinates to the texture, so linear
 //! filtering at an edge reaches the border: the border texel, or the border
-//! colour (TXBCOLOR) when the texture has none (TEXMODE2 bit 16).
+//! colour (TXBCOLOR) when the texture has none (texture_mode_drawn bit 16).
 //!
 //! Readback (glGetTexImage): the GE aims the sampler at the level and
 //! arms a read transfer on the texture side; each line is a row of texels,
@@ -49,14 +49,14 @@
 //! Colour arithmetic is 12.16 fixed point (`fixed`).
 //!
 //! Detail textures (SGIS_detail_texture; observed on the board's driver):
-//! TEXMODE2 bit 9 turns them on, bit 10 picks a 128-texel detail image
-//! (else 256). TXDETAIL bits 7:0 is its TRAM page; it is stored as a level
+//! texture_mode_drawn bit 9 turns them on, bit 10 picks a 128-texel detail image
+//! (else 256). texture_detail_block bits 7:0 is its TRAM page; it is stored as a level
 //! twice as wide as high (2N x N) whose left N columns hold the image, in
-//! the base texture's format. TXSIZE bits 18:16 hold 6 + the detail level
+//! the base texture's format. texture_size bits 18:16 hold 6 + the detail level
 //! L (L < 0), so the detail texel coordinate is the base's level-0
 //! coordinate times 2^-L, repeating. The weight F(LOD) comes from the
-//! DETAILSCALE table: 32 five-bit weights (31 = 1.0) at k = 32 2^LOD,
-//! linear between, zero past the last entry the driver used (TXLOD bits
+//! detailscale table: 32 five-bit weights (31 = 1.0) at k = 32 2^LOD,
+//! linear between, zero past the last entry the driver used (texture_lod bits
 //! 15:10, twice that index). The board only adds: out = base + F (2 detail
 //! - 1), whatever detail mode GL asked for. Detail applies when
 //! magnifying (LOD <= 0) only (`Sampler::detail`).
@@ -76,54 +76,54 @@ use serde::{Deserialize, Serialize};
 
 /// TE1 / texture-related RSS registers.
 pub mod reg {
-    pub const TEXMODE1: u32 = 0x111;
-    pub const TXENV_RG: u32 = 0x142;
-    pub const TXENV_B: u32 = 0x143;
-    pub const TEXMODE2: u32 = 0x180;
-    pub const TXSIZE: u32 = 0x181;
-    pub const TXLOD: u32 = 0x183;
-    pub const TXBCOLOR_RG: u32 = 0x184;
-    pub const TXBCOLOR_BA: u32 = 0x185;
+    pub const MGRAS_RE4_TEXTURE_MODE_FIRST: u32 = 0x111;
+    pub const MGRAS_RE4_TEXENV_RG: u32 = 0x142;
+    pub const MGRAS_RE4_TEXENV_B: u32 = 0x143;
+    pub const MGRAS_TE1_TEXTURE_MODE_DRAWN: u32 = 0x180;
+    pub const MGRAS_TE1_TEXTURE_SIZE: u32 = 0x181;
+    pub const MGRAS_TE1_TEXTURE_LOD: u32 = 0x183;
+    pub const MGRAS_TE1_TEXTURE_BORDER_COLOR_RG: u32 = 0x184;
+    pub const MGRAS_TE1_TEXTURE_BORDER_COLOR_BA: u32 = 0x185;
     /// The context's base page: every TRAM page the TE addresses
     /// (sampling, loading, reading back) is relative to it.
-    pub const TXBASE: u32 = 0x186;
+    pub const MGRAS_TE1_REG_F186: u32 = 0x186;
     /// Index into the per-level tables below, advanced by each table write.
-    pub const TXADDR: u32 = 0x190;
-    pub const TXMIPMAP: u32 = 0x191;
+    pub const MGRAS_TE1_TEXTURE_LEVEL_TABLE_INDEX: u32 = 0x190;
+    pub const MGRAS_TE1_REG_F191: u32 = 0x191;
     /// The detail image's TRAM page (bits 7:0).
-    pub const TXDETAIL: u32 = 0x192;
-    pub const TXBORDER: u32 = 0x193;
-    pub const DETAILSCALE: u32 = 0x194;
-    pub const TL_WBUFFER: u32 = 0x1A0;
-    pub const TL_MODE: u32 = 0x1A1;
-    pub const TL_SPEC: u32 = 0x1A2;
-    pub const TL_ADDR: u32 = 0x1A3;
-    pub const TL_MIPMAP: u32 = 0x1A4;
-    pub const TL_BORDER: u32 = 0x1A5;
-    pub const TL_S_SIZE: u32 = 0x1A9;
-    pub const TL_T_SIZE: u32 = 0x1AA;
-    pub const TL_S_LEFT: u32 = 0x1AB;
-    pub const TL_T_BOTTOM: u32 = 0x1AC;
+    pub const MGRAS_TE1_TEXTURE_DETAIL_BLOCK: u32 = 0x192;
+    pub const MGRAS_TE1_TEXTURE_BORDER_BLOCK: u32 = 0x193;
+    pub const MGRAS_TE1_DETAILSCALE: u32 = 0x194;
+    pub const MGRAS_TE1_TEXTURE_LOADER_WRITE_BUFFER: u32 = 0x1A0;
+    pub const MGRAS_TE1_TEXTURE_LOADER_MODE: u32 = 0x1A1;
+    pub const MGRAS_TE1_TEXTURE_LOADER_LEVEL_SPEC: u32 = 0x1A2;
+    pub const MGRAS_TE1_TEXTURE_LOADER_INDEX: u32 = 0x1A3;
+    pub const MGRAS_TE1_TEXTURE_LOADER_MIPMAP_BLOCK: u32 = 0x1A4;
+    pub const MGRAS_TE1_TEXTURE_LOADER_BORDER_BLOCK: u32 = 0x1A5;
+    pub const MGRAS_TE1_TEXTURE_LOADER_COPY_WIDTH: u32 = 0x1A9;
+    pub const MGRAS_TE1_TEXTURE_LOADER_COPY_HEIGHT: u32 = 0x1AA;
+    pub const MGRAS_TE1_TEXTURE_LOADER_COPY_LEFT: u32 = 0x1AB;
+    pub const MGRAS_TE1_TEXTURE_LOADER_COPY_BOTTOM: u32 = 0x1AC;
     /// Iterators (double buffered; 64-bit hi/lo pairs): S/W, T/W, 1/W at
     /// the first pixel, their steps along the span (X) and down the major
     /// edge (E), and their Y derivatives.
-    pub const SW: u32 = 0x080;
-    pub const TW: u32 = 0x082;
-    pub const WI: u32 = 0x084;
-    pub const DWIE: u32 = 0x086;
-    pub const DWIX: u32 = 0x088;
-    pub const DWIY: u32 = 0x08A;
-    pub const DSWE: u32 = 0x0C0;
-    pub const DTWE: u32 = 0x0C2;
-    pub const DSWX: u32 = 0x0C4;
-    pub const DTWX: u32 = 0x0C6;
-    pub const DSWY: u32 = 0x0C8;
-    pub const DTWY: u32 = 0x0CA;
+    pub const MGRAS_RE4_REG_E080: u32 = 0x080;
+    pub const MGRAS_RE4_REG_E082: u32 = 0x082;
+    pub const MGRAS_RE4_REG_E084: u32 = 0x084;
+    pub const MGRAS_RE4_REG_E086: u32 = 0x086;
+    pub const MGRAS_RE4_REG_E088: u32 = 0x088;
+    pub const MGRAS_RE4_REG_E08A: u32 = 0x08A;
+    pub const MGRAS_RE4_REG_E0C0: u32 = 0x0C0;
+    pub const MGRAS_RE4_REG_E0C2: u32 = 0x0C2;
+    pub const MGRAS_RE4_REG_E0C4: u32 = 0x0C4;
+    pub const MGRAS_RE4_REG_E0C6: u32 = 0x0C6;
+    pub const MGRAS_RE4_REG_E0C8: u32 = 0x0C8;
+    pub const MGRAS_RE4_REG_E0CA: u32 = 0x0CA;
 }
 
 /// The texture registers a GL context owns (single buffered), which the GE
-/// keeps a shadow of and loads into the TE (`gl.rs`). TXADDR and the
-/// per-level tables it indexes (TXMIPMAP, TXBORDER, DETAILSCALE) are kept
+/// keeps a shadow of and loads into the TE (`gl.rs`). texture_level_table_index and the
+/// per-level tables it indexes (reg_f191, texture_border_block, detailscale) are kept
 /// apart.
 pub const CONTEXT_REGS: [u32; 31] = [
     0x111, 0x142, 0x143, 0x180, 0x181, 0x182, 0x183, 0x184, 0x185, 0x186, 0x187, 0x188, 0x189, 0x18A,
@@ -131,15 +131,15 @@ pub const CONTEXT_REGS: [u32; 31] = [
     0x1AA, 0x1AB, 0x1AC,
 ];
 
-/// Per-level tables written through TXADDR's index.
-pub const TABLE_REGS: [u32; 3] = [reg::TXMIPMAP, reg::TXBORDER, reg::DETAILSCALE];
+/// Per-level tables written through texture_level_table_index's index.
+pub const TABLE_REGS: [u32; 3] = [reg::MGRAS_TE1_REG_F191, reg::MGRAS_TE1_TEXTURE_BORDER_BLOCK, reg::MGRAS_TE1_DETAILSCALE];
 pub const TABLE_LEN: usize = 32;
 
 /// Fixed point of the iterator registers: value * 2^32 (our choice; the
 /// IDE's values suggest 1/W = 1.0 is 2^20 on the real board).
 pub const ITER_ONE: f64 = 4_294_967_296.0;
 
-/// TEXMODE1: texture enable, environment mode (bits 2:1: modulate, decal,
+/// texture_mode_first: texture enable, environment mode (bits 2:1: modulate, decal,
 /// blend, alpha-only modulate), components - 1 (4:3), texel class (11:9:
 /// 4 RGB(A), 2 luminance(-alpha), 1 alpha, 3 intensity).
 pub const TEXMODE1_ENABLE: u32 = 1;
@@ -178,7 +178,7 @@ pub fn tex_lut(mode1: u32, lut: &[u8; TEX_LUT_LEN], mut tex: [i32; 4]) -> [i32; 
     tex
 }
 
-/// TEXMODE2: magnification / minification within a level linear, mipmaps
+/// texture_mode_drawn: magnification / minification within a level linear, mipmaps
 /// (nearest level; with bit 6 blending two), clamp S and T, mipmapping on.
 pub(crate) const TM2_MAG_LINEAR: u32 = 1 << 7;
 pub(crate) const TM2_MIN_LINEAR: u32 = 1 << 8;
@@ -212,7 +212,7 @@ pub(crate) const PAGE_NIBBLES: usize = 16384 * 2;
 /// without the base two of them shared TRAM (issue 844: buttonfly's
 /// buttons picked up powerflip's flowers).
 pub(crate) fn based(regs: &[u32], page: u32) -> u32 {
-    page.wrapping_add(regs[reg::TXBASE as usize]) & 0xFF
+    page.wrapping_add(regs[reg::MGRAS_TE1_REG_F186 as usize]) & 0xFF
 }
 
 /// Texel offset in a shared page of a level whose larger side is `n` (<=
@@ -237,13 +237,13 @@ fn cell_nibbles(d: usize) -> usize {
 }
 
 /// Nibble offset in its cell of component `c` of a texture of `nc`
-/// components in select slot `sel` (SGIS_texture_select: TL_MODE bits 4:3
-/// at load, TEXMODE1 bits 8:7 when sampling; traced, TyrQuake packs four
+/// components in select slot `sel` (SGIS_texture_select: texture_loader_mode bits 4:3
+/// at load, texture_mode_first bits 8:7 when sampling; traced, TyrQuake packs four
 /// 256x256 luminance lightmaps into one set of pages, slots 0-3).
 /// Only textures that leave room share cells: four slots for one
 /// component, two for two; three- and four-component textures fill the
 /// cell, and the select bits mean nothing for them (TyrQuake draws RGBA
-/// textures with TEXMODE1 0x409D9, bits 8:7 = 3).
+/// textures with texture_mode_first 0x409D9, bits 8:7 = 3).
 fn comp_offset(sel: usize, nc: usize, c: usize, d: usize) -> usize {
     let slot = match nc {
         1 => sel & 3,
@@ -292,7 +292,7 @@ fn border_addr(page: u32, w: usize, h: usize, s: i64, t: i64, tn: usize) -> usiz
     (page as usize * PAGE_NIBBLES + PAGE_NIBBLES / 2 + (off + idx) * tn) % TRAM_NIBBLES
 }
 
-/// A component's depth in nibbles, from TL_MODE bits 6:5 / TEXMODE2 bits
+/// A component's depth in nibbles, from texture_loader_mode bits 6:5 / texture_mode_drawn bits
 /// 3:2: 0, 1, 2 = 4, 8, 12 bits (traced: libGLcore stores RGBA8 at 0 with 1
 /// TRAM, at 1 with 4).
 pub(crate) fn depth_nibbles(field: u32) -> usize {
@@ -311,7 +311,7 @@ pub struct Te1 {
     tables: [[u32; TABLE_LEN]; 3],
     pub texels_loaded: u64,
     /// Diagnostic: per page, the last level loaded there (page << 16 |
-    /// TL_SPEC's sizes), for `stale`.
+    /// texture_loader_level_spec's sizes), for `stale`.
     owner: [u32; 256],
     /// Pages a load wrote since the GPU unit last took them (one bit a
     /// 16 KB page): what it sends up before it samples again.
@@ -400,7 +400,7 @@ impl Te1 {
         fixed::widen(v, d)
     }
 
-    /// A table write (TXMIPMAP, TXBORDER, DETAILSCALE) at `index`.
+    /// A table write (reg_f191, texture_border_block, detailscale) at `index`.
     pub fn table_write(&mut self, r: u32, index: u32, v: u32) {
         if let Some(k) = TABLE_REGS.iter().position(|&t| t == r) {
             self.tables[k][index as usize % TABLE_LEN] = v;
@@ -409,22 +409,22 @@ impl Te1 {
 
     /// One line of a texture load, 4 bytes a texel (components in order,
     /// unused ones ignored), placed by the texture loader registers: line
-    /// `line` is texel row TL_T_BOTTOM + line, from column TL_S_LEFT, in
-    /// the level of TL_SPEC's size at TL_MIPMAP's page, TL_MODE's
+    /// `line` is texel row texture_loader_copy_bottom + line, from column texture_loader_copy_left, in
+    /// the level of texture_loader_level_spec's size at texture_loader_mipmap_block's page, texture_loader_mode's
     /// components and depth.
     pub fn load_line(&mut self, regs: &[u32], line: u32, bytes: &[u8]) {
-        let mode = regs[reg::TL_MODE as usize];
-        let spec = regs[reg::TL_SPEC as usize];
+        let mode = regs[reg::MGRAS_TE1_TEXTURE_LOADER_MODE as usize];
+        let spec = regs[reg::MGRAS_TE1_TEXTURE_LOADER_LEVEL_SPEC as usize];
         let nc = ((mode >> 1) & 3) as usize + 1;
         let sel = ((mode >> 3) & 3) as usize;
         let d = depth_nibbles(mode >> 5);
         let (w, h) = (1usize << ((spec >> 4) & 0xF), 1usize << ((spec >> 8) & 0xF));
-        let page = based(regs, regs[reg::TL_MIPMAP as usize]);
+        let page = based(regs, regs[reg::MGRAS_TE1_TEXTURE_LOADER_MIPMAP_BLOCK as usize]);
         // The origin is signed: a GL border starts at -1. Border texels go
         // to the border page; anything further out is dropped.
-        let border_page = based(regs, regs[reg::TL_BORDER as usize]);
-        let s0 = regs[reg::TL_S_LEFT as usize] as i32 as i64;
-        let t = regs[reg::TL_T_BOTTOM as usize] as i32 as i64 + line as i64;
+        let border_page = based(regs, regs[reg::MGRAS_TE1_TEXTURE_LOADER_BORDER_BLOCK as usize]);
+        let s0 = regs[reg::MGRAS_TE1_TEXTURE_LOADER_COPY_LEFT as usize] as i32 as i64;
+        let t = regs[reg::MGRAS_TE1_TEXTURE_LOADER_COPY_BOTTOM as usize] as i32 as i64 + line as i64;
         let (wi, hi) = (w as i64, h as i64);
         if t < -1 || t > hi {
             return;
@@ -493,17 +493,17 @@ impl Te1 {
     }
 
     /// Row `line` of the texture manager's page view (its save of TRAM
-    /// pages): from the page of level 0 in the TXMIPMAP table, `w` texels
-    /// a row in a level `w` wide, of the components (TEXMODE1) and depth
-    /// (TEXMODE2) of the texture being saved. Each texel is its components
+    /// pages): from the page of level 0 in the reg_f191 table, `w` texels
+    /// a row in a level `w` wide, of the components (texture_mode_first) and depth
+    /// (texture_mode_drawn) of the texture being saved. Each texel is its components
     /// in storage order, as many as the transfer mode's format carries
     /// (traced: RGB textures 0x400070, three bytes; RGBA 0x400080, four),
-    /// 8 bits each or 16 for type 1. The restore (TL_MODE the same
-    /// components and depth, TL_SPEC as wide) stores them back.
+    /// 8 bits each or 16 for type 1. The restore (texture_loader_mode the same
+    /// components and depth, texture_loader_level_spec as wide) stores them back.
     pub fn read_raw(&self, regs: &[u32], line: u32, w: u32) -> Vec<u8> {
-        let nc = ((regs[reg::TEXMODE1 as usize] >> 3) & 3) as usize + 1;
-        let d = depth_nibbles(regs[reg::TEXMODE2 as usize] >> 2);
-        let sel = ((regs[reg::TEXMODE1 as usize] >> 7) & 3) as usize;
+        let nc = ((regs[reg::MGRAS_RE4_TEXTURE_MODE_FIRST as usize] >> 3) & 3) as usize + 1;
+        let d = depth_nibbles(regs[reg::MGRAS_TE1_TEXTURE_MODE_DRAWN as usize] >> 2);
+        let sel = ((regs[reg::MGRAS_RE4_TEXTURE_MODE_FIRST as usize] >> 7) & 3) as usize;
         let xfrmode = regs[0x159];
         let wide = xfrmode & 0xF == 1;
         let n = Self::read_texel_bytes(xfrmode) as usize / if wide { 2 } else { 1 };
@@ -531,14 +531,14 @@ impl Te1 {
     }
 
     /// Row `line` of the level the sampler is aimed at (level 0 of the
-    /// TXMIPMAP table, TXSIZE's size), `w` texels in the transfer mode's
+    /// reg_f191 table, texture_size's size), `w` texels in the transfer mode's
     /// layout (XFRMODE): the texture's own components (one: luminance,
     /// alpha or intensity; two: luminance-alpha; RGB), or RGBA with the
     /// class's components where GL's readback puts them (luminance and
     /// intensity in red, alpha in alpha, 1 where absent); 8 or 16 bits.
     pub fn read_line(&self, regs: &[u32], line: u32, w: u32) -> Vec<u8> {
         let smp = self.sampler(regs);
-        let class = (regs[reg::TEXMODE1 as usize] >> 9) & 7;
+        let class = (regs[reg::MGRAS_RE4_TEXTURE_MODE_FIRST as usize] >> 9) & 7;
         let xfrmode = regs[0x159];
         let n = match (xfrmode >> 4) & 0xF {
             9 => 1,
@@ -578,7 +578,7 @@ impl Te1 {
     /// Diagnostic: level 0 of the bound texture when its page was last
     /// loaded with another level ((page, owner) of that load), else None.
     pub fn stale(&self, regs: &[u32]) -> Option<(u32, u32)> {
-        let size = regs[reg::TXSIZE as usize];
+        let size = regs[reg::MGRAS_TE1_TEXTURE_SIZE as usize];
         let (ls, lt) = (size & 0xF, (size >> 4) & 0xF);
         if ls.max(lt) <= 4 {
             return None;
@@ -591,9 +591,9 @@ impl Te1 {
 
     /// The sampler for the registers as they stand (once per primitive).
     pub fn sampler(&self, regs: &[u32]) -> Sampler {
-        let m2 = regs[reg::TEXMODE2 as usize];
-        let m1 = regs[reg::TEXMODE1 as usize];
-        let size = regs[reg::TXSIZE as usize];
+        let m2 = regs[reg::MGRAS_TE1_TEXTURE_MODE_DRAWN as usize];
+        let m1 = regs[reg::MGRAS_RE4_TEXTURE_MODE_FIRST as usize];
+        let size = regs[reg::MGRAS_TE1_TEXTURE_SIZE as usize];
         let mut pages = [0u32; 16];
         let mut border_pages = [0u32; 16];
         for (k, p) in pages.iter_mut().enumerate() {
@@ -602,7 +602,7 @@ impl Te1 {
         }
         // The border colour as the texel class's components (12 bits).
         let c = |v: u32| v & 0xFFF;
-        let (rg, ba) = (regs[reg::TXBCOLOR_RG as usize], regs[reg::TXBCOLOR_BA as usize]);
+        let (rg, ba) = (regs[reg::MGRAS_TE1_TEXTURE_BORDER_COLOR_RG as usize], regs[reg::MGRAS_TE1_TEXTURE_BORDER_COLOR_BA as usize]);
         let (r, g, b, a) = (c(rg), c(rg >> 12), c(ba), c(ba >> 12));
         let border_color = match (m1 >> 9) & 7 {
             1 => [a, 0, 0, 0],
@@ -615,7 +615,7 @@ impl Te1 {
             mode2: m2,
             ls: size & 0xF,
             lt: (size >> 4) & 0xF,
-            max_level: if mipmaps { (regs[reg::TXLOD as usize] & 0xF).min(15) } else { 0 },
+            max_level: if mipmaps { (regs[reg::MGRAS_TE1_TEXTURE_LOD as usize] & 0xF).min(15) } else { 0 },
             nc: ((m1 >> 3) & 3) + 1,
             sel: (m1 >> 7) & 3,
             d: depth_nibbles(m2 >> 2) as u32,
@@ -628,21 +628,21 @@ impl Te1 {
 
     /// The detail texture's parameters, or all zero when it is off.
     fn detail(&self, regs: &[u32], size: u32) -> Detail {
-        let m2 = regs[reg::TEXMODE2 as usize];
+        let m2 = regs[reg::MGRAS_TE1_TEXTURE_MODE_DRAWN as usize];
         if m2 & TM2_DETAIL == 0 {
             return Detail::default();
         }
         let log = if m2 & TM2_DETAIL_128 != 0 { 7 } else { 8 };
-        // TXSIZE 18:16 = 6 + L: detail texels per level-0 texel 2^(6 - D).
+        // texture_size 18:16 = 6 + L: detail texels per level-0 texel 2^(6 - D).
         let up = 6 - ((size >> 16) & 7) as i32;
         let mut table = [0u32; TABLE_LEN];
-        let last = ((regs[reg::TXLOD as usize] >> 10) & 0x3F) as usize / 2;
+        let last = ((regs[reg::MGRAS_TE1_TEXTURE_LOD as usize] >> 10) & 0x3F) as usize / 2;
         for (k, w) in table.iter_mut().enumerate().take(last + 1) {
             *w = self.tables[2][k] & 0x1F;
         }
         Detail {
             on: 1,
-            page: based(regs, regs[reg::TXDETAIL as usize]),
+            page: based(regs, regs[reg::MGRAS_TE1_TEXTURE_DETAIL_BLOCK as usize]),
             log,
             shift_s: ((size & 0xF) as i32 + up).max(0) as u32,
             shift_t: (((size >> 4) & 0xF) as i32 + up).max(0) as u32,
@@ -686,7 +686,7 @@ pub struct Detail {
     /// (log2 of level 0's size - L).
     pub shift_s: u32,
     pub shift_t: u32,
-    /// TXLOD 15:10 / 2: from this table index on, F is 0.
+    /// texture_lod 15:10 / 2: from this table index on, F is 0.
     pub last: u32,
     pub pad: [u32; 2],
     /// Five-bit weights, zero past the last one used.
@@ -704,7 +704,7 @@ pub struct Sampler {
     pub lt: u32,
     pub max_level: u32,
     pub nc: u32,
-    /// Select slot (TEXMODE1 bits 8:7, see `comp_offset`).
+    /// Select slot (texture_mode_first bits 8:7, see `comp_offset`).
     pub sel: u32,
     /// Component depth in nibbles.
     pub d: u32,
@@ -814,15 +814,15 @@ impl Sampler {
 
     /// The detail weight F at `lambda` (<= 0, Q8) in 12.16: the table at
     /// k = 32 2^lambda, its top 24 bits an index and an 8-bit fraction;
-    /// 0 from the TXLOD index on.
+    /// 0 from the texture_lod index on.
     pub fn detail_weight(&self, lambda: i32) -> i32 {
         let e = lambda.saturating_add(5 * 256);
         let x = exp2_q8()[(e & 0xFF) as usize];
         let x = if e >= 0 { x << (e >> 8).min(8) } else { x >> (-(e >> 8)).min(31) };
         let (i, f) = if x >= 31 << 8 { (31, 0) } else { ((x >> 8) as usize, x & 0xFF) };
-        // From the TXLOD index on there is no detail: a real board gives
+        // From the texture_lod index on there is no detail: a real board gives
         // full weight at k = 15.5 and none at 16 for a table whose index is
-        // 16 (entries 16 and 15 both 31), and none at k >= 31 for TXLOD 62.
+        // 16 (entries 16 and 15 both 31), and none at k >= 31 for texture_lod 62.
         if i as u32 >= self.detail.last {
             return 0;
         }
@@ -870,9 +870,9 @@ impl Sampler {
 }
 
 /// The texture environment (RE4), in 12.16: fragment colour `f` and texel
-/// components `tex`, per TEXMODE1 (environment mode, components, texel
-/// class) and the environment colour (TXENV_RG: red 11:0, green 23:12;
-/// TXENV_B: blue 11:0, alpha 23:12).
+/// components `tex`, per texture_mode_first (environment mode, components, texel
+/// class) and the environment colour (texenv_rg: red 11:0, green 23:12;
+/// texenv_b: blue 11:0, alpha 23:12).
 pub fn tex_env(mode1: u32, env_rg: u32, env_b: u32, f: [i32; 4], tex: [i32; 4]) -> [i32; 4] {
     use fixed::{mul, ONE};
     let nc = ((mode1 >> 3) & 3) + 1;
@@ -944,20 +944,20 @@ mod tests {
         let mut te = unsafe { Box::<Te1>::new_zeroed().assume_init() };
         let mut regs = vec![0u32; 0x400];
         // A 4x4 RGBA8 level at page 0, one colour per context.
-        regs[reg::TL_MODE as usize] = 3 << 1 | 1 << 5;
-        regs[reg::TL_SPEC as usize] = 2 << 8 | 2 << 4;
-        regs[reg::TEXMODE1 as usize] = TEXMODE1_ENABLE | 3 << 3 | 4 << 9;
-        regs[reg::TEXMODE2 as usize] = 1 << 2;
-        regs[reg::TXSIZE as usize] = 2 << 4 | 2;
-        te.table_write(reg::TXMIPMAP, 0, 0);
+        regs[reg::MGRAS_TE1_TEXTURE_LOADER_MODE as usize] = 3 << 1 | 1 << 5;
+        regs[reg::MGRAS_TE1_TEXTURE_LOADER_LEVEL_SPEC as usize] = 2 << 8 | 2 << 4;
+        regs[reg::MGRAS_RE4_TEXTURE_MODE_FIRST as usize] = TEXMODE1_ENABLE | 3 << 3 | 4 << 9;
+        regs[reg::MGRAS_TE1_TEXTURE_MODE_DRAWN as usize] = 1 << 2;
+        regs[reg::MGRAS_TE1_TEXTURE_SIZE as usize] = 2 << 4 | 2;
+        te.table_write(reg::MGRAS_TE1_REG_F191, 0, 0);
         for (base, v) in [(0x1D, 0x40u8), (0, 0xC0)] {
-            regs[reg::TXBASE as usize] = base;
+            regs[reg::MGRAS_TE1_REG_F186 as usize] = base;
             for t in 0..4 {
                 te.load_line(&regs, t, &[v; 16]);
             }
         }
         for (base, v) in [(0x1D, 0x40u8), (0, 0xC0)] {
-            regs[reg::TXBASE as usize] = base;
+            regs[reg::MGRAS_TE1_REG_F186 as usize] = base;
             let smp = te.sampler(&regs);
             assert_eq!(smp.pages[0], base);
             let got = smp.texel(&te, 0, 1, 2);
@@ -965,8 +965,8 @@ mod tests {
             assert_eq!((got[0] >> 4) as u8, v, "base {base:#x}");
         }
         // The base wraps within TRAM's 256 pages.
-        regs[reg::TXBASE as usize] = 0xFF;
-        te.table_write(reg::TXMIPMAP, 0, 2);
+        regs[reg::MGRAS_TE1_REG_F186 as usize] = 0xFF;
+        te.table_write(reg::MGRAS_TE1_REG_F191, 0, 2);
         assert_eq!(te.sampler(&regs).pages[0], 1);
     }
 
@@ -988,38 +988,38 @@ mod tests {
         let base: Vec<u8> = (0..8 * 8 * 4).map(|_| rnd(48, 160)).collect();
         let det: Vec<u8> = (0..256 * 256 * 4).map(|_| rnd(0, 256)).collect();
         // RGBA, 8-bit components.
-        regs[reg::TL_MODE as usize] = 3 << 1 | 1 << 5;
-        regs[reg::TL_SPEC as usize] = 3 << 8 | 3 << 4;
+        regs[reg::MGRAS_TE1_TEXTURE_LOADER_MODE as usize] = 3 << 1 | 1 << 5;
+        regs[reg::MGRAS_TE1_TEXTURE_LOADER_LEVEL_SPEC as usize] = 3 << 8 | 3 << 4;
         for t in 0..8 {
             te.load_line(&regs, t, &base[t as usize * 32..][..32]);
         }
         // The detail image: the left half of a 512x256 level at page 16.
-        regs[reg::TL_SPEC as usize] = 8 << 8 | 9 << 4;
-        regs[reg::TL_MIPMAP as usize] = 16;
+        regs[reg::MGRAS_TE1_TEXTURE_LOADER_LEVEL_SPEC as usize] = 8 << 8 | 9 << 4;
+        regs[reg::MGRAS_TE1_TEXTURE_LOADER_MIPMAP_BLOCK as usize] = 16;
         for t in 0..256 {
             te.load_line(&regs, t, &det[t as usize * 1024..][..1024]);
         }
-        te.table_write(reg::TXMIPMAP, 0, 0);
+        te.table_write(reg::MGRAS_TE1_REG_F191, 0, 0);
         for k in 0..32 {
-            te.table_write(reg::DETAILSCALE, k, 0x1F);
+            te.table_write(reg::MGRAS_TE1_DETAILSCALE, k, 0x1F);
         }
-        regs[reg::TEXMODE1 as usize] = TEXMODE1_ENABLE | 3 << 3 | 4 << 9;
-        regs[reg::TEXMODE2 as usize] = 1 << 2 | TM2_MAG_LINEAR | TM2_DETAIL;
-        regs[reg::TXSIZE as usize] = 3 << 16 | 3 << 4 | 3;
-        regs[reg::TXLOD as usize] = 62 << 10;
-        regs[reg::TXDETAIL as usize] = 16;
+        regs[reg::MGRAS_RE4_TEXTURE_MODE_FIRST as usize] = TEXMODE1_ENABLE | 3 << 3 | 4 << 9;
+        regs[reg::MGRAS_TE1_TEXTURE_MODE_DRAWN as usize] = 1 << 2 | TM2_MAG_LINEAR | TM2_DETAIL;
+        regs[reg::MGRAS_TE1_TEXTURE_SIZE as usize] = 3 << 16 | 3 << 4 | 3;
+        regs[reg::MGRAS_TE1_TEXTURE_LOD as usize] = 62 << 10;
+        regs[reg::MGRAS_TE1_TEXTURE_DETAIL_BLOCK as usize] = 16;
         let smp = te.sampler(&regs);
         // An entry of 31 is 31/32.
         assert_eq!(smp.detail_weight(-3 * 256), fixed::ONE / 32 * 31);
-        // No detail from the TXLOD index on (k = 32 2^lambda): index 31
-        // here, and with TXLOD 32 (index 16) full weight at k = 15.5, none
+        // No detail from the texture_lod index on (k = 32 2^lambda): index 31
+        // here, and with texture_lod 32 (index 16) full weight at k = 15.5, none
         // at 16.
         assert_eq!(smp.detail_weight(-10), 0);
-        regs[reg::TXLOD as usize] = 32 << 10;
+        regs[reg::MGRAS_TE1_TEXTURE_LOD as usize] = 32 << 10;
         let cut = te.sampler(&regs);
         assert_eq!(cut.detail_weight(-268), fixed::ONE / 32 * 31);
         assert_eq!(cut.detail_weight(-256), 0);
-        regs[reg::TXLOD as usize] = 62 << 10;
+        regs[reg::MGRAS_TE1_TEXTURE_LOD as usize] = 62 << 10;
         let bilinear = |img: &[u8], n: usize, u: f64, v: f64, c: usize| {
             let (fu, fv) = (u - 0.5, v - 0.5);
             let (a, b) = (fu - fu.floor(), fv - fv.floor());
@@ -1058,16 +1058,16 @@ mod tests {
         // SAFETY: Te1 is plain data, valid zeroed.
         let mut te = unsafe { Box::<Te1>::new_zeroed().assume_init() };
         let mut regs = vec![0u32; 0x400];
-        regs[reg::TL_MODE as usize] = 0x34E24;
-        regs[reg::TL_SPEC as usize] = 7 << 8 | 6 << 4;
+        regs[reg::MGRAS_TE1_TEXTURE_LOADER_MODE as usize] = 0x34E24;
+        regs[reg::MGRAS_TE1_TEXTURE_LOADER_LEVEL_SPEC as usize] = 7 << 8 | 6 << 4;
         for t in 0..128u32 {
-            regs[reg::TL_T_BOTTOM as usize] = 0;
+            regs[reg::MGRAS_TE1_TEXTURE_LOADER_COPY_BOTTOM as usize] = 0;
             let line: Vec<u8> = (0..64u32).flat_map(|s| [s as u8, t as u8, 0xA5, 0]).collect();
             te.load_line(&regs, t, &line);
         }
-        regs[reg::TEXMODE1 as usize] = 2 << 3;
-        regs[reg::TEXMODE2 as usize] = 1 << 2;
-        te.table_write(reg::TXMIPMAP, 0, 1);
+        regs[reg::MGRAS_RE4_TEXTURE_MODE_FIRST as usize] = 2 << 3;
+        regs[reg::MGRAS_TE1_TEXTURE_MODE_DRAWN as usize] = 1 << 2;
+        te.table_write(reg::MGRAS_TE1_REG_F191, 0, 1);
         let row = te.read_raw(&regs, 6, 64);
         assert_eq!(&row[..8], &[0, 70, 0xA5, 0, 1, 70, 0xA5, 0]);
     }
@@ -1078,13 +1078,13 @@ mod tests {
     #[test]
     fn byte_component_loads_match_nibble_stores() {
         fn by_nibbles(te: &mut Te1, regs: &[u32], line: u32, bytes: &[u8]) {
-            let mode = regs[reg::TL_MODE as usize];
-            let spec = regs[reg::TL_SPEC as usize];
+            let mode = regs[reg::MGRAS_TE1_TEXTURE_LOADER_MODE as usize];
+            let spec = regs[reg::MGRAS_TE1_TEXTURE_LOADER_LEVEL_SPEC as usize];
             let (nc, sel, d) = (((mode >> 1) & 3) as usize + 1, ((mode >> 3) & 3) as usize, depth_nibbles(mode >> 5));
             let (w, h) = (1usize << ((spec >> 4) & 0xF), 1usize << ((spec >> 8) & 0xF));
-            let s0 = regs[reg::TL_S_LEFT as usize] as i32 as i64;
-            let t = regs[reg::TL_T_BOTTOM as usize] as i32 as i64 + line as i64;
-            let (page, border) = (regs[reg::TL_MIPMAP as usize] & 0xFF, regs[reg::TL_BORDER as usize] & 0xFF);
+            let s0 = regs[reg::MGRAS_TE1_TEXTURE_LOADER_COPY_LEFT as usize] as i32 as i64;
+            let t = regs[reg::MGRAS_TE1_TEXTURE_LOADER_COPY_BOTTOM as usize] as i32 as i64 + line as i64;
+            let (page, border) = (regs[reg::MGRAS_TE1_TEXTURE_LOADER_MIPMAP_BLOCK as usize] & 0xFF, regs[reg::MGRAS_TE1_TEXTURE_LOADER_BORDER_BLOCK as usize] & 0xFF);
             for (k, px) in bytes.chunks_exact(4).enumerate() {
                 let s = s0 + k as i64;
                 if s < -1 || s > w as i64 || t < -1 || t > h as i64 {
@@ -1108,12 +1108,12 @@ mod tests {
         let mut regs = vec![0u32; 0x400];
         let mut seed = 0x1234_5678u32;
         for (lw, lh, nc, sel, s0, page) in [(6, 7, 4, 0, 0, 3), (3, 2, 4, 3, -1, 255), (0, 0, 3, 0, -1, 9), (8, 8, 1, 2, 0, 40), (4, 4, 2, 1, -1, 77)] {
-            regs[reg::TL_MODE as usize] = (nc - 1) << 1 | sel << 3 | 1 << 5;
-            regs[reg::TL_SPEC as usize] = lh << 8 | lw << 4;
-            regs[reg::TL_MIPMAP as usize] = page;
-            regs[reg::TL_BORDER as usize] = page + 1;
-            regs[reg::TL_S_LEFT as usize] = s0 as u32;
-            regs[reg::TL_T_BOTTOM as usize] = s0 as u32;
+            regs[reg::MGRAS_TE1_TEXTURE_LOADER_MODE as usize] = (nc - 1) << 1 | sel << 3 | 1 << 5;
+            regs[reg::MGRAS_TE1_TEXTURE_LOADER_LEVEL_SPEC as usize] = lh << 8 | lw << 4;
+            regs[reg::MGRAS_TE1_TEXTURE_LOADER_MIPMAP_BLOCK as usize] = page;
+            regs[reg::MGRAS_TE1_TEXTURE_LOADER_BORDER_BLOCK as usize] = page + 1;
+            regs[reg::MGRAS_TE1_TEXTURE_LOADER_COPY_LEFT as usize] = s0 as u32;
+            regs[reg::MGRAS_TE1_TEXTURE_LOADER_COPY_BOTTOM as usize] = s0 as u32;
             let (w, h) = (1usize << lw, 1usize << lh);
             for line in 0..h as u32 + 2 {
                 let bytes: Vec<u8> = (0..4 * (w + 2))

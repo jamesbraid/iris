@@ -231,7 +231,7 @@ pub(super) fn marks_show(marks: &[Mark], rss: &Rss, dcb: &Dcb) -> bool {
     }
     let (w, h) = frame::display_size(dcb);
     let (main, _) = frame::scanout_buffers(rss, dcb);
-    let back = Buffer::new(dcb.xmap.dib_pointers() >> 10, Kind::Wide, rss.reg(rss::reg::DRBSIZE));
+    let back = Buffer::new(dcb.xmap.dib_pointers() >> 10, Kind::Wide, rss.reg(rss::reg::MGRAS_PP1_DRB_SIZE));
     let select = dcb.xmap.buf_select();
     // Pages a displayed buffer runs over from its pointer: a buffer drawn
     // at another pointer inside them shares memory with it.
@@ -538,7 +538,7 @@ mod tests {
     /// at page 0x1C0 and B at 0x2E0.
     fn screen(did: u8, mode: u32, select: u32) -> (Box<Rss>, Box<Dcb>) {
         let mut r = Rss::new_boxed();
-        r.write(reg::DRBSIZE, 0x9000_025A, false);
+        r.write(reg::MGRAS_PP1_DRB_SIZE, 0x9000_025A, false);
         r.write(reg::DRBPOINTERS, 0x1C0 | 0x2E0 << 10, false);
         let mut dcb = plain::boxed_zeroed::<Dcb>();
         dcb.xmap.set_modes(0, 0x15, 0);
@@ -605,7 +605,7 @@ mod tests {
         for select in [0, 1 << 7] {
             let (mut r, mut dcb) = screen(7, 7, select);
             // One page for both, as a HighImpact at 1280x1024 has it.
-            r.write(reg::DRBSIZE, 0x9000_031A, false);
+            r.write(reg::MGRAS_PP1_DRB_SIZE, 0x9000_031A, false);
             dcb.xmap.set_scanout(select, 0x240 | 0x240 << 10 | 0x40 << 20, 0);
             r.write(reg::DRBPOINTERS, 0x240 | 0x240 << 10, false);
             r.write(reg::COLORMASKLSBSA, 0x4000_7FFF, false);
