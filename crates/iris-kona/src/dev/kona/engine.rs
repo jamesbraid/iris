@@ -142,7 +142,7 @@ pub struct KonaEngine<M: HostMem> {
     pixels: super::back::display::Pixels,
     source: Source,
     parked: bool,
-    fault: Mutex<Option<String>>,
+    fault: Arc<Mutex<Option<String>>>,
     _mem: std::marker::PhantomData<M>,
 }
 
@@ -169,9 +169,23 @@ impl<M: HostMem> KonaEngine<M> {
             pixels,
             source: Source::default(),
             parked: false,
-            fault: Mutex::new(None),
+            fault: Arc::new(Mutex::new(None)),
             _mem: std::marker::PhantomData,
         })
+    }
+
+    /// What a GPU unit's device-loss callback calls once this engine exists (`GpuLoss::attach`): post
+    /// `GpuLost`, then fault the engine, which tells the shell.
+    pub fn gpu_lost_handler(&self) -> impl Fn(&str) + Send + Sync + 'static {
+        let (fault, events) = (self.fault.clone(), self.events.clone());
+        move |why| {
+            events.out.post(Event::GpuLost(why.to_string()));
+            let mut f = fault.lock();
+            if f.is_none() {
+                *f = Some(why.to_string());
+                events.out.post(Event::DeviceFault(why.to_string()));
+            }
+        }
     }
 
     /// The device fault, latched or not yet noticed: what `fail` was told, a failed command stream or

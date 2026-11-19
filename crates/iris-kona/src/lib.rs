@@ -15,6 +15,7 @@ pub use sgi_gpu_core as wgpu;
 pub mod cpu;
 pub mod dev;
 pub mod devlog;
+pub mod ffi;
 pub mod disp;
 pub mod hostinput;
 pub mod irq;
