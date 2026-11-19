@@ -586,6 +586,16 @@ impl<M: HostMem> MgrasEngine<M> {
         self.now
     }
 
+    /// What a GPU unit's device-loss callback calls once this engine exists (`GpuLoss::attach`):
+    /// post `GpuLost`, then fault the engine, which tells the shell.
+    pub fn gpu_lost_handler(&self) -> impl Fn(&str) + Send + Sync + 'static {
+        let sh = self.sh.clone();
+        move |why| {
+            sh.out.post(Event::GpuLost(why.to_string()));
+            sh.fail(why);
+        }
+    }
+
     /// The HQ flags as the board holds them.
     pub fn flags(&self) -> u32 {
         self.sh.front.flags.load(Ordering::Acquire)

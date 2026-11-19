@@ -71,3 +71,28 @@ mod inline {
 mod threaded {
     sgi_engine::conformance_tests!(super::Impact(iris_mgras::dev::mgras::engine::Mode::Threaded));
 }
+
+/// A GPU unit's loss, reported on any thread, posts `GpuLost` with the adapter's text, faults the
+/// engine and wakes the shell.
+#[test]
+fn a_gpu_loss_posts_gpu_lost_faults_the_engine_and_wakes_the_shell() {
+    use sgi_engine::{BoardEngine, Event, GpuLoss};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    let woken = Arc::new(AtomicU32::new(0));
+    let w = woken.clone();
+    let mut e = MgrasEngine::new(Config::new(Board::High, Mode::Inline), Ram, None, Some(Box::new(move || {
+        w.fetch_add(1, Ordering::SeqCst);
+    })))
+    .unwrap();
+    let loss = GpuLoss::new();
+    loss.attach(e.gpu_lost_handler());
+    let lost = loss.callback();
+    std::thread::spawn(move || lost("NVIDIA GeForce RTX 4090: wgpu device lost (Unknown): gone")).join().unwrap();
+    assert!(woken.load(Ordering::SeqCst) >= 1, "the shell was told without a call into the engine");
+    let mut seen = Vec::new();
+    e.drain_events(&mut seen, usize::MAX);
+    assert!(seen.contains(&Event::GpuLost("NVIDIA GeForce RTX 4090: wgpu device lost (Unknown): gone".into())), "{seen:?}");
+    assert_eq!(seen.iter().filter(|x| matches!(x, Event::DeviceFault(_))).count(), 1, "{seen:?}");
+    assert!(e.fault().unwrap().contains("RTX 4090"));
+}
