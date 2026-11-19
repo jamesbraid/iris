@@ -4,9 +4,9 @@
 // (setup::Tri); a fragment record is a quad the CPU shaded itself; a
 // rectangle record is a clear's. The arithmetic follows pipe/raster.rs,
 // pipe/interp.rs, pipe/fixed.rs and pipe/backend.rs operation for
-// operation; where a product feeds a sum, it is multiplied by a one the
-// compiler cannot see through (`nc`), so no driver fuses it into a
-// multiply-add the CPU does not do, and quotients go through
+// operation; where a product feeds a sum, its f32 bits are made observable
+// through a one the compiler cannot see through (`nc`), so no driver fuses
+// it into a multiply-add the CPU does not do, and quotients go through
 // `div_exact` (src/wgpu/shaders/float.wgsl), since a GPU's division need
 // not be correctly rounded.
 //

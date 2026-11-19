@@ -22,7 +22,7 @@ use super::super::pipe::texture::{Latch, TexRegs, Unit, Wrap};
 use super::super::consts::tex;
 use super::super::view::DestViews;
 use super::super::vram::Vram;
-use super::{GpuRaster, Rec, Slot, TexSlot};
+use super::{GpuRaster, Observation, Rec, Slot, TexSlot, DIRTY_BLOCK_SHIFT};
 use crate::wgpu::{Gpu, GpuOptions};
 
 /// The test memory: 4 MB, a power of two.
@@ -77,6 +77,25 @@ fn gpu() -> Option<Arc<Gpu>> {
             None
         }
     }
+}
+
+#[test]
+fn readback_observations_count_calls_and_bytes() {
+    let Some(gpu) = gpu() else { return };
+    let mut mirror = Vram::new(VRAM_BYTES);
+    let mut raster = GpuRaster::new(&gpu, VRAM_BYTES, GRID, GRID).expect("raster");
+    raster.attach_mirror(mirror.ptr());
+    raster.gpu_dirty[0] = 1;
+    raster.gpu_dirty_any = true;
+
+    raster.read_back_now(Observation::DmaRead).expect("readback");
+
+    let counts: Vec<_> = raster.observation_counts().collect();
+    assert_eq!(
+        counts.iter().copied().find(|(name, _, _)| *name == "dma-read"),
+        Some(("dma-read", 1, 1 << DIRTY_BLOCK_SHIFT))
+    );
+    assert!(counts.iter().filter(|(name, _, _)| *name != "dma-read").all(|(_, calls, bytes)| *calls == 0 && *bytes == 0));
 }
 
 /// Both memories and the destination they share.
