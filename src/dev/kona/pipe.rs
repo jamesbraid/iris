@@ -210,6 +210,8 @@ pub(super) struct Core {
     pub(super) load_sections: Vec<LoadSection>,
     pub(super) load_record: Vec<LoadSection>,
     pub(super) indirect_select: u32,
+    /// Commands the framers have completed, for the engine's credit accounting. Not saved.
+    pub packets: u64,
 }
 
 /// One section of the firmware load: where its words started and how many
@@ -259,6 +261,7 @@ impl Core {
             load_sections: Vec::new(),
             load_record: Vec::new(),
             indirect_select: 0,
+            packets: 0,
         }
     }
 
@@ -276,7 +279,7 @@ impl Core {
     /// are the build's. A loaded stream starts with every framer idle.
     pub(super) fn visit<S: super::stream::Stream>(&mut self, s: &mut S) {
         // Every field is named, so a new one fails to compile until it is saved here or left out on purpose.
-        let Self { cfg: _, tables: _, input: _, saved: _, kernel: _, dma_fifo: _, kernel_input: _, kernel_privileged: _, suspended_owner: _, gl_grammar: _, swapin: _, return_page: _, reason_page: _, reason_unread: _, reason_posted: _, reason_queue: _, contexts: _, context_count: _, current: _, context_page_pending: _, failed: _, managed: _, map_ram: _, flash: _, dma: _, dma_fault: _, port_addr: _, icu_control: _, arm_low: _, arm_high: _, load_open: _, load_count: _, load_sections: _, load_record: _, indirect_select: _ } = self;
+        let Self { cfg: _, tables: _, input: _, saved: _, kernel: _, dma_fifo: _, kernel_input: _, kernel_privileged: _, suspended_owner: _, gl_grammar: _, swapin: _, return_page: _, reason_page: _, reason_unread: _, reason_posted: _, reason_queue: _, contexts: _, context_count: _, current: _, context_page_pending: _, failed: _, managed: _, map_ram: _, flash: _, dma: _, dma_fault: _, port_addr: _, icu_control: _, arm_low: _, arm_high: _, load_open: _, load_count: _, load_sections: _, load_record: _, indirect_select: _, packets: _ } = self;
         self.input.visit(s);
         s.len(self.saved.len());
         let t = self.tables;
@@ -392,6 +395,7 @@ impl Core {
         self.load_sections.clear();
         self.load_record.clear();
         self.indirect_select = 0;
+        self.packets = 0;
     }
 
     /// Words the framers hold of commands still arriving.
@@ -404,6 +408,7 @@ impl Core {
     }
 
     pub(super) fn job(&mut self, h: &Host, be: &mut KonaBackend, job: Job<'_>) -> Reply {
+        self.packets += matches!(job, Job::Command { .. }) as u64;
         be.job(&mut BackPort { core: self, host: h }, job)
     }
 
