@@ -82,6 +82,14 @@ impl InterruptController for Events {
     }
 }
 
+/// A composed frame the GPU holds: the shell's scan-out on the engine's device reads it in place.
+#[cfg(feature = "wgpu")]
+pub struct LentFrame {
+    pub buffer: wgpu::Buffer,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// The flash a pipe starts with and where its programmed bytes go: the shell's drive.
 pub struct FlashDrive {
     /// Exactly `FLASH_SIZE` bytes.
@@ -429,6 +437,18 @@ impl<M: HostMem> KonaEngine<M> {
         self.back.drain();
         let (w, h) = self.core.managed;
         (w, h, self.pixels.frame())
+    }
+
+    /// The frame the display would show, composed on the GPU and left there for a scan-out on the
+    /// same device to take: no readback. None when the pipe has no GPU scan-out. The words are
+    /// 0xAABBGGRR, rows from the top, and the buffer is rewritten by the next call.
+    #[cfg(feature = "wgpu")]
+    pub fn lend_frame(&mut self) -> Result<Option<LentFrame>, String> {
+        if let Some(f) = self.fault_now() {
+            return Err(f);
+        }
+        let lent = self.back.lend_frame()?;
+        Ok(lent.map(|(buffer, width, height)| LentFrame { buffer, width, height }))
     }
 
     /// The sections of the last completed firmware load.

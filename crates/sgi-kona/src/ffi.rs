@@ -227,3 +227,34 @@ pub unsafe extern "C" fn sgi_kona_observe(h: *mut IrisEngine, r: *const IrisKona
         })
     }
 }
+
+/// Copy the composed scan-out into `buf` (`cap` words): 0x00RRGGBB a pixel, row by row from the
+/// top, as `sgi_odyssey_scanout` does. `*w` and `*hgt` are set to the frame's size, also when
+/// `cap` is too small (ERROR, nothing copied). FAULT on a faulted engine.
+///
+/// # Safety
+/// `h` is a live KONA handle, `buf` points to `cap` words and `w` and `hgt` to `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_scanout(h: *mut IrisEngine, buf: *mut u32, cap: usize, w: *mut u32, hgt: *mut u32) -> c_int {
+    unsafe {
+        call::<KonaEngine<CMem>, _>(h, Point::Pixel, IRIS_ENGINE_FAULT, |e| {
+            if w.is_null() || hgt.is_null() || (buf.is_null() && cap != 0) {
+                return sgi_engine::ffi::IRIS_ENGINE_ERROR;
+            }
+            if e.fault().is_some() {
+                return IRIS_ENGINE_FAULT;
+            }
+            let (fw, fh, pixels) = e.compose();
+            *w = fw;
+            *hgt = fh;
+            if pixels.len() > cap {
+                return sgi_engine::ffi::IRIS_ENGINE_ERROR;
+            }
+            // The compose is 0xAABBGGRR; the scan-out the shells share is 0x00RRGGBB.
+            for (i, p) in pixels.iter().enumerate() {
+                *buf.add(i) = (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff);
+            }
+            IRIS_ENGINE_OK
+        })
+    }
+}

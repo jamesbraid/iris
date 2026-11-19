@@ -477,3 +477,32 @@ fn the_dma_widget_is_reported_at_start_and_at_each_change() {
     e.reset().unwrap();
     assert_eq!(*seen.lock(), [9, 5, 7, 5, 9], "and a reset the configured one");
 }
+
+/// With a GPU, the frame is composed there and lent in place: reading it back gives what the CPU
+/// compose gives. Without one, the call says there is nothing to lend.
+#[test]
+fn a_gpu_frame_is_lent_in_place() {
+    use sgi_kona::wgpu::{Gpu, GpuOptions};
+    let mut cpu = engine();
+    assert!(cpu.lend_frame().unwrap().is_none(), "no GPU scan-out on a CPU pipe");
+    let gpu = match Gpu::new(&GpuOptions::default(), Box::new(|m| panic!("GPU failed: {m}"))) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let opts = Options { gpu: Some(gpu.clone()), ..Options::default() };
+    let mut e = Engine::new(KonaConfig::ir2(1).unwrap().with_pool(0, 32), Ram::default(), opts, None).expect("engine");
+    // Colour 1 is red; a point at (100, 50).
+    for (selector, args) in [(0x3, &[1, 0xff << 2, 0, 0][..]), (0x2, &[1]), (0x6, &[100, 50])] {
+        textport(&mut e, &[&[1, selector][..], args].concat(), &[A]);
+    }
+    let lent = e.lend_frame().unwrap().expect("a GPU scan-out");
+    let (w, h, want) = e.compose();
+    assert_eq!((lent.width, lent.height), (w, h));
+    let mut got = vec![0u32; (w * h) as usize];
+    gpu.read(&lent.buffer, &[(0, got.len() as u64 * 4)], bytemuck::cast_slice_mut(&mut got)).unwrap();
+    assert_eq!(got, want);
+    assert!(want.iter().any(|&p| p != 0), "the point is in the frame");
+}

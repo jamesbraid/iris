@@ -749,6 +749,21 @@ impl KonaBackend {
         self.handle = Some(handle);
     }
 
+    /// Compose the frame on the GPU scan-out now and hand back its buffer, with no readback: the
+    /// words are 0xAABBGGRR, rows from the top, valid until the next compose. None when this back
+    /// end has no GPU scan-out (a CPU store, or planes too big for the device).
+    #[cfg(feature = "wgpu")]
+    pub fn lend_frame(&mut self) -> Result<Option<(wgpu::Buffer, u32, u32)>, String> {
+        let shared = self.scanout.clone();
+        let mut guard = shared.lock();
+        let Some(sc) = guard.as_mut() else { return Ok(None) };
+        self.drain();
+        let map = self.map.lock().clone();
+        let tables = self.tables.lock().snapshot();
+        sc.compose(&self.store, textport::COLOUR_WORD, &map, &tables).inspect_err(|e| sc.fail(e))?;
+        Ok(Some((sc.output().clone(), self.store.cpu().width(), self.store.cpu().height())))
+    }
+
     /// Hold each swap until the next `frame`, as a pipe that changes the displayed buffer at a
     /// retrace does, instead of showing it when the command is reached.
     pub fn latch_swaps(&mut self, on: bool) {
