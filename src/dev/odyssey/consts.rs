@@ -83,13 +83,8 @@ pub(super) mod route {
     pub const VECTOR_DMA_SHIFT: u32 = 8;
     pub const VECTOR_FLAG_SHIFT: u32 = 0;
 
-    // Bits 18:16 of ROUTE_DEST_UPPER enable the three non-flag sources. The
-    // three bits are inferred to be the enables, but not which bit belongs to
-    // which source; this assignment is a model choice (an approximation):
-    // ascending with the vector bytes.
-    pub const ENABLE_DMA: u32 = 1 << 16;
-    pub const ENABLE_RETRACE: u32 = 1 << 17;
-    pub const ENABLE_SOFTSYNC: u32 = 1 << 18;
+    // Bits 18:16 of ROUTE_DEST_UPPER are set together by the kernel and zeroed with the
+    // whole register. Their role is unknown, so the model does not act on them.
 }
 pub(super) const ODSY_STATUS0: u64 = 0x1064;
 pub(super) mod flctl {

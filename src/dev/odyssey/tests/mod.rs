@@ -51,7 +51,8 @@ const CONTROL: u64 = 0x0024;
 const ROUTE_DEST_UPPER: u64 = 0x1044;
 const ROUTE_DEST_LOWER: u64 = 0x104c;
 const ROUTE_VECTORS: u64 = 0x1054;
-pub(super) const ROUTE_ENABLES: u32 = route::ENABLE_DMA | route::ENABLE_RETRACE | route::ENABLE_SOFTSYNC;
+/// Bits 18:16 of the routed destination's upper half, which the kernel sets together.
+pub(super) const ROUTE_ENABLES: u32 = 0x7 << 16;
 const INTR_CLEAR: u64 = 0x101c;
 const INTR_ENABLE_SET: u64 = 0x1034;
 const INTR_FIFO_LOW_WATER: u64 = 0x200;

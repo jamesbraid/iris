@@ -371,38 +371,19 @@ fn raise_each_source(upper: u32) -> Vec<u32> {
 
 const HEART_UPPER: u32 = (HEART_WIDGET << 25) as u32;
 
-/// MODEL CHOICE: each of bits 16, 17
-/// and 18 of the destination's upper half enables one non-flag source (16
-/// DMA-done, 17 retrace, 18 softsync). A source raised while its bit is
-/// clear sends nothing and is dropped; the other two are unaffected. The
-/// bit-to-source assignment is the model's, not a measurement.
+/// Bits 18:16 of the destination's upper half do not gate the retrace, softsync and DMA-done
+/// sources: each sends its packet with any combination of them set or clear. No shipped code sets
+/// one alone, so nothing says what the board does then, and QEMU's device never looked at them.
 #[test]
-fn a_clear_source_enable_bit_suppresses_only_its_source() {
-    for (bit, silent) in [
-        (route::ENABLE_DMA, DMA_VECTOR),
-        (route::ENABLE_RETRACE, RETRACE_VECTOR),
-        (route::ENABLE_SOFTSYNC, SOFTSYNC_VECTOR),
-    ] {
-        let sent = raise_each_source(HEART_UPPER | (ROUTE_ENABLES & !bit));
-        let want: Vec<u32> = [RETRACE_VECTOR, SOFTSYNC_VECTOR, DMA_VECTOR].into_iter().filter(|v| *v != silent).collect();
-        assert_eq!(sent, want, "bit {:#x} clear suppresses vector {}", bit, silent);
+fn the_source_enable_bits_do_not_gate_a_routed_source() {
+    for bits in 0..8u32 {
+        let sent = raise_each_source(HEART_UPPER | bits << 16);
+        assert_eq!(sent, [RETRACE_VECTOR, SOFTSYNC_VECTOR, DMA_VECTOR], "bits {bits:#x}");
     }
-}
-
-/// The control for the test above: with all three bits set every source
-/// sends its packet, and with all three clear none does.
-#[test]
-fn a_set_source_enable_bit_sends_its_source() {
-    assert_eq!(raise_each_source(HEART_UPPER | ROUTE_ENABLES), [RETRACE_VECTOR, SOFTSYNC_VECTOR, DMA_VECTOR]);
-    for bit in [route::ENABLE_DMA, route::ENABLE_RETRACE, route::ENABLE_SOFTSYNC] {
-        let sent = raise_each_source(HEART_UPPER | bit);
-        assert_eq!(sent.len(), 1, "bit {:#x} alone sends exactly one source", bit);
-    }
-    assert!(raise_each_source(HEART_UPPER).is_empty(), "no enable bit set sends nothing");
 }
 
 /// The value the shipped kernel stores in the upper half, 0x35cf8000, has
-/// all three enable bits set. Its address (15:0) and target widget (28:25)
+/// bits 18:16 set. Its address (15:0) and target widget (28:25)
 /// are replaced with HEART's so the packets can be recorded; every other bit
 /// is the kernel's. All three sources are delivered.
 #[test]
@@ -413,8 +394,8 @@ fn the_kernels_upper_half_enables_every_source() {
     assert_eq!(raise_each_source(upper), [RETRACE_VECTOR, SOFTSYNC_VECTOR, DMA_VECTOR]);
 }
 
-/// The flag has no bit in the upper half: it is gated by the enable mask
-/// alone, so a low-water flag is delivered with every source enable clear.
+/// The flag is gated by the enable mask alone, so a low-water flag is delivered with bits 18:16
+/// clear.
 #[test]
 fn the_flag_ignores_the_source_enable_bits() {
     let (mut s, rec) = board("v12");

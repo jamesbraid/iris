@@ -289,16 +289,10 @@ impl HostInterface {
     /// assumed. The flag source is a level the guest clears through
     /// intr::CLEAR, so it sends a clearing packet as it falls
     /// (HostInterface::update_irq()); the softsync, retrace and DMA-done handlers ack
-    /// nothing, and those sources send a single set pulse.
-    ///
-    /// MODEL CHOICE: bits 18:16 of
-    /// ROUTE_DEST_UPPER are the per-source enables of the DMA-done, retrace
-    /// and softsync sources, in the order of ODSY_ROUTE_ENABLE_*. A source
-    /// raised while its bit is clear sends nothing and is dropped. Which
-    /// bit enables which source is unknown, and what the board does with a
-    /// source raised while disabled is approximated;
-    /// IRIX sets and clears all three together, so it cannot tell. The flag
-    /// source has no bit here: intr::ENABLE_SET gates it.
+    /// nothing, and those sources send a single set pulse. Bits 18:16 of
+    /// ROUTE_DEST_UPPER do not gate them: no shipped code sets one alone, so
+    /// nothing says what the board does then. The all-clear store of the
+    /// destination silences the sources, as no routing is programmed.
     pub fn deliver_routed(&mut self, shift: u32, what: &str, set: bool) {
         let widget = (self.route_dest_upper >> route::DEST_WIDGET_SHIFT) & ((1u32 << ODSY_INT_DEST_WIDGET_BITS) - 1);
         let addr = (((self.route_dest_upper & 0xffff) as u64) << 32) | self.route_dest_lower as u64;
@@ -312,16 +306,6 @@ impl HostInterface {
                 what,
                 if set { "raised" } else { "lowered" }
             );
-            return;
-        }
-        let enable = match shift {
-            route::VECTOR_DMA_SHIFT => route::ENABLE_DMA,
-            route::VECTOR_RETRACE_SHIFT => route::ENABLE_RETRACE,
-            route::VECTOR_SOFTSYNC_SHIFT => route::ENABLE_SOFTSYNC,
-            _ => 0,
-        };
-        if self.route_dest_upper & enable != enable {
-            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: {} interrupt with its enable bit clear; dropped", what);
             return;
         }
         if !odyssey_xio_compose(widget, addr, &mut where_) {
