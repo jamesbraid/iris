@@ -1,0 +1,39 @@
+[package]
+name = "sgi-kona"
+version = "0.1.0"
+edition = "2021"
+description = "Iris's KONA (InfiniteReality) engine, from the token layer down, CPU and GPU, without the board"
+publish = false
+
+[lib]
+# The tests inside the mounted files drive the whole board and stay with iris.
+test = false
+doctest = false
+
+[features]
+default = ["wgpu"]
+wgpu = []
+# `tools/check-header`: cbindgen compares the C header with src/ffi.rs.
+header-check = ["dep:cbindgen"]
+
+[dependencies]
+sgi-gpu-core = { path = "../sgi-gpu-core", default-features = false }
+sgi-engine = { path = "../sgi-engine" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan", "metal", "dx12"] }
+bytemuck = { version = "1", features = ["derive"] }
+parking_lot = "0.12"
+serde = { version = "1.0.228", features = ["derive"] }
+crossbeam-utils = "0.8"
+crossbeam-queue = "0.3"
+log = "0.4"
+toml = "1.0.3"
+blake3 = "1"
+postcard = { version = "1", features = ["alloc"] }
+cbindgen = { version = "0.29", optional = true, default-features = false }
+
+[dev-dependencies]
+sgi-engine = { path = "../sgi-engine", features = ["conformance", "fault-injection"] }
+
+[[example]]
+name = "cbindgen_header"
+required-features = ["header-check"]
