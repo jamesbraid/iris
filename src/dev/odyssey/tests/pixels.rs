@@ -4,7 +4,7 @@
 use crate::dev::odyssey::field::{Codec, Field};
 use crate::dev::odyssey::view::{Rows, View, MAX_DIM};
 use crate::dev::odyssey::vram::Surface;
-use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use crate::dev::odyssey::board::{Board, ODSY_BOOT_HEIGHT, ODSY_BOOT_WIDTH};
 use crate::dev::odyssey::consts::{
     dest, dispmode, dma, gl_cmd, image, reg, self, swap, tex, write, ODSY_DRAW_MASK_BUFFER0,
     ODSY_DRAW_MASK_BUFFER1, ODSY_GAMMA_GROUP, ODSY_PLANE_MASK_SHIFT, ODSY_USER_CMD_FIFO,
@@ -22,7 +22,7 @@ use super::dma::{PAGE_A, TABLE, colour_destination, descriptor, pte, put_table};
 fn window() -> (Box<Board>, Arc<Ram>) {
     let (mut s, _, ram) = board_with_ram();
     s.win.clip_kept = 1;
-    s.win.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: ODSY_WIDTH as i32 - 1, y1: ODSY_HEIGHT as i32 - 1 };
+    s.win.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: ODSY_BOOT_WIDTH as i32 - 1, y1: ODSY_BOOT_HEIGHT as i32 - 1 };
     (s, ram)
 }
 
@@ -799,7 +799,7 @@ fn a_copy_from_a_10_10_10_2_window_into_a_texture_converts_the_colour() {
     // The pixel belongs to window id 21, whose display mode (the value a
     // TyrQuake session had) says 10:10:10:2 with A at byte 12, B at 4.
     s.regs().set_dispmode(21, 0x0096_53a6);
-    set_aux(&mut s, 0, y * ODSY_WIDTH + x, 21 << crate::dev::odyssey::consts::ODSY_DID_MAIN_SHIFT);
+    set_aux(&mut s, 0, y * ODSY_BOOT_WIDTH + x, 21 << crate::dev::odyssey::consts::ODSY_DID_MAIN_SHIFT);
     // The texture the copy lands in, selected first as the library does.
     s.pixel_mode = [0x39_de80, 0x10, 0x0800_24d0, 0];
     copy_block(&mut s, [0x3000_0019, y << 16 | x, 0x8010_0050, 1 << 16 | 1, 0x1263_3002, 0x39_de80, 0, 0xf801_210b]);
@@ -826,7 +826,7 @@ fn overlay_copy(s: &mut Board, (sx, sy): (u32, u32), (w, h): (u32, u32), (dx, dy
 }
 
 fn overlay_at(s: &Board, x: u32, y: u32) -> u8 {
-    aux_at(s, 1, y * ODSY_WIDTH + x)
+    aux_at(s, 1, y * ODSY_BOOT_WIDTH + x)
 }
 
 /// A menu's pattern fill replicates a seed by copying the id-plane base onto
@@ -840,7 +840,7 @@ fn a_copy_at_the_id_plane_base_moves_overlay_bytes_not_colour() {
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     for x in 0..4u32 {
-        set_aux(&mut s, 1, 40 * ODSY_WIDTH + 30 + x, 0x11 * (x as u8 + 1));
+        set_aux(&mut s, 1, 40 * ODSY_BOOT_WIDTH + 30 + x, 0x11 * (x as u8 + 1));
         pixel_write(&mut s, 30 + x as i32, 40, 0xaa00_00ff | x << 8);
     }
     let colour: Vec<u32> = (30..70).map(|x| pixel(&s, 0, x, 40)).collect();
@@ -862,7 +862,7 @@ fn an_overlay_copy_onto_itself_reads_the_source_as_it_was() {
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     for x in 0..4u32 {
-        set_aux(&mut s, 1, 40 * ODSY_WIDTH + 30 + x, x as u8 + 1);
+        set_aux(&mut s, 1, 40 * ODSY_BOOT_WIDTH + 30 + x, x as u8 + 1);
     }
     overlay_copy(&mut s, (30, 40), (4, 1), (32, 40));
     let row: Vec<u8> = (30..36).map(|x| overlay_at(&s, x, 40)).collect();
@@ -873,7 +873,7 @@ fn an_overlay_copy_onto_itself_reads_the_source_as_it_was() {
     assert_eq!(row, [1, 2, 3, 4, 3, 4], "a copy to the left");
 
     for y in 0..4u32 {
-        set_aux(&mut s, 1, (50 + y) * ODSY_WIDTH + 70, y as u8 + 1);
+        set_aux(&mut s, 1, (50 + y) * ODSY_BOOT_WIDTH + 70, y as u8 + 1);
     }
     overlay_copy(&mut s, (70, 50), (1, 4), (70, 52));
     let column: Vec<u8> = (50..56).map(|y| overlay_at(&s, 70, y)).collect();
@@ -887,8 +887,8 @@ fn an_overlay_copy_changes_only_the_bits_of_the_plane_mask() {
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     s.plane_write_mask = 0x0f << ODSY_PLANE_MASK_SHIFT;
-    set_aux(&mut s, 1, 40 * ODSY_WIDTH + 30, 0xa5);
-    set_aux(&mut s, 1, 40 * ODSY_WIDTH + 60, 0xf0);
+    set_aux(&mut s, 1, 40 * ODSY_BOOT_WIDTH + 30, 0xa5);
+    set_aux(&mut s, 1, 40 * ODSY_BOOT_WIDTH + 60, 0xf0);
     overlay_copy(&mut s, (30, 40), (1, 1), (60, 40));
     assert_eq!(overlay_at(&s, 60, 40), 0xf5);
 }
@@ -896,13 +896,13 @@ fn an_overlay_copy_changes_only_the_bits_of_the_plane_mask() {
 /// Seed the overlay, the id byte and colour buffer 0 at (30, 40) with three
 /// distinct values, so a copy to (60, 41) shows which plane it moved.
 fn seed_three_planes(s: &mut Board) {
-    set_aux(s, 1, 40 * ODSY_WIDTH + 30, 0x77);
-    set_aux(s, 0, 40 * ODSY_WIDTH + 30, 0x55);
+    set_aux(s, 1, 40 * ODSY_BOOT_WIDTH + 30, 0x77);
+    set_aux(s, 0, 40 * ODSY_BOOT_WIDTH + 30, 0x55);
     pixel_write(s, 30, 40, 0xaa00_00ff);
 }
 
 fn planes_at(s: &Board, x: u32, y: u32) -> (u8, u8, u32) {
-    (overlay_at(s, x, y), aux_at(s, 0, y * ODSY_WIDTH + x), pixel(s, 0, x as i32, y as i32))
+    (overlay_at(s, x, y), aux_at(s, 0, y * ODSY_BOOT_WIDTH + x), pixel(s, 0, x as i32, y as i32))
 }
 
 /// The drawing mask names the byte a copy moves, and the other byte stays.
@@ -925,7 +925,7 @@ fn an_overlay_copy_up_onto_itself_reads_the_source_as_it_was() {
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     for y in 0..4u32 {
-        set_aux(&mut s, 1, (50 + y) * ODSY_WIDTH + 70, y as u8 + 1);
+        set_aux(&mut s, 1, (50 + y) * ODSY_BOOT_WIDTH + 70, y as u8 + 1);
     }
     overlay_copy(&mut s, (70, 52), (1, 4), (70, 50));
     let column: Vec<u8> = (50..56).map(|y| overlay_at(&s, 70, y)).collect();
@@ -937,8 +937,8 @@ fn an_overlay_copy_up_onto_itself_reads_the_source_as_it_was() {
 /// does), past the right edge or the bottom.
 #[test]
 fn an_overlay_copy_is_clipped_to_the_plane_at_both_ends() {
-    let w = ODSY_WIDTH;
-    let h = ODSY_HEIGHT;
+    let w = ODSY_BOOT_WIDTH;
+    let h = ODSY_BOOT_HEIGHT;
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     for x in 0..8u32 {

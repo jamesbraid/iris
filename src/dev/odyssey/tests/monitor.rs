@@ -4,7 +4,7 @@
 
 use crate::dev::heart::{Heart, HeartConfig};
 use crate::dev::heart_mem::HeartRam;
-use crate::dev::odyssey::board::ODSY_WIDTH;
+use crate::dev::odyssey::board::ODSY_BOOT_WIDTH;
 use crate::dev::odyssey::consts::{backend, cmd, dispmode, ODSY_DID_MAIN_SHIFT};
 use crate::dev::odyssey::debug::memory_hash;
 use crate::dev::odyssey::tests::pixel_write;
@@ -141,7 +141,7 @@ fn pix_decodes_the_pixel_the_scanout_shows() {
     // The same pixel as the display resolves it.
     let s = v.state.test_board();
     s.scanout_update();
-    assert_eq!(s.reader.frame[20 * ODSY_WIDTH as usize + 10] & 0xff_ffff, 0xff0080);
+    assert_eq!(s.reader.frame[20 * ODSY_BOOT_WIDTH as usize + 10] & 0xff_ffff, 0xff0080);
     let err = vpro(&v, "pix 1280 0").expect_err("outside the screen");
     assert!(err.contains("outside"), "{err}");
 }

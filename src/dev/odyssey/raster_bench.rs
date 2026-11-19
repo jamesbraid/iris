@@ -14,7 +14,7 @@
 //! one second).
 
 use crate::dev::odyssey::draw::{RasterOp, RASTER_CLEAR};
-use super::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use super::board::{Board, ODSY_BOOT_HEIGHT, ODSY_BOOT_WIDTH};
 use super::consts::{gl_cmd, tex};
 use super::pipe::encode::{
     vtx, GL_ALWAYS, GL_COLOR_BUFFER_BIT, GL_COLOUR_MASK_ALL, GL_DEPTH_BUFFER_BIT, GL_EQUAL, GL_FLAT, GL_INCR,
@@ -22,8 +22,8 @@ use super::pipe::encode::{
     GL_TRIANGLES, LibDraw, LibState,
 };
 use super::clip::ClipRect;
-pub(super) const BENCH_W: i32 = ODSY_WIDTH as i32;
-pub(super) const BENCH_H: i32 = ODSY_HEIGHT as i32;
+pub(super) const BENCH_W: i32 = ODSY_BOOT_WIDTH as i32;
+pub(super) const BENCH_H: i32 = ODSY_BOOT_HEIGHT as i32;
 
 /// A deterministic generator, so every run and every path draws the same.
 pub(super) struct Lcg(pub u64);

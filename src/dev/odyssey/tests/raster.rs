@@ -2,7 +2,7 @@
 //! orderings the guest can see hold across both queues.
 
 use crate::dev::odyssey::Odyssey;
-use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use crate::dev::odyssey::board::{Board, ODSY_BOOT_HEIGHT, ODSY_BOOT_WIDTH};
 use crate::dev::odyssey::consts::{
     colour, cursor, dispmode, dma, gl_cmd, light, lut, write, ODSY_BUZZ_1, ODSY_DID_MAIN_SHIFT,
     ODSY_DRAW_MASK_BUFFER0, ODSY_DRAW_MASK_BUFFER1, ODSY_GAMMA_BASE, ODSY_GAMMA_GROUP, ODSY_SW_TOKEN,
@@ -60,7 +60,7 @@ fn vertices(points: &[(f32, f32)], colour: [f32; 4]) -> Vec<f32> {
             }
             n
         };
-        o[vtx::POSITION..][..4].copy_from_slice(&[ndc(x, ODSY_WIDTH), ndc(y, ODSY_HEIGHT), 0.0, 1.0]);
+        o[vtx::POSITION..][..4].copy_from_slice(&[ndc(x, ODSY_BOOT_WIDTH), ndc(y, ODSY_BOOT_HEIGHT), 0.0, 1.0]);
         o[vtx::COLOR..][..4].copy_from_slice(&colour);
     }
     v
@@ -69,7 +69,7 @@ fn vertices(points: &[(f32, f32)], colour: [f32; 4]) -> Vec<f32> {
 /// One red triangle over the left half of the screen, through the board's
 /// own GL draw: set up by the front end, drawn by the raster unit.
 fn red_triangle(s: &mut Board, st: &LibState) {
-    let v = vertices(&[(0.0, 0.0), (ODSY_WIDTH as f32, 0.0), (0.0, ODSY_HEIGHT as f32)], RED);
+    let v = vertices(&[(0.0, 0.0), (ODSY_BOOT_WIDTH as f32, 0.0), (0.0, ODSY_BOOT_HEIGHT as f32)], RED);
     let stipple = [0u32; 32];
     let mut d = LibDraw::new(GL_TRIANGLES, 3, &v, st, &stipple);
     s.lib_draw(&mut d);
@@ -328,7 +328,7 @@ fn a_reused_draw_job_draws_only_its_new_primitive() {
     const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
     fn draws(h: &BoardLocks, st: &LibState) -> Vec<u32> {
         let stipple = [0u32; 32];
-        let (w, ht) = (ODSY_WIDTH as f32, ODSY_HEIGHT as f32);
+        let (w, ht) = (ODSY_BOOT_WIDTH as f32, ODSY_BOOT_HEIGHT as f32);
         // A six-vertex pair of triangles, then once that is drawn a
         // three-vertex one that covers less.
         let quad = vertices(&[(0.0, 0.0), (64.0, 0.0), (0.0, 64.0), (64.0, 0.0), (64.0, 64.0), (0.0, 64.0)], RED);
@@ -341,8 +341,8 @@ fn a_reused_draw_job_draws_only_its_new_primitive() {
         let s = h.test_board();
         s.gpu_sync();
         let mut px = Vec::new();
-        for y in (0..ODSY_HEIGHT as i32).step_by(8) {
-            for x in (0..ODSY_WIDTH as i32).step_by(8) {
+        for y in (0..ODSY_BOOT_HEIGHT as i32).step_by(8) {
+            for x in (0..ODSY_BOOT_WIDTH as i32).step_by(8) {
                 px.push(pixel(&s, 0, x, y));
             }
         }
@@ -735,12 +735,12 @@ fn display_rig() -> (BoardLocks, LibState, Arc<Display>) {
         s.regs().set_dispmode(id as usize, 0x0096_4000 | 0xa << 9 | ODSY_GAMMA_GROUP << dispmode::GROUP_SHIFT);
     }
     let did = s.dest_mem().did;
-    for y in 0..ODSY_HEIGHT as i32 {
-        for x in 0..ODSY_WIDTH as i32 {
+    for y in 0..ODSY_BOOT_HEIGHT as i32 {
+        for x in 0..ODSY_BOOT_WIDTH as i32 {
             did.store1(x, y, ((x / 320) as u8) << ODSY_DID_MAIN_SHIFT);
         }
     }
-    s.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
+    s.set_scanout_size(ODSY_BOOT_WIDTH, ODSY_BOOT_HEIGHT);
     let h = BoardLocks::new(s);
     h.raster.start();
     let display = Arc::new(Display::new(crate::status::MachineStatus::detached()));
@@ -890,8 +890,8 @@ fn swap_atomicity() {
     {
         let s = h.test_board();
         let m = s.dest_mem();
-        for y in 0..ODSY_HEIGHT as i32 {
-            for x in 0..ODSY_WIDTH as i32 {
+        for y in 0..ODSY_BOOT_HEIGHT as i32 {
+            for x in 0..ODSY_BOOT_WIDTH as i32 {
                 m.did.store1(x, y, 0);
                 m.colour[0].store_word(x, y, 0);
                 m.colour[1].store_word(x, y, 0);
@@ -929,7 +929,7 @@ fn swap_atomicity() {
         })
     };
     let ram = Ram::new(1 << 20);
-    let (wf, hf) = (ODSY_WIDTH as f32, ODSY_HEIGHT as f32);
+    let (wf, hf) = (ODSY_BOOT_WIDTH as f32, ODSY_BOOT_HEIGHT as f32);
 
     std::thread::sleep(Duration::from_millis(100));
     // Two swaps with nothing drawn: the first measures the buffers the
