@@ -96,6 +96,7 @@ mod registers;
 mod resolve;
 mod scanout;
 mod snapshot;
+mod state;
 #[cfg(test)]
 mod tests;
 mod trace;

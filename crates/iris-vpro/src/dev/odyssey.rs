@@ -1,7 +1,7 @@
 //! The files of `src/dev/odyssey` the engine is made of, in place: command
 //! decode to the raster back end and the scan-out compose. Not here: the
 //! processor-facing board (`mod.rs`), the refresh thread's window
-//! (`display.rs`), the monitor and the snapshot serialiser.
+//! (`display.rs`), the monitor and the snapshot word streams.
 
 #[path = "../../../../src/dev/odyssey/bits.rs"]
 pub mod bits;
@@ -68,6 +68,8 @@ pub mod registers;
 pub mod resolve;
 #[path = "../../../../src/dev/odyssey/scanout.rs"]
 pub mod scanout;
+#[path = "../../../../src/dev/odyssey/state.rs"]
+pub mod state;
 #[path = "../../../../src/dev/odyssey/trace.rs"]
 pub mod trace;
 #[path = "../../../../src/dev/odyssey/worker.rs"]
