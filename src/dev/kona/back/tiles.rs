@@ -211,6 +211,12 @@ impl Tiles {
         self.shared.poisoned.load(SeqCst)
     }
 
+    /// Forget a worker's panic, for a reset: every job has retired, so the pool is whole again.
+    pub fn clear_poison(&mut self) {
+        let _ = self.drain();
+        self.shared.poisoned.store(false, SeqCst);
+    }
+
     /// The producer is waiting on the workers: the driver's watchdog is told.
     fn working(&self) {
         if let Some(h) = &self.handle {
@@ -517,6 +523,21 @@ mod tests {
         assert_eq!(t.drain(), Err(Poisoned));
         assert!(t.is_poisoned());
         assert_eq!(t.submit(RasterJob::default()), Err(Poisoned));
+    }
+
+    /// A reset forgets the panic: submissions work again and the pool still runs jobs.
+    #[test]
+    fn clearing_the_poison_lets_the_tiles_work_again() {
+        let store = Arc::new(Store::new(W, H));
+        let (mut t, s) = tiles(store.clone(), 16, 2, 4, 1 << 20);
+        t.submit(clear(Rect { x0: 0, y0: 0, x1: 10, y1: 10 }, 1, s)).unwrap();
+        assert_eq!(t.drain(), Err(Poisoned));
+        t.clear_poison();
+        assert!(!t.is_poisoned());
+        store.ensure(1);
+        t.submit(clear(Rect { x0: 0, y0: 0, x1: 10, y1: 10 }, 0xff00_0007, s)).unwrap();
+        t.drain().unwrap();
+        assert_eq!(store.read(5, 5, 1), 0xff00_0007);
     }
 
     /// Dropping runs what is queued and joins the workers.
