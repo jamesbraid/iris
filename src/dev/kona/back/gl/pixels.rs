@@ -1002,6 +1002,11 @@ impl Frags {
         })
     }
 
+    /// The window pixels the rectangle holds, as (x, y) half-open ranges.
+    fn bounds(&self) -> ((i64, i64), (i64, i64)) {
+        ((self.x0, self.x0 + self.w as i64), (self.y0, self.y0 + self.h as i64))
+    }
+
     fn put(&mut self, x: i64, y: i64, words: [u32; 3]) {
         if x < self.x0 || y < self.y0 || x >= self.x0 + self.w as i64 || y >= self.y0 + self.h as i64 {
             return;
@@ -1095,6 +1100,11 @@ fn emit(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, img: &Image) {
     let pos = p.pos;
     let (rx, ry) = (pos.x.floor() as i64, pos.y.floor() as i64);
     let [zx, zy] = p.zoom;
+    // A zoom that is not a number draws nothing, as the old model refused it.
+    if !zx.is_finite() || !zy.is_finite() {
+        c.refused += 1;
+        return;
+    }
     let span = |origin: i64, i: usize, z: f32| {
         let (a, b) = ((origin as f32 + i as f32 * z).floor() as i64, (origin as f32 + (i + 1) as f32 * z).floor() as i64);
         (a.min(b), a.max(b))
@@ -1108,10 +1118,13 @@ fn emit(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, img: &Image) {
     };
     let kind = if matches!(img.plane, Plane::Stencil(_)) { FRAG_STENCIL } else { FRAG_COLOUR };
     if let Some(mut frags) = Frags::new(canvas, kind, extent(rx, img.w, zx), extent(ry, img.h, zy)) {
+        let (bx, by) = frags.bounds();
         for j in 0..img.h {
             let (y0, y1) = span(ry, j, zy);
+            let (y0, y1) = (y0.max(by.0), y1.min(by.1));
             for i in 0..img.w {
                 let (x0, x1) = span(rx, i, zx);
+                let (x0, x1) = (x0.max(bx.0), x1.min(bx.1));
                 let k = j * img.w + i;
                 for y in y0..y1.max(y0) {
                     for x in x0..x1.max(x0) {
