@@ -628,6 +628,19 @@ fn a_gl_copy_between_the_drawables_moves_the_rectangle() {
     assert_eq!(got, [0x1100_00ff, 0x2200_00ff, 0x1100_00ff, 0x2200_00ff, 0x3300_00ff, 0x4400_00ff]);
 }
 
+/// A copy rectangle the operands give 16 bits each way is bounded by the planes before the copy
+/// stages it: 65535 by 65535 asked for 17 GB and aborted the process.
+#[test]
+fn a_copy_of_the_largest_rectangle_is_bounded_by_the_planes() {
+    let (mut s, _) = window();
+    pixel_write(&mut s, 30, 40, 0x1100_00ff);
+    s.draw_mask = 4;
+    copy_block(&mut s, [0x3000_0019, 40 << 16 | 30, 0x0050_2050, 0xffff_ffff, 0x9263_3042, 0x3000_0010, 70 << 16 | 60, 0x3863_204b]);
+    assert_eq!(pixel(&s, 1, 60, 70), 0x1100_00ff, "the copy still ran");
+    let c = crate::dev::odyssey::copy::CopyOperands::decode(&[0x3000_0019, 0, 0, 0xffff_ffff, 0, 0, 0, 0]);
+    assert_eq!(c.size(), (MAX_DIM, MAX_DIM));
+}
+
 /// TyrQuake's water and lava: it draws the warped liquid into its
 /// 10:10:10:2 window and copies it into the liquid's 8:8:8:8 texture
 /// (glCopyTexSubImage). The copy's source format byte 0x02 names the
