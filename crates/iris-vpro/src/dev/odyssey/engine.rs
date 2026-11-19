@@ -570,6 +570,7 @@ impl BoardEngine for VproEngine {
         let vram = self.vram;
         self.locks.restore_state(&state, |_| vram.mark_written()).map_err(bad)?;
         self.credits = Credits::default();
+        self.out.post(Event::Irq);
         Ok(())
     }
 
@@ -588,6 +589,7 @@ impl BoardEngine for VproEngine {
         self.credits = Credits::default();
         self.failed.take();
         self.fault_sent.store(false, Ordering::Release);
+        self.out.post(Event::Irq);
         Ok(())
     }
 
