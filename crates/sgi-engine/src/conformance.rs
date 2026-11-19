@@ -29,6 +29,11 @@ pub trait Subject {
     /// A width (and an offset it was tried at) the board's registers lack and
     /// answer with `Fault`; None for a board that widens every access.
     fn missing_width(&self) -> Option<(u32, u32)>;
+    /// Whether a worker thread of the engine in its default mode passes `inject::Point::Exec`
+    /// while it runs a store: false for an engine whose work runs on the caller's thread.
+    fn worker_panics(&self) -> bool {
+        false
+    }
     /// Whether a store is still queued, or a worker still runs, after `write`
     /// returns: until `quiesce`, `save`, `load` and `reset` are refused.
     fn holds_stores(&self) -> bool;
@@ -89,6 +94,25 @@ fn events<E: BoardEngine>(e: &mut E, max: usize) -> Vec<Event> {
 
 fn credits_of(ev: &[Event]) -> Vec<(u32, u32)> {
     ev.iter().filter_map(|x| if let Event::Credits { source, retired } = x { Some((*source, *retired)) } else { None }).collect()
+}
+
+/// The clauses run in parallel; the one that arms a panic point excludes the rest.
+static CLAUSES: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+#[doc(hidden)]
+pub enum Held {
+    Shared(#[allow(dead_code)] std::sync::RwLockReadGuard<'static, ()>),
+    Alone(#[allow(dead_code)] std::sync::RwLockWriteGuard<'static, ()>),
+}
+
+/// Taken by each clause's `#[test]`: shared, except for the one that arms a panic.
+#[doc(hidden)]
+pub fn hold(clause: &str) -> Held {
+    if clause == "a_panic_on_a_worker_is_a_fault_and_reset_recovers" {
+        Held::Alone(CLAUSES.write().unwrap_or_else(|e| e.into_inner()))
+    } else {
+        Held::Shared(CLAUSES.read().unwrap_or_else(|e| e.into_inner()))
+    }
 }
 
 pub fn send<S: Subject>(_: &S) {
@@ -293,6 +317,39 @@ pub fn a_storm_on_one_interrupt_line_stays_one_packet<S: Subject>(s: &S) {
     assert_eq!(crate::outbox::aliasing_lines(packets.iter().copied(), |i| s.receiver_bit(i)), None, "two lines reach one receiver bit, so a merge can reorder them");
 }
 
+/// A panic on an engine's worker is a device fault the engine reports: it does not hang
+/// `quiesce`, and `reset` recovers. Needs the `fault-injection` feature to run.
+pub fn a_panic_on_a_worker_is_a_fault_and_reset_recovers<S: Subject>(s: &S) {
+    #[cfg(feature = "fault-injection")]
+    {
+        use crate::inject::{arm, disarm, Point};
+        if !s.worker_panics() {
+            return;
+        }
+        let mut e = s.engine(None);
+        arm(Point::Exec);
+        put(s, &mut e, 1);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while e.fault().is_none() {
+            assert!(std::time::Instant::now() < end, "a panic on the worker made no fault in 5 s");
+            e.run(usize::MAX);
+            e.advance(0);
+            std::thread::yield_now();
+        }
+        disarm();
+        assert!(e.fault().unwrap().contains("injected panic"), "{:?}", e.fault());
+        let (off, val) = s.store();
+        assert_eq!(e.write(off, 32, val), Write::Fault);
+        assert!(matches!(e.quiesce(u64::MAX), Err(Refused::Faulted(_))), "a faulted engine parks and says so");
+        e.reset().unwrap();
+        assert!(e.fault().is_none());
+        assert_eq!(e.write(off, 32, val), Write::Done);
+        settle(&mut e);
+    }
+    #[cfg(not(feature = "fault-injection"))]
+    let _ = s;
+}
+
 pub fn observe_brings_a_box_current<S: Subject>(s: &S) {
     let mut e = s.engine(None);
     put(s, &mut e, 1000);
@@ -320,10 +377,11 @@ macro_rules! conformance_tests {
             a_budget_that_runs_out_leaves_the_engine_going,
             a_budget_of_nothing_still_makes_progress,
             a_storm_on_one_interrupt_line_stays_one_packet,
-            observe_brings_a_box_current
+            observe_brings_a_box_current,
+            a_panic_on_a_worker_is_a_fault_and_reset_recovers
         );
     };
     (@each $subject:expr; $($clause:ident),*) => {
-        $( #[test] fn $clause() { $crate::conformance::$clause(&$subject); } )*
+        $( #[test] fn $clause() { let _held = $crate::conformance::hold(stringify!($clause)); $crate::conformance::$clause(&$subject); } )*
     };
 }
