@@ -1,7 +1,7 @@
 //! The X server's fills: boxes and rectangles, and the data tokens that carry
 //! their words.
 //!
-//! A box (0x154, `x_box`; 0x155 with six) is two words, `x1 << 16 | y1` and
+//! A box (0x154, `FILL_BOXES_TWO_CORNERS`; 0x155 with six) is two words, `x1 << 16 | y1` and
 //! `x2 << 16 | y2` with signed halves, far corner exclusive, both corners added
 //! to the drawable's position like a rectangle's origin and a point. That the pipe
 //! adds the position to a box is inferred: the senders in the recordings zero the

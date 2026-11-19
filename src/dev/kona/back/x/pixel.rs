@@ -1,18 +1,18 @@
 //! The X server's pixel transfers: setup, write, read, copy and finish.
 //!
-//! - 0x136 (`x_pixel_setup`) seven words that the next transfer reads: mode,
+//! - 0x136 (`WINDOW_SYSTEM_PIXEL_PATH_SET_UP`) seven words that the next transfer reads: mode,
 //!   source packing, destination packing, shift, width, height and pad. The
 //!   packing and shift words are table entries whose meaning to the pipe is
 //!   unknown; this model reads the forms the X server is known to send and
 //!   refuses the rest, counted.
-//! - 0x139 (`x_pixel_write`) the position of an image whose rows follow, either
+//! - 0x139 (`WINDOW_SYSTEM_PIXEL_WRITE`) the position of an image whose rows follow, either
 //!   behind the command as a data run the back end sizes, or, with the DMA bit
 //!   of the mode word set, in a DMA packet that arrives next. Rows run down from
 //!   the position, each `ceil((pad + bits * width) / 32)` words, pixels packed
 //!   most significant bit first (inferred from the senders' packing tables).
-//! - 0x13a (`x_pixel_finish`) ends the write.
-//! - 0x137 (`x_pixel_copy`) moves a rectangle inside the store.
-//! - 0x138 (`x_pixel_read`) returns a rectangle on the return page.
+//! - 0x13a (`WINDOW_SYSTEM_PIXEL_PATH_FINISH`) ends the write.
+//! - 0x137 (`WINDOW_SYSTEM_PIXEL_COPY`) moves a rectangle inside the store.
+//! - 0x138 (`WINDOW_SYSTEM_PIXEL_READ`) returns a rectangle on the return page.
 //!
 //! Grades. The word layouts, the pixel widths a source packing names and the
 //! forms of context each transfer accepts are software expectations from the

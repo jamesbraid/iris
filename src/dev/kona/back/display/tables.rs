@@ -2,10 +2,10 @@
 //! not the textport's: the X colour map, and the display-ID table that says,
 //! for each window's ID, how its pixel words become colours.
 //!
-//! - 0x12e (`x_color_map`): a start address, a count and that many entries,
+//! - 0x12e (`LOAD_COLOUR_MAP_ENTRIES`): a start address, a count and that many entries,
 //!   each 10:10:10 with red in bits 29:20 (software expectation from the X
 //!   server's install routine). Entry `i` lands at `start + i`.
-//! - 0x132 (`x_did_map`): a display ID and a word, the ID-table entry
+//! - 0x132 (`LOAD_ONE_ENTRY_OF_DISPLAY_ID_TABLE`): a display ID and a word, the ID-table entry
 //!   `(cmap << 7) & 0xffff80 | ((planes - 1) & 0xf) << 3 | lum << 2 | grey << 1`
 //!   (established layout; the same word the X server stores through the XMAP's
 //!   indirect registers 0x118 (index) and 0x11c (data), which `indirect` takes
