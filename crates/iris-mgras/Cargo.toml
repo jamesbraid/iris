@@ -37,6 +37,7 @@ cranelift-module = { version = "0.134", optional = true }
 cranelift-native = { version = "0.134", optional = true }
 
 [dev-dependencies]
+sgi-engine = { path = "../sgi-engine", features = ["conformance"] }
 blake3 = "1"
 
 [[example]]
