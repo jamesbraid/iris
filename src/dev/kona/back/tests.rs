@@ -354,6 +354,21 @@ fn a_poisoned_tile_scheduler_makes_the_board_dead() {
     assert!(why.contains("tile worker"), "{why}");
 }
 
+/// A reset forgets a worker's panic: the board is not dead after it.
+#[test]
+fn a_reset_clears_a_poisoned_tile_scheduler() {
+    let mut b = KonaBackend::new(test_cfg().with_pool(2, 32));
+    use super::tiles::{ClearJob, RasterJob};
+    let full = Rect { x0: 0, y0: 0, x1: 64, y1: 64 };
+    let state = b.tiles().state(raster::DrawState { clip: full, colour: [77, 0], colours: 1, ..Default::default() });
+    let req = raster::ClearReq { rect: full, colour: Some(1), ..Default::default() };
+    let _ = b.tiles().submit(RasterJob::Clear(ClearJob { req, state }));
+    b.drain();
+    assert!(b.is_poisoned());
+    b.reset();
+    assert!(!b.is_poisoned());
+}
+
 /// The placement's word 9 and the enable in word 10 become the draw state's
 /// ownership test: off with the enable clear; encoded as the board does when set;
 /// a word in none of the ranges is encoded as the ordinary pair and counted.

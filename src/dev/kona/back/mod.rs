@@ -771,6 +771,9 @@ impl KonaBackend {
         self.swaps.clear();
         // Jobs queued before the reset finish first: they write the store it clears.
         self.drain();
+        if let Some(t) = &mut self.tiles {
+            t.clear_poison();
+        }
         // SAFETY: the tiles are drained, and nothing draws until the reset returns.
         self.store.apply(StoreOp::Reset(unsafe { Drained::assume() }));
         self.textport.reset();
