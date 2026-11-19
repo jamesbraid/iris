@@ -1,34 +1,9 @@
-use super::board::BoardSnapshot;
 #[cfg(test)]
 use super::board::{ODSY_HEIGHT, ODSY_WIDTH};
-use super::display_fifo::DisplayFifoSnapshot;
-use super::interface::HostInterfaceSnapshot;
-use super::reader::DisplayRegsSnapshot;
+use super::state::ODYSSEY_STATE_MAX_BYTES;
 use super::Odyssey;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-
-const ODYSSEY_SNAPSHOT_VERSION: u32 = 1;
-const ODYSSEY_STATE_MAX_BYTES: usize = 16 << 20;
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OdysseyMetadata {
-    version: u32,
-    board: String,
-    memory_bytes: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-struct OdysseyState {
-    version: u32,
-    board: BoardSnapshot,
-    front: HostInterfaceSnapshot,
-    display_fifo: DisplayFifoSnapshot,
-    display_regs: DisplayRegsSnapshot,
-    line_phase: u32,
-}
 
 fn pack_bytes(bytes: &[u8]) -> Result<Vec<u32>, String> {
     let len = u32::try_from(bytes.len())
@@ -78,21 +53,6 @@ fn pack_vram(words: &[u64], bytes: u64) -> Result<Vec<u32>, String> {
     Ok(packed)
 }
 
-fn decode_state(bytes: &[u8]) -> Result<OdysseyState, String> {
-    if bytes.len() > ODYSSEY_STATE_MAX_BYTES {
-        return Err(format!(
-            "VPro state is {} bytes, maximum is {ODYSSEY_STATE_MAX_BYTES}",
-            bytes.len()
-        ));
-    }
-    let (state, rest) =
-        postcard::take_from_bytes(bytes).map_err(|e| format!("decode VPro state: {e}"))?;
-    if !rest.is_empty() {
-        return Err(format!("VPro state has {} trailing bytes", rest.len()));
-    }
-    Ok(state)
-}
-
 impl Odyssey {
     /// Architectural state and VRAM split into named word streams. The
     /// board and raster workers must already be stopped.
@@ -100,70 +60,21 @@ impl Odyssey {
         if self.running.load(Ordering::Acquire) {
             return Err("VPro workers must be stopped before taking a snapshot".into());
         }
-        if self.state.fifo.level() != 0 {
-            return Err("VPro command FIFO is not empty".into());
-        }
-        if let Some(error) = self.state.shared.gpu_fault.lock().as_ref() {
-            return Err(format!("VPro GPU raster unit is faulted: {error}"));
-        }
-        self.state.with_stopped_board(|board| {
-            board.gpu_sync_result(super::gpu_unit::Observation::Snapshot)
+        let (metadata, state) = self.state.snapshot_state(false)?;
+        let vram = self.state.with_stopped_board(|board| {
+            let bytes = board.vram.size();
+            pack_vram(board.vram.ptr_shared().words_at(0, bytes), bytes)
         })?;
-        if let Some(error) = self.state.shared.gpu_fault.lock().as_ref() {
-            return Err(format!("VPro GPU raster unit is faulted: {error}"));
-        }
-        let (board_name, memory_bytes, board, vram, line_phase) =
-            self.state.with_stopped_board(|board| {
-                let memory_bytes = board.vram.size();
-                let memory = board.vram.ptr_shared();
-                let vram = pack_vram(memory.words_at(0, memory_bytes), memory_bytes)?;
-                Ok::<_, String>((
-                    board.widget.product.clone(),
-                    memory_bytes,
-                    BoardSnapshot::capture(board)?,
-                    vram,
-                    board.snapshot_line_phase()?,
-                ))
-            })?;
-        let state = OdysseyState {
-            version: ODYSSEY_SNAPSHOT_VERSION,
-            board,
-            front: self.state.front.lock().snapshot(),
-            display_fifo: self.state.display_fifo.lock().snapshot(),
-            display_regs: DisplayRegsSnapshot::capture(&self.state.shared.regs),
-            line_phase,
-        };
-        let state = postcard::to_allocvec(&state).map_err(|e| format!("encode VPro state: {e}"))?;
-        let metadata = toml::to_string(&OdysseyMetadata {
-            version: ODYSSEY_SNAPSHOT_VERSION,
-            board: board_name,
-            memory_bytes,
-        })
-        .map_err(|e| format!("encode VPro snapshot metadata: {e}"))?;
-        Ok((
-            metadata,
-            vec![("state".into(), pack_bytes(&state)?), ("vram".into(), vram)],
-        ))
+        Ok((metadata, vec![("state".into(), pack_bytes(&state)?), ("vram".into(), vram)]))
     }
 
     /// Restore a complete VPro snapshot after the machine's power-on reset.
     /// Every named payload is decoded and validated before live state changes.
-    pub fn restore_snapshot_parts(
-        &self,
-        metadata: &str,
-        parts: &[(String, Vec<u32>)],
-    ) -> Result<(), String> {
+    pub fn restore_snapshot_parts(&self, metadata: &str, parts: &[(String, Vec<u32>)]) -> Result<(), String> {
         if self.running.load(Ordering::Acquire) {
             return Err("VPro workers must be stopped before restoring a snapshot".into());
         }
-        let metadata: OdysseyMetadata =
-            toml::from_str(metadata).map_err(|e| format!("decode VPro snapshot metadata: {e}"))?;
-        if metadata.version != ODYSSEY_SNAPSHOT_VERSION {
-            return Err(format!(
-                "VPro snapshot version {} is not supported",
-                metadata.version
-            ));
-        }
+        let metadata = self.state.check_metadata(metadata, false)?;
         let mut named = HashMap::with_capacity(parts.len());
         for (name, words) in parts {
             if named.insert(name.as_str(), words.as_slice()).is_some() {
@@ -171,96 +82,29 @@ impl Odyssey {
             }
         }
         if named.len() != 2 {
-            return Err(format!(
-                "VPro snapshot has {} parts, expected 2",
-                named.len()
-            ));
+            return Err(format!("VPro snapshot has {} parts, expected 2", named.len()));
         }
-        let state_words = named
-            .remove("state")
-            .ok_or("VPro snapshot part state is missing")?;
-        let vram_words = named
-            .remove("vram")
-            .ok_or("VPro snapshot part vram is missing")?;
+        let state_words = named.remove("state").ok_or("VPro snapshot part state is missing")?;
+        let vram_words = named.remove("vram").ok_or("VPro snapshot part vram is missing")?;
         if let Some(name) = named.keys().next() {
             return Err(format!("unknown VPro snapshot part {name}"));
         }
-        let state = decode_state(&unpack_bytes("state", state_words)?)?;
-        if state.version != ODYSSEY_SNAPSHOT_VERSION {
-            return Err(format!(
-                "VPro state version {} is not supported",
-                state.version
-            ));
-        }
+        let state = unpack_bytes("state", state_words)?;
         let vram = unpack_bytes("vram", vram_words)?;
-        self.state.with_stopped_board(|board| {
-            if metadata.board != board.widget.product {
-                return Err(format!(
-                    "VPro snapshot is for {}, running board is {}",
-                    metadata.board, board.widget.product
-                ));
-            }
-            if metadata.memory_bytes != board.vram.size() {
-                return Err(format!(
-                    "VPro snapshot has {} bytes of memory, running board has {}",
-                    metadata.memory_bytes,
-                    board.vram.size()
-                ));
-            }
-            if vram.len() as u64 != metadata.memory_bytes {
-                return Err(format!(
-                    "VPro VRAM part is {} bytes, expected {}",
-                    vram.len(),
-                    metadata.memory_bytes
-                ));
-            }
-            state.board.validate(board)
-        })?;
-        let current_identity = self.state.front.lock().identity;
-        state.front.validate(current_identity)?;
-        state.display_fifo.validate()?;
-        state.display_regs.validate()?;
-
-        let OdysseyState {
-            board,
-            front,
-            display_fifo,
-            display_regs,
-            line_phase,
-            ..
-        } = state;
-        self.state.with_stopped_board(|running| {
+        if vram.len() as u64 != metadata.memory_bytes {
+            return Err(format!("VPro VRAM part is {} bytes, expected {}", vram.len(), metadata.memory_bytes));
+        }
+        self.state.restore_state(&state, |running| {
             let ptr = running.vram.ptr_shared();
             for (index, bytes) in vram.chunks(64 << 10).enumerate() {
                 let mut words = Vec::with_capacity(bytes.len() / 8);
                 for word in bytes.chunks_exact(8) {
-                    words.push(u64::from_ne_bytes(
-                        word.try_into().expect("eight-byte VRAM word"),
-                    ));
+                    words.push(u64::from_ne_bytes(word.try_into().expect("eight-byte VRAM word")));
                 }
                 ptr.write_words_untracked((index * (64 << 10)) as u64, &words);
             }
             ptr.mark_written();
-            running.restore_snapshot(board)?;
-            running.restore_raster_snapshot(line_phase)
-        })?;
-        self.state.front.lock().restore_snapshot(front)?;
-        self.state
-            .display_fifo
-            .lock()
-            .restore_snapshot(display_fifo)?;
-        self.state.shared.regs.restore_snapshot(display_regs)?;
-        let gpu_enabled = self.state.with_stopped_board(|board| board.gpu_unit());
-        self.state.shared.covered.store(
-            if gpu_enabled {
-                self.state.fifo.pushed()
-            } else {
-                u64::MAX
-            },
-            Ordering::Release,
-        );
-        self.state.shared.swaps.fetch_add(1, Ordering::Release);
-        Ok(())
+        })
     }
 }
 
@@ -285,7 +129,7 @@ mod tests {
             ram.dma_view(),
             crate::status::MachineStatus::detached(),
             (2, 32),
-            (crate::config::RasterUnit::Cpu, "auto"),
+            None,
         )
         .expect("VPro board")
     }
@@ -512,6 +356,13 @@ mod tests {
             crate::clock::Clock::new(),
         ));
         let ram = Arc::new(HeartRam::try_new([128, 0, 0, 0]).expect("ram"));
+        let gpu = match crate::wgpu::Gpu::standalone(&Default::default()) {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                eprintln!("skipped: {error}");
+                return;
+            }
+        };
         let vpro = match Odyssey::new(
             11,
             "v6",
@@ -519,7 +370,7 @@ mod tests {
             ram.dma_view(),
             crate::status::MachineStatus::detached(),
             (2, 32),
-            (crate::config::RasterUnit::Wgpu, "auto"),
+            Some(gpu),
         ) {
             Ok(vpro) => vpro,
             Err(error) => {
