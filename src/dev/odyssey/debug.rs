@@ -31,7 +31,7 @@ use super::frame::Frame;
 use super::reader::DisplayRegs;
 use super::vram::{VramPtr, UNIT};
 use super::record::Recorder;
-use super::trace::trace_mask;
+use super::trace::{begin_name, trace_mask};
 use super::Odyssey;
 use super::assembly::CLIP_PLANES;
 
@@ -117,12 +117,6 @@ fn arg_or(args: &[&str], i: usize, what: &str, default: u64) -> Result<u64, Stri
         Some(_) => arg(args, i, what),
         None => Ok(default),
     }
-}
-
-/// A primitive type's name.
-pub(super) fn begin_name(mode: u32) -> &'static str {
-    const NAMES: [&str; 10] = ["POINTS", "LINES", "LINE_LOOP", "LINE_STRIP", "TRIANGLES", "TRIANGLE_STRIP", "TRIANGLE_FAN", "QUADS", "QUAD_STRIP", "POLYGON"];
-    NAMES.get(mode as usize).copied().unwrap_or("?")
 }
 
 fn f32s(bits: &[u32]) -> String {
