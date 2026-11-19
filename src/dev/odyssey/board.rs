@@ -1242,7 +1242,10 @@ impl Board {
         self.vram = match lent {
             Some((ptr, lent)) if lent == bytes => {
                 // SAFETY: `Board::new_lent`'s contract.
-                unsafe { super::vram::Vram::lent(ptr, bytes) }
+                let mut vram = unsafe { super::vram::Vram::lent(ptr, bytes) };
+                // The shell watches what the board writes into it.
+                vram.report_dirty();
+                vram
             }
             Some((_, lent)) => return Err(format!("the product has {bytes} bytes of board memory, not the {lent} lent")),
             None => super::vram::Vram::new(bytes),
