@@ -304,6 +304,19 @@ fn main() {
             Err(x) => println!("lend failed: {x}"),
         }
     }
+    if let Some(g) = &gpu {
+        // The same frame composed into a buffer of this device with a stride wider than the frame.
+        let (w, h, copy) = e.compose();
+        let stride = w + 16;
+        let dst = g.buffer("replay compose_into", stride as u64 * h as u64 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+        let size = sgi_engine::BoardEngine::compose_into(&mut e, 0, &dst, stride).expect("compose_into");
+        let mut bytes = vec![0u8; stride as usize * h as usize * 4];
+        g.read(&dst, &[(0, bytes.len() as u64)], &mut bytes).expect("read back");
+        let words: &[u32] = bytemuck::cast_slice(&bytes);
+        let rgb = |p: u32| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff);
+        let same = (0..h as usize).map(|y| (0..w as usize).filter(|&x| words[y * stride as usize + x] == rgb(copy[y * w as usize + x])).count()).sum::<usize>();
+        println!("compose_into {size:?}: {same} of {} words equal the copy, stride {stride}, generation {}", w as usize * h as usize, sgi_engine::BoardEngine::frame_generation(&e, 0));
+    }
     let (w, h, words) = e.compose();
     println!("compose (waits for the drawing still queued, then reads the frame): {:.3} s", c0.elapsed().as_secs_f64());
     if let Some(p) = &outp {

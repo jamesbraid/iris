@@ -174,6 +174,8 @@ pub struct KonaEngine<M: HostMem> {
     fault: Arc<Mutex<Option<String>>>,
     /// The widget the shell was last told, and who tells it.
     widget: (Option<u8>, Option<Box<dyn Fn(u8) + Send>>),
+    /// Moves with every store, push, frame, load and reset (`frame_generation`).
+    activity: u64,
     _mem: std::marker::PhantomData<M>,
 }
 
@@ -206,6 +208,7 @@ impl<M: HostMem> KonaEngine<M> {
             parked: false,
             fault: Arc::new(Mutex::new(None)),
             widget: (None, opts.dma_widget),
+            activity: 0,
             _mem: std::marker::PhantomData,
         };
         engine.report_widget();
@@ -410,6 +413,7 @@ impl<M: HostMem> KonaEngine<M> {
             self.settle(false, self.core.packets, self.credits.last);
             host.with_front(|f| ((), f.lowater()));
         }
+        self.activity += (ran != 0) as u64;
         self.notice_fault();
         self.report_widget();
         ran
@@ -489,16 +493,36 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         Ok((w != 0 && h != 0).then_some((w, h)))
     }
 
+    fn frame_generation(&self, head: u32) -> u64 {
+        if head != 0 {
+            return 0;
+        }
+        1 + self.activity
+    }
+
     #[cfg(feature = "wgpu")]
     fn lend_frame(&mut self, head: u32) -> Result<Option<sgi_engine::LentFrame>, Fault> {
         if head != 0 {
             return Ok(None);
         }
+        let generation = self.frame_generation(0);
         let lent = KonaEngine::lend_frame(self).map_err(Fault)?;
-        Ok(lent.map(|f| sgi_engine::LentFrame { width: f.width, height: f.height, stride: f.width, words: sgi_engine::FrameWords::Abgr, generation: 0, buffer: Arc::new(f.buffer) }))
+        Ok(lent.map(|f| sgi_engine::LentFrame { width: f.width, height: f.height, stride: f.width, words: sgi_engine::FrameWords::Abgr, generation, buffer: Arc::new(f.buffer) }))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn compose_into(&mut self, head: u32, dst: &dyn std::any::Any, stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
+        if head != 0 {
+            return Ok(None);
+        }
+        if let Some(f) = self.fault_now() {
+            return Err(Fault(f));
+        }
+        self.back.compose_into(dst, stride_words).map_err(Fault)
     }
 
     fn write(&mut self, off: u32, bits: u32, val: u64) -> Write {
+        self.activity += 1;
         if self.dead() {
             return Write::Fault;
         }
@@ -517,6 +541,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
 
     /// Each word is a 4-byte store at `port`, and takes a credit when the source is charged.
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize {
+        self.activity += 1;
         if self.dead() {
             return 0;
         }
@@ -571,6 +596,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
     }
 
     fn frame(&mut self, _now_ns: u64) {
+        self.activity += 1;
         self.back.frame();
     }
 
@@ -661,6 +687,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
     }
 
     fn load(&mut self, src: &mut dyn StateSource) -> Result<(), Refused> {
+        self.activity += 1;
         self.need_parked()?;
         let bad = Refused::Mismatch;
         let next = |src: &mut dyn StateSource| src.next().map_err(|e| bad(e.0));
@@ -742,6 +769,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
 
     /// Power-on state. The flash and the configuration stay.
     fn reset(&mut self) -> Result<(), Refused> {
+        self.activity += 1;
         if !self.stream.is_empty() {
             return Err(Refused::NotQuiesced);
         }

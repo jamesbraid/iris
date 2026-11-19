@@ -326,14 +326,26 @@ impl GpuScanout {
     /// Bring the planes up to date, resolve the tables and compose; no
     /// readback. `word` is the colour word position of the main window.
     pub fn compose(&mut self, store: &Store, word: usize, map: &ColourMap, tables: &Baked) -> Result<(), String> {
+        let (w, h) = self.prepare(store, word, map, tables)?;
+        self.scanout.compose(&self.pipeline, w, h, bytemuck::cast_slice(&self.slot), &[&self.group])
+    }
+
+    /// As `compose`, into `dst` as 0x00RRGGBB words of `stride_words` a row (`Scanout::compose_into`).
+    pub fn compose_into(&mut self, store: &Store, word: usize, map: &ColourMap, tables: &Baked, dst: &wgpu::Buffer, stride_words: u32) -> Result<(u32, u32), String> {
+        let (w, h) = self.prepare(store, word, map, tables)?;
+        self.scanout.compose_into(&self.pipeline, w, h, bytemuck::cast_slice(&self.slot), &[&self.group], dst, stride_words)?;
+        Ok((w, h))
+    }
+
+    /// Bring the planes up to date and build the slot; the frame's size.
+    fn prepare(&mut self, store: &Store, word: usize, map: &ColourMap, tables: &Baked) -> Result<(u32, u32), String> {
         if (store.cpu().width() as usize, store.cpu().height() as usize) != (self.planes.w, self.planes.h) {
             return Err("the managed area changed size".into());
         }
         let positions = [word, word + 1, DID_PLANE, OVERLAY0_PLANE, OVERLAY1_PLANE, POPUP_PLANE];
         self.planes.upload(&self.gpu, store, positions, needs(tables));
         self.build(map, tables);
-        let (w, h) = (self.planes.w as u32, self.planes.h as u32);
-        self.scanout.compose(&self.pipeline, w, h, bytemuck::cast_slice(&self.slot), &[&self.group])
+        Ok((self.planes.w as u32, self.planes.h as u32))
     }
 
     /// Read the last composed frame into `out`, rows of the managed width.
