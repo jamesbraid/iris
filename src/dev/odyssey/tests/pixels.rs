@@ -224,13 +224,23 @@ fn read_word4(class: u32, code: u32) -> u32 {
 /// `word4` at `bytes` bytes a pixel, into a guest page pre-filled with
 /// 0xa5 guard bytes. Returns the 64 bytes at the start of the page.
 fn dma_read(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: u32, bytes: u32) -> Vec<u8> {
+    dma_read_from(s, ram, dma::SENTINEL_READ, (x, y, w), word4, bytes)
+}
+
+/// The same from the source word 0 `from` names: a sentinel, or a board address.
+fn dma_read_from(s: &mut Board, ram: &Ram, from: u32, (x, y, w): (u32, u32, u32), word4: u32, bytes: u32) -> Vec<u8> {
+    dma_read_coded(s, ram, from, (x, y, w), word4, bytes, 0)
+}
+
+/// The same with the source code in word 7's low bits.
+fn dma_read_coded(s: &mut Board, ram: &Ram, from: u32, (x, y, w): (u32, u32, u32), word4: u32, bytes: u32, code: u32) -> Vec<u8> {
     let bpp_code = DMA_BPP.iter().position(|&b| b as u32 == bytes).expect("a size the header can name") as u32;
 
     ram.put(PAGE_A, &[0xa5; 64]);
     put_table(
         ram,
         TABLE,
-        [dma::SENTINEL_READ, y << 16 | x, 0x50, 1 << 16 | w, word4, 0, w * bytes, dma::TO_HOST | bpp_code << 16],
+        [from, y << 16 | x, 0x50, 1 << 16 | w, word4, 0, w * bytes, dma::TO_HOST | bpp_code << 16 | code],
         &[pte(PAGE_A, w * bytes)],
     );
     descriptor(s, TABLE);
@@ -352,6 +362,42 @@ fn a_colour_index_read_returns_the_index() {
     s.regs().set_dispmode((0) as usize, ODSY_GAMMA_GROUP << dispmode::GROUP_SHIFT);
     let got = dma_read(&mut s, &ram, (30, 40, 1), read_word4(0, 1), 1);
     assert_eq!(got[..2], [0xa5, 0xa5], "the red byte of 0xa55a3cff");
+}
+
+/// The X server's GetImage reads the window's frame buffer by address, not by the read sentinel
+/// (odsy software/xsgi/odyssey-so-reads.md, odsyReadImage, established), and a colour-index window
+/// has to give its indices: the read takes the display mode of the pixel's window id, as a drawable
+/// read does, instead of being refused for naming board memory.
+#[test]
+fn an_index_read_at_the_screens_address_returns_the_index() {
+    let (mut s, ram) = read_window();
+    let screen = s.pbj(crate::dev::odyssey::frame::pbj::PIXEL_BASE);
+    pixel_write(&mut s, 31, 40, 0x2a);
+    s.regs().set_dispmode((0) as usize, 0);
+    let got = dma_read_from(&mut s, &ram, screen, (31, 40, 1), read_word4(0, 1), 1);
+    assert_eq!(got[..2], [0x2a, 0xa5], "an index window gives its index");
+}
+
+/// An index read of the screen by address follows the display mode of the window id under the
+/// pixel, as a sentinel read does: with an index group the byte comes back whole (the one-component
+/// field word 4 names would load 0xff as 0xffffffff, which is not an 8-bit index and was refused),
+/// and with an RGB mode the page keeps its guard bytes. odsy software/xsgi/odyssey-so-reads.md
+/// (odsyReadImage, an address read, established); the mode's effect on the read is a software
+/// expectation, as for the drawable read.
+#[test]
+fn an_index_read_of_the_screen_follows_the_display_mode_of_the_id_under_the_pixel() {
+    let (mut s, ram) = read_window();
+    let screen = s.pbj(crate::dev::odyssey::frame::pbj::PIXEL_BASE);
+    s.regs().set_dispmode(0, 0x004b_5f10);
+    // The mode's index field: unit 6, two bytes, the index in its low bits.
+    let field = Field { at: 6, codec: Codec::Texel { bytes: 2, field: crate::dev::odyssey::field::FIELD_INDEX } };
+    Rows::new(s.vram_ptr(), View::colour(&Surface::new(screen, 80, 4), field, MAX_DIM)).store_word(31, 40, 0xff);
+    let got = dma_read_coded(&mut s, &ram, screen, (31, 40, 1), 0x8333_1008, 1, 0x41);
+    assert_eq!(got[..2], [0xff, 0xa5], "an index window gives its index byte");
+
+    s.regs().set_dispmode(0, ODSY_GAMMA_GROUP << dispmode::GROUP_SHIFT);
+    let got = dma_read_coded(&mut s, &ram, screen, (31, 40, 1), 0x8333_1008, 1, 0x41);
+    assert_eq!(got[..2], [0xa5, 0xa5], "an RGB mode is not an index read");
 }
 
 /// A GL image write by DMA to the draw drawable: the table at `TABLE` names

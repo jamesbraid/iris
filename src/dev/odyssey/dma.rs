@@ -236,13 +236,16 @@ impl Board {
                 _ => None,
             }
         };
+        // A read at the screen's own address (the X server's GetImage) holds its colour the same
+        // way: by the display mode of the window id under the pixel.
+        let screen_read = !drawable && read && addr == self.pbj(super::frame::pbj::PIXEL_BASE);
         let codec = |at: u8| {
             let named = if let Some(field) = one_or_two {
                 super::field::Codec::Texel { bytes: 2, field }
             } else {
                 super::copy::source_codec(bytes, fmt & 0xff)
             };
-            if drawable && read {
+            if (drawable || screen_read) && read {
                 return self.drawable_codec(origin.0, origin.1, at).filter(|c| super::copy::codec_bytes(*c) == bytes).unwrap_or(named);
             }
             match [layout.front, layout.back].into_iter().find(|f| selected && f.at == at && (super::copy::codec_bytes(f.codec) == bytes || !fits)) {
