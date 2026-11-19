@@ -29,7 +29,7 @@ typedef struct IrisKonaConfig {
     uint32_t probe;             /* the value the probe register reads */
     uint32_t managed_width;     /* the managed area in pixels; 0: 1280 by 1024 */
     uint32_t managed_height;
-    uint32_t pool_threads;      /* tile workers; 0: draw on the caller's thread */
+    uint32_t pool_threads;      /* tile workers, at most 256; 0: draw on the caller's thread */
     uint32_t pool_tile;         /* tile size in pixels */
     /* The boards. NULL or "" takes the product's own; the display generator's own is the
      * DG5-8, or the DG5-2 behind a host board. */

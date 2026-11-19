@@ -89,6 +89,11 @@ fn the_boards_are_inputs_and_what_a_product_cannot_have_is_refused() {
     let other = [bogus.as_ptr()];
     (rack.parts, rack.num_parts) = (other.as_ptr(), 1);
     assert!(!builds(&rack), "the chain holds no part but the Ktown");
+    let twice = [ktown.as_ptr(), ktown.as_ptr()];
+    (rack.parts, rack.num_parts) = (twice.as_ptr(), 2);
+    assert!(!builds(&rack), "a part listed twice, which the chain's one-wire search would never finish");
+    (rack.parts, rack.num_parts) = (null(), u32::MAX);
+    assert!(!builds(&rack), "a count with no list is refused before a list the size of the count is built");
     let mut two = config(ir2.as_ptr());
     (two.geometry, two.pixel_depth) = (ge14_2.as_ptr(), medium.as_ptr());
     assert!(builds(&two), "a two-engine geometry board and medium pixels");
@@ -140,6 +145,13 @@ fn the_constructor_refuses_what_it_cannot_build() {
     let mut c = config(ir2.as_ptr());
     c.rm_count = 3;
     assert!(unsafe { sgi_kona_new(&c, &host()) }.is_null(), "a pipe holds one or two raster managers");
+    let mut c = config(ir2.as_ptr());
+    c.pool_threads = u32::MAX;
+    assert!(unsafe { sgi_kona_new(&c, &host()) }.is_null(), "a thread for every worker asked for");
+    let mut c = config(ir2.as_ptr());
+    c.managed_width = 1 << 20;
+    c.managed_height = 1 << 20;
+    assert!(unsafe { sgi_kona_new(&c, &host()) }.is_null(), "a managed area past the largest drawable");
     let mut c = config(ir2.as_ptr());
     c.widget = 16;
     assert!(unsafe { sgi_kona_new(&c, &host()) }.is_null(), "a widget number is four bits");
