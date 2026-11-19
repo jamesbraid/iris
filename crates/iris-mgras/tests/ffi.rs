@@ -4,13 +4,14 @@
 
 mod support;
 
-use std::ffi::{c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::ptr::null_mut;
 
 use iris_mgras::dev::mgras::engine::{Mode, Region};
 use iris_mgras::dev::mgras::pixmem::Kind;
 use iris_mgras::ffi::*;
-use iris_mgras::interface::{VecSource, decode_chunks, encode_chunks, BoardEngine, Event, Fault, Pump, Read, Refused, StateSink, StateSource, Write};
+use sgi_engine::ffi::*;
+use sgi_engine::{BoardEngine, Chunk, Event, Fault, Idle, Pump, Read, Refused, StallOn, StateSink, StateSource, VecSource, Write};
 use support::*;
 
 unsafe extern "C" fn ram_read(user: *mut c_void, addr: u64, buf: *mut u8, len: usize, _: u32) -> c_int {
@@ -27,16 +28,46 @@ unsafe extern "C" fn ram_write(user: *mut c_void, addr: u64, buf: *const u8, len
 
 /// The C ABI as a `BoardEngine`.
 struct CEngine {
-    h: *mut IrisMgras,
+    h: *mut IrisEngine,
     mem: Box<Mem>,
+}
+
+fn mgras_config(board: u32, mode: u32) -> IrisMgrasConfig {
+    IrisMgrasConfig {
+        common: IrisEngineConfig {
+            abi_version: IRIS_ENGINE_ABI_VERSION,
+            struct_size: std::mem::size_of::<IrisMgrasConfig>() as u32,
+            mode,
+            queue_ops: 4096,
+            gpu: 0,
+            gpu_backend: std::ptr::null(),
+            lent_ptr: null_mut(),
+            lent_len: 0,
+            reserved: [0; 4],
+        },
+        board,
+        flags: 1,
+        jit: 0,
+    }
+}
+
+fn host_of(mem: &Mem) -> IrisEngineHost {
+    IrisEngineHost {
+        abi_version: IRIS_ENGINE_ABI_VERSION,
+        struct_size: std::mem::size_of::<IrisEngineHost>() as u32,
+        user: mem as *const Mem as *mut c_void,
+        ram_read: Some(ram_read),
+        ram_write: Some(ram_write),
+        bus_read: None,
+        bus_write: None,
+        notify: None,
+    }
 }
 
 impl CEngine {
     fn new(board: u32, mode: u32) -> CEngine {
         let mem = Box::new(Mem::default());
-        let cfg = IrisMgrasConfig { abi_version: IRIS_MGRAS_ABI_VERSION, board, flags: 1, mode, queue_ops: 4096, jit: 0 };
-        let ops = IrisMgrasMemOps { ram_read: Some(ram_read), ram_write: Some(ram_write), bus_read: None, bus_write: None };
-        let h = unsafe { iris_mgras_new(&cfg, &ops, &*mem as *const Mem as *mut c_void, None, null_mut()) };
+        let h = unsafe { iris_mgras_new(&mgras_config(board, mode), &host_of(&mem)) };
         assert!(!h.is_null());
         CEngine { h, mem }
     }
@@ -44,65 +75,97 @@ impl CEngine {
 
 impl Drop for CEngine {
     fn drop(&mut self) {
-        unsafe { iris_mgras_free(self.h) };
+        unsafe { iris_engine_free(self.h) };
     }
 }
 
 fn status(c: c_int) -> Result<(), Fault> {
-    if c == IRIS_MGRAS_OK { Ok(()) } else { Err(Fault(format!("status {c}"))) }
+    if c == IRIS_ENGINE_OK { Ok(()) } else { Err(Fault(format!("status {c}"))) }
+}
+
+fn idle_of(i: &IrisEngineIdle) -> Idle {
+    match i.state {
+        IRIS_ENGINE_IDLE => Idle::Yes,
+        IRIS_ENGINE_WORKING => Idle::Working,
+        IRIS_ENGINE_STALLED_FRAME => Idle::Stalled(StallOn::Frame),
+        IRIS_ENGINE_STALLED_TIME => Idle::Stalled(StallOn::Time(i.stall_time)),
+        _ => Idle::Faulted,
+    }
+}
+
+fn refusal(c: c_int, h: *mut IrisEngine) -> Refused {
+    let why = unsafe { iris_engine_last_error(h) };
+    let why = if why.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(why) }.to_string_lossy().into_owned() };
+    match c {
+        IRIS_ENGINE_NOT_QUIESCED => Refused::NotQuiesced,
+        IRIS_ENGINE_MIDWAY => Refused::Midway(why),
+        IRIS_ENGINE_MISMATCH => Refused::Mismatch(why),
+        _ => Refused::Faulted(why),
+    }
 }
 
 impl BoardEngine for CEngine {
     type Region = Region;
 
     fn write(&mut self, off: u32, bits: u32, val: u64) -> Write {
-        match unsafe { iris_mgras_write(self.h, off, bits, val) } {
-            IRIS_MGRAS_OK => Write::Done,
-            IRIS_MGRAS_BUSY => Write::Busy,
+        match unsafe { iris_engine_write(self.h, off, bits, val) } {
+            IRIS_ENGINE_OK => Write::Done,
+            IRIS_ENGINE_BUSY => Write::Busy,
             _ => Write::Fault,
         }
     }
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize {
-        unsafe { iris_mgras_push_words(self.h, port, words.as_ptr(), words.len()) }
+        unsafe { iris_engine_push_words(self.h, port, words.as_ptr(), words.len()) }
     }
     fn read(&mut self, off: u32, bits: u32) -> Read {
         let mut v = 0;
-        match unsafe { iris_mgras_read(self.h, off, bits, &mut v) } {
-            IRIS_MGRAS_OK => Read::Value(v),
-            IRIS_MGRAS_BUSY => Read::Busy,
+        match unsafe { iris_engine_read(self.h, off, bits, &mut v) } {
+            IRIS_ENGINE_OK => Read::Value(v),
+            IRIS_ENGINE_BUSY => Read::Busy,
             _ => Read::Fault,
         }
     }
     fn run(&mut self, max_ops: usize) -> usize {
-        unsafe { iris_mgras_run(self.h, max_ops) }
+        unsafe { iris_engine_run(self.h, max_ops) }
     }
     fn advance(&mut self, now_ns: u64) -> Pump {
-        let mut p = IrisMgrasPump::default();
-        unsafe { iris_mgras_advance(self.h, now_ns, &mut p) };
-        Pump { idle: p.idle != 0, events: p.events != 0, next_deadline: (p.has_deadline != 0).then_some(p.next_deadline) }
+        let mut p = IrisEnginePump::default();
+        unsafe { iris_engine_advance(self.h, now_ns, &mut p) };
+        Pump { idle: idle_of(&p.idle), events: p.events != 0, next_deadline: (p.has_deadline != 0).then_some(p.next_deadline), irq_levels: p.irq_levels }
     }
-    fn wait_idle(&mut self, now_ns: u64, budget_ns: u64) -> bool {
-        unsafe { iris_mgras_wait_idle(self.h, now_ns, budget_ns) == 1 }
+    fn wait_idle(&mut self, now_ns: u64, budget_ns: u64) -> Idle {
+        let mut i = IrisEngineIdle::default();
+        unsafe { iris_engine_wait_idle(self.h, now_ns, budget_ns, &mut i) };
+        idle_of(&i)
     }
-    fn drain_events(&mut self, out: &mut Vec<Event>) {
-        let mut buf: Vec<IrisMgrasEvent> = Vec::with_capacity(8);
-        loop {
-            let n = unsafe { iris_mgras_drain_events(self.h, buf.as_mut_ptr(), 8) };
+    fn irq_levels(&self) -> u64 {
+        unsafe { iris_engine_irq_levels(self.h) }
+    }
+    fn drain_events(&mut self, out: &mut Vec<Event>, max: usize) {
+        let mut buf: Vec<IrisEngineEvent> = Vec::with_capacity(8);
+        let mut left = max;
+        while left > 0 {
+            let want = left.min(8);
+            let n = unsafe { iris_engine_drain_events(self.h, buf.as_mut_ptr(), want) };
             unsafe { buf.set_len(n) };
+            left -= n;
             for e in buf.drain(..) {
                 out.push(match e.kind {
-                    IRIS_MGRAS_EVENT_FLAGS => Event::Flags,
-                    IRIS_MGRAS_EVENT_DAMAGE => Event::Damage(iris_mgras::display::Mark {
-                        store: e.store,
-                        planes: e.planes,
-                        rect: iris_mgras::display::Rect::new(e.x0, e.y0, e.x1, e.y1),
-                    }),
-                    IRIS_MGRAS_EVENT_NOTE => Event::Note(unsafe { std::ffi::CStr::from_ptr(e.text.as_ptr()) }.to_string_lossy().into()),
-                    IRIS_MGRAS_EVENT_BUS_FAULT => Event::BusFault { addr: e.store, write: e.write != 0 },
-                    _ => Event::DeviceFault(String::new()),
+                    IRIS_ENGINE_EVENT_IRQ => Event::Irq,
+                    IRIS_ENGINE_EVENT_DAMAGE => {
+                        let d = unsafe { e.data.damage };
+                        Event::Damage(sgi_engine::Mark { store: d.store, planes: d.planes, rect: sgi_engine::Rect::new(d.x0, d.y0, d.x1, d.y1) })
+                    }
+                    IRIS_ENGINE_EVENT_NOTE => Event::Note(unsafe { std::ffi::CStr::from_ptr(e.data.text.as_ptr()) }.to_string_lossy().into()),
+                    IRIS_ENGINE_EVENT_BUS_FAULT => {
+                        let b = unsafe { e.data.bus_fault };
+                        Event::BusFault { addr: b.addr, write: b.write != 0 }
+                    }
+                    IRIS_ENGINE_EVENT_DEVICE_FAULT => Event::DeviceFault(unsafe { std::ffi::CStr::from_ptr(e.data.text.as_ptr()) }.to_string_lossy().into()),
+                    k => panic!("event kind {k}"),
                 });
             }
-            if n < 8 {
+            if n < want {
                 return;
             }
         }
@@ -111,40 +174,71 @@ impl BoardEngine for CEngine {
         status(unsafe { iris_mgras_observe(self.h, &c_region(r)) })
     }
     fn access_waits(&self, off: u32, bits: u32, write: bool) -> bool {
-        unsafe { iris_mgras_access_waits(self.h, off, bits, write as u32) == 1 }
+        unsafe { iris_engine_access_waits(self.h, off, bits, write as u32) == 1 }
     }
     fn observe_all(&mut self) -> Result<(), Refused> {
-        status(unsafe { iris_mgras_observe_all(self.h) }).map_err(|e| Refused::Faulted(e.0))
+        match unsafe { iris_engine_observe_all(self.h) } {
+            IRIS_ENGINE_OK => Ok(()),
+            c => Err(refusal(c, self.h)),
+        }
     }
-    fn quiesce(&mut self) -> Result<(), Fault> {
-        status(unsafe { iris_mgras_quiesce(self.h) })
+    fn quiesce(&mut self, budget_ns: u64) -> Result<(), Refused> {
+        match unsafe { iris_engine_quiesce(self.h, budget_ns) } {
+            IRIS_ENGINE_OK => Ok(()),
+            c => Err(refusal(c, self.h)),
+        }
     }
     fn resume(&mut self) {
-        unsafe { iris_mgras_resume(self.h) };
+        unsafe { iris_engine_resume(self.h) };
     }
     fn save(&mut self, sink: &mut dyn StateSink) -> Result<(), Refused> {
-        status(unsafe { iris_mgras_save(self.h) }).map_err(|e| Refused::Faulted(e.0))?;
-        let mut buf = vec![0u8; unsafe { iris_mgras_state_len(self.h) }];
-        assert_eq!(unsafe { iris_mgras_state_copy(self.h, buf.as_mut_ptr(), buf.len()) }, buf.len());
-        for c in decode_chunks(&buf).expect("the C ABI's state is chunks") {
-            sink.put(c).unwrap();
+        // The sink is reached through a pointer to a fat pointer.
+        unsafe extern "C" fn put(user: *mut c_void, name: *const c_char, index: u64, bytes: *const u8, len: usize) -> c_int {
+            let sink = unsafe { &mut *(user as *mut &mut dyn StateSink) };
+            let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned();
+            let bytes = unsafe { std::slice::from_raw_parts(bytes, len) }.to_vec();
+            sink.put(Chunk { name, index, bytes }).is_err() as c_int
         }
-        Ok(())
+        let mut sink = sink;
+        match unsafe { iris_engine_save(self.h, Some(put), &mut sink as *mut &mut dyn StateSink as *mut c_void) } {
+            IRIS_ENGINE_OK => Ok(()),
+            c => Err(refusal(c, self.h)),
+        }
     }
     fn load(&mut self, src: &mut dyn StateSource) -> Result<(), Refused> {
-        let mut chunks = Vec::new();
-        while let Some(c) = src.next().unwrap() {
-            chunks.push(c);
+        struct Cur<'a>(&'a mut dyn StateSource, Vec<u8>);
+        unsafe extern "C" fn next(user: *mut c_void, c: *mut IrisEngineChunk) -> c_int {
+            let cur = unsafe { &mut *(user as *mut Cur) };
+            let Some(ch) = cur.0.next().unwrap() else { return 0 };
+            cur.1 = ch.bytes;
+            let c = unsafe { &mut *c };
+            for (d, b) in c.name.iter_mut().zip(ch.name.bytes().chain([0])) {
+                *d = b as c_char;
+            }
+            (c.index, c.bytes, c.len) = (ch.index, cur.1.as_ptr(), cur.1.len());
+            1
         }
-        let bytes = encode_chunks(&chunks).unwrap();
-        status(unsafe { iris_mgras_load(self.h, bytes.as_ptr(), bytes.len()) }).map_err(|e| Refused::Mismatch(e.0))
+        let mut cur = Cur(src, Vec::new());
+        match unsafe { iris_engine_load(self.h, Some(next), &mut cur as *mut Cur as *mut c_void) } {
+            IRIS_ENGINE_OK => Ok(()),
+            c => Err(refusal(c, self.h)),
+        }
+    }
+    fn state_version(&self) -> u32 {
+        unsafe { iris_engine_state_version(self.h) }
     }
     fn reset(&mut self) -> Result<(), Refused> {
-        status(unsafe { iris_mgras_reset(self.h) }).map_err(|e| Refused::Faulted(e.0))
+        match unsafe { iris_engine_reset(self.h) } {
+            IRIS_ENGINE_OK => Ok(()),
+            c => Err(refusal(c, self.h)),
+        }
     }
     fn fault(&self) -> Option<String> {
-        let p = unsafe { iris_mgras_fault(self.h) };
+        let p = unsafe { iris_engine_fault(self.h) };
         (!p.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into())
+    }
+    fn fail(&self, _: &str) {
+        unreachable!("the C ABI has no entry that stops the engine from outside");
     }
 }
 
@@ -154,14 +248,14 @@ fn c_region(r: &Region) -> IrisMgrasRegion {
 }
 
 /// The pixels of the window the sphere draws in, through the C ABI.
-fn window(h: *mut IrisMgras, drbsize: u32, page: u32) -> Vec<u64> {
+fn window(h: *mut IrisEngine, drbsize: u32, page: u32) -> Vec<u64> {
     let r = IrisMgrasRegion { page, overlay: 0, drbsize, x0: 90, y0: 820, x1: 230, y1: 930 };
-    assert_eq!(unsafe { iris_mgras_observe(h, &r) }, IRIS_MGRAS_OK);
+    assert_eq!(unsafe { iris_mgras_observe(h, &r) }, IRIS_ENGINE_OK);
     (r.y0..=r.y1)
         .flat_map(|y| (r.x0..=r.x1).map(move |x| (x, y)))
         .map(|(x, y)| {
             let mut v = 0;
-            assert_eq!(unsafe { iris_mgras_pixel(h, &r, x as u32, y as u32, &mut v) }, IRIS_MGRAS_OK);
+            assert_eq!(unsafe { iris_mgras_pixel(h, &r, x as u32, y as u32, &mut v) }, IRIS_ENGINE_OK);
             v
         })
         .collect()
@@ -194,15 +288,15 @@ fn a_c_shell_replays_a_recording_and_saves_it() {
         assert_eq!(pixels, want, "mode {mode}: the C ABI stored other words");
 
         // Save through the C ABI, load into a second engine, same window.
-        c.quiesce().unwrap();
+        c.quiesce(u64::MAX).unwrap();
         let mut chunks = Vec::new();
         c.save(&mut chunks).unwrap();
         let mut d = CEngine::new(0, mode);
-        d.quiesce().unwrap();
-        d.load(&mut VecSource(chunks.clone().into_iter())).unwrap();
+        d.quiesce(u64::MAX).unwrap();
+        d.load(&mut VecSource::new(chunks.clone())).unwrap();
         assert_eq!(window(d.h, drb, page), pixels);
         chunks.retain(|k| k.name != "hq3");
-        assert!(d.load(&mut VecSource(chunks.into_iter())).is_err());
+        assert!(matches!(d.load(&mut VecSource::new(chunks)), Err(Refused::Mismatch(_))));
         assert_eq!(window(d.h, drb, page), pixels, "a refused load changed the engine");
     }
 }

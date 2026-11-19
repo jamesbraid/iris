@@ -5,7 +5,7 @@
 mod support;
 
 use iris_mgras::dev::mgras::engine::{Board, Mode};
-use iris_mgras::interface::{decode_chunks, encode_chunks, BoardEngine, Chunk, Refused, VecSource};
+use sgi_engine::{BoardEngine, Chunk, Refused, VecSource};
 use support::*;
 
 fn recording(name: &str) -> Replay {
@@ -13,7 +13,7 @@ fn recording(name: &str) -> Replay {
 }
 
 fn source(c: &[Chunk]) -> VecSource {
-    VecSource(c.to_vec().into_iter())
+    VecSource::new(c.to_vec())
 }
 
 /// Stop at `at`, save, finish on the same engine; load into another and
@@ -22,12 +22,11 @@ fn split(rep: &Replay, at: usize, mode: Mode) {
     let cfg = config(&rep.head, mode, None);
     let mut a = Player::new(cfg, Drive::Lazy);
     rep.cmds[..at].iter().for_each(|c| a.apply(c));
-    a.e.quiesce().expect("quiesce");
+    a.e.quiesce(u64::MAX).expect("quiesce");
     let mut chunks = Vec::new();
     a.e.save(&mut chunks).expect("save");
-    let chunks = decode_chunks(&encode_chunks(&chunks).expect("encode")).expect("decode");
     let mut b = a.twin(cfg);
-    b.e.quiesce().expect("quiesce the new engine");
+    b.e.quiesce(u64::MAX).expect("quiesce the new engine");
     b.e.load(&mut source(&chunks)).expect("load");
     b.e.resume();
     a.e.resume();
@@ -71,7 +70,7 @@ fn a_state_that_does_not_fit_is_refused_and_changes_nothing() {
     let rep = recording("gl-swap-tmesh-sphere");
     let mut p = Player::new(config(&rep.head, Mode::Inline, None), Drive::Each);
     rep.cmds[..rep.cmds.len() / 2].iter().for_each(|c| p.apply(c));
-    p.e.quiesce().unwrap();
+    p.e.quiesce(u64::MAX).unwrap();
     let mut good = Vec::new();
     p.e.save(&mut good).unwrap();
     let before = p.e.state_hash().unwrap();
@@ -94,7 +93,7 @@ fn a_state_that_does_not_fit_is_refused_and_changes_nothing() {
     assert!(mismatch(&mut p, &bad), "a part nobody knows");
     // Another board's state.
     let mut max = Player::new(config("sgi-mgras-ssi", Mode::Inline, None), Drive::Each);
-    max.e.quiesce().unwrap();
+    max.e.quiesce(u64::MAX).unwrap();
     assert!(mismatch(&mut max, &good), "{:?}", Board::Max);
 
     assert_eq!(p.e.state_hash().unwrap(), before, "a refused state changed the engine");

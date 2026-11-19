@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use iris_mgras::dev::mgras::engine::{Board, Config, MgrasEngine, Mode};
 use iris_mgras::dev::mgras::hq3::host;
-use iris_mgras::interface::{BoardEngine, Event, Read, Refused, Write};
+use sgi_engine::{BoardEngine, Event, Idle, Read, Refused, Write};
 use support::*;
 
 fn engine(mode: Mode, queue_ops: usize, notes: Option<Arc<AtomicU32>>) -> (MgrasEngine<Mem>, Mem) {
@@ -51,11 +51,11 @@ fn status_never_waits_and_reads_wait_for_queued_work() {
     assert_eq!(e.read(REG, 32), Read::Busy);
     // The pump hands work over and never runs it.
     let p = e.advance(1_000);
-    assert!(!p.idle);
+    assert_eq!(p.idle, Idle::Working);
     assert_eq!(e.read(REG, 32), Read::Busy);
     assert_eq!(e.now(), 1_000);
     e.run(usize::MAX);
-    assert!(e.advance(2_000).idle);
+    assert_eq!(e.advance(2_000).idle, Idle::Yes);
     assert_eq!(e.read(REG, 32), Read::Value(0x1234));
     assert_eq!(e.read(host::FIFOSTATUS, 32), Read::Value(0));
 }
@@ -74,8 +74,8 @@ fn the_notify_hook_only_says_that_something_waits() {
     e.run(usize::MAX);
     e.write(host::SET_FLAGS, 32, 1 << 20);
     let mut ev = Vec::new();
-    e.drain_events(&mut ev);
-    assert_eq!(ev, vec![Event::Flags]);
+    e.drain_events(&mut ev, usize::MAX);
+    assert_eq!(ev, vec![Event::Irq]);
 }
 
 #[test]
@@ -87,8 +87,8 @@ fn a_worker_runs_the_queue_and_quiescence_parks_it() {
     // Running means saving is refused.
     assert_eq!(p.e.save(&mut Vec::new()), Err(Refused::NotQuiesced));
     assert_eq!(p.e.observe_all(), Err(Refused::NotQuiesced));
-    p.e.quiesce().unwrap();
-    assert!(p.e.advance(0).idle, "quiescence drained the queue");
+    p.e.quiesce(u64::MAX).unwrap();
+    assert_eq!(p.e.advance(0).idle, Idle::Yes, "quiescence drained the queue");
     let hash = p.e.state_hash().unwrap();
     p.e.observe_all().unwrap();
     p.e.save(&mut Vec::new()).unwrap();
@@ -101,7 +101,7 @@ fn a_worker_runs_the_queue_and_quiescence_parks_it() {
     p.e.write(REG, 32, 0x77);
     assert_eq!(p.e.read(REG, 32), Read::Busy);
     p.e.resume();
-    assert!(p.e.wait_idle(0, 10_000_000_000));
+    assert_eq!(p.e.wait_idle(0, 10_000_000_000), Idle::Yes);
     assert_eq!(p.e.read(REG, 32), Read::Value(0x77));
     assert_eq!(p.e.state_hash().unwrap(), hash);
 }
@@ -113,13 +113,13 @@ fn reset_returns_to_power_on() {
     let empty = p.e.state_hash().unwrap();
     rep.cmds.iter().for_each(|c| p.apply(c));
     assert_ne!(p.e.state_hash().unwrap(), empty);
-    p.e.quiesce().unwrap();
+    p.e.quiesce(u64::MAX).unwrap();
     p.e.reset().unwrap();
     assert_eq!(p.e.state_hash().unwrap(), empty);
     assert_eq!(p.e.flags(), 0);
     let mut ev = Vec::new();
-    p.e.drain_events(&mut ev);
-    assert!(ev.is_empty());
+    p.e.drain_events(&mut ev, usize::MAX);
+    assert_eq!(ev, vec![Event::Irq], "a reset announces the levels it cleared");
 }
 
 /// DMA that reaches no RAM is reported, not guessed.
@@ -149,4 +149,69 @@ fn access_waits_says_what_a_call_would_do() {
     assert!(!e.access_waits(host::STATUS, 32, false), "status never waits");
     e.run(usize::MAX);
     assert!(!e.access_waits(REG, 32, true) && !e.access_waits(REG, 32, false));
+}
+
+/// The interrupt line is the engine's flags under its interrupt enable, read
+/// without waiting, and every change that can move it is announced.
+#[test]
+fn the_interrupt_level_follows_the_flags_and_the_enable() {
+    let (mut e, _) = engine(Mode::Inline, 1024, None);
+    let drain = |e: &mut MgrasEngine<Mem>| {
+        let mut ev = Vec::new();
+        e.drain_events(&mut ev, usize::MAX);
+        ev
+    };
+    assert_eq!(e.irq_levels(), 0);
+    e.write(host::SET_FLAGS, 32, 1 << 16);
+    assert_eq!((e.irq_levels(), drain(&mut e)), (0, vec![Event::Irq]), "a flag nobody enabled");
+    e.write(host::INTERRUPT_ENABLE_SET, 32, 1 << 16);
+    assert_eq!((e.irq_levels(), drain(&mut e)), (1, vec![Event::Irq]), "the enable raised it");
+    assert_eq!(e.advance(0).irq_levels, 1);
+    e.write(host::CLEAR_FLAGS, 32, 1 << 16);
+    assert_eq!((e.irq_levels(), drain(&mut e)), (0, vec![Event::Irq]));
+    // A saved level comes back with a load, which announces it.
+    e.write(host::SET_FLAGS, 32, 1 << 16);
+    e.quiesce(u64::MAX).unwrap();
+    let mut state = Vec::new();
+    e.save(&mut state).unwrap();
+    e.reset().unwrap();
+    assert_eq!((e.irq_levels(), drain(&mut e)), (0, vec![Event::Irq]), "a reset announces the level it cleared");
+    e.load(&mut sgi_engine::VecSource::new(state)).unwrap();
+    assert_eq!(e.irq_levels(), 1);
+    assert!(drain(&mut e).contains(&Event::Irq));
+}
+
+/// A guest that polls status with a part-full stage must see its work run: the
+/// poll hands the stage to the worker, with no pump.
+#[test]
+fn a_status_poll_hands_staged_work_to_the_worker() {
+    let (mut e, _) = engine(Mode::Threaded, 1024, None);
+    let idle = host::STATUS_HQ_IDLE | host::STATUS_BOARD_IDLE;
+    e.write(REG, 32, 0x55);
+    let start = std::time::Instant::now();
+    loop {
+        let Read::Value(s) = e.read(host::STATUS, 32) else { panic!("status waited") };
+        if s as u32 & idle == idle {
+            break;
+        }
+        assert!(start.elapsed().as_secs() < 30, "the staged write never ran");
+        std::thread::yield_now();
+    }
+    assert_eq!(e.read(REG, 32), Read::Value(0x55));
+}
+
+/// A quiesce with a budget answers `Midway` for work it could not finish and
+/// goes on running; with room it parks.
+#[test]
+fn quiesce_with_a_budget_answers_midway_instead_of_running_on() {
+    let (mut e, _) = engine(Mode::Inline, 20_000, None);
+    for i in 0..10_000 {
+        assert_eq!(e.write(REG, 32, i), Write::Done);
+    }
+    let Err(Refused::Midway(why)) = e.quiesce(0) else { panic!("no budget, yet it finished 10,000 writes") };
+    assert!(why.contains("budget"), "{why}");
+    assert_eq!(e.save(&mut Vec::new()), Err(Refused::NotQuiesced), "it did not park");
+    e.quiesce(u64::MAX).unwrap();
+    assert_eq!(e.save(&mut Vec::new()), Ok(()));
+    assert_eq!(e.wait_idle(0, 0), Idle::Yes, "MGRAS never stalls on the shell");
 }

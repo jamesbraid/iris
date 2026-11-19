@@ -12,7 +12,7 @@ mod support;
 
 use iris_mgras::dev::mgras::engine::{Board, MgrasEngine, Mode};
 use iris_mgras::dev::mgras::pixmem::{Buffer, Kind};
-use iris_mgras::interface::BoardEngine;
+use sgi_engine::BoardEngine;
 use support::*;
 
 /// A raster write as the diagnostic sends it: header, then the value.
