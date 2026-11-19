@@ -229,6 +229,32 @@ fn a_fence_raises_its_interrupt_only_after_its_write_back() {
     assert!(drain(&mut e).contains(&packet(SOFTSYNC_VECTOR, true)));
 }
 
+/// Composing the scan-out on the CPU path does not wait for the board: it returns while the raster
+/// thread is held inside a write, which a shell calling it under the BQL could not outlast.
+#[test]
+fn the_cpu_scanout_does_not_wait_for_the_board() {
+    let (mut e, ram) = engine(Mode::Threaded);
+    put(&mut e, HOST_WRITE_UPPER, 0);
+    put(&mut e, HOST_WRITE_LOWER, 0x10000);
+    ram.hold_writes_at(0x10000 + 2 * 5);
+    e.push_words(CMD_FIFO, &[0x0001_0a5a, 5 | 1 << 15, 0xbeef]);
+    let t = std::time::Instant::now();
+    while !ram.held.load(Ordering::SeqCst) {
+        assert!(t.elapsed().as_secs() < 10, "the fence never reached its write");
+        std::thread::yield_now();
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _ = e.scanout();
+        tx.send(()).unwrap();
+        e
+    });
+    let returned = rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+    ram.release();
+    let _ = worker.join();
+    assert!(returned, "scanout waited for the held board");
+}
+
 /// A fence whose slot is not RAM is reported once, as a write the DMA could not make.
 #[test]
 fn dma_that_reaches_no_ram_is_reported_once_a_page() {
