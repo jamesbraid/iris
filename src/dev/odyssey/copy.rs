@@ -100,8 +100,11 @@ impl CopyOperands {
         CopyOperands { w }
     }
 
+    /// The rectangle's width and height, at most the planes' span. The operands hold 16 bits each,
+    /// so a copy of 65535 by 65535 asked for 17 GB of staging; nothing outside the planes can be
+    /// read or written, and the board's surfaces are at most MAX_DIM across.
     pub fn size(&self) -> (u32, u32) {
-        (self.w[3] & 0xffff, self.w[3] >> 16)
+        ((self.w[3] & 0xffff).min(MAX_DIM), (self.w[3] >> 16).min(MAX_DIM))
     }
 
     pub fn src(&self) -> Side {
