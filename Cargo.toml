@@ -1,5 +1,5 @@
 [workspace]
-members = ["iris-gui", "iris-hostcall", "iris-checks", "iris-prom", "crates/sgi-gpu-core", "crates/sgi-gl-math"]
+members = ["iris-gui", "iris-hostcall", "iris-checks", "iris-prom", "crates/sgi-gpu-core", "crates/sgi-gl-math", "crates/sgi-engine"]
 # iris-hostgl is built only through `--features hostgl`, never by a plain or
 # `--workspace` build: it links the host's OpenGL (OpenGL.framework, libGL), which hosts
 # such as RISC-V boards do not have.
