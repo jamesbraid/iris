@@ -1483,7 +1483,7 @@ impl Hq3Engine {
         }
         if self.dl_logged < 2 {
             self.dl_logged += 1;
-            eprintln!("mgras: display list at {offset:#x} ({words} words) ran {segments} segments");
+            log::debug!("mgras: display list at {offset:#x} ({words} words) ran {segments} segments");
         }
         self.stats.dl_calls += 1;
         self.cfifo[DL_PORT] = saved;
@@ -1551,7 +1551,7 @@ impl Hq3Engine {
         }
         if self.dma_logged < 16 {
             self.dma_logged += 1;
-            eprintln!("mgras: {}", desc());
+            log::debug!("mgras: {}", desc());
         }
         // The kernel maps a large buffer a window of pages at a time
         // (MAX_PTR_OFFSET entries; a 400 KB glReadPixels on IP28 got 4) and
@@ -1566,13 +1566,13 @@ impl Hq3Engine {
             let idx = if list.is_empty() { page } else { *list.get(page as usize)? };
             if window != 0 && idx >= window {
                 if !stop_logged.replace(true) {
-                    eprintln!("mgras: {} stops at page {idx}, past the {window} the kernel mapped (TLB-miss refill not modelled)", desc());
+                    log::warn!("mgras: {} stops at page {idx}, past the {window} the kernel mapped (TLB-miss refill not modelled)", desc());
                 }
                 return None;
             }
             let r = mem.read32(table.wrapping_add(4 * idx) as u64);
             if r == Some(0) && !stop_logged.replace(true) {
-                eprintln!("mgras: {} reaches page {page} (table entry {idx}) = frame 0", desc());
+                log::warn!("mgras: {} reaches page {page} (table entry {idx}) = frame 0", desc());
             }
             r.map(|f| f << 12)
         };

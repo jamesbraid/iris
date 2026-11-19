@@ -1694,7 +1694,7 @@ impl Rss {
                     self.device.insert(a, val);
                     if self.device.overflowed {
                         self.device.overflowed = false;
-                        eprintln!("mgras: raster device space full, write to {a:#x} dropped");
+                        log::warn!("mgras: raster device space full, write to {a:#x} dropped");
                     }
                 }
             }
@@ -3198,7 +3198,7 @@ impl Rss {
                 if let Some(fault) = unsafe { self.gpu_fault.as_ref() } {
                     let mut fault = fault.lock();
                     if fault.is_none() {
-                        eprintln!("mgras: GPU raster unit failed: {message}");
+                        log::warn!("mgras: GPU raster unit failed: {message}");
                         *fault = Some(message.clone());
                     }
                     Err(fault.as_ref().unwrap().clone())
