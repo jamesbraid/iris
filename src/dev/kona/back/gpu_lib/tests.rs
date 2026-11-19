@@ -227,6 +227,81 @@ fn log2_and_exp2_match_the_host() {
     assert!(bad.is_empty(), "{} results differ:\n{}", bad.len(), bad.iter().take(20).cloned().collect::<Vec<_>>().join("\n"));
 }
 
+/// `tex_sat_i32`, `tex_sat_u32` and `div_exact` over 3-word cases [a, b, unused].
+const EDGE_KERNEL: Fragment = Fragment::new(
+    "edge_test.wgsl",
+    r#"
+#include "kona_texture.wgsl"
+
+@group(0) @binding(0) var<storage, read> ins: array<u32>;
+@group(0) @binding(1) var<storage, read_write> outs: array<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+    let i = g.x;
+    if i * 2u >= arrayLength(&ins) {
+        return;
+    }
+    let a = bitcast<f32>(ins[2u * i]);
+    let b = bitcast<f32>(ins[2u * i + 1u]);
+    outs[3u * i] = bitcast<u32>(tex_sat_i32(a));
+    outs[3u * i + 1u] = tex_sat_u32(a);
+    outs[3u * i + 2u] = bitcast<u32>(div_exact(a, b));
+}
+"#,
+);
+
+/// The edges of the float helpers the texture sampler leans on, against Rust: `as i32` and `as u32`
+/// (saturating, NaN to 0) and IEEE division, for infinities, NaN, zeros, the saturation bounds and
+/// random values. Subnormal operands and results are left out: the adapters flush them, which the
+/// float probe records as a limit of the platform, not of these helpers.
+#[test]
+fn texture_saturation_and_division_edges_match_rust() {
+    let Some(gpu) = gpu() else { return };
+    let normal_or_zero = |x: f32| x == 0.0 || x.is_normal() || x.is_infinite() || x.is_nan();
+    let mut xs: Vec<f32> = vec![
+        0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 1.5, -1.5, 2147483520.0, 2147483648.0, -2147483648.0, -2147483904.0, 4294967040.0, 4294967296.0, 8388608.0, 16777216.0, 1.0e10, -1.0e10, 1.0e38, -1.0e38,
+        f32::MAX, f32::MIN, f32::MIN_POSITIVE, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, -f32::NAN, f32::from_bits(0x7fc0_0001), f32::from_bits(0xffa0_0000),
+    ];
+    let mut rng = Rng(0xED6E_5A71);
+    for _ in 0..20_000 {
+        xs.push(f32::from_bits(rng.next() as u32));
+        xs.push(rng.f(-4.0e9, 4.0e9));
+    }
+    let xs: Vec<f32> = xs.into_iter().filter(|&x| normal_or_zero(x)).collect();
+    let mut cases: Vec<(f32, f32)> = Vec::new();
+    for &a in xs.iter().take(60) {
+        for &b in xs.iter().take(60) {
+            cases.push((a, b));
+        }
+    }
+    for &a in &xs {
+        cases.push((a, xs[(rng.next() as usize) % xs.len()]));
+    }
+    let ins: Vec<u32> = cases.iter().flat_map(|&(a, b)| [a.to_bits(), b.to_bits()]).collect();
+    let outs = dispatch(&gpu, &texture_source("edge test", PLANES, PAGES).body(EDGE_KERNEL), &ins, cases.len(), 3, None);
+    let mut bad = Vec::new();
+    let mut kinds = [0usize; 3];
+    for (i, &(a, b)) in cases.iter().enumerate() {
+        let (si, su, dv) = (outs[3 * i] as i32, outs[3 * i + 1], outs[3 * i + 2]);
+        if si != a as i32 {
+            kinds[0] += 1;
+            bad.push(format!("tex_sat_i32({a:e} [{:#010x}]) = {si}, Rust {}", a.to_bits(), a as i32));
+        }
+        if su != a as u32 {
+            kinds[1] += 1;
+            bad.push(format!("tex_sat_u32({a:e} [{:#010x}]) = {su}, Rust {}", a.to_bits(), a as u32));
+        }
+        let q = a / b;
+        if normal_or_zero(q) && !same(dv, q) {
+            kinds[2] += 1;
+            bad.push(format!("div_exact({a:e} [{:#010x}], {b:e} [{:#010x}]) = {:e} [{dv:#010x}], IEEE {q:e}", a.to_bits(), b.to_bits(), f32::from_bits(dv)));
+        }
+    }
+    eprintln!("{} cases; differ: tex_sat_i32 {}, tex_sat_u32 {}, div_exact {}", cases.len(), kinds[0], kinds[1], kinds[2]);
+    assert!(bad.is_empty(), "{} results differ:\n{}", bad.len(), bad.iter().take(20).cloned().collect::<Vec<_>>().join("\n"));
+}
+
 /// A kernel over 16-word cases: [desc, kind, s, t, r, lod, 6..9 fragment colour, 10..13 texel, 14
 /// unused, 15 zero], kind 0 sample, 1 sample3, 2 sample_enhanced, 3 environment.
 const TEX_KERNEL: Fragment = Fragment::new(

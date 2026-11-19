@@ -51,16 +51,34 @@ fn tex_p(x: f32) -> f32 {
     return bitcast<f32>(bitcast<u32>(x) ^ tex_nz);
 }
 
-// Rust's `as i32` on a float: truncation, saturating, NaN to 0.
+// NaN by its bits: `x != x` is an ordered compare in the SPIR-V naga writes, false for NaN.
+fn tex_is_nan(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
+}
+
+// Rust's `as i32` on a float: truncation, saturating at both ends, NaN to 0.
 fn tex_sat_i32(x: f32) -> i32 {
-    let c = clamp(x, -2147483648.0, 2147483520.0);
-    return select(i32(c), 0, x != x);
+    if tex_is_nan(x) {
+        return 0;
+    }
+    if x >= 2147483648.0 {
+        return 2147483647;
+    }
+    if x <= -2147483648.0 {
+        return bitcast<i32>(0x80000000u);
+    }
+    return i32(x);
 }
 
 // Rust's `as u32` on a float: truncation, saturating, NaN and negatives to 0.
 fn tex_sat_u32(x: f32) -> u32 {
-    let c = clamp(x, 0.0, 4294967040.0);
-    return select(u32(c), 0u, x != x);
+    if tex_is_nan(x) || !(x > 0.0) {
+        return 0u;
+    }
+    if x >= 4294967296.0 {
+        return 0xffffffffu;
+    }
+    return u32(x);
 }
 
 // A coordinate wrapped into 0..n (n >= 1): Rust's `rem_euclid` for repeat,
