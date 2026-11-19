@@ -3,8 +3,8 @@
 use std::ffi::{c_int, c_void, CString};
 use std::ptr::{null, null_mut};
 
-use sgi_kona::ffi::*;
 use sgi_engine::ffi::*;
+use sgi_kona::ffi::*;
 
 unsafe extern "C" fn ram_read(_: *mut c_void, _: u64, buf: *mut u8, len: usize, _: u32) -> c_int {
     unsafe { std::ptr::write_bytes(buf, 0, len) };
@@ -107,6 +107,29 @@ fn the_boards_are_inputs_and_what_a_product_cannot_have_is_refused() {
     one.channels = 0;
     one.display = gvo.as_ptr();
     assert!(!builds(&one), "the GVO option channel is not modelled");
+}
+
+/// The scan-out entry hands the shells' 0x00RRGGBB where the engine composes 0xAABBGGRR, and says
+/// the size when the buffer is too small.
+#[test]
+fn the_scanout_entry_copies_the_frame_as_0x00rrggbb() {
+    let ir2 = CString::new("ir2").unwrap();
+    let h = unsafe { sgi_kona_new(&config(ir2.as_ptr()), &host()) };
+    assert!(!h.is_null());
+    // Colour 1 is red; a point at (100, 50), counted up from the bottom row.
+    for w in [1u32, 3, 1, 0xff << 2, 0, 0, 1, 2, 1, 1, 6, 100, 50] {
+        assert_eq!(unsafe { iris_engine_write(h, 0xc10000, 32, w as u64) }, IRIS_ENGINE_OK);
+    }
+    assert_eq!(unsafe { iris_engine_quiesce(h, u64::MAX) }, IRIS_ENGINE_OK);
+    let (mut w, mut hgt) = (0u32, 0u32);
+    assert_eq!(unsafe { sgi_kona_scanout(h, null_mut(), 0, &mut w, &mut hgt) }, IRIS_ENGINE_ERROR);
+    assert_eq!((w, hgt), (1280, 1024), "the size, when the buffer is too small");
+    assert_eq!(unsafe { sgi_kona_scanout(h, null_mut(), 0, null_mut(), null_mut()) }, IRIS_ENGINE_ERROR);
+    let mut frame = vec![0u32; 1280 * 1024];
+    assert_eq!(unsafe { sgi_kona_scanout(h, frame.as_mut_ptr(), frame.len(), &mut w, &mut hgt) }, IRIS_ENGINE_OK);
+    assert_eq!(frame[(1023 - 50) * 1280 + 100], 0x00ff_0000, "red, with nothing in the top byte");
+    assert_eq!(frame.iter().filter(|&&p| p != 0).count(), 1);
+    unsafe { iris_engine_free(h) };
 }
 
 #[test]

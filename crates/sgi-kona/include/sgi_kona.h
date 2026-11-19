@@ -78,6 +78,15 @@ IrisEngine *sgi_kona_new(const IrisKonaConfig *cfg,
 /* Bring a box of pixels current for a CPU reader. */
 int sgi_kona_observe(IrisEngine *h, const IrisKonaRegion *r);
 
+/*
+ * Copy the composed scan-out into buf (cap 32-bit words): 0x00RRGGBB a pixel,
+ * row by row from the top. *w and *hgt are set to the frame's size also when
+ * cap is too small (ERROR, nothing copied). FAULT on a faulted engine. The call
+ * waits for the drawing queued behind the frame.
+ */
+int sgi_kona_scanout(IrisEngine *h, uint32_t *buf, size_t cap, uint32_t *w,
+                     uint32_t *hgt);
+
 #ifdef __cplusplus
 }
 #endif
