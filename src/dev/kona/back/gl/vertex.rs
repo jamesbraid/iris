@@ -147,10 +147,14 @@ pub fn colour_word(c: [f32; 4]) -> u32 {
 /// Full intensity of a 13-bit colour component, as the vertex bus carries it.
 pub const COLOUR_MAX: f32 = 8191.0;
 
-/// A colour component, 0 to 1, as a 13-bit value.
+/// The geometry engine's colour scale, 0x457ffff8: 2^12 less 2^-9, so 1.0 stays below 4096.
+const COLOUR_SCALE: f32 = 4095.998046875;
+
+/// A colour component, 0 to 1, as a 13-bit value: scaled by the engine's colour scale, doubled for
+/// the field's fraction bit and truncated (inferred; kona raster-reference row C2).
 #[inline]
 pub fn colour13(c: f32) -> u16 {
-    (c.clamp(0.0, 1.0) * COLOUR_MAX + 0.5) as u16
+    (c.clamp(0.0, 1.0) * COLOUR_SCALE * 2.0) as u16
 }
 
 /// A window coordinate in pixels on the 1/256 grid, saturating at what an `i32` holds. The geometry
@@ -215,7 +219,7 @@ mod tests {
     #[test]
     fn components_quantise_to_thirteen_bits_and_depth_to_a_fraction() {
         assert_eq!((colour13(0.0), colour13(1.0), colour13(2.0), colour13(-1.0)), (0, 8191, 8191, 0));
-        assert_eq!(colour13(0.5), 4096);
+        assert_eq!(colour13(0.5), 4095, "half is 4095.998 / 2 doubled, then truncated, not rounded up to 4096");
         assert_eq!((depth32(0.0), depth32(2.0)), (0, 4_294_967_040));
     }
 
