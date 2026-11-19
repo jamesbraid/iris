@@ -878,6 +878,16 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
     }
 
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize {
+        // The command FIFO's port: 0 the user's, 1 the privileged one, or the window offset of
+        // either (the shell may name the port as it does for `write`). Anything else is no FIFO.
+        let port = match port {
+            0 | host::CFIFO | 0x70084 | host::CFIFO_GL => 0u8,
+            1 | host::CFIFO_PRIVILEGED | 0x50084 => 1,
+            _ => {
+                log::warn!("mgras engine: push_words to {port:#x}, which is no command FIFO port; nothing taken");
+                return 0;
+            }
+        };
         if self.dead() {
             return 0;
         }
@@ -887,7 +897,7 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
             (self.cfg.queue_ops as u64).saturating_sub(self.pending_ops()) as usize
         };
         for &w in &words[..take] {
-            self.stage_op(Op::Word { port: port as u8, w });
+            self.stage_op(Op::Word { port, w });
         }
         take
     }
