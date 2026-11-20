@@ -678,3 +678,26 @@ fn head_zero_reports_the_running_channels_format_timing_and_its_generation() {
     video(&mut e, VIDEO_DISABLE_CHANNEL, &[0]);
     assert_eq!(e.head_timing(0), None);
 }
+
+/// The adaptor reset's registers are saved with the state (version 6): what a pipe held comes back.
+#[test]
+fn the_adaptor_reset_registers_survive_a_save_and_a_load() {
+    let mut e = engine();
+    for (off, v) in [(0x2c, 0x11), (0x74, 0x3f40), (0x800390, 0x22), (0x800398, 0x33)] {
+        assert_eq!(e.write(off, 32, v), Write::Done);
+    }
+    e.run(usize::MAX);
+    assert_eq!(e.read(0x6c, 32), Read::Value(0), "the error status reads clear");
+    e.quiesce(u64::MAX).unwrap();
+    let mut chunks: Vec<Chunk> = Vec::new();
+    e.save(&mut chunks).unwrap();
+    e.resume();
+    let mut f = engine();
+    f.quiesce(u64::MAX).unwrap();
+    f.load(&mut VecSource::new(chunks)).unwrap();
+    f.resume();
+    f.run(usize::MAX);
+    for (off, v) in [(0x2c, 0x11), (0x74, 0x3f40), (0x800390, 0x22), (0x800398, 0x33)] {
+        assert_eq!(f.read(off, 32), Read::Value(v), "{off:#x}");
+    }
+}
