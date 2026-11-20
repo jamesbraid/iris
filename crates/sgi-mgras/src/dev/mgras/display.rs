@@ -5,7 +5,7 @@
 //! It has a lock of its own so the shell's bus accesses never wait for the
 //! raster worker; the worker never touches it.
 
-use super::dcb::{Dcb, Txn, DEV_DAC, DEV_VC3};
+use super::dcb::{Dcb, Txn, DEV_DAC, DEV_VC3, VC3_CONTROL, VC3_CONTROL_DISPLAY};
 use super::frame::{self, Frame};
 use super::plain::boxed_zeroed;
 use super::rss::Rss;
@@ -39,18 +39,61 @@ pub trait BusSlave: Send {
     fn write(&mut self, dev: u32, crs: u32, width: u32, data: u32) -> bool;
 }
 
+/// The video timing the guest's tables and the DAC's PLL give: a frame of `frame_clocks` of `clock_hz`, in `lines`
+/// and `fields`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timing {
+    pub frame_clocks: u64,
+    pub clock_hz: u32,
+    pub lines: u32,
+    pub fields: u32,
+}
+
 pub struct Display {
     dcb: Box<Dcb>,
     slave: Option<Box<dyn BusSlave>>,
     /// The decoded frame; allocated by the first composition on the CPU.
     frame: Option<Box<Frame>>,
+    /// Derived when the guest enables the display; None until then or when the tables give no frame.
+    timing: Option<Timing>,
+    /// Moves whenever `timing` does, across resets.
+    timing_generation: u64,
 }
 
 impl Display {
     pub fn new(bdvers: [u32; 2], cmap_rev: [u32; 2]) -> Display {
         let mut dcb = boxed_zeroed::<Dcb>();
         dcb.init(bdvers, cmap_rev);
-        Display { dcb, slave: None, frame: None }
+        Display { dcb, slave: None, frame: None, timing: None, timing_generation: 0 }
+    }
+
+    /// Back to power-on state: the shell's bus device stays, and the timing generation moves on.
+    pub fn reset(&mut self, bdvers: [u32; 2], cmap_rev: [u32; 2]) {
+        let mut fresh = Display::new(bdvers, cmap_rev);
+        fresh.slave = self.slave.take();
+        fresh.timing_generation = self.timing_generation + self.timing.is_some() as u64;
+        *self = fresh;
+    }
+
+    /// The video timing from the VC3's frame table and the DAC's PLL, read when the display was last enabled;
+    /// None until then, or when the tables give no usable frame (the shell keeps its default).
+    pub fn timing(&self) -> Option<(Timing, u64)> {
+        self.timing.map(|t| (t, self.timing_generation))
+    }
+
+    /// Take the timing the registers give now. A new period moves the generation; an unchanged one does not.
+    fn derive_timing(&mut self) {
+        let next = self.timing_from_tables();
+        if next != self.timing {
+            self.timing = next;
+            self.timing_generation += 1;
+        }
+    }
+
+    /// The tables' and the PLL's timing (`Dcb::video_timing`), in pixel clocks.
+    fn timing_from_tables(&self) -> Option<Timing> {
+        let t = self.dcb.video_timing()?;
+        Some(Timing { frame_clocks: t.h_total as u64 * t.v_total as u64, clock_hz: u32::try_from(t.pixel_clock_hz).ok()?, lines: t.v_total, fields: t.fields })
     }
 
     pub fn dcb(&self) -> &Dcb {
@@ -104,6 +147,12 @@ impl Display {
                 return false;
             }
             self.dcb.write(t, t.store_data(bits, val));
+            if t.dev == DEV_VC3 && (t.crs == 1 || (t.crs == 0 && t.width >= 2)) {
+                let enabled = self.dcb.vc3.index() == VC3_CONTROL && self.dcb.vc3.regs[VC3_CONTROL as usize] & VC3_CONTROL_DISPLAY != 0;
+                if enabled {
+                    self.derive_timing();
+                }
+            }
             return t.crs >= 2 || t.dev == DEV_VC3;
         }
         let dev = ((off - DCBCTRL) >> 2) as usize;
@@ -150,6 +199,9 @@ impl Display {
         }
         // SAFETY: the length was checked and `Dcb` is plain numeric state.
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), (&mut *self.dcb as *mut Dcb).cast::<u8>(), bytes.len()) };
+        // The loaded tables are the guest's; its period starts afresh.
+        self.timing = self.timing_from_tables();
+        self.timing_generation += 1;
         Ok(())
     }
 }

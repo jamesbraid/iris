@@ -207,6 +207,14 @@ impl Dac {
         self.gamma_comp = 0;
     }
 
+    /// The pixel clock as a ratio of the reference, (numerator, denominator), from the PLL's registers 0x0c
+    /// (r), 0x0f (v) and 0x09 (control): 4 * (v + 2) + control[7:6] over (r + 2) * 2^control[5:4] * 2^control[2].
+    pub fn pll_ratio(&self) -> (u64, u64) {
+        let reg = |n: u32| self.regs.lookup(n).unwrap_or(0) as u64;
+        let (r, v, cntl) = (reg(PLL_R), reg(PLL_V), reg(PLL_CONTROL));
+        (4 * (v + 2) + (cntl >> 6), (r + 2) << ((cntl >> 4) & 3) << ((cntl >> 2) & 1))
+    }
+
     /// Set the pixel mask (tests).
     #[cfg(test)]
     pub fn set_pixmask(&mut self, v: u32) {
@@ -391,6 +399,9 @@ pub const VC3_SRAM_POINTER: usize = 7;
 /// Line table, a run's first word: the line is in the picture.
 const VC3_LINE_VISIBLE: u8 = 1 << 5;
 const VC3_CURRENT_LINE: usize = 0xB;
+/// The display control register: bit 2 enables the display.
+pub const VC3_CONTROL: u32 = 0x1E;
+pub const VC3_CONTROL_DISPLAY: u16 = 4;
 
 impl Vc3 {
     /// The hardware cursor, when shown: the screen position of its top-left
@@ -425,6 +436,11 @@ impl Vc3 {
     /// blank line's none (IRIX's 1280x1024_60 tables: 1024 lines of 1065).
     pub fn totals(&self) -> Option<crate::disp::Vc2Totals> {
         crate::disp::decode_vc2_totals(&self.regs, &self.sram, |a, _| a & VC3_LINE_VISIBLE != 0)
+    }
+
+    /// The register the next data access reaches.
+    pub fn index(&self) -> u32 {
+        self.index
     }
 
     /// Scanlines in the main window-ID frame table: one entry per visible

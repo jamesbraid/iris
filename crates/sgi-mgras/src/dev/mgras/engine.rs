@@ -48,7 +48,7 @@ use super::rss::{self, Entry, Rss};
 use super::te1::Te1;
 use crate::display::{Mark, Rect};
 use sgi_engine::inject::{hit, Point};
-use sgi_engine::{BoardEngine, Chunk, Event, Fault, FrameWords, HostMem, Idle, LentFrame, Outbox, Pump, Read, Refused, StateSink, StateSource, Swap, Write, DAMAGE_ANY};
+use sgi_engine::{BoardEngine, Chunk, Event, Fault, FrameWords, HeadTiming, HostMem, Idle, LentFrame, Outbox, Pump, Read, Refused, StateSink, StateSource, Swap, Write, DAMAGE_ANY};
 use crate::wgpu::Gpu;
 
 /// The boards that share this engine; they differ in the geometry engine
@@ -1075,6 +1075,14 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         inner.core.back.observe(&[region.buffer], (r.x0, r.y0, r.x1, r.y1)).map_err(Fault)
     }
 
+    fn head_timing(&self, head: u32) -> Option<HeadTiming> {
+        if head != 0 {
+            return None;
+        }
+        let (t, generation) = self.display.lock().timing()?;
+        Some(HeadTiming { frame_clocks: t.frame_clocks, clock_hz: t.clock_hz, fields: t.fields, lines: t.lines, epoch_ns: -1, generation })
+    }
+
     fn busy_ns(&self) -> u64 {
         self.sh.busy_ns.load(Ordering::Relaxed)
     }
@@ -1225,9 +1233,7 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         {
             // The shell's bus device is the shell's, not the board's state: it stays through a reset.
             let mut display = self.display.lock();
-            let slave = display.take_slave();
-            *display = Display::new(self.cfg.bdvers.unwrap_or_else(|| display::default_bdvers(self.cfg.board)), self.cfg.cmap_rev);
-            display.set_slave(slave);
+            display.reset(self.cfg.bdvers.unwrap_or_else(|| display::default_bdvers(self.cfg.board)), self.cfg.cmap_rev);
         }
         self.sh.generation.fetch_add(1, Ordering::Release);
         let f = &self.sh.front;
