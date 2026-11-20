@@ -163,6 +163,18 @@ fn the_head_timing_follows_the_vc3_tables_and_the_pll_when_the_display_is_enable
 }
 
 #[test]
+fn the_vc3_display_control_register_is_there_to_ask() {
+    let mut e = engine(|_| {});
+    assert_eq!(e.vc3_control(), 0);
+    vc3(&mut e, 0x1E, 5);
+    assert_eq!(e.vc3_control(), 5, "retrace interrupt and display enabled");
+    vc3(&mut e, 0x1E, 4);
+    assert_eq!(e.vc3_control(), 4);
+    e.reset().unwrap();
+    assert_eq!(e.vc3_control(), 0);
+}
+
+#[test]
 fn a_reset_forgets_the_timing_and_the_generation_does_not_go_back() {
     let mut e = engine(|_| {});
     load_stock_timing(&mut e);
