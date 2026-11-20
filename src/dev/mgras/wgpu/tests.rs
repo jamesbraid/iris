@@ -57,6 +57,14 @@ struct Held {
     _slot: Option<Slot>,
 }
 
+impl Held {
+    /// `steps` of a sweep, a fifth of them on a software rasteriser: those runs are a smoke check, and a
+    /// sweep at full length took minutes on a few cores.
+    fn steps(&self, steps: usize) -> usize {
+        if self._turn.is_some() { steps.div_ceil(5) } else { steps }
+    }
+}
+
 impl std::ops::Deref for Held {
     type Target = Arc<Gpu>;
     fn deref(&self) -> &Arc<Gpu> {
@@ -354,6 +362,7 @@ fn each() -> bool {
 
 fn sweep(prim: Prim, salt: u64, steps: usize, tex_bias: f64, loads: bool) {
     let Some(g) = gpu() else { return };
+    let steps = g.steps(steps);
     let mut p = Pair::new(&g, 0xC0FF_EE00 ^ salt);
     let t0 = std::time::Instant::now();
     let mut prims = 0;
@@ -439,7 +448,7 @@ fn diagnostic_lines_match_the_interpreter() {
 fn steep_and_far_triangles_match_the_interpreter() {
     let Some(g) = gpu() else { return };
     let mut p = Pair::new(&g, 0xFA12);
-    for step in 0..60 {
+    for step in 0..g.steps(60) {
         if step % 8 == 0 {
             p.refresh();
         }
@@ -737,7 +746,8 @@ fn transfer_reads_see_the_drawing() {
     let Some(g) = gpu() else { return };
     let mut p = Pair::new(&g, 0x4EAD);
     let mut lines_read = 0;
-    for step in 0..120 {
+    let steps = g.steps(120);
+    for step in 0..steps {
         if step % 8 == 0 {
             p.refresh();
         }
@@ -770,8 +780,8 @@ fn transfer_reads_see_the_drawing() {
         }
         p.check(&format!("reads step {step}"), false);
     }
-    assert!(lines_read > 500, "{lines_read}");
+    assert!(lines_read > 500 * steps / 120, "{lines_read}");
     // The reads brought drawn pages back (they did not pass on a stale
     // mirror that happened to match).
-    assert!(p.unit.syncs > 50 && p.unit.read_back > 0, "{} syncs, {} bytes read back", p.unit.syncs, p.unit.read_back);
+    assert!(p.unit.syncs as usize > 50 * steps / 120 && p.unit.read_back > 0, "{} syncs, {} bytes read back", p.unit.syncs, p.unit.read_back);
 }
