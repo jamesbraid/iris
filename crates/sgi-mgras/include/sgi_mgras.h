@@ -3,6 +3,10 @@
  * entries that name its own types. Everything else (write, read, pump,
  * events, state) is iris_engine.h, whose call contract applies.
  *
+ * Host DMA addresses (the host's ram_* and bus_* callbacks) are fabric addresses: the XIO widget of the
+ * transfer's page table, bits 19:16 of its control word, in bits 51:48 above the node's 40-bit physical address.
+ * Inline (mode 0) the transfers go through bus_*, with a worker thread through ram_* alone.
+ *
  * Kept in step with src/ffi.rs by tools/check-header.
  */
 

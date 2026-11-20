@@ -15,7 +15,10 @@
 //!   and writes host memory through `HostMem::ram_*` only, which must be
 //!   lock-free. `Mode::Inline` has no thread: `run` executes the queue, in
 //!   order, on the caller's thread, so replays and parity tests do not depend
-//!   on host scheduling.
+//!   on host scheduling, and its host DMA goes through `HostMem::bus_*`.
+//! - Host DMA addresses are fabric addresses: the XIO widget of the transfer's
+//!   page table (bits 19:16 of its control word) in bits 51:48, above the node's
+//!   40-bit physical address.
 //! - The worker holds `Shared::inner` while it executes; the caller takes it
 //!   only when the queue is empty and the worker parked between batches.
 //!   Lock order: `inner`, then `outbox`; `q` is never held with either.
@@ -276,6 +279,10 @@ struct Core<M: HostMem> {
     front: Arc<Front>,
     /// Damage since the batch began, posted by `finish_batch`.
     damage: Vec<Mark>,
+    /// Nothing runs on a worker: DMA may go through the bus.
+    inline: bool,
+    /// The XIO widget of the transfer in progress (`DmaPath`).
+    dma_widget: u32,
 }
 
 impl<M: HostMem> Inner<M> {
@@ -295,7 +302,7 @@ impl<M: HostMem> Inner<M> {
         }
         let mut regs = boxed_zeroed::<Hq3Regs>();
         regs.ge_readback = [0, cfg.ge_revision];
-        Ok(Inner { hq, core: Core { back, regs, mem, out, front, damage: Vec::new() } })
+        Ok(Inner { hq, core: Core { back, regs, mem, out, front, damage: Vec::new(), inline: cfg.mode == Mode::Inline, dma_widget: 0 } })
     }
 
     fn exec(&mut self, op: Op) {
@@ -379,23 +386,42 @@ impl<M: HostMem> Core<M> {
     }
 }
 
-/// Host memory as the command parser's DMA sees it: the RAM path only.
-struct RamPath<M: HostMem>(Arc<M>);
+/// The shift of the XIO widget in a fabric address: the widget in bits 51:48 above the node's 40-bit physical address.
+const WIDGET_SHIFT: u32 = 48;
 
-impl<M: HostMem> DmaMem for RamPath<M> {
+/// Host memory as the command parser's DMA sees it, at fabric addresses (`widget << 48 | node address`). On the
+/// worker thread it takes the RAM path only; inline, where the transfer runs on the caller's thread inside a call,
+/// it goes through the bus.
+struct DmaPath<M: HostMem> {
+    mem: Arc<M>,
+    widget: u64,
+    bus: bool,
+}
+
+impl<M: HostMem> DmaPath<M> {
+    fn at(&self, addr: u64) -> u64 {
+        addr | self.widget << WIDGET_SHIFT
+    }
+}
+
+impl<M: HostMem> DmaMem for DmaPath<M> {
     fn read32(&self, addr: u64) -> Option<u32> {
         let mut b = [0u8; 4];
-        self.0.ram_read(addr, &mut b, Swap::None).ok()?;
+        self.read(addr, &mut b).ok()?;
         Some(u32::from_be_bytes(b))
     }
     fn read(&self, addr: u64, out: &mut [u8]) -> Result<(), DmaFault> {
-        self.0.ram_read(addr, out, Swap::None).map_err(|_| {
+        let at = self.at(addr);
+        let done = if self.bus { self.mem.bus_read(at, out, Swap::None) } else { self.mem.ram_read(at, out, Swap::None) };
+        done.map_err(|_| {
             out.fill(0);
             DmaFault
         })
     }
     fn write(&self, addr: u64, data: &[u8]) -> Result<(), DmaFault> {
-        self.0.ram_write(addr, data, Swap::None).map_err(|_| DmaFault)
+        let at = self.at(addr);
+        let done = if self.bus { self.mem.bus_write(at, data, Swap::None) } else { self.mem.ram_write(at, data, Swap::None) };
+        done.map_err(|_| DmaFault)
     }
 }
 
@@ -431,7 +457,10 @@ impl<M: HostMem> Hq3Sink for Core<M> {
         was
     }
     fn sys_mem(&mut self) -> Option<Arc<dyn DmaMem>> {
-        Some(Arc::new(RamPath(self.mem.clone())))
+        Some(Arc::new(DmaPath { mem: self.mem.clone(), widget: self.dma_widget as u64, bus: self.inline }))
+    }
+    fn set_dma_widget(&mut self, widget: u32) {
+        self.dma_widget = widget;
     }
     fn host_fault(&mut self, addr: u64, write: bool) {
         self.out.post(Event::BusFault { addr, write });
