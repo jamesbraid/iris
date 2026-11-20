@@ -84,6 +84,10 @@ int sgi_mgras_set_display_bus(IrisEngine *h, void *user,
                               int (*read)(void *user, uint32_t dev, uint32_t crs, uint32_t width, uint32_t *data),
                               int (*write)(void *user, uint32_t dev, uint32_t crs, uint32_t width, uint32_t data));
 
+/* The VC3's display control register (0x1e) as the guest last wrote it: bit 0 enables the retrace
+ * interrupt, bit 2 the display; 0 after a reset. */
+uint32_t sgi_mgras_vc3_control(IrisEngine *h);
+
 /* The HQ flags as the board holds them (a debug accessor: the interrupt
  * line is iris_engine_irq_levels). */
 uint32_t sgi_mgras_flags(IrisEngine *h);

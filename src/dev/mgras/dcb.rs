@@ -420,6 +420,11 @@ impl Vc3 {
         (w > 0 && h > 0).then_some((w, h))
     }
 
+    /// The display control register, 0x1e: bit 0 enables the retrace interrupt, bit 2 the display.
+    pub fn control(&self) -> u16 {
+        self.regs[VC3_CONTROL as usize]
+    }
+
     /// The register the next data access reaches.
     pub fn index(&self) -> u32 {
         self.index

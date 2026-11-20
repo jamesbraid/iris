@@ -839,6 +839,12 @@ impl<M: HostMem> MgrasEngine<M> {
         self.display.lock().set_slave(slave);
     }
 
+    /// The VC3's display control register (0x1e) as the guest last wrote it: bit 0 enables the retrace interrupt,
+    /// bit 2 the display. A shell that raises the retrace interrupt reads the enable here.
+    pub fn vc3_control(&self) -> u32 {
+        self.display.lock().dcb().vc3.control() as u32
+    }
+
     /// The 24 colour planes of the displayed buffer at display (`x`, `y`), `y` = 0 the top row. For tests.
     pub fn fb_pixel(&mut self, x: usize, y: usize) -> u32 {
         let (_, h) = self.display.lock().size();

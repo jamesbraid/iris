@@ -250,6 +250,16 @@ pub unsafe extern "C" fn sgi_mgras_set_display_bus(
     }
 }
 
+/// The VC3's display control register (0x1e) as the guest last wrote it: bit 0 enables the retrace interrupt, bit 2
+/// the display; 0 after a reset.
+///
+/// # Safety
+/// `h` is a live MGRAS handle.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_mgras_vc3_control(h: *mut IrisEngine) -> u32 {
+    unsafe { call::<MgrasEngine<CMem>, _>(h, Point::Flags, 0, |e| e.vc3_control()) }
+}
+
 /// The HQ flags as the board holds them.
 ///
 /// # Safety
