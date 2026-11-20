@@ -241,6 +241,16 @@ impl DacDraw {
     /// Draw the cursor into `out`, a frame `stride` pixels a row, top row first, `w` x `h` of it
     /// the screen. Value 3 is the foreground, 2 the background; 0 and 1 leave the frame.
     pub fn draw(&self, out: &mut [u32], stride: usize, w: usize, h: usize) {
+        self.draw_in(self.foreground, self.background, out, stride, w, h)
+    }
+
+    /// As `draw`, in the colours the DAC holds: ten bits a channel, `0x00` then red, green and blue.
+    pub fn draw_wide(&self, out: &mut [u32], stride: usize, w: usize, h: usize) {
+        let wide = |c: [u16; 3]| (c[0] as u32 & 0x3ff) << 20 | (c[1] as u32 & 0x3ff) << 10 | (c[2] as u32 & 0x3ff);
+        self.draw_in(wide(self.cursor.foreground), wide(self.cursor.background), out, stride, w, h)
+    }
+
+    fn draw_in(&self, foreground: u32, background: u32, out: &mut [u32], stride: usize, w: usize, h: usize) {
         for r in 0..SIZE {
             let y = self.y0 + r as i32;
             if y < 0 || y >= h as i32 {
@@ -252,8 +262,8 @@ impl DacDraw {
                     continue;
                 }
                 match self.cursor.pixel(c, r) {
-                    3 => out[y as usize * stride + x as usize] = self.foreground,
-                    2 => out[y as usize * stride + x as usize] = self.background,
+                    3 => out[y as usize * stride + x as usize] = foreground,
+                    2 => out[y as usize * stride + x as usize] = background,
                     _ => {}
                 }
             }

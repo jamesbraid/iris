@@ -614,6 +614,33 @@ mod tests {
         assert!(frame(&t).iter().all(|&p| p == 0xff00_0000));
     }
 
+    /// Drawn over ten-bit pixels, the DAC cursor keeps its colours' ten bits, whose top eight are the
+    /// eight-bit frame's; a blanked frame has none.
+    #[test]
+    fn the_dac_cursor_keeps_its_ten_bits_over_a_wide_frame() {
+        let mut w = vec![0u32; dac_cursor::WORDS];
+        w[1..7].copy_from_slice(&[0x3fd, 1, 2, 0x155, 0x2aa, 0x3ff]);
+        w[7 + 3] = 0b11_10_00_00;
+        let mut t = Tables::default();
+        t.load_dac_cursor(dac_cursor::DacCursor::from_request(&w).unwrap());
+        for (selector, value) in [(0xb00, 0x04), (0xb00, 0x02), (0xb02, 5), (0xb00, 0x00), (0xb00, 0x02), (0xb02, 2), (0xb02, 0), (0xb02, 1), (0xb02, 0)] {
+            t.indirect(selector, value);
+        }
+        let (mut wide, mut narrow) = (vec![7u32; 16], vec![0xff00_0007u32; 16]);
+        t.snapshot().draw_dac_cursor_wide(&mut wide, 8, 8, 2);
+        t.snapshot().draw_dac_cursor(&mut narrow, 8, 8, 2);
+        assert_eq!((wide[10], wide[11]), (0x3fd << 20 | 1 << 10 | 2, 0x155 << 20 | 0x2aa << 10 | 0x3ff));
+        assert_eq!(wide.iter().filter(|&&p| p != 7).count(), 2);
+        let top = |c: u32| (c >> 2) & 0xff;
+        for i in [10, 11] {
+            assert_eq!(narrow[i], 0xff00_0000 | top(wide[i] >> 20) | top(wide[i] >> 10) << 8 | top(wide[i]) << 16);
+        }
+        t.set_blank(true);
+        let mut blank = vec![7u32; 16];
+        t.snapshot().draw_dac_cursor_wide(&mut blank, 8, 8, 2);
+        assert!(blank.iter().all(|&p| p == 7), "a blanked frame has no cursor");
+    }
+
     /// A blanked frame is black and leaves the store alone; showing it again restores the frame.
     #[test]
     fn blanking_blacks_the_frame_and_leaves_the_store() {

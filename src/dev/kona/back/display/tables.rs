@@ -586,6 +586,14 @@ impl Baked {
         }
     }
 
+    /// Draw the DAC cursor over a frame of ten-bit pixels as `draw_dac_cursor` does, in the ten bits
+    /// the DAC holds its colours in; a blanked frame has none.
+    pub fn draw_dac_cursor_wide(&self, out: &mut [u32], stride: usize, w: usize, h: usize) {
+        if let (Some(d), false) = (&self.dac_cursor, self.blank) {
+            d.draw_wide(out, stride, w, h);
+        }
+    }
+
     pub fn is_default(&self) -> bool {
         self.default
     }

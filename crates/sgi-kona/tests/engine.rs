@@ -564,6 +564,40 @@ fn the_pipe_has_one_head_whose_picture_is_copied_as_rgb_and_not_lent_without_a_g
     assert_eq!(BoardEngine::scanout(&mut e, 0, &mut px), Err(sgi_engine::Fault("gone".into())));
 }
 
+/// `scanout10` of the pipe: its pixels reach the DAC as eight bits, so they are those eight widened by
+/// repeating their top bits and the top eight bits are `scanout`'s; the GPU scan-out gives the same
+/// words as the CPU compose. Skips the GPU half without an adapter.
+#[test]
+fn scanout10_widens_the_eight_bit_pixels_the_same_on_the_cpu_and_the_gpu() {
+    use sgi_kona::wgpu::{Gpu, GpuOptions};
+    let gpu = Gpu::new(&GpuOptions::default(), Box::new(|m| panic!("GPU failed: {m}"))).map_err(|e| eprintln!("no GPU: {e}")).ok();
+    let mut frames = Vec::new();
+    for gpu in [None].into_iter().chain(gpu.map(Some)) {
+        let opts = Options { gpu: gpu.clone(), ..Options::default() };
+        let mut e = Engine::new(KonaConfig::ir2(1).unwrap().with_pool(0, 32), Ram::default(), opts, None).expect("engine");
+        // Colour 1 is a ten-bit 0x3fc, 0x155 and 0x001: eight bits 0xff, 0x55 and 0x00; a point at (100, 50).
+        for (selector, args) in [(0x3, &[1, 0x3fc, 0x155, 1][..]), (0x2, &[1]), (0x6, &[100, 50])] {
+            textport(&mut e, &[&[1, selector][..], args].concat(), &[A]);
+        }
+        let (mut eight, mut ten) = (Vec::new(), Vec::new());
+        let size = BoardEngine::scanout(&mut e, 0, &mut eight).unwrap().expect("a frame");
+        assert_eq!(BoardEngine::scanout10(&mut e, 0, &mut ten), Ok(Some(size)));
+        assert_eq!(BoardEngine::scanout10(&mut e, 1, &mut Vec::new()), Ok(None), "one head");
+        let lit: Vec<usize> = (0..eight.len()).filter(|&i| eight[i] != 0).collect();
+        assert_eq!(lit.len(), 1, "the point");
+        assert_eq!(eight[lit[0]], 0xff_55_00);
+        assert_eq!(ten[lit[0]], 0x3ff << 20 | 0x155 << 10, "0xff and 0x55 widened by repeating their top bits, and 0");
+        for (&a, &t) in eight.iter().zip(&ten) {
+            let top = |c: u32| (c >> 2) & 0xff;
+            assert_eq!(a, top(t >> 20) << 16 | top(t >> 10) << 8 | top(t));
+        }
+        frames.push(ten);
+    }
+    if let [cpu, gpu] = &frames[..] {
+        assert!(cpu == gpu, "the GPU scan-out is the CPU compose");
+    }
+}
+
 /// A swap latched for the next frame is part of the saved state: a save between the swap and its
 /// retrace (the VM stops there and nothing releases it) keeps it, and the loaded engine shows it at
 /// its next frame as the saved one would. It was refused before, so savevm and migration failed.
