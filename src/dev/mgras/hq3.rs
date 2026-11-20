@@ -302,6 +302,8 @@ const DL_MAX_SEGMENTS: u32 = 1 << 20;
 struct PageTable {
     base: u64,
     entry: u32,
+    /// The XIO widget the table's memory is reached through: bits 19:16 of the register pair's control word.
+    widget: u32,
 }
 
 impl PageTable {
@@ -311,7 +313,7 @@ impl PageTable {
     /// the address.
     fn of(hi: u32, lo: u32, entry: u32) -> PageTable {
         let base = if entry == 8 { ((hi & 0xFF) as u64) << 32 | (lo & !7) as u64 } else { (lo & !3) as u64 };
-        PageTable { base, entry }
+        PageTable { base, entry, widget: hi >> 16 & 0xF }
     }
 
     /// Whether the table is a real one: between transfers the kernel parks
@@ -422,6 +424,9 @@ pub trait Hq3Sink {
     fn finish_raster(&mut self) {}
     /// System memory for DMA, if connected.
     fn sys_mem(&mut self) -> Option<Arc<dyn HostMem>>;
+    /// The XIO widget the transfer about to start reaches host memory through, which `sys_mem` composes into the
+    /// addresses it hands the bus. A sink that has no widgets ignores it.
+    fn set_dma_widget(&mut self, _widget: u32) {}
     /// A DMA access that reached no memory.
     fn host_fault(&mut self, _addr: u64, _write: bool) {}
     /// Something not modelled yet (reported once).
@@ -1472,8 +1477,9 @@ impl Hq3Engine {
     /// segment, or back to the FIFO when none is left. ideas keeps its
     /// materials in lists; long lists chain segments of about 1 K words.
     fn run_display_list(&mut self, offset: u32, words: u32, sink: &mut dyn Hq3Sink) {
-        let Some(mem) = sink.sys_mem() else { return };
         let table = PageTable::of(self.dma_regs[dma::DL_TABLE_BASE], self.dma_regs[dma::DL_TABLE_BASE + 1], self.entry_bytes);
+        sink.set_dma_widget(table.widget);
+        let Some(mem) = sink.sys_mem() else { return };
         let saved = std::mem::replace(&mut self.cfifo[DL_PORT], Cfifo::EMPTY);
         let mut stack: Vec<(u32, u32)> = Vec::new();
         let mut cur = Some((offset, words));
@@ -1538,13 +1544,14 @@ impl Hq3Engine {
     /// a time. Host addresses are logical within the pool and translate
     /// through its page table: one 32-bit frame number per 4 KB page.
     fn dma(&mut self, word: u32, mut peer: DmaPeer, sink: &mut dyn Hq3Sink) {
-        let Some(mem) = sink.sys_mem() else { return };
         let read = word & 8 != 0;
         #[cfg(feature = "perfetto")]
         let def = if read { &crate::perfetto::events::MGRAS_DMA_TO_HOST } else { &crate::perfetto::events::MGRAS_DMA_TO_BOARD };
         crate::pf_scope!(*def, word);
         let pool = ((word >> 1) & 3) as usize;
         let table = PageTable::of(self.dma_regs[dma::TABLE_BASE + 2 * pool], self.dma_regs[dma::TABLE_BASE + 2 * pool + 1], self.entry_bytes);
+        sink.set_dma_widget(table.widget);
+        let Some(mem) = sink.sys_mem() else { return };
         // Between transfers the kernel parks a pool's table at a dummy
         // value (0x1, 0x5, 0x9: no page table). A DMA through it would take
         // frame numbers from low memory and scribble over the kernel.

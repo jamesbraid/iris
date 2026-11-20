@@ -107,3 +107,26 @@ fn a_start_word_without_bit_0_runs_nothing() {
     run_with_start(&mut e, (0, 0x4019), 8, 0x10, 0x1020, 0);
     assert_eq!(mem.get(0x9020, 32), vec![0; 32]);
 }
+
+/// The table's control word names the XIO widget its memory is reached through (bits 19:16), and the engine puts it in
+/// bits 51:48 of the address it hands the shell: the page-table fetch and the data both. Inline, where the transfer runs
+/// on the caller's thread, the shell's bus is used; with a worker thread, the RAM path alone.
+#[test]
+fn the_tables_widget_is_in_the_address_and_inline_dma_uses_the_bus() {
+    for (mode, bus) in [(Mode::Inline, true), (Mode::Threaded, false)] {
+        let mem = Mem::default();
+        let widget = 3u64 << 48;
+        mem.put(widget | 0x4018, &[0, 0, 0, 7, 0, 0, 0, 9]);
+        mem.put(widget | 0x7010, &pattern(8));
+        // The same offsets without the widget hold other data, which must not be read or written.
+        mem.put(0x7010, &[0xEE; 32]);
+        let mut cfg = Config::new(Board::Solid, mode);
+        cfg.entry_bytes = 4;
+        let mut e = MgrasEngine::new(cfg, mem.clone(), None, None).unwrap();
+        run(&mut e, (3 << 16, 0x4019), 8, 0x10, 0x1020);
+        assert_eq!(mem.get(widget | 0x9020, 32), pattern(8), "{mode:?}");
+        assert_eq!(mem.get(0x9020, 32), vec![0; 32], "{mode:?}: nothing on widget 0");
+        let calls = mem.0.bus_calls.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(calls > 0, bus, "{mode:?}: {calls} bus calls");
+    }
+}
