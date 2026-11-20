@@ -5,7 +5,7 @@
 //! It has a lock of its own so the shell's bus accesses never wait for the
 //! raster worker; the worker never touches it.
 
-use super::dcb::{Dcb, Txn, DEV_VC3};
+use super::dcb::{Dcb, Txn, DEV_DAC, DEV_VC3};
 use super::frame::{self, Frame};
 use super::plain::boxed_zeroed;
 use super::rss::Rss;
@@ -75,7 +75,8 @@ impl Display {
                     return t.load_value(bits, d);
                 }
             }
-            let d = self.dcb.read(t);
+            // The address register reads back as the halfword the CPU wrote, register number in bits 15:8.
+            let d = if t.dev == DEV_DAC && t.crs == 0 && t.width >= 2 { self.dcb.dac.address_halfword() } else { self.dcb.read(t) };
             return t.load_value(bits, d);
         }
         let dev = ((off - DCBCTRL) >> 2) as usize;
@@ -96,6 +97,11 @@ impl Display {
                 if slave.write(t.dev, t.crs, t.width, t.store_data(bits, val)) {
                     return false;
                 }
+            }
+            // A byte store at +1 of the DAC's address halfword sets the register number, its bits 15:8.
+            if t.dev == DEV_DAC && t.crs == 0 && t.width >= 2 && bits == 8 {
+                self.dcb.dac.set_register_number(val as u32);
+                return false;
             }
             self.dcb.write(t, t.store_data(bits, val));
             return t.crs >= 2 || t.dev == DEV_VC3;
