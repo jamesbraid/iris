@@ -839,6 +839,13 @@ impl<M: HostMem> MgrasEngine<M> {
         self.display.lock().set_slave(slave);
     }
 
+    /// The hardware cursor as the VC3's registers hold it: the glyph's top-left pixel in screen pixels from the top left
+    /// (the position registers less 31, signed), and whether it is shown (cursor control bits 0 and 1 both set).
+    /// The position is given whether or not it is shown. Does not wait for queued work.
+    pub fn cursor_position(&self) -> (i32, i32, bool) {
+        self.display.lock().dcb().vc3.cursor_position()
+    }
+
     /// The VC3's display control register (0x1e) as the guest last wrote it: bit 0 enables the retrace interrupt,
     /// bit 2 the display. A shell that raises the retrace interrupt reads the enable here.
     pub fn vc3_control(&self) -> u32 {

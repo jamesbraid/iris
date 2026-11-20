@@ -84,6 +84,11 @@ int sgi_mgras_set_display_bus(IrisEngine *h, void *user,
                               int (*read)(void *user, uint32_t dev, uint32_t crs, uint32_t width, uint32_t *data),
                               int (*write)(void *user, uint32_t dev, uint32_t crs, uint32_t width, uint32_t data));
 
+/* The hardware cursor as the VC3's registers hold it: the glyph's top-left pixel in screen pixels from the top
+ * left (the position registers less 31, signed) in *x and *y, set whether or not it is shown. Returns 1 when
+ * it is shown (cursor control bits 0 and 1 both set), 0 when not or for a NULL output. */
+int sgi_mgras_cursor_position(IrisEngine *h, int32_t *x, int32_t *y);
+
 /* The VC3's display control register (0x1e) as the guest last wrote it: bit 0 enables the retrace
  * interrupt, bit 2 the display; 0 after a reset. */
 uint32_t sgi_mgras_vc3_control(IrisEngine *h);

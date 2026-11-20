@@ -250,6 +250,26 @@ pub unsafe extern "C" fn sgi_mgras_set_display_bus(
     }
 }
 
+/// The hardware cursor as the VC3's registers hold it: the glyph's top-left pixel in screen pixels from the top left
+/// (the position registers less 31, signed) in `*x` and `*y`, set whether or not it is shown, and the return is 1
+/// when it is shown (control bits 0 and 1 both set), 0 when not or for a NULL output.
+///
+/// # Safety
+/// `h` is a live MGRAS handle; `x` and `y` point to `int32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_mgras_cursor_position(h: *mut IrisEngine, x: *mut i32, y: *mut i32) -> c_int {
+    unsafe {
+        call::<MgrasEngine<CMem>, _>(h, Point::Flags, 0, |e| {
+            if x.is_null() || y.is_null() {
+                return 0;
+            }
+            let (cx, cy, shown) = e.cursor_position();
+            (*x, *y) = (cx, cy);
+            shown as c_int
+        })
+    }
+}
+
 /// The VC3's display control register (0x1e) as the guest last wrote it: bit 0 enables the retrace interrupt, bit 2
 /// the display; 0 after a reset.
 ///
