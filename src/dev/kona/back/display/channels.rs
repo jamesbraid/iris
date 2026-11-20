@@ -105,7 +105,8 @@ pub struct Channel {
     pub blanked: bool,
     pub gamma_map: u32,
     pub cursor_priority: u32,
-    /// The channel whose timing this one takes.
+    /// The channel whose pixels this one copies, as the request named it: a display channel's number, or the
+    /// option board's index or VOC id. Its own number when it runs independent.
     pub source: u32,
     pub name: [u32; NAME_WORDS],
     /// The resize read's words 4 to 7.
@@ -164,6 +165,17 @@ impl Channel {
         let [rate, fields, lines, _] = self.timing;
         (self.enabled && rate != 0 && lines != 0).then_some((rate, 65536, fields.max(1), lines))
     }
+}
+
+/// Where a channel's picture comes from (`Channels::source`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// The channel's own: it runs independent.
+    Own,
+    /// Another channel's: the channel runs dependent.
+    Channel(usize),
+    /// The word names no channel the board has.
+    Unknown,
 }
 
 /// The display generator's video state.
@@ -236,6 +248,21 @@ impl Channels {
         match self.option_index() {
             Some(option) if word == GVO_ID || word as usize == option => Some(option),
             _ => ((word as usize) < self.count).then_some(word as usize),
+        }
+    }
+
+    /// Where channel `index` takes its picture from. The source word is its own number or physical id (the
+    /// combination names the option board's channel by its VOC id) for an independent channel (established,
+    /// kona devices/dg/README.md, `SourceChannel`: a channel's source defaults to itself).
+    pub fn source(&self, index: usize) -> Source {
+        let word = self.channel[index].source;
+        if word as usize == index {
+            return Source::Own;
+        }
+        match self.physical(word) {
+            Some(s) if s == index => Source::Own,
+            Some(s) => Source::Channel(s),
+            None => Source::Unknown,
         }
     }
 
@@ -467,8 +494,8 @@ impl Channels {
             VIDEO_CURSOR_PRIORITY => ch.cursor_priority = d(1),
             VIDEO_VAMPIRE => {
                 ch.source = d(1);
-                if d(1) as usize != channel {
-                    crate::dlog!(LogModule::Kona, "kona: channel {channel} taking channel {}'s timing is not modelled", d(1));
+                if self.source(channel) == Source::Unknown {
+                    crate::dlog!(LogModule::Kona, "kona: channel {channel} takes source channel {}, which the board lacks: it shows its own", d(1));
                 }
             }
             VIDEO_BIND_TO_X_WINDOW => {
@@ -718,6 +745,25 @@ mod tests {
         c.reset();
         assert_eq!((c.physical(0xc6), c.option_index()), (None, None));
         assert_eq!(&words(&c.reply(VIDEO_GET_BOARD_CONFIG, &[0]).unwrap())[..5], &[6, 1, 3, 0, 0x10], "the mask is the board's, not the probe's");
+    }
+
+    #[test]
+    fn a_source_word_is_compared_with_the_channels_index_and_its_physical_id() {
+        let mut c = Channels::new(2).with_count(2).with_option_mask(0x10);
+        c.set_option_channel(true);
+        // The boot combination copies channel 0 into channel 1.
+        c.set(VIDEO_VAMPIRE, &[1, 0]);
+        assert_eq!((c.source(0), c.source(1)), (Source::Own, Source::Channel(0)));
+        // The GVO names itself by its VOC id (198): independent, as by its index.
+        for word in [GVO_ID, 2] {
+            c.set(VIDEO_VAMPIRE, &[GVO_ID, word]);
+            assert_eq!(c.source(2), Source::Own, "word {word}");
+        }
+        c.set(VIDEO_VAMPIRE, &[GVO_ID, 0]);
+        assert_eq!(c.source(2), Source::Channel(0));
+        // A source the board lacks is unknown.
+        c.set(VIDEO_VAMPIRE, &[1, 5]);
+        assert_eq!(c.source(1), Source::Unknown);
     }
 
     #[test]
