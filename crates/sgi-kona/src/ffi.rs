@@ -315,6 +315,26 @@ pub unsafe extern "C" fn sgi_kona_scanout(h: *mut IrisEngine, buf: *mut u32, cap
     }
 }
 
+/// Channel 0's DAC cursor as the display bus's registers hold it, without waiting for queued stores: the origin of
+/// its 64 by 64 image in screen pixels from the top left (signed) in `*x` and `*y`, and in `*on` whether it is enabled
+/// in X11 mode, for a shell that publishes the pointer. OK; ERROR for a NULL output.
+///
+/// # Safety
+/// `h` is a live KONA handle; `x` and `y` point to `int32_t` and `on` to `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_dac_cursor(h: *mut IrisEngine, x: *mut i32, y: *mut i32, on: *mut u32) -> c_int {
+    unsafe {
+        call::<KonaEngine<CMem>, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| {
+            if x.is_null() || y.is_null() || on.is_null() {
+                return sgi_engine::ffi::IRIS_ENGINE_ERROR;
+            }
+            let (cx, cy, shown) = e.dac_cursor();
+            (*x, *y, *on) = (cx, cy, shown as u32);
+            IRIS_ENGINE_OK
+        })
+    }
+}
+
 /// The channels the pipe's display generator has: 8 on a DG5-8, 2 on a DG5-2, with or without its option board
 /// (whose channel is one more once the firmware's probe finds it). 0 for a NULL handle.
 ///

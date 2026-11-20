@@ -852,6 +852,11 @@ impl KonaBackend {
         self.channels.option_index()
     }
 
+    /// Channel 0's DAC cursor: its origin in screen pixels from the top left, and whether it is enabled (`Dac::state`).
+    pub fn dac_cursor(&self) -> (i32, i32, bool) {
+        self.tables.lock().dac().state()
+    }
+
     /// The channel a request's channel word names (`Channels::physical`).
     pub fn channel_index(&self, word: u32) -> Option<usize> {
         self.channels.physical(word)

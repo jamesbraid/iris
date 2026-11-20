@@ -268,3 +268,38 @@ fn the_link_reset_entry_resets_the_interrupt_registers_and_keeps_the_map_ram() {
     assert_eq!((rd(0x5c), rd(0x100008)), (0, 0x2000_1234));
     unsafe { iris_engine_free(h) };
 }
+
+/// A shell publishes the pointer from the DAC cursor's registers: the origin of the image, and whether it is enabled in
+/// X11 mode, read as the kernel's display-bus writes left them.
+#[test]
+fn a_c_shell_reads_the_dac_cursor_origin_and_enable() {
+    let ir2 = CString::new("ir2").unwrap();
+    let h = unsafe { sgi_kona_new(&config(ir2.as_ptr()), &host()) };
+    // A word through the indirect port: the selector, then the data.
+    let indirect = |selector: u32, value: u32| {
+        assert_eq!(unsafe { iris_engine_write(h, 0x8003c0, 32, selector as u64) }, IRIS_ENGINE_OK);
+        assert_eq!(unsafe { iris_engine_write(h, 0x8003d0, 32, value as u64) }, IRIS_ENGINE_OK);
+        assert_eq!(unsafe { iris_engine_quiesce(h, u64::MAX) }, IRIS_ENGINE_OK);
+    };
+    // The kernel's way: the block's index (low byte, then high), then data bytes to its register 2.
+    let at = |index: u32, bytes: &[u32]| {
+        indirect(0xb00, index & 0xff);
+        indirect(0xb00, index >> 8);
+        bytes.iter().for_each(|&b| indirect(0xb02, b));
+    };
+    let (mut x, mut y, mut on) = (7i32, 7i32, 7u32);
+    assert_eq!(unsafe { sgi_kona_dac_cursor(h, &mut x, &mut y, &mut on) }, IRIS_ENGINE_OK);
+    assert_eq!((x, y, on), (0, 0, 0), "off at power-on");
+    at(0x200, &[0x10, 0, 0x20, 0]);
+    at(0x204, &[5]);
+    assert_eq!(unsafe { sgi_kona_dac_cursor(h, &mut x, &mut y, &mut on) }, IRIS_ENGINE_OK);
+    assert_eq!((x, y, on), (16, 32, 1));
+    at(0x200, &[0xfe, 0xff, 0xf0, 0xff]);
+    assert_eq!(unsafe { sgi_kona_dac_cursor(h, &mut x, &mut y, &mut on) }, IRIS_ENGINE_OK);
+    assert_eq!((x, y, on), (-2, -16, 1), "signed, as the frame places it");
+    at(0x204, &[0]);
+    assert_eq!(unsafe { sgi_kona_dac_cursor(h, &mut x, &mut y, &mut on) }, IRIS_ENGINE_OK);
+    assert_eq!(on, 0);
+    assert_eq!(unsafe { sgi_kona_dac_cursor(h, null_mut(), &mut y, &mut on) }, IRIS_ENGINE_ERROR);
+    unsafe { iris_engine_free(h) };
+}
