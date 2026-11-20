@@ -10,7 +10,7 @@
 //!   output chips: each of the VOCs 0xc6 and 0xc7 is present when id + 0x3e8 written to its register 0x31
 //!   (bus 0xc831 and 0xc931) reads back the same. Request 83 also pulses 0xc000 (soft reset), 1 then 0.
 //!   The channel exists only when both are present.
-//! - Request 82 loads the board's logic: type 0, count -1 writes 1 to 0x8900 (clear) and otherwise up to 16
+//! - Request 82 loads the board's logic, whether or not the probe has run (the X server sends it first): type 0, count -1 writes 1 to 0x8900 (clear) and otherwise up to 16
 //!   bytes, packed four to a word in words 2 to 5 (first byte in the top byte: inferred), each written to
 //!   0x8a02 and acknowledged by bit 7 of that word within 999 reads. The reply (27) is 1 on success, 0 on
 //!   a refusal or a timeout.
@@ -145,7 +145,9 @@ impl OptionBoard {
     /// Request 82: type, count (-1 clears), the bytes. True when the board took it.
     fn load_logic(&mut self, data: &[u32]) -> bool {
         let d = |i: usize| data.get(i).copied().unwrap_or(0);
-        let (Some(slave), true) = (self.slave.as_mut(), self.present && d(0) == 0) else { return false };
+        // The X server loads the logic before it probes the board (the screen set-up loads it first, the firmware's
+        // load routine checks nothing of the probe), so the board only has to be there to answer.
+        let (Some(slave), true) = (self.slave.as_mut(), d(0) == 0) else { return false };
         let count = d(1);
         if count == u32::MAX {
             return slave.write(LOAD_CONTROL, 1);
@@ -237,6 +239,8 @@ mod tests {
     fn the_logic_load_clears_then_sends_each_byte_to_0x8a02_and_polls_its_bit_7() {
         let fake = Fake::default();
         let mut b = board(&fake);
+        assert_eq!(b.request(0x52, &[0, u32::MAX, 0, 0, 0, 0]), Some(1), "before the probe: the X server loads the logic first");
+        assert!(!b.present());
         b.request(0x11, &[0]);
         fake.log.lock().unwrap().clear();
         assert_eq!(b.request(0x52, &[0, u32::MAX, 0, 0, 0, 0]), Some(1));
