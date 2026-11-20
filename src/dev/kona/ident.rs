@@ -584,6 +584,11 @@ impl KonaConfig {
         self.geometry.map_or(self.spec().geometries[0], |g| g.spec())
     }
 
+    /// The channels the pipe's display generator has: 8 on a DG5-8, 2 on a DG5-2 (with or without its option board).
+    pub fn display_channels(&self) -> u32 {
+        self.display_board().channels
+    }
+
     /// The display generator the pipe has.
     pub(super) fn display_board(&self) -> &'static Display {
         self.display.unwrap_or(if self.host_board == HostBoard::Deskside { DisplayBoard::Dg5_8 } else { DisplayBoard::Dg5_2 }).spec()

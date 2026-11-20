@@ -56,6 +56,15 @@ impl DisplayBusSlave for Board {
 
 const A: Source = Source { id: 1, charged: true };
 
+#[test]
+fn the_display_boards_channel_count_is_asked_not_derived() {
+    for (display, channels) in [("dg5-2", 2), ("dg5-2-gvo", 2)] {
+        assert_eq!(engine(display).display_channels(), channels, "{display}");
+    }
+    let deskside = Engine::new(KonaConfig::ir2(2).unwrap().with_pool(0, 32), Ram::default(), Options::default(), None).unwrap();
+    assert_eq!(deskside.display_channels(), 8, "the deskside's DG5-8");
+}
+
 fn engine(display: &str) -> Engine {
     let cfg = KonaConfig::ir2(1).unwrap().with_option_slave().with_display(display, 2).unwrap().with_pool(0, 32);
     Engine::new(cfg, Ram::default(), Options::default(), None).expect("engine")
