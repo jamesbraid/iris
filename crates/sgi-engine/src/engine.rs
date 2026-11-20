@@ -363,6 +363,12 @@ pub trait BoardEngine {
     fn compose_into(&mut self, _head: u32, _dst: &dyn std::any::Any, _stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
         Ok(None)
     }
+    /// Wall time, in ns, the engine's own worker threads have spent running work since it was built (not waiting
+    /// for it), summed over them, so it can exceed wall time. Work done inside a call is in that call's time and
+    /// not here; 0 for an engine that runs everything inside calls. Cheap; waits for nothing.
+    fn busy_ns(&self) -> u64 {
+        0
+    }
     /// The timing of `head`'s scan-out (`HeadTiming`), `None` while none is loaded or for no such head: the
     /// shell keeps its default. Cheap; waits for nothing.
     fn head_timing(&self, _head: u32) -> Option<HeadTiming> {

@@ -284,6 +284,11 @@ typedef struct IrisEngineHeadTiming {
 /* The timing of head's scan-out: 1 with *t set, 0 for none (the shell keeps its default). */
 int iris_engine_head_timing(IrisEngine *h, uint32_t head, IrisEngineHeadTiming *t);
 
+/* Wall time in ns the engine's own worker threads have spent running work since it was built (not waiting for
+ * it), summed over them, so it can exceed wall time. Work done inside a call is in that call's time and not here.
+ * 0 for an engine with no threads of its own. */
+uint64_t iris_engine_busy_ns(IrisEngine *h);
+
 /* As iris_engine_scanout, x2r10g10b10 a pixel (2 unused bits, then red, green, blue of 10): the top 8 bits of
  * each colour are the 8-bit scan-out's. A board with 8-bit colour maps repeats their top bits. */
 int iris_engine_scanout10(IrisEngine *h, uint32_t head, uint32_t *buf,
