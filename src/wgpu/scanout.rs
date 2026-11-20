@@ -45,7 +45,8 @@ struct Header {
     width: u32,
     height: u32,
     stride: u32,
-    /// 0: words are 0xAABBGGRR; 1: 0x00RRGGBB, as the board's kernel produces them.
+    /// 0: words are 0xAABBGGRR; 1: 0x00RRGGBB, as the board's kernel produces them; 2: the kernel's
+    /// x2r10g10b10, ten bits a channel.
     format: u32,
 }
 
@@ -94,6 +95,15 @@ impl ScanoutPipeline {
     }
 }
 
+/// A second frame buffer, header and slot, so a wide compose leaves the first's as they were.
+struct Wide {
+    frame: wgpu::Buffer,
+    header: wgpu::Buffer,
+    slot: wgpu::Buffer,
+    frame_group: wgpu::BindGroup,
+    slot_group: wgpu::BindGroup,
+}
+
 /// A frame on the GPU and the slot the kernel reads, with a readback.
 pub struct Scanout {
     gpu: Arc<Gpu>,
@@ -109,6 +119,8 @@ pub struct Scanout {
     /// own header so the lent output's cached one is not disturbed.
     into: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     into_header: wgpu::Buffer,
+    /// What `run_wide` composes with, made on first use.
+    wide: Option<Wide>,
     label: String,
     /// Frames composed so far.
     pub frames: u64,
@@ -136,7 +148,7 @@ impl Scanout {
         let into_header = gpu.buffer("scanout header into", 16, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         Scanout {
             gpu: Arc::clone(gpu), header_buf, out_buf, slot_buf, frame_group, slot_group,
-            max_pixels, last_dimensions: None, slot_initialized: false, into: None, into_header,
+            max_pixels, last_dimensions: None, slot_initialized: false, into: None, into_header, wide: None,
             label: pipeline.label.clone(), frames: 0,
         }
     }
@@ -156,6 +168,62 @@ impl Scanout {
         }
         self.compose(pipeline, width, height, slot, groups)?;
         self.read_output(width, height, out)
+    }
+
+    /// As `run`, for a board kernel whose pixels are x2r10g10b10 (ten bits a channel): `out` takes those
+    /// words, rows of `width`. Composed with a frame buffer, header and slot of its own, so the frame
+    /// `compose` lends and the cached slot of `compose_cached` are not disturbed.
+    pub fn run_wide(&mut self, pipeline: &ScanoutPipeline, width: u32, height: u32, slot: &[u8], groups: &[&wgpu::BindGroup], out: &mut [u32]) -> Result<(), String> {
+        let pixels = width as u64 * height as u64;
+        if pixels == 0 {
+            return Ok(());
+        }
+        if out.len() < pixels as usize || pixels > self.max_pixels as u64 {
+            return Err(self.fail(format!("a {width} x {height} frame does not fit")));
+        }
+        self.run_wide_inner(pipeline, width, height, slot, groups, &mut out[..pixels as usize]).map_err(|e| self.fail(e))
+    }
+
+    fn run_wide_inner(&mut self, pipeline: &ScanoutPipeline, width: u32, height: u32, slot: &[u8], groups: &[&wgpu::BindGroup], out: &mut [u32]) -> Result<(), String> {
+        if slot.len() as u64 > self.slot_buf.size() {
+            return Err(format!("a slot of {} bytes does not fit {}", slot.len(), self.slot_buf.size()));
+        }
+        if self.wide.is_none() {
+            let frame = self.gpu.buffer("scanout frame wide", self.max_pixels.max(1) as u64 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+            let header = self.gpu.buffer("scanout header wide", 16, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+            let slot = self.gpu.buffer("scanout slot wide", self.slot_buf.size(), wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+            let frame_group = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("scanout frame wide"),
+                layout: &pipeline.frame_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: header.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: frame.as_entire_binding() },
+                ],
+            });
+            let slot_group = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("scanout slot wide"),
+                layout: &pipeline.slot_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: slot.as_entire_binding() }],
+            });
+            self.wide = Some(Wide { frame, header, slot, frame_group, slot_group });
+        }
+        let wide = self.wide.as_ref().expect("set above");
+        self.gpu.write(&wide.header, 0, bytemuck::bytes_of(&Header { width, height, stride: width, format: 2 }));
+        self.gpu.write(&wide.slot, 0, slot);
+        let mut enc = self.gpu.encoder("scanout wide");
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("scanout wide"), timestamp_writes: None });
+            pass.set_pipeline(&pipeline.pipeline);
+            pass.set_bind_group(0, &wide.frame_group, &[]);
+            pass.set_bind_group(1, &wide.slot_group, &[]);
+            for (i, g) in groups.iter().enumerate() {
+                pass.set_bind_group(2 + i as u32, *g, &[]);
+            }
+            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+        }
+        self.gpu.submit(enc);
+        self.gpu.check()?;
+        self.gpu.read(&wide.frame, &[(0, width as u64 * height as u64 * 4)], bytemuck::cast_slice_mut(out))
     }
 
     /// Fail the device with `why`, as every error out of a scan-out does.

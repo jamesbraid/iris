@@ -113,6 +113,11 @@ pub(super) struct Frame {
     gamma: Box<[[[u32; 256]; 3]; 3]>,
     /// The lookup RAM's colours, in the output's order.
     lut: Box<[u32; lut::SIZE as usize]>,
+    /// The tables carry ten bits a channel as x2r10g10b10 (no alpha) instead of the opaque
+    /// 0xAABBGGRR of eight.
+    wide: bool,
+    /// Black, outside any field, in the output's order.
+    black: u32,
 }
 
 /// 0x00RRGGBB as 0xAABBGGRR, opaque: the one order every frame is in, the
@@ -190,7 +195,7 @@ fn colour<const K: u32, const RGB: bool, const LOG2: u32>(f: &Frame, p: &Plan, w
         K_LANES => word_of(lanes_from(value(words, b, 6))),
         K_INDEX2 => value(words, b, 2) as u32,
         K_INDEX4 => value(words, b, 4) as u32,
-        K_OUTSIDE => return abgr(0),
+        K_OUTSIDE => return f.black,
         _ => p.field.load(value(words, b, p.field.value_len())),
     };
     if RGB {
@@ -265,6 +270,12 @@ impl Frame {
     /// The frame the registers describe, with buffer (displayed >> id) & 1
     /// showing for each window; None before the scan-out is set up.
     pub fn snapshot(regs: &DisplayRegs, displayed: u32) -> Option<Frame> {
+        Self::snapshot_in(regs, displayed, false)
+    }
+
+    /// As `snapshot`; `wide` keeps the colour maps' ten bits a channel (x2r10g10b10, the top eight
+    /// bits of each what 0xAABBGGRR holds) in the frame `compose` builds.
+    pub fn snapshot_in(regs: &DisplayRegs, displayed: u32, wide: bool) -> Option<Frame> {
         let r = &regs.pbj;
         let (width, height, stride) = (r[pbj::WIDTH], r[pbj::HEIGHT], r[pbj::STRIDE]);
         if width == 0 || height == 0 || stride == 0 || width > stride * TILE {
@@ -274,7 +285,7 @@ impl Frame {
         let wid_format = Format { fb_log2: 1, win_log2: 1, pixel_fmt: PIXEL_FMT_B, ..Default::default() };
         let fb = Surface::new(r[pbj::PIXEL_BASE], stride, fb_log2);
         let fields: [[Field; 2]; dispmode::COUNT as usize] = std::array::from_fn(|id| mode_fields(regs.dispmode[id]));
-        let ctx = ResolveCtx::new(regs, displayed);
+        let ctx = ResolveCtx::new(regs, displayed, wide);
         let plans = std::array::from_fn(|id| {
             let show = &ctx.ids[id];
             Plan::of(fields[id][show.buf & 1], show, fb.bpp_log2)
@@ -287,7 +298,7 @@ impl Frame {
                     // Each channel's entry alone in its byte; alpha is set in
                     // all three, so their OR is opaque.
                     let v = ctx.gamma[ch][folded];
-                    t[ch][c as usize] = abgr(v);
+                    t[ch][c as usize] = if wide { v } else { abgr(v) };
                 }
             }
         }
@@ -298,11 +309,18 @@ impl Frame {
             fields,
             wid: Surface::new(r[pbj::OVERLAY_BASE], stride, 1),
             wid_layout: Layout::of(wid_format),
-            lut: Box::new(std::array::from_fn(|i| abgr(ctx.rgb[i]))),
+            lut: Box::new(std::array::from_fn(|i| if wide { ctx.rgb[i] } else { abgr(ctx.rgb[i]) })),
+            wide,
+            black: if wide { 0 } else { abgr(0) },
             ctx,
             plans,
             gamma,
         })
+    }
+
+    /// Whether the tables hold ten bits a channel (`snapshot_in`).
+    pub fn is_wide(&self) -> bool {
+        self.wide
     }
 
     /// The frame buffer and the window-id buffer the scan-out reads.
@@ -334,7 +352,7 @@ impl Frame {
         })
     }
 
-    /// One displayed pixel as 0x00RRGGBB, the reference `compose` is held
+    /// One displayed pixel as 0x00RRGGBB (x2r10g10b10 when wide), the reference `compose` is held
     /// to.
     #[inline]
     pub(super) fn pixel(&self, mem: VramPtr, x: u32, y: u32) -> u32 {
@@ -381,7 +399,7 @@ impl Frame {
                 }
             }
             for y in band..band + lines {
-                regs.cursor_row(y as u32, &mut out[y * stride..y * stride + w], w as u32);
+                regs.cursor_row_in(y as u32, &mut out[y * stride..y * stride + w], w as u32, self.wide);
             }
         }
     }
@@ -404,7 +422,7 @@ impl Frame {
             // A tile row that wraps the end of memory.
             for (i, o) in seg.iter_mut().enumerate() {
                 let rgb = self.pixel(mem, x + i as u32, y);
-                *o = abgr(rgb);
+                *o = if self.wide { rgb } else { abgr(rgb) };
             }
             return;
         };
@@ -539,7 +557,7 @@ fn field_word(mem: VramPtr, p: u64, f: &Field) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::consts::ODSY_GAMMA_GROUP;
+    use super::super::consts::{cursor, ODSY_GAMMA_GROUP};
     use super::super::vram::Vram;
 
     #[test]
@@ -584,5 +602,68 @@ mod tests {
         frame.compose(mem, &regs, &mut out, 32, 16);
         assert_eq!(out[2 * 32 + 3], abgr(0x40_80_c0));
         assert_eq!(out[9 * 32 + 20], abgr(0x10_20_30));
+    }
+
+    /// The wide frame keeps the maps' ten bits a channel, its top eight are the narrow frame's, and
+    /// both are what `pixel` says, over random modes, maps and memory with the cursor on.
+    #[test]
+    fn a_wide_frame_keeps_ten_bits_and_its_top_eight_are_the_narrow_frame() {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut regs = DisplayRegs::default();
+        regs.pbj[pbj::OVERLAY_BASE] = 0x2000;
+        regs.pbj[pbj::PIXEL_BASE] = 0x100;
+        regs.pbj[pbj::WIDTH] = 32;
+        regs.pbj[pbj::HEIGHT] = 16;
+        regs.pbj[pbj::STRIDE] = 2;
+        regs.pbj[pbj::DEPTH] = 3;
+        for id in 0..32 {
+            let group = if id % 3 == 0 { ODSY_GAMMA_GROUP } else { next() as u32 % 32 };
+            regs.dispmode[id] = (next() as u32 & !(dispmode::GROUP_MASK << dispmode::GROUP_SHIFT)) | group << dispmode::GROUP_SHIFT;
+        }
+        for o in 0..8 {
+            regs.overlay_mode[o] = next() as u32;
+        }
+        regs.lut.iter_mut().for_each(|e| *e = next() as u32);
+        let mut m = Vram::new(1 << 20);
+        let mem = m.ptr();
+        for a in (0x100..0x2100u64).chain(0x2000..0x2400).step_by(8) {
+            mem.store(a, 8, next());
+        }
+        let mut narrow = vec![0u32; 32 * 16];
+        let mut wide = vec![0u32; 32 * 16];
+        let (n, w) = (Frame::snapshot(&regs, 5).unwrap(), Frame::snapshot_in(&regs, 5, true).unwrap());
+        assert!(w.is_wide() && !n.is_wide());
+        // Without the cursor, both are the reference pixel.
+        n.compose(mem, &regs, &mut narrow, 32, 16);
+        w.compose(mem, &regs, &mut wide, 32, 16);
+        for (i, (&a, &b)) in narrow.iter().zip(&wide).enumerate() {
+            let (px, py) = (i as u32 % 32, i as u32 / 32);
+            assert_eq!(a, abgr(n.pixel(mem, px, py)), "narrow ({px}, {py})");
+            assert_eq!(b, w.pixel(mem, px, py), "wide ({px}, {py})");
+        }
+        // With it: a ten-bit colour in each of the two cursor shapes.
+        let bare = wide.clone();
+        regs.cursor.iter_mut().for_each(|c| *c = next() as u32);
+        regs.cursor[cursor::POSITION as usize] = 4 << 16 | 3;
+        for ctl in [cursor::CTL_ENABLE, cursor::CTL_ENABLE | cursor::CTL_CROSSHAIR] {
+            regs.cursor[cursor::CONTROL as usize] = ctl;
+            n.compose(mem, &regs, &mut narrow, 32, 16);
+            w.compose(mem, &regs, &mut wide, 32, 16);
+            for (i, (&a, &b)) in narrow.iter().zip(&wide).enumerate() {
+                assert_eq!(b & 0xc000_0000, 0, "pixel {i} of cursor control {ctl:#x}");
+                let top = |c: u32| (c >> 2) & 0xff;
+                assert_eq!(a, abgr(top(b >> 20) << 16 | top(b >> 10) << 8 | top(b)), "pixel {i} of cursor control {ctl:#x}");
+            }
+            assert_ne!(wide, bare, "the cursor, control {ctl:#x}, draws");
+        }
+        // The low two bits are in use: the table's own, not a widened copy of the top.
+        let widened = |c: u32| (c << 2) | (c >> 6);
+        assert!(wide.iter().any(|&b| (b >> 20) & 0x3ff != widened((b >> 22) & 0xff) || b & 0x3ff != widened((b >> 2) & 0xff)));
     }
 }

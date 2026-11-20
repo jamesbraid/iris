@@ -53,6 +53,7 @@ impl DisplaySlot {
         d.head[10] = regs.cursor_shown() as u32 | if regs.cursor[cursor::CONTROL as usize] & cursor::CTL_CROSSHAIR != 0 { 2 } else { 0 };
         d.head[11] = frame.wid_layout.front.at as u32;
         d.head[12] = frame.wid_layout.back.at as u32;
+        d.head[13] = frame.is_wide() as u32;
         let ctx = &frame.ctx;
         for id in 0..dispmode::COUNT as usize {
             let show = &ctx.ids[id];
@@ -136,6 +137,13 @@ impl VproScanout {
     pub fn run(&mut self, frame: &Frame, regs: &DisplayRegs, width: u32, height: u32, out: &mut [u32]) -> Result<(), String> {
         let slot = self.slot(frame, regs)?;
         self.scanout.run(&self.pipeline, width, height, bytemuck::bytes_of(&slot), &[&self.vram_group], out)
+    }
+
+    /// As `run`, for a wide `frame` (`Frame::snapshot_in`): x2r10g10b10 words, composed into a buffer of
+    /// the scan-out's own so a frame lent from `compose` is left as it was.
+    pub fn run_wide(&mut self, frame: &Frame, regs: &DisplayRegs, width: u32, height: u32, out: &mut [u32]) -> Result<(), String> {
+        let slot = self.slot(frame, regs)?;
+        self.scanout.run_wide(&self.pipeline, width, height, bytemuck::bytes_of(&slot), &[&self.vram_group], out)
     }
 
     /// Compose `frame` under `regs` (rows of `width`) and submit it with no

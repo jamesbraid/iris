@@ -436,8 +436,33 @@ impl VproEngine {
     /// writing, as the board's own display thread does, so a drawing in progress
     /// shows for one frame.
     pub fn scanout(&mut self) -> Option<(u32, u32, Vec<u32>)> {
-        if self.faulted() {
+        if !self.settle_scanout() {
             return None;
+        }
+        let r = &mut self.reader;
+        r.attach(&self.locks.shared);
+        r.recompose();
+        r.update_to(None);
+        // The reader composes 0xAABBGGRR; this API hands out 0x00RRGGBB.
+        let rgb = |p: &u32| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16) & 0xff;
+        (r.frame_width != 0).then(|| (r.frame_width, r.frame_height, r.frame.iter().map(rgb).collect()))
+    }
+
+    /// As `scanout` with the colour maps' ten bits a channel, x2r10g10b10, whose top eight bits are
+    /// what `scanout` gives.
+    pub fn scanout10(&mut self) -> Option<(u32, u32, Vec<u32>)> {
+        if !self.settle_scanout() {
+            return None;
+        }
+        let r = &mut self.reader;
+        r.attach(&self.locks.shared);
+        r.compose_wide()
+    }
+
+    /// What a scan-out waits for before it composes (see `scanout`); false while the engine has faulted.
+    fn settle_scanout(&mut self) -> bool {
+        if self.faulted() {
+            return false;
         }
         // The GPU scan-out composes from the unit's own memory, in order behind the work submitted so
         // far, so it waits for the GPU and not for the board's queued CPU work. The unit takes the
@@ -447,20 +472,14 @@ impl VproEngine {
         // readback brings current.
         if self.gpu {
             if self.locks.shared.gpu_scanout.get().is_none() {
-                let g = self.settle().ok()?;
+                let Ok(g) = self.settle() else { return false };
                 g.gpu_upload_tick(true);
                 g.gpu_sync();
             } else if let Some(g) = self.locks.quiesce(Duration::ZERO) {
                 g.gpu_upload_tick(true);
             }
         }
-        let r = &mut self.reader;
-        r.attach(&self.locks.shared);
-        r.recompose();
-        r.update_to(None);
-        // The reader composes 0xAABBGGRR; this API hands out 0x00RRGGBB.
-        let rgb = |p: &u32| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16) & 0xff;
-        (r.frame_width != 0).then(|| (r.frame_width, r.frame_height, r.frame.iter().map(rgb).collect()))
+        true
     }
 }
 
@@ -481,6 +500,20 @@ impl BoardEngine for VproEngine {
             return Ok(None);
         }
         Ok(VproEngine::scanout(self).map(|(w, h, pixels)| {
+            *out = pixels;
+            (w, h)
+        }))
+    }
+
+    fn scanout10(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
+        out.clear();
+        if let Some(f) = self.fault() {
+            return Err(Fault(f));
+        }
+        if head != 0 {
+            return Ok(None);
+        }
+        Ok(VproEngine::scanout10(self).map(|(w, h, pixels)| {
             *out = pixels;
             (w, h)
         }))

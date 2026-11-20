@@ -937,6 +937,25 @@ fn scanout_composes_as_the_cpu_frame() {
             let (i, (a, b)) = want.iter().zip(&got).enumerate().find(|(_, (a, b))| a != b).unwrap();
             panic!("round {round}: {diffs} pixels differ, first at ({}, {}): cpu {a:#08x} gpu {b:#08x}", i % w, i / w);
         }
+        // The same frame with the maps' ten bits a channel, on both sides; its top eight bits are the
+        // narrow frame's.
+        let wide = Frame::snapshot_in(&regs, displayed, true).expect("a frame");
+        let mut want10 = vec![0u32; w * h];
+        wide.compose(p.cpu.ptr(), &regs, &mut want10, w, h);
+        let mut got10 = vec![0u32; w * h];
+        scan.run_wide(&wide, &regs, w as u32, h as u32, &mut got10).unwrap_or_else(|e| panic!("{e}"));
+        if let Some((i, (a, b))) = want10.iter().zip(&got10).enumerate().find(|(_, (a, b))| a != b) {
+            panic!("round {round}: wide pixels differ, first at ({}, {}): cpu {a:#08x} gpu {b:#08x}", i % w, i / w);
+        }
+        for (i, (&n, &t)) in want.iter().zip(&got10).enumerate() {
+            let top = |c: u32| (c >> 2) & 0xff;
+            assert_eq!(n, 0xff00_0000 | top(t >> 20) | top(t >> 10) << 8 | top(t) << 16, "round {round}: pixel {i}");
+            assert_eq!(t >> 30, 0);
+        }
+        // The narrow compose after it is as it was: the wide one shares nothing with it.
+        let mut again = vec![0u32; w * h];
+        scan.run(&frame, &regs, w as u32, h as u32, &mut again).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(again, got);
     }
 }
 

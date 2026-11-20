@@ -607,6 +607,82 @@ fn a_cpu_store_announced_with_cpu_wrote_reaches_a_gpu_scanout() {
     assert_ne!(after.2[at], 0, "the CPU's store is in the frame");
 }
 
+/// `scanout10` gives the colour maps' ten bits a channel: its top eight bits are `scanout`'s, its low two
+/// are the map entry's own (not a widened copy), and the CPU compose and the GPU scan-out agree on every
+/// pixel. The GPU half needs an adapter and is skipped without one.
+#[test]
+fn scanout10_gives_the_ten_bit_colour_maps_on_the_cpu_and_the_gpu() {
+    let bytes = memory_bytes("v12").unwrap() as usize;
+    // A ramp over the 0x600 gamma entries, and the entry an 8-bit channel value selects (12 bits wide,
+    // then the table's three ranges).
+    let ramp = |t: u32| t * 0x3ff / 0x5ff;
+    let entry_of = |c: u32| {
+        let v = (c << 4) | (c >> 4);
+        ramp(if v < 0x200 { v } else if v < 0x400 { v / 2 + 0x100 } else { v / 4 + 0x200 })
+    };
+    let mut frames = Vec::new();
+    for gpu in [false, true] {
+        let mut buf = vec![0u64; bytes / 8];
+        let lent = unsafe { Lent::new(buf.as_mut_ptr().cast(), bytes) }.unwrap();
+        let mut cfg = config("v12", Mode::Inline);
+        cfg.gpu = gpu.then(|| "auto".into());
+        let made = VproEngine::new(cfg, Some(lent), Shared(Arc::new(Ram::default())), None);
+        // No adapter: the CPU half stands alone.
+        let mut e = match made {
+            Ok(e) => e,
+            Err(why) => {
+                assert!(gpu, "the CPU engine: {why:?}");
+                assert!(std::env::var_os("IRIS_REQUIRE_GPU").is_none_or(|v| v != "1"), "no GPU: {why:?}");
+                break;
+            }
+        };
+        let word = |e: &mut VproEngine, w: u32| assert_eq!(e.write(BACKEND_SELECT, 32, w as u64), Write::Done);
+        let entry = |e: &mut VproEngine, index: u32, v: u32| {
+            word(e, 0x3000_0000 | index << 14 | 1);
+            word(e, v);
+        };
+        entry(&mut e, DISPMODE_BASE, 0x0096_55a6);
+        word(&mut e, 0x3000_0000 | 0x1a00 << 14 | 0x600);
+        for i in 0..0x600u32 {
+            // Each channel's ten bits differ from the others', and from an 8-bit value widened.
+            let v = ramp(i);
+            word(&mut e, (v ^ 1) << 20 | (v ^ 2) << 10 | (v ^ 3));
+        }
+        for (i, v) in [(0, 0x14_2000), (1, 0x2000), (2, 1280), (3, 1024), (7, 80), (9, 3)] {
+            entry(&mut e, 0x2800 + i, v);
+        }
+        e.quiesce(u64::MAX).unwrap();
+        let (from, len) = (0x2_0000usize, 1280 * 1024 * 16);
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        for w in &mut buf[from / 8..(from + len) / 8] {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *w = x;
+        }
+        e.cpu_wrote(0, bytes as u64);
+        let (mut eight, mut ten) = (Vec::new(), Vec::new());
+        assert_eq!(BoardEngine::scanout(&mut e, 0, &mut eight), Ok(Some((1280, 1024))));
+        assert_eq!(BoardEngine::scanout10(&mut e, 0, &mut ten), Ok(Some((1280, 1024))));
+        assert_eq!(BoardEngine::scanout10(&mut e, 1, &mut Vec::new()), Ok(None), "no second head");
+        let reachable = |c: u32| (0..256).any(|i| [entry_of(i) ^ 1, entry_of(i) ^ 2, entry_of(i) ^ 3].contains(&c));
+        let widened = |c: u32| (c << 2) | (c >> 6);
+        let mut own_low_bits = 0;
+        for (&a, &t) in eight.iter().zip(&ten) {
+            let top = |c: u32| (c >> 2) & 0xff;
+            assert_eq!(a, top(t >> 20) << 16 | top(t >> 10) << 8 | top(t), "the top eight bits are scanout's");
+            assert_eq!(t >> 30, 0);
+            assert!([t >> 20, t >> 10, t].iter().all(|&c| reachable(c & 0x3ff)), "a channel is a map entry's");
+            own_low_bits += [t >> 20, t >> 10, t].iter().any(|&c| c & 0x3ff != widened((c >> 2) & 0xff)) as u32;
+        }
+        assert!(own_low_bits > 0, "the low two bits are the maps' own");
+        frames.push(ten);
+    }
+    if let [cpu, gpu] = &frames[..] {
+        assert!(cpu == gpu, "the GPU scan-out is the CPU compose");
+    }
+}
+
 /// A shell sizes its display buffer from `frame_size`, and a destination too small for the frame is an error of
 /// the call, not a fault: the GPU unit and the engine go on (it stopped the machine before). Needs an adapter.
 #[test]
