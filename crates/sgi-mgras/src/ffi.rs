@@ -21,7 +21,7 @@ pub struct IrisMgrasConfig {
     pub common: IrisEngineConfig,
     /// 0 Solid IMPACT, 1 High, 2 Maximum.
     pub board: u32,
-    /// Bit 0: the Octane's HQ4 front.
+    /// Bit 0: the Octane's HQ4 front. Bit 1: 8-byte DMA page-table entries (Origin 2000, Onyx2).
     pub flags: u32,
     /// -1 the default, 0 interpreter only, 1 compile on first use, 2 compile in the background.
     pub jit: i32,
@@ -69,6 +69,9 @@ pub unsafe extern "C" fn sgi_mgras_new(cfg: *const IrisMgrasConfig, host: *const
         }
         let mut config = Config::new(board, if c.common.threaded() { Mode::Threaded } else { Mode::Inline });
         config.octane = c.flags & 1 != 0;
+        if c.flags & 2 != 0 {
+            config.entry_bytes = 8;
+        }
         if c.common.queue_ops != 0 {
             config.queue_ops = c.common.queue_ops as usize;
         }
