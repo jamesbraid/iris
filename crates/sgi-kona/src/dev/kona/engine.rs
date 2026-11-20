@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use sgi_engine::{BoardEngine, Chunk, Event, Fault, HeadTiming, HostMem, Idle, Interrupt, Outbox, Pump, Read, Rect, Refused, Source, StallOn, StateSink, StateSource, Swap, Write};
 
 use super::back::snapshot::Layout;
+use super::back::display::option::DisplayBusSlave;
 use super::back::KonaBackend;
 use super::defs::*;
 use super::flash::{Flash, FlashSink};
@@ -35,8 +36,9 @@ use crate::SharedGpu;
 
 /// The version of the state `save` writes. Version 1 held only a stream between commands;
 /// 2 adds the commands a guest has part way and the credits they owe; 3 the swaps latched for
-/// the next frame; 4 keeps the credits held and parked by source. A load takes all four.
-pub const STATE_VERSION: u32 = 4;
+/// the next frame; 4 keeps the credits held and parked by source; 5 whether the display option board's
+/// channel exists. A load takes all five.
+pub const STATE_VERSION: u32 = 5;
 
 /// Stores `quiesce` and `wait_idle` run between looks at the clock.
 const SLICE: usize = 1 << 12;
@@ -487,6 +489,42 @@ impl<M: HostMem> KonaEngine<M> {
         (w, h, self.pixels.frame())
     }
 
+    /// The shell's device for the display option board (a GVO), or none: it answers the display-bus accesses
+    /// the firmware makes for the board (`display::option`), and the board's channel exists once the firmware's
+    /// probe of it succeeds. The configuration must allow it (`KonaConfig::with_option_slave`). It stays through
+    /// a reset and a load.
+    pub fn set_display_bus(&mut self, slave: Option<Box<dyn DisplayBusSlave>>) {
+        self.back.set_display_bus(slave);
+    }
+
+    /// Channel `index`'s output window: the rectangle of the managed area its output shows, as
+    /// (x, y from the top, width, height); None for a channel that does not exist or does not run. The option
+    /// board's channel is the one after the display's.
+    pub fn channel_window(&self, index: usize) -> Option<(u32, u32, u32, u32)> {
+        self.back.channel_window(index, self.core.managed)
+    }
+
+    /// `channel_window` for a channel named as a request names it: a display channel's number, or the option
+    /// board's index or VOC id.
+    pub fn channel_window_of(&self, channel: u32) -> Option<(u32, u32, u32, u32)> {
+        self.channel_window(self.back.channel_index(channel)?)
+    }
+
+    /// `channel_scanout` for a channel named as a request names it.
+    pub fn channel_scanout_of(&mut self, channel: u32) -> Option<(u32, u32, Vec<u32>)> {
+        self.channel_scanout(self.back.channel_index(channel)?)
+    }
+
+    /// The pixels of `channel_window`, `0x00RRGGBB` in rows from the top, with its size: what the channel's
+    /// output shows, for a device that takes the picture (the option board). Composes the frame as `compose`.
+    pub fn channel_scanout(&mut self, index: usize) -> Option<(u32, u32, Vec<u32>)> {
+        let (x, y, w, h) = self.channel_window(index)?;
+        let (fw, _, pixels) = self.compose();
+        let rows = (y..y + h).flat_map(|row| pixels.get((row * fw + x) as usize..(row * fw + x + w) as usize).unwrap_or(&[]).iter().map(|p| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff)));
+        let out: Vec<u32> = rows.collect();
+        (out.len() == (w * h) as usize).then_some((w, h, out))
+    }
+
     /// The frame the display would show, composed on the GPU and left there for a scan-out on the
     /// same device to take: no readback. None when the pipe has no GPU scan-out. The words are
     /// 0xAABBGGRR, rows from the top, and the buffer is rewritten by the next call.
@@ -755,6 +793,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         self.core.visit_open(&mut w);
         self.credits.visit(&mut w);
         self.back.visit_swaps(&mut w);
+        self.back.visit_option(&mut w);
         let meta = Meta { version: STATE_VERSION, state_len: w.out.len() as u32, bulk: self.back.bulk_layout() };
         let put = |sink: &mut dyn StateSink, name: &str, index: u64, bytes: Vec<u8>| sink.put(Chunk { name: name.into(), index, bytes }).map_err(|e| e.0);
         let sent = (|| {
@@ -783,6 +822,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         let open = meta.version >= 2;
         let swaps = meta.version >= 3;
         let by_source = meta.version >= 4;
+        let with_option = meta.version >= 5;
         if meta.state_len as usize > 1 << 28 {
             return Err(bad(format!("a state blob of {} bytes", meta.state_len)));
         }
@@ -818,6 +858,9 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
                 if swaps {
                     KonaBackend::check_swaps(&mut r);
                 }
+                if with_option {
+                    KonaBackend::check_option(&mut r);
+                }
             } else {
                 KonaBackend::check_small(&mut r);
             }
@@ -839,6 +882,11 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
                 self.back.visit_swaps(&mut r);
             } else {
                 self.back.clear_swaps();
+            }
+            if with_option {
+                self.back.visit_option(&mut r);
+            } else {
+                self.back.restore_option(false);
             }
         } else {
             self.back.visit_small(&mut r).map_err(bad)?;

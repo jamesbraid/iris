@@ -62,6 +62,7 @@
 pub mod channels;
 pub mod clock;
 pub mod dac_cursor;
+pub mod option;
 #[cfg(feature = "wgpu")]
 pub mod scanout;
 pub mod screen;

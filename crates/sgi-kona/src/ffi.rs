@@ -73,6 +73,9 @@ pub struct IrisKonaConfig {
     /// Called with the widget the pipe's DMA goes to (0 to 15) before the engine returns from
     /// the call that created it or changed it, so the shell's bus callbacks can name it.
     pub dma_widget: Option<unsafe extern "C" fn(user: *mut c_void, widget: u32)>,
+    /// Bit 0: the shell models the display option board and will give `sgi_kona_set_display_bus` its
+    /// device, which lets `display` name `dg5-2-gvo`. Zero for a caller that predates the field.
+    pub flags: u32,
 }
 
 /// The shell's `user` pointer, for the callbacks the engine makes on its own threads' behalf.
@@ -138,7 +141,11 @@ fn pipe_config(c: &IrisKonaConfig) -> Result<KonaConfig, String> {
         .with_rm_count(c.rm_count)?
         .with_geometry(text(c.geometry)?)?
         .with_rm_type(text(c.rm_type)?)?
-        .with_texture_mb(c.texture_mb)?
+        .with_texture_mb(c.texture_mb)?;
+    if c.flags & 1 != 0 {
+        cfg = cfg.with_option_slave();
+    }
+    let mut cfg = cfg
         .with_display(text(c.display)?, c.channels)?
         .with_pixel_depth(text(c.pixel_depth)?)?
         .in_slot(byte(c.identity_index, "identity index")?)?
@@ -303,6 +310,102 @@ pub unsafe extern "C" fn sgi_kona_scanout(h: *mut IrisEngine, buf: *mut u32, cap
             for (i, p) in pixels.iter().enumerate() {
                 *buf.add(i) = (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff);
             }
+            IRIS_ENGINE_OK
+        })
+    }
+}
+
+/// The shell's device for the display option board (a GVO), for a pipe configured with `dg5-2-gvo`: the
+/// engine calls `read` for a read of display-bus word `addr` and `write` for a store, as the display
+/// generator's firmware does for the board when the X server probes it, loads its logic and sets its data
+/// format, and for the diagnostic requests that read and write a display-bus word. `read` returns 1 with
+/// `*data` set when the board has the register, 0 when it does not; `write` returns 1 when the board took
+/// the store. Both are called from the engine's calls, on the thread making them, and must not call the
+/// engine. NULL for both detaches. It survives a reset and a load.
+///
+/// # Safety
+/// `h` is a live KONA handle; the callbacks and `user` stay valid until detached or `iris_engine_free`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_set_display_bus(
+    h: *mut IrisEngine,
+    user: *mut c_void,
+    read: Option<unsafe extern "C" fn(user: *mut c_void, addr: u32, data: *mut u32) -> c_int>,
+    write: Option<unsafe extern "C" fn(user: *mut c_void, addr: u32, data: u32) -> c_int>,
+) -> c_int {
+    struct Callbacks {
+        user: *mut c_void,
+        read: Option<unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> c_int>,
+        write: Option<unsafe extern "C" fn(*mut c_void, u32, u32) -> c_int>,
+    }
+    // SAFETY: the caller's contract: the callbacks may be called from any thread the engine's calls come from.
+    unsafe impl Send for Callbacks {}
+    impl crate::dev::kona::back::display::option::DisplayBusSlave for Callbacks {
+        fn read(&mut self, addr: u32) -> Option<u32> {
+            let f = self.read?;
+            let mut data = 0u32;
+            (unsafe { f(self.user, addr, &mut data) } != 0).then_some(data)
+        }
+        fn write(&mut self, addr: u32, data: u32) -> bool {
+            self.write.is_some_and(|f| unsafe { f(self.user, addr, data) } != 0)
+        }
+    }
+    unsafe {
+        call::<KonaEngine<CMem>, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| {
+            e.set_display_bus((read.is_some() || write.is_some()).then(|| Box::new(Callbacks { user, read, write }) as Box<dyn crate::dev::kona::back::display::option::DisplayBusSlave>));
+            IRIS_ENGINE_OK
+        })
+    }
+}
+
+/// Channel `channel`'s output window: the rectangle of the managed area its output shows, set to
+/// (`*x`, `*y` from the top, `*w`, `*hgt`). OK, or ERROR for a channel that does not exist or does not run
+/// (nothing set). The display channels are 0 and 1; the option board's, once the firmware has found it
+/// (`sgi_kona_set_display_bus`), is the next, and the option board's own VOC id (0xc6) names it too.
+///
+/// # Safety
+/// `h` is a live KONA handle; `x`, `y`, `w` and `hgt` point to `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_channel_window(h: *mut IrisEngine, channel: u32, x: *mut u32, y: *mut u32, w: *mut u32, hgt: *mut u32) -> c_int {
+    unsafe {
+        call::<KonaEngine<CMem>, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| {
+            if x.is_null() || y.is_null() || w.is_null() || hgt.is_null() {
+                return sgi_engine::ffi::IRIS_ENGINE_ERROR;
+            }
+            match e.channel_window_of(channel) {
+                Some((cx, cy, cw, ch)) => {
+                    (*x, *y, *w, *hgt) = (cx, cy, cw, ch);
+                    IRIS_ENGINE_OK
+                }
+                None => sgi_engine::ffi::IRIS_ENGINE_ERROR,
+            }
+        })
+    }
+}
+
+/// The pixels of `sgi_kona_channel_window`'s rectangle into `buf` (`cap` words): 0x00RRGGBB a pixel,
+/// row by row from the top. `*w` and `*hgt` are set to its size, also when `cap` is too small (ERROR,
+/// nothing copied); ERROR with them untouched for a channel that does not exist or does not run. FAULT on a
+/// faulted engine. The call waits for the drawing queued behind the frame.
+///
+/// # Safety
+/// `h` is a live KONA handle, `buf` points to `cap` words and `w` and `hgt` to `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_channel_scanout(h: *mut IrisEngine, channel: u32, buf: *mut u32, cap: usize, w: *mut u32, hgt: *mut u32) -> c_int {
+    unsafe {
+        call::<KonaEngine<CMem>, _>(h, Point::Pixel, IRIS_ENGINE_FAULT, |e| {
+            if w.is_null() || hgt.is_null() || (buf.is_null() && cap != 0) {
+                return sgi_engine::ffi::IRIS_ENGINE_ERROR;
+            }
+            if e.fault().is_some() {
+                return IRIS_ENGINE_FAULT;
+            }
+            let Some((cw, ch, pixels)) = e.channel_scanout_of(channel) else { return sgi_engine::ffi::IRIS_ENGINE_ERROR };
+            *w = cw;
+            *hgt = ch;
+            if pixels.len() > cap {
+                return sgi_engine::ffi::IRIS_ENGINE_ERROR;
+            }
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), buf, pixels.len());
             IRIS_ENGINE_OK
         })
     }

@@ -55,6 +55,9 @@ typedef struct IrisKonaConfig {
     /* The widget the pipe's DMA goes to (0 to 15), before the engine returns from the call that
      * created it or changed it: the shell's bus callbacks name it. */
     void (*dma_widget)(void *user, uint32_t widget);
+    /* Bit 0: the shell models the display option board and will give sgi_kona_set_display_bus its
+     * device, which lets display name "dg5-2-gvo". Zero for a caller that predates the field. */
+    uint32_t flags;
 } IrisKonaConfig;
 
 /* A box of pixels in one word position of the store. */
@@ -93,6 +96,39 @@ int sgi_kona_observe(IrisEngine *h, const IrisKonaRegion *r);
  */
 int sgi_kona_scanout(IrisEngine *h, uint32_t *buf, size_t cap, uint32_t *w,
                      uint32_t *hgt);
+
+/*
+ * The shell's device for the display option board (a GVO), for a pipe configured with "dg5-2-gvo":
+ * the engine calls read for a read of display-bus word addr and write for a store, as the display
+ * generator's firmware does for the board when the X server probes it (a write of id + 0x3e8 to the
+ * video output chips' register 0x31, at 0xc831 and 0xc931, read back), loads its logic (0x8900 clear, bytes
+ * to 0x8a02 polled for bit 7) and sets its data format (0x8400, 0xc006, 0xc214 to 0xc216), and for the
+ * diagnostic requests that read and write a display-bus word. read returns 1 with *data set when the
+ * board has the register, 0 when it does not; write returns 1 when the board took the store. Both are
+ * called from the engine's calls, on the thread making them, and must not call the engine. NULL for both
+ * detaches. It survives a reset and a load.
+ */
+int sgi_kona_set_display_bus(IrisEngine *h, void *user,
+                             int (*read)(void *user, uint32_t addr, uint32_t *data),
+                             int (*write)(void *user, uint32_t addr, uint32_t data));
+
+/*
+ * Channel channel's output window: the rectangle of the managed area its output shows, set to *x,
+ * *y (from the top), *w and *hgt. ERROR for a channel that does not exist or does not run (nothing set).
+ * The display channels are 0 and 1; the option board's, once the firmware has found it, is the next, and
+ * the option board's own VOC id (0xc6) names it too.
+ */
+int sgi_kona_channel_window(IrisEngine *h, uint32_t channel, uint32_t *x, uint32_t *y,
+                            uint32_t *w, uint32_t *hgt);
+
+/*
+ * The pixels of that rectangle into buf (cap 32-bit words): 0x00RRGGBB a pixel, row by row from the
+ * top. *w and *hgt are set to its size, also when cap is too small (ERROR, nothing copied); ERROR
+ * with them untouched for a channel that does not exist or does not run. FAULT on a faulted engine.
+ * The call waits for the drawing queued behind the frame.
+ */
+int sgi_kona_channel_scanout(IrisEngine *h, uint32_t channel, uint32_t *buf, size_t cap, uint32_t *w,
+                             uint32_t *hgt);
 
 #ifdef __cplusplus
 }
