@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 
-use crate::engine::{BoardEngine, Event, Fault, Idle, Pump, Read, Refused, Source, StallOn, Write};
+use crate::engine::{BoardEngine, Event, Fault, HeadTiming, Idle, Pump, Read, Refused, Source, StallOn, Write};
 use crate::inject::{hit, Point};
 use crate::mem::{DirtyRun, HostMem, Lent, MemFault, Swap};
 use crate::state::{Chunk, StateSink, StateSource};
@@ -247,6 +247,8 @@ trait DynEngine: Send {
     fn write(&mut self, off: u32, bits: u32, val: u64) -> Write;
     fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write;
     fn heads(&self) -> u32;
+    fn head_timing(&self, head: u32) -> Option<HeadTiming>;
+    fn scanout10(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault>;
     fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault>;
     fn head_deadline(&self, head: u32) -> Option<u64>;
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize;
@@ -286,6 +288,12 @@ impl<E: BoardEngine + Send + 'static> DynEngine for E {
     }
     fn heads(&self) -> u32 {
         BoardEngine::heads(self)
+    }
+    fn head_timing(&self, head: u32) -> Option<HeadTiming> {
+        BoardEngine::head_timing(self, head)
+    }
+    fn scanout10(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
+        BoardEngine::scanout10(self, head, out)
     }
     fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
         BoardEngine::scanout(self, head, out)
@@ -623,6 +631,69 @@ pub unsafe extern "C" fn iris_engine_scanout(h: *mut IrisEngine, head: u32, buf:
         }
         let mut pixels = Vec::new();
         match s.eng.scanout(head, &mut pixels) {
+            Err(f) => {
+                set_error(s, &f.0);
+                IRIS_ENGINE_FAULT
+            }
+            Ok(size) => {
+                let (fw, fh) = size.unwrap_or((0, 0));
+                unsafe {
+                    *w = fw;
+                    *hgt = fh;
+                }
+                if pixels.len() > cap {
+                    return IRIS_ENGINE_ERROR;
+                }
+                unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), buf, pixels.len()) };
+                IRIS_ENGINE_OK
+            }
+        }
+    })
+}
+
+/// A head's scan-out timing, as `HeadTiming`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct IrisEngineHeadTiming {
+    pub frame_clocks: u64,
+    /// When retrace 0 fell in the `iris_engine_advance` time base, ns; -1 where the shell's clock starts the phase.
+    pub epoch_ns: i64,
+    /// Changes whenever the timing or the phase restarts.
+    pub generation: u64,
+    pub clock_hz: u32,
+    pub fields: u32,
+    /// Lines in a frame.
+    pub lines: u32,
+    pub reserved: u32,
+}
+
+/// The timing of head `head`'s scan-out: 1 with `*t` set, 0 for none (the shell keeps its default).
+///
+/// # Safety
+/// `h` is a live handle and `t` points to an `IrisEngineHeadTiming`.
+#[no_mangle]
+pub unsafe extern "C" fn iris_engine_head_timing(h: *mut IrisEngine, head: u32, t: *mut IrisEngineHeadTiming) -> c_int {
+    guard(h, Point::Flags, 0, |s| match s.eng.head_timing(head) {
+        Some(x) if !t.is_null() => {
+            unsafe { *t = IrisEngineHeadTiming { frame_clocks: x.frame_clocks, epoch_ns: x.epoch_ns, generation: x.generation, clock_hz: x.clock_hz, fields: x.fields, lines: x.lines, reserved: 0 } };
+            1
+        }
+        _ => 0,
+    })
+}
+
+/// As `iris_engine_scanout`, `x2r10g10b10` a pixel (the top 8 bits of each colour are the 8-bit scan-out's).
+///
+/// # Safety
+/// As `iris_engine_scanout`.
+#[no_mangle]
+pub unsafe extern "C" fn iris_engine_scanout10(h: *mut IrisEngine, head: u32, buf: *mut u32, cap: usize, w: *mut u32, hgt: *mut u32) -> c_int {
+    guard(h, Point::Pixel, IRIS_ENGINE_FAULT, |s| {
+        if w.is_null() || hgt.is_null() || (buf.is_null() && cap != 0) {
+            return IRIS_ENGINE_ERROR;
+        }
+        let mut pixels = Vec::new();
+        match s.eng.scanout10(head, &mut pixels) {
             Err(f) => {
                 set_error(s, &f.0);
                 IRIS_ENGINE_FAULT

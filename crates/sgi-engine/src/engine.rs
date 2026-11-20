@@ -247,6 +247,23 @@ impl fmt::Debug for LentFrame {
     }
 }
 
+/// The scan-out timing of a head, for a shell that paces its own retrace by the board's.
+///
+/// A frame is `frame_clocks` clocks of `clock_hz`, in `fields` fields (retrace n falls at
+/// `epoch + n * frame_clocks / (fields * clock_hz)`), over `lines` lines in all. `epoch_ns` is when retrace 0
+/// fell in the shell's `advance` time base, or -1 where the shell's clock starts the phase (a board whose retrace
+/// is the shell's, as KONA's is). `generation` changes whenever the timing or the phase restarts, so a shell
+/// reads it, and the rest only when it moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeadTiming {
+    pub frame_clocks: u64,
+    pub clock_hz: u32,
+    pub fields: u32,
+    pub lines: u32,
+    pub epoch_ns: i64,
+    pub generation: u64,
+}
+
 /// The calls every board engine has. A board's constructor is not in the
 /// trait: each board takes its own configuration. The rules every call
 /// keeps are in the crate docs.
@@ -323,6 +340,16 @@ pub trait BoardEngine {
     fn scanout(&mut self, _head: u32, _out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
         Ok(None)
     }
+    /// `scanout` with ten bits a colour, `0x00` then red, green and blue in `x2r10g10b10` (2 unused bits, then
+    /// 10 each): the top 8 bits of each are what `scanout` gives. A board whose colour maps carry only 8 bits
+    /// widens them by repeating their top bits, so the low two bits add no precision; a board with wider maps
+    /// gives the extra.
+    fn scanout10(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
+        let size = self.scanout(head, out)?;
+        let widen = |c: u32| (c << 2) | (c >> 6);
+        out.iter_mut().for_each(|p| *p = widen(*p >> 16 & 0xff) << 20 | widen(*p >> 8 & 0xff) << 10 | widen(*p & 0xff));
+        Ok(size)
+    }
     /// The same picture left on the GPU (`LentFrame`) instead of copied to the
     /// host; `None` where the board has no GPU scan-out (use `scanout`).
     fn lend_frame(&mut self, _head: u32) -> Result<Option<LentFrame>, Fault> {
@@ -335,6 +362,11 @@ pub trait BoardEngine {
     /// buffer too small for `(height - 1) * stride_words + width` words, or a stride under the width, is an `Err` that leaves the engine and its GPU running (not a device fault: `fault()` stays `None`).
     fn compose_into(&mut self, _head: u32, _dst: &dyn std::any::Any, _stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
         Ok(None)
+    }
+    /// The timing of `head`'s scan-out (`HeadTiming`), `None` while none is loaded or for no such head: the
+    /// shell keeps its default. Cheap; waits for nothing.
+    fn head_timing(&self, _head: u32) -> Option<HeadTiming> {
+        None
     }
     /// The size of the picture of `head` (`scanout`, `lend_frame` and `compose_into` give frames no larger):
     /// the video mode's, so a shell can size a display buffer without composing; `None` for no such head or

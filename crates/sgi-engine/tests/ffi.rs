@@ -506,3 +506,21 @@ fn a_c_shell_takes_a_timed_write_a_head_s_picture_and_a_stopped_stream() {
     let (code, i) = idle(h, 1);
     assert_eq!((code, i.state), (IRIS_ENGINE_OK, IRIS_ENGINE_STOPPED), "stopped is not a fault");
 }
+
+#[test]
+fn a_c_shell_reads_a_heads_timing_and_its_ten_bit_picture() {
+    let f = Fixture::new(false);
+    let h = f.h;
+    let mut t = IrisEngineHeadTiming::default();
+    assert_eq!(unsafe { iris_engine_head_timing(h, 0, &mut t) }, 0, "none for head 0");
+    assert_eq!(unsafe { iris_engine_head_timing(h, 1, &mut t) }, 1);
+    assert_eq!((t.frame_clocks, t.clock_hz, t.fields, t.lines, t.epoch_ns, t.generation), (1_000_000, 60_000_000, 2, 525, -1, 3));
+    let (mut w, mut hgt, mut eight, mut ten) = (0u32, 0u32, [0u32; 8], [0u32; 8]);
+    assert_eq!(unsafe { iris_engine_scanout(h, 1, eight.as_mut_ptr(), 8, &mut w, &mut hgt) }, IRIS_ENGINE_OK);
+    assert_eq!(unsafe { iris_engine_scanout10(h, 1, ten.as_mut_ptr(), 8, &mut w, &mut hgt) }, IRIS_ENGINE_OK);
+    assert_eq!((w, hgt), (4, 2));
+    for (a, b) in eight.iter().zip(&ten) {
+        assert_eq!((b >> 22, b >> 12 & 0xff, b >> 2 & 0xff), (a >> 16 & 0xff, a >> 8 & 0xff, a & 0xff));
+    }
+    assert_eq!(unsafe { iris_engine_scanout10(h, 1, ten.as_mut_ptr(), 3, &mut w, &mut hgt) }, IRIS_ENGINE_ERROR, "too small: the size comes back");
+}

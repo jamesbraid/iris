@@ -335,6 +335,11 @@ impl<M: HostMem> BoardEngine for Mock<M> {
         2
     }
 
+    fn head_timing(&self, head: u32) -> Option<HeadTiming> {
+        // Head 1 runs two fields; head 0 has none loaded.
+        (head == 1).then_some(HeadTiming { frame_clocks: 1_000_000, clock_hz: 60_000_000, fields: 2, lines: 525, epoch_ns: -1, generation: 3 })
+    }
+
     fn frame_size(&self, head: u32) -> Option<(u32, u32)> {
         (head < 2).then_some((4, 2))
     }
