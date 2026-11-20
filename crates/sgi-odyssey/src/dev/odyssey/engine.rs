@@ -34,7 +34,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use sgi_engine::inject::{hit, Point};
-use sgi_engine::{GpuLoss, BoardEngine, Chunk, DirtyRun, Event, Fault, HostMem, FrameWords, Idle, Interrupt, Lent, LentFrame, MemFault, Outbox, Pump, Read, Rect, Refused, Source, StateSink, StateSource, Swap, Write, DIRTY_BLOCK};
+use sgi_engine::{GpuLoss, BoardEngine, Chunk, DirtyRun, Event, Fault, HostMem, FrameWords, HeadTiming, Idle, Interrupt, Lent, LentFrame, MemFault, Outbox, Pump, Read, Rect, Refused, Source, StateSink, StateSource, Swap, Write, DIRTY_BLOCK};
 
 use super::board::{Board, Params};
 use super::gpu_unit::{fail_gpu, Observation};
@@ -484,6 +484,14 @@ impl BoardEngine for VproEngine {
             *out = pixels;
             (w, h)
         }))
+    }
+
+    fn head_timing(&self, head: u32) -> Option<HeadTiming> {
+        if head != 0 {
+            return None;
+        }
+        let (frame_clocks, clock_hz, fields, lines, epoch_ns, generation) = self.locks.shared.head_timing()?;
+        Some(HeadTiming { frame_clocks, clock_hz, fields, lines, epoch_ns, generation })
     }
 
     fn frame_size(&self, head: u32) -> Option<(u32, u32)> {
