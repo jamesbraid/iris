@@ -55,6 +55,9 @@ pub(super) struct Display {
     /// Bits 31 to 24 of the identity word.
     high: u32,
     pub board: BoardSpec,
+    /// The option board's own one-wire record (`DGOPT`), the 13th of the pipe's description; None prints "No NIC
+    /// serial number available".
+    pub option_board: Option<BoardSpec>,
 }
 
 impl Display {
@@ -77,6 +80,7 @@ pub(super) const DG5_8: Display = Display {
     external_gamma: true,
     high: 0x51,
     board: BoardSpec { name: "", part: "030-1087-001", revision: "" },
+    option_board: None,
 };
 /// The DG5-2 on its own: the rack capture's base board (high byte and part family) with the
 /// part a published PCA list gives a DG5-2, and no option. No capture shows it bare, an
@@ -88,11 +92,12 @@ pub(super) const DG5_2: Display = Display {
     external_gamma: false,
     high: 0xf9,
     board: BoardSpec { name: "DG5-2", part: "030-1055-001", revision: "" },
+    option_board: None,
 };
 
 /// The DG5-2 with the GVO option board: the rack capture's word, `f9311002` (option 6), and its part,
-/// 030-1242-001 (rev D seen). The option board's own record (030-1184-002, `DGOPT`) is not on the
-/// one-wire chain here.
+/// 030-1242-001 (rev D seen), and the option board's own record, 030-1184-002 rev B named GVO (kona
+/// devices/dg/gvo-option.md, from the published captures).
 pub(super) const DG5_2_GVO: Display = Display {
     channels: 2,
     option: 6,
@@ -100,6 +105,7 @@ pub(super) const DG5_2_GVO: Display = Display {
     external_gamma: false,
     high: 0xf9,
     board: BoardSpec { name: "DG5-2", part: "030-1242-001", revision: "D" },
+    option_board: Some(BoardSpec { name: "GVO", part: "030-1184-002", revision: "B" }),
 };
 
 /// The display generators a pipe takes.
@@ -819,6 +825,7 @@ const CFG_DG_CHANNELS: usize = 0x35c;
 const CFG_NIC_RM: usize = 0x3e8;
 const CFG_NIC_TM: usize = 0x564;
 const CFG_NIC_DG: usize = 0x6e0;
+const CFG_NIC_DGOPT: usize = 0x72c;
 
 /// The block's size in bytes, and where the answer puts it on the return
 /// page.
@@ -911,6 +918,9 @@ pub(super) fn config_block(cfg: &KonaConfig, width: u32, height: u32) -> Vec<u8>
     put_words(&mut b, CFG_DG_WORDS + 4, 4, 0x1583_8057);
     put_words(&mut b, CFG_DG_CHANNELS, display.channels as usize, 0x1563_1057);
     put_record(&mut b[CFG_NIC_DG..][..0x4c], &display.board, base + 10);
+    if let Some(option) = &display.option_board {
+        put_record(&mut b[CFG_NIC_DGOPT..][..0x4c], option, base + 11);
+    }
     b
 }
 
@@ -1064,7 +1074,7 @@ pub(in crate::dev::kona) mod tests {
     #[test]
     fn the_display_word_follows_the_display_board() {
         assert_eq!(DG5_8.word(), 0x51bf_1002);
-        let dg5_2_gvo = Display { channels: 2, option: 6, colour_map: false, external_gamma: false, high: 0xf9, board: BoardSpec { name: "", part: "030-1242-001", revision: "D" } };
+        let dg5_2_gvo = Display { channels: 2, option: 6, colour_map: false, external_gamma: false, high: 0xf9, board: BoardSpec { name: "", part: "030-1242-001", revision: "D" }, option_board: None };
         assert_eq!(dg5_2_gvo.word(), 0xf931_1002);
         assert_eq!(Display { option: 7, ..dg5_2_gvo }.word(), 0xf939_1002);
     }

@@ -59,6 +59,30 @@ fn a_pipe_slot_moves_the_serial_instances() {
     assert!(KonaConfig::ir2(2).unwrap().in_slot(4).is_err());
 }
 
+/// The option board's record is the 13th of the pipe's description: a DG5-2 with the GVO option carries it (030-1184-002
+/// rev B, named GVO, the next instance after the display generator's) and a plain DG5-2 leaves the slot empty, which
+/// `gfxinfo` prints as "No NIC serial number available".
+#[test]
+fn the_gvo_option_boards_record_is_the_13th_and_a_plain_dg5_2_has_none() {
+    let record = |display: &str| {
+        let cfg = KonaConfig::ir2(1).unwrap().with_option_slave().with_display(display, 2).unwrap();
+        let block = read_config(&Fixture::with(cfg, Recorder::default()));
+        block[0x72c..0x72c + 0x4c].to_vec()
+    };
+    assert!(record("dg5-2").iter().all(|&b| b == 0), "a plain DG5-2: an empty slot");
+    let gvo = record("dg5-2-gvo");
+    let text = |at: usize, n: usize| String::from_utf8_lossy(&gvo[at..at + n]).trim().to_string();
+    assert_eq!((text(0x17, 0x13), text(0x32, 4), text(0x3c, 0x0e)), ("030-1184-002".into(), "B".into(), "GVO".into()));
+    // The next serial instance after the display generator's (the slot's base + 10).
+    let serial = synthetic_serial(11);
+    for i in 0..6 {
+        assert_eq!(gvo[4 + i], (serial >> (40 - 8 * i)) as u8);
+    }
+    let cfg = KonaConfig::ir2(1).unwrap().with_option_slave().with_display("dg5-2-gvo", 2).unwrap();
+    let block = read_config(&Fixture::with(cfg, Recorder::default()));
+    assert_eq!(String::from_utf8_lossy(&block[0x6e0 + 0x17..0x6e0 + 0x2a]).trim(), "030-1242-001", "the display generator's record is as before");
+}
+
 /// The two words the driver's attach classes the pipe by,
 /// read through the indirect port: after selecting 0x8800 the low two bits are
 /// the product's (0 for an InfiniteReality2), after 0xb00 bit 10 would make it
