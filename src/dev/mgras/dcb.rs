@@ -112,6 +112,10 @@ pub struct Dac {
 
 /// DAC register: the pixel read mask; zero blanks the screen.
 pub const DAC_PIXMASK: u32 = 4;
+/// The pixel clock PLL's control, reference divisor and VCO multiplier registers.
+const PLL_CONTROL: u32 = 0x09;
+const PLL_R: u32 = 0x0C;
+const PLL_V: u32 = 0x0F;
 
 impl Dac {
     /// Power-on: an identity gamma ramp.
@@ -173,6 +177,14 @@ impl Dac {
     pub fn set_register_number(&mut self, number: u32) {
         self.addr = (self.addr & 0xFF00) | (number & 0xFF);
         self.gamma_comp = 0;
+    }
+
+    /// The pixel clock as a ratio of the reference, (numerator, denominator), from the PLL's registers 0x0c
+    /// (r), 0x0f (v) and 0x09 (control): 4 * (v + 2) + control[7:6] over (r + 2) * 2^control[5:4] * 2^control[2].
+    pub fn pll_ratio(&self) -> (u64, u64) {
+        let reg = |n: u32| self.regs.lookup(n).unwrap_or(0) as u64;
+        let (r, v, cntl) = (reg(PLL_R), reg(PLL_V), reg(PLL_CONTROL));
+        (4 * (v + 2) + (cntl >> 6), (r + 2) << ((cntl >> 4) & 3) << ((cntl >> 2) & 1))
     }
 
     /// Set the pixel mask (tests).
@@ -357,6 +369,9 @@ pub struct Vc3 {
 
 pub const VC3_SRAM_POINTER: usize = 7;
 const VC3_CURRENT_LINE: usize = 0xB;
+/// The display control register: bit 2 enables the display.
+pub const VC3_CONTROL: u32 = 0x1E;
+pub const VC3_CONTROL_DISPLAY: u16 = 4;
 
 impl Vc3 {
     /// The hardware cursor, when shown: the screen position of its top-left
@@ -384,6 +399,50 @@ impl Vc3 {
     pub fn timing_size(&self) -> Option<(usize, usize)> {
         let (w, h, _) = crate::disp::decode_vc2_timings(&self.regs, &self.sram);
         (w > 0 && h > 0).then_some((w, h))
+    }
+
+    /// The register the next data access reaches.
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// VC3 clocks in one pass of the frame table and the lines in it, or None when it gives no frame. Register 0
+    /// points at pairs of (line sequence address, repeat count) ending at a count of 0. A line sequence is a run
+    /// of entries of one halfword (bit 7 set) or two; each first halfword carries a duration in VC3 clocks in bits
+    /// 14:8, and the line ends at an entry whose halfwords all have bit 15 set. Inferred from every timing table
+    /// IRIX ships (the old QEMU model's walk, kept).
+    pub fn frame_table(&self) -> Option<(u64, u32)> {
+        const MASK: usize = 0x7FFF;
+        let ep = self.regs[0] as usize;
+        let mut budget = 0x8000 * 4;
+        let (mut frame, mut lines) = (0u64, 0u32);
+        for i in 0..0x4000usize {
+            let (line, count) = (self.sram[(ep + 2 * i) & MASK] as usize, self.sram[(ep + 2 * i + 1) & MASK]);
+            if count == 0 {
+                return (frame != 0).then_some((frame, lines));
+            }
+            let (mut addr, mut clocks) = (line, 0u64);
+            loop {
+                if budget == 0 {
+                    return None;
+                }
+                budget -= 1;
+                let first = self.sram[addr & MASK];
+                addr += 1;
+                clocks += (first >> 8 & 0x7F) as u64;
+                let mut end = first & 0x8000 != 0;
+                if first & 0x80 == 0 {
+                    end &= self.sram[addr & MASK] & 0x8000 != 0;
+                    addr += 1;
+                }
+                if end {
+                    break;
+                }
+            }
+            frame += count as u64 * clocks;
+            lines = lines.saturating_add(count as u32);
+        }
+        None
     }
 
     /// Scanlines in the main window-ID frame table: one entry per visible
