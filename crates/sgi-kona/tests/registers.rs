@@ -329,3 +329,33 @@ fn the_periodic_video_cause_sends_its_vector_once_per_cause_and_only_while_unmas
     assert_eq!(general(&mut t), 1, "unmasked: it goes");
     assert_eq!(t.packets.iter().filter(|p| p.0 == GENERAL_VECTOR && p.3).count(), 3);
 }
+
+/// A link reset puts the widget's crosstalk interface registers (widget control, interrupt destination and
+/// vectors) back to their reset values, which the driver's adaptor reset rewrites after it; the pipe's own
+/// registers and the map RAM stay, so the shell need not power the pipe on for it. (iris
+/// `a_link_reset_clears_the_crosstalk_interface_registers_only`; what else a real link reset touches is unknown.)
+#[test]
+fn a_link_reset_clears_the_crosstalk_interface_registers_only() {
+    const MAPRAM: u32 = 0x100000;
+    const RESET_ARG: u32 = 0x800220;
+    const CREDIT_CONFIG: u32 = 0x800210;
+    const EEPROM_ENABLE: u32 = 0x800308;
+    const LOADER_3B0: u32 = 0x8003b0;
+    let mut t = Rig::new();
+    let reset_control = t.r(WIDGET_CONTROL);
+    t.w(WIDGET_CONTROL, 9 << 22);
+    t.program_interrupts();
+    t.w(RESET_ARG, 0x8000);
+    t.w(CREDIT_CONFIG, 0x700);
+    t.w(EEPROM_ENABLE, 1);
+    t.w(LOADER_3B0, 5);
+    t.w(MAPRAM + 8, 0x2000_1234);
+    t.e.link_reset();
+    assert_eq!(t.r(WIDGET_CONTROL), reset_control);
+    for reg in [INT_DEST_UPPER, INT_DEST_LOWER, INT_VECTORS_REG] {
+        assert_eq!(t.r(reg), 0, "register {reg:#x} was reset");
+    }
+    assert_eq!((t.r(RESET_ARG), t.r(CREDIT_CONFIG), t.r(EEPROM_ENABLE), t.r(LOADER_3B0)), (0x8000, 0x700, 1, 5));
+    assert_eq!(t.r(MAPRAM + 8), 0x2000_1234, "the map RAM stays");
+    t.assert_probe_answers();
+}

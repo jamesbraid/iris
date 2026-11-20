@@ -75,6 +75,13 @@ typedef struct IrisKonaRegion {
 IrisEngine *sgi_kona_new(const IrisKonaConfig *cfg,
                           const IrisEngineHost *host);
 
+/*
+ * A Crossbow link reset reached the widget: its widget control, interrupt destination and
+ * interrupt vector registers go back to their reset values; the rest of the pipe, the map RAM
+ * included, stays. Not a power-on (iris_engine_reset): use it for the link reset.
+ */
+int sgi_kona_link_reset(IrisEngine *h);
+
 /* Bring a box of pixels current for a CPU reader. */
 int sgi_kona_observe(IrisEngine *h, const IrisKonaRegion *r);
 

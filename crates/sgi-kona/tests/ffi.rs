@@ -189,3 +189,27 @@ unsafe fn call_compose(h: *mut IrisEngine, dst: &wgpu::Buffer) -> Option<(u32, u
     use sgi_engine::ffi::call;
     unsafe { call::<sgi_kona::dev::kona::engine::KonaEngine<sgi_engine::ffi::CMem>, _>(h, sgi_engine::inject::Point::Pixel, None, |e| sgi_engine::BoardEngine::compose_into(e, 0, dst, 1280).ok().flatten()) }
 }
+
+#[test]
+fn the_link_reset_entry_resets_the_interrupt_registers_and_keeps_the_map_ram() {
+    let ir2 = CString::new("ir2").unwrap();
+    let h = unsafe { sgi_kona_new(&config(ir2.as_ptr()), &host()) };
+    assert!(!h.is_null());
+    let rd = |off: u32| {
+        let mut v = 0u64;
+        assert_eq!(unsafe { iris_engine_read(h, off, 32, &mut v) }, IRIS_ENGINE_OK);
+        v
+    };
+    let wr = |off: u32, val: u64| {
+        while unsafe { iris_engine_write(h, off, 32, val) } == IRIS_ENGINE_BUSY {
+            unsafe { iris_engine_run(h, usize::MAX) };
+        }
+        unsafe { iris_engine_run(h, usize::MAX) };
+    };
+    wr(0x5c, 0x3e2210);
+    wr(0x100008, 0x2000_1234);
+    assert_eq!(rd(0x5c), 0x3e2210);
+    assert_eq!(unsafe { sgi_kona_link_reset(h) }, IRIS_ENGINE_OK);
+    assert_eq!((rd(0x5c), rd(0x100008)), (0, 0x2000_1234));
+    unsafe { iris_engine_free(h) };
+}
