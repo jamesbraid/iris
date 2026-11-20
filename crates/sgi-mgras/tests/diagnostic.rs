@@ -322,7 +322,6 @@ fn the_engine_stores_the_diagnostics_lines() {
 /// is file offset 0x143380 (red, green, blue at +0, +0x600, +0xc00), the
 /// lines table is at 0x144b80. Words are big-endian 0xAABBGGRR.
 const IDE_ENV: &str = "IRIS_MGRAS_IDE";
-const IDE_DEFAULT: &str = "usr/stand/ide";
 const IDE_SIZE: u64 = 1_516_224;
 
 fn stored(ide: &[u8], offset: usize, n: usize) -> Vec<u32> {
@@ -342,7 +341,10 @@ fn differing(name: &str, got: &[u32], want: &[u32], cols: usize) -> usize {
 /// the JIT and the GPU unit must each match all four tables exactly.
 #[test]
 fn the_engine_matches_the_stored_tables_word_for_word() {
-    let path = std::env::var(IDE_ENV).unwrap_or_else(|_| IDE_DEFAULT.into());
+    let Ok(path) = std::env::var(IDE_ENV) else {
+        eprintln!("skipped: {IDE_ENV} names no diagnostic binary");
+        return;
+    };
     let Ok(ide) = std::fs::read(&path) else {
         eprintln!("skipped: no diagnostic binary at {path} (set {IDE_ENV})");
         return;
