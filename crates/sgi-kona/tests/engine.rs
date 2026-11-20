@@ -609,3 +609,38 @@ fn the_frame_generation_moves_with_stores_and_runs_and_holds_when_idle() {
     assert_eq!(BoardEngine::frame_generation(&e, 0), ran, "an idle pipe holds");
     assert_eq!(BoardEngine::compose_into(&mut e, 0, &0u8, 1280), Ok(None), "no GPU scan-out, nothing to compose into");
 }
+
+/// Head 0's timing is the lowest running channel's format-load timing (words 19 to 22 of the load: frames a
+/// second times 65536, fields, total lines, total pixels a line; established), kept by the engine though it paints
+/// nothing: a frame is 65536 clocks of that many Hz, the shell's clock starts the phase (epoch -1), and the
+/// generation moves when a channel loads or stops. A powered pipe has none loaded until the firmware's or the
+/// kernel's format load arrives.
+#[test]
+fn head_zero_reports_the_running_channels_format_timing_and_its_generation() {
+    // The video command: 0x1a6, the command, its data words, their sum with the command.
+    let video = |e: &mut Engine, command: u32, data: &[u32]| {
+        let sum = data.iter().fold(command, |s, w| s.wrapping_add(*w));
+        for w in [0x1a6, command].into_iter().chain(data.iter().copied()).chain([sum]) {
+            store(e, COMMAND_PAGE, w, A);
+        }
+        e.run(usize::MAX);
+    };
+    let mut e = engine();
+    assert_eq!(e.head_timing(0), None, "no format loaded: the shell keeps its default");
+    // DISPREQ_LOAD_A_VIDEO_FORMAT for channel 0: 1280x1024 at 60 Hz, 1066 lines of 1688 pixels, one field.
+    let mut format = [0u32; 383];
+    (format[1], format[19], format[20], format[21], format[22], format[23], format[24]) = (1, 60 << 16, 1, 1066, 1688, 1024, 1280);
+    video(&mut e, VIDEO_LOAD_FORMAT, &format);
+    let t = e.head_timing(0).expect("a format is running");
+    assert_eq!((t.frame_clocks, t.clock_hz, t.fields, t.lines, t.epoch_ns), (65536, 60 << 16, 1, 1066, -1));
+    assert_eq!(e.head_timing(1), None, "one head");
+    // Two fields (an interlaced format): the retrace is per field.
+    format[20] = 2;
+    video(&mut e, VIDEO_LOAD_FORMAT, &format);
+    let two = e.head_timing(0).unwrap();
+    assert_eq!(two.fields, 2);
+    assert_ne!(two.generation, t.generation, "a new format moves the generation");
+    // DISPREQ_DISABLE_A_CHANNEL: the channel stops and holds no format.
+    video(&mut e, VIDEO_DISABLE_CHANNEL, &[0]);
+    assert_eq!(e.head_timing(0), None);
+}

@@ -223,6 +223,9 @@ pub struct KonaBackend {
     /// Swaps wait here for the next `frame` instead of showing at once (`latch_swaps`).
     latch: bool,
     swaps: Vec<(u32, u8)>,
+    /// Moves when a video format load, disable, enable, reset, start or state load may have changed the
+    /// scan-out timing (`head_timing`). Not saved.
+    timing_generation: u64,
     /// The window the board shows the guest, which the machine keeps a clone
     /// of (`KonaBackend::display`).
     display: Arc<Display>,
@@ -377,6 +380,7 @@ impl KonaBackend {
             manual: None,
             latch: false,
             swaps: Vec::new(),
+            timing_generation: 0,
             layouts: 0,
             refused: [0; Refusal::ALL.len()],
             malformed: 0,
@@ -492,6 +496,9 @@ impl KonaBackend {
         self.textport.visit(s);
         self.contexts.visit(s);
         self.channels.visit(s);
+        if s.loading() {
+            self.timing_generation += 1;
+        }
         self.sync_blank();
         if s.loading() {
             self.drain();
@@ -812,6 +819,13 @@ impl KonaBackend {
         self.latch = on;
     }
 
+    /// The scan-out timing of head 0: the lowest running channel's format-load timing (`Channel::head_timing`), as
+    /// (clock Hz, frame clocks, fields, lines, generation).
+    pub fn head_timing(&self) -> Option<(u32, u64, u32, u32, u64)> {
+        let (hz, frame_clocks, fields, lines) = self.channels.channel[..self.channels.count()].iter().find_map(|c| c.head_timing())?;
+        Some((hz, frame_clocks, fields, lines, self.timing_generation))
+    }
+
     /// Whether a swap waits for a frame.
     pub fn swaps_waiting(&self) -> bool {
         !self.swaps.is_empty()
@@ -864,6 +878,7 @@ impl KonaBackend {
         self.dac_cursor_loads = 0;
         self.dac_cursor_refused = 0;
         self.channels.reset();
+        self.timing_generation += 1;
         self.sync_blank();
         self.tex_counts = Default::default();
         self.pix_counts = Default::default();
@@ -1372,6 +1387,7 @@ impl KonaBackend {
                 // The store keeps the configured size; a combination that sets another is logged and the
                 // configured size is what the configuration request reports.
                 let frame = self.channels.start(combination);
+                self.timing_generation += 1;
                 self.sync_blank();
                 if frame != self.cfg.managed {
                     crate::dlog!(LogModule::Kona, "kona: the combination set a managed area of {}x{}; the board keeps {}x{}", frame.0, frame.1, self.cfg.managed.0, self.cfg.managed.1);
@@ -1587,7 +1603,11 @@ impl KonaBackend {
                 }
             }
             Job::Video { command, data } => {
+                let before = self.channels.channel.iter().map(|c| (c.enabled, c.timing)).collect::<Vec<_>>();
                 self.channels.set(command, data);
+                if self.channels.channel.iter().map(|c| (c.enabled, c.timing)).collect::<Vec<_>>() != before {
+                    self.timing_generation += 1;
+                }
                 self.sync_blank();
                 // A Get's reply: the id, the data and their sum from byte 8, then the ready word.
                 if let Some(reply) = self.channels.reply(command, data) {
