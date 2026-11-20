@@ -45,6 +45,10 @@ mod stub_scanout {
         pub fn run(&mut self, _frame: &super::super::frame::Frame, _regs: &super::DisplayRegs, _width: u32, _height: u32, _out: &mut [u32]) -> Result<(), String> {
             match *self {}
         }
+
+        pub fn run_wide(&mut self, _frame: &super::super::frame::Frame, _regs: &super::DisplayRegs, _width: u32, _height: u32, _out: &mut [u32]) -> Result<(), String> {
+            match *self {}
+        }
     }
 }
 #[cfg(not(feature = "wgpu"))]
@@ -81,13 +85,17 @@ impl DisplayRegs {
         (((word >> lut::RED_SHIFT) & 0xff) << 16) | (((word >> lut::GREEN_SHIFT) & 0xff) << 8) | ((word >> lut::BLUE_SHIFT) & 0xff)
     }
 
-    /// One 8-bit RGB channel through the 1,536-entry gamma table: widened to 12
+    /// A lookup-RAM entry as x2r10g10b10: its ten bits a channel, whose top eight
+    /// bits `lut_rgb` shows.
+    pub fn lut_wide(&self, entry: u32) -> u32 {
+        if entry < lut::SIZE { self.lut[entry as usize] & lut::ENTRY_MASK } else { 0 }
+    }
+
+    /// The gamma table's entry for one 8-bit RGB channel: widened to 12
     /// bits as the X server widens it (c << 4 | c >> 4; the board's own widening
-    /// is unknown), mapped to the table in three ranges -- v below 0x200, v / 2 +
-    /// 0x100 below 0x400, else v / 4 + 0x200 -- and shown as the top eight bits of
-    /// that entry's channel at shift. Inferred: that the table applies to RGB
-    /// pixels at all (the blank zeroes it to blacken the screen).
-    pub fn gamma(&self, c: u32, shift: u32) -> u32 {
+    /// is unknown) and mapped to the table in three ranges -- v below 0x200, v / 2 +
+    /// 0x100 below 0x400, else v / 4 + 0x200.
+    fn gamma_word(&self, c: u32) -> u32 {
         let v = (c << 4) | (c >> 4);
         let t = if v < 0x200 {
             v
@@ -97,7 +105,19 @@ impl DisplayRegs {
             v / 4 + 0x200
         };
 
-        (self.lut[(ODSY_GAMMA_BASE + t) as usize] >> shift) & 0xff
+        self.lut[(ODSY_GAMMA_BASE + t) as usize]
+    }
+
+    /// One 8-bit RGB channel through the gamma table, shown as the top eight bits
+    /// of that entry's channel at shift. Inferred: that the table applies to RGB
+    /// pixels at all (the blank zeroes it to blacken the screen).
+    pub fn gamma(&self, c: u32, shift: u32) -> u32 {
+        (self.gamma_word(c) >> shift) & 0xff
+    }
+
+    /// As `gamma`, the entry's whole ten-bit channel.
+    pub fn gamma_wide(&self, c: u32, shift: u32) -> u32 {
+        (self.gamma_word(c) >> (shift - 2)) & 0x3ff
     }
 
     /// The colormap group main drawable main_id shows through: bits 8:4 of its
@@ -129,12 +149,13 @@ impl DisplayRegs {
     /// crosshair's extent, width and colour are unknown.
     #[cfg(test)]
     pub fn cursor_row(&self, y: u32, dst: &mut [u32], width: u32) {
-        self.cursor_row_in(y, dst, width, false);
+        self.cursor_row_in(y, dst, width, false, false);
     }
 
-    /// As `cursor_row`, in the screen's order when `abgr` (`frame::to_screen`).
-    pub fn cursor_row_in(&self, y: u32, dst: &mut [u32], width: u32, abgr: bool) {
-        let cursor_rgb = |w: u32| if abgr { super::frame::to_screen(cursor_rgb(w)) } else { cursor_rgb(w) };
+    /// As `cursor_row`, in the screen's order when `abgr` (`frame::to_screen`);
+    /// `wide` draws the colours' ten bits a channel as x2r10g10b10 instead.
+    pub fn cursor_row_in(&self, y: u32, dst: &mut [u32], width: u32, abgr: bool, wide: bool) {
+        let cursor_rgb = |w: u32| if wide { w & lut::ENTRY_MASK } else if abgr { super::frame::to_screen(cursor_rgb(w)) } else { cursor_rgb(w) };
         let cx = self.cursor_x();
         let cy = self.cursor_y();
         let row = (y as i32).wrapping_sub(cy);
@@ -762,6 +783,47 @@ impl ScanoutReader {
     #[cfg(test)]
     pub fn update(&mut self) -> bool {
         !matches!(self.update_to(None), Composed::No)
+    }
+
+    /// The current picture with ten bits a channel (x2r10g10b10), `(width, height, pixels)`; None
+    /// with no mode, or after a GPU fault. Composed afresh on the GPU scan-out when there is one,
+    /// else on the CPU, and apart from `update_to`: it leaves `frame` and the marks `update_to`
+    /// compares alone.
+    pub fn compose_wide(&mut self) -> Option<(u32, u32, Vec<u32>)> {
+        let shared = self.shared();
+        if shared.gpu_fault.lock().is_some() {
+            return None;
+        }
+        self.sync(&shared);
+        if self.frame.is_empty() {
+            return None;
+        }
+        let displayed = shared.front.lock().displayed_buffer;
+        self.snap_gen = shared.regs.snapshot(&mut self.snap, self.snap_gen);
+        let (w, h) = (self.frame_width as usize, self.frame_height as usize);
+        let mut out = vec![0u32; w * h];
+        let (Some(frame), Some(mem)) = (Frame::snapshot_wide(&self.snap, displayed), shared.vram.get()) else {
+            return Some((w as u32, h as u32, out));
+        };
+        if let Some(scanout) = shared.gpu_scanout.get() {
+            let (fw, fh) = (frame.width.min(self.frame_width), frame.height.min(self.frame_height));
+            match scanout.lock().run_wide(&frame, &self.snap, fw, fh, &mut out) {
+                Ok(()) => {
+                    if fw as usize != w {
+                        for y in (1..fh as usize).rev() {
+                            out.copy_within(y * fw as usize..(y + 1) * fw as usize, y * w);
+                        }
+                    }
+                    return Some((w as u32, h as u32, out));
+                }
+                Err(e) => {
+                    fail_gpu(&shared.gpu_fault, "GPU scanout readback", e);
+                    return None;
+                }
+            }
+        }
+        frame.compose(*mem, &self.snap, &mut out, w, h);
+        Some((w as u32, h as u32, out))
     }
 
     /// As `update`, composing on the CPU into `target` (rows of `stride`,

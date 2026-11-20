@@ -49,30 +49,35 @@ pub(super) struct ResolveCtx {
     pub ids: [IdShow; dispmode::COUNT as usize],
     /// Per overlay id: whether it is enabled, and its entry base.
     pub overlay: [(bool, u32); overlay::IDS as usize],
-    /// Every lookup-RAM entry as 0x00RRGGBB (DisplayRegs::lut_rgb()).
+    /// Every lookup-RAM entry as 0x00RRGGBB (DisplayRegs::lut_rgb()), or with
+    /// ten bits a channel (`lut_wide()`) in a wide context.
     pub rgb: Box<[u32; lut::SIZE as usize]>,
-    /// DisplayRegs::gamma() of each 8-bit channel value, placed in its byte of
-    /// the pixel: red, green, blue.
+    /// DisplayRegs::gamma() of each 8-bit channel value, placed in its field of
+    /// the pixel (a byte, or ten bits in a wide context): red, green, blue.
     pub gamma: Box<[[u32; 256]; 3]>,
 }
 
 impl ResolveCtx {
     /// What the registers `regs` make of each drawable, overlay id, lookup
     /// entry and gamma step, with colour buffer (displayed >> id) & 1
-    /// showing for each drawable.
-    pub(super) fn new(regs: &DisplayRegs, displayed: u32) -> ResolveCtx {
+    /// showing for each drawable. `wide` keeps the maps' ten bits a channel
+    /// (x2r10g10b10) instead of their top eight.
+    pub(super) fn new(regs: &DisplayRegs, displayed: u32, wide: bool) -> ResolveCtx {
         let mut ids = [IdShow::default(); dispmode::COUNT as usize];
         let mut overlay = [(false, 0u32); overlay::IDS as usize];
         let mut rgb = Box::new([0u32; lut::SIZE as usize]);
         let mut gamma = Box::new([[0u32; 256]; 3]);
 
         for (i, v) in rgb.iter_mut().enumerate() {
-            *v = regs.lut_rgb(i as u32);
+            *v = if wide { regs.lut_wide(i as u32) } else { regs.lut_rgb(i as u32) };
         }
         for c in 0..256u32 {
-            gamma[0][c as usize] = regs.gamma(c, lut::RED_SHIFT) << 16;
-            gamma[1][c as usize] = regs.gamma(c, lut::GREEN_SHIFT) << 8;
-            gamma[2][c as usize] = regs.gamma(c, lut::BLUE_SHIFT);
+            let [r, g, b] = if wide {
+                [regs.gamma_wide(c, lut::RED_SHIFT) << 20, regs.gamma_wide(c, lut::GREEN_SHIFT) << 10, regs.gamma_wide(c, lut::BLUE_SHIFT)]
+            } else {
+                [regs.gamma(c, lut::RED_SHIFT) << 16, regs.gamma(c, lut::GREEN_SHIFT) << 8, regs.gamma(c, lut::BLUE_SHIFT)]
+            };
+            (gamma[0][c as usize], gamma[1][c as usize], gamma[2][c as usize]) = (r, g, b);
         }
         for (id, show) in ids.iter_mut().enumerate() {
             let mode = regs.dispmode[id];

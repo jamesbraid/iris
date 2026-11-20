@@ -12,7 +12,7 @@ struct DisplaySlot {
     // fb base (bytes), fb pitch (tiles), fb log2 bytes a pixel, fb bytes a
     // pixel, wid base, wid pitch, width, height, cursor x, cursor y,
     // cursor control (bit 0 shown, bit 1 crosshair), wid front byte, wid
-    // back byte, pad.
+    // back byte, wide (the tables hold x2r10g10b10), pad.
     head: array<u32, 16>,
     // Per main window id, 8 words: buffer shown, rgb, keep, down, base,
     // mask, field A, field B (a field is its kind word with the byte
@@ -20,12 +20,12 @@ struct DisplaySlot {
     ids: array<u32, 256>,
     // Per overlay id: enabled, entry base.
     overlay: array<u32, 16>,
-    // Each 8-bit channel value through the gamma table, in its byte of
-    // the pixel: red, green, blue.
+    // Each 8-bit channel value through the gamma table, in its field of
+    // the pixel (a byte, or ten bits when wide): red, green, blue.
     gamma: array<u32, 768>,
     // The cursor's backend entries 0x2500-0x25ff.
     cursor: array<u32, 256>,
-    // Every lookup-RAM entry as 0x00RRGGBB.
+    // Every lookup-RAM entry as 0x00RRGGBB, or x2r10g10b10 when wide.
     rgb: array<u32, 8192>,
 }
 
@@ -46,6 +46,9 @@ fn surface_offset(base: u32, pitch: u32, log2: u32, x: u32, y: u32) -> u32 {
 }
 
 fn cursor_rgb(word: u32) -> u32 {
+    if disp.head[13] != 0u {
+        return word & 0x3fffffffu;
+    }
     return (((word >> 22u) & 0xffu) << 16u) | (((word >> 12u) & 0xffu) << 8u) | ((word >> 2u) & 0xffu);
 }
 
