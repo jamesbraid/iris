@@ -270,3 +270,71 @@ fn the_gvo_channel_is_the_last_head_and_shows_its_window_at_one_to_one() {
     assert_eq!((ten.len(), ten0.len()), (720 * 486, 1280 * 1024));
     assert!(BoardEngine::lend_frame(&mut e, 1).unwrap().is_none(), "a window is not a lendable frame");
 }
+
+/// DISPREQ_COPY_ANOTHER_CHANNEL_OUTPUT: `channel` takes `source`'s pixels.
+fn copy_channel(e: &mut Engine, channel: u32, source: u32) {
+    video(e, VIDEO_VAMPIRE, &[channel, source, 0, 0, 0, 0, 0]);
+}
+
+/// A red point at (100, 50) in the managed area, drawn through the textport, so a head's picture is not all black.
+fn draw_a_point(e: &mut Engine) {
+    for (selector, args) in [(0x3, &[1, 0xff << 2, 0, 0][..]), (0x2, &[1]), (0x6, &[100, 50])] {
+        for w in [&[1, selector][..], args].concat() {
+            e.set_source(A);
+            assert_eq!(e.write(COMMAND_PAGE, 32, w as u64), Write::Done);
+            e.run(usize::MAX);
+        }
+    }
+}
+
+/// Channel 1 runs 640 by 480 at 50 Hz in its own window until it is made to copy channel 0 (the boot combination does
+/// that; kona devices/dg/README.md, `SourceChannel`: the source's pixels are copied): then its head is channel 0's
+/// whole picture at channel 0's timing, and it follows when the source's timing changes or the copy ends.
+#[test]
+fn a_dependent_channels_head_shows_its_sources_picture_and_timing() {
+    let mut e = engine("dg5-2");
+    draw_a_point(&mut e);
+    load_format_at(&mut e, 0, 1280, 1024, 60);
+    load_format_at(&mut e, 1, 640, 480, 50);
+    video(&mut e, VIDEO_RESIZE, &[1, 16, 499, 640, 480, 1, 1, 0]);
+    let own = e.head_timing(1).unwrap();
+    assert_eq!((e.frame_size(1), own.clock_hz), (Some((640, 480)), 50 << 16));
+
+    copy_channel(&mut e, 1, 0);
+    assert_eq!((e.heads(), e.frame_size(1), e.channel_window(1)), (2, Some((1280, 1024)), Some((0, 0, 1280, 1024))));
+    let (t0, t1) = (e.head_timing(0).unwrap(), e.head_timing(1).unwrap());
+    assert_eq!((t1.clock_hz, t1.lines, t1.fields), (t0.clock_hz, t0.lines, t0.fields), "the source's timing");
+    assert!(t1.generation > own.generation, "the head's timing changed");
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    BoardEngine::scanout(&mut e, 0, &mut a).unwrap();
+    BoardEngine::scanout(&mut e, 1, &mut b).unwrap();
+    assert!(a.iter().any(|&p| p != 0), "the point is in the picture");
+    assert_eq!(a, b, "the source's picture");
+
+    // The source's timing changes: the dependent follows.
+    load_format_at(&mut e, 0, 1280, 1024, 30);
+    let t1b = e.head_timing(1).unwrap();
+    assert_eq!(t1b.clock_hz, 30 << 16);
+    assert!(t1b.generation > t1.generation);
+
+    // Naming itself ends the copy; so does a source that does not run.
+    copy_channel(&mut e, 1, 1);
+    assert_eq!((e.frame_size(1), e.head_timing(1).unwrap().clock_hz), (Some((640, 480)), 50 << 16));
+    copy_channel(&mut e, 1, 0);
+    video(&mut e, VIDEO_DISABLE_CHANNEL, &[0]);
+    assert_eq!((e.heads(), e.frame_size(0)), (1, Some((640, 480))), "channel 0 is off: channel 1 shows its own");
+}
+
+/// The combination names the GVO channel as its own source by its physical id, 198: independent, so its window and
+/// timing stay its own.
+#[test]
+fn the_gvo_naming_itself_as_its_source_stays_independent() {
+    let (mut e, _) = the_probed_pipe();
+    load_format_at(&mut e, 0, 1280, 1024, 60);
+    load_format_at(&mut e, 0xc6, 720, 486, 30);
+    video(&mut e, VIDEO_RESIZE, &[0xc6, 0, 1023, 720, 486, 1, 1, 0]);
+    copy_channel(&mut e, 0xc6, 0xc6);
+    assert_eq!((e.frame_size(1), e.head_timing(1).unwrap().clock_hz), (Some((720, 486)), 30 << 16));
+    copy_channel(&mut e, 0xc6, 0);
+    assert_eq!((e.frame_size(1), e.head_timing(1).unwrap().clock_hz), (Some((1280, 1024)), 60 << 16), "dependent on channel 0");
+}

@@ -828,10 +828,13 @@ impl KonaBackend {
         (0..self.channels.count()).chain(option).filter(|&c| self.channels.channel[c].enabled).collect()
     }
 
-    /// The scan-out timing of channel `index`: its format-load timing (`Channel::head_timing`), as
+    /// The scan-out timing of channel `index`: the format-load timing (`Channel::head_timing`) of the channel it
+    /// shows (`Channels::shown`: its own, or its source's while it runs dependent), as
     /// (clock Hz, frame clocks, fields, lines, generation).
     pub fn channel_timing(&self, index: usize) -> Option<(u32, u64, u32, u32, u64)> {
-        let (hz, frame_clocks, fields, lines) = self.channels.channel.get(index)?.head_timing()?;
+        let own = self.channels.channel.get(index)?;
+        let shown = &self.channels.channel[self.channels.shown(index)];
+        let (hz, frame_clocks, fields, lines) = shown.head_timing().filter(|_| own.enabled)?;
         Some((hz, frame_clocks, fields, lines, self.timing_generation[index]))
     }
 
@@ -883,13 +886,15 @@ impl KonaBackend {
         s.bool(&mut false);
     }
 
-    /// Channel `index`'s input rectangle of the managed area as (x, top row from the top, width, height) clipped
-    /// to the `managed` area, the window a channel's output shows; None when the channel does not exist or is not running.
+    /// The input rectangle of the managed area that channel `index` shows, as (x, top row from the top, width, height)
+    /// clipped to the `managed` area, the window a channel's output shows: its own, or its source's while it runs
+    /// dependent (`Channels::shown`); None when the channel does not exist or is not running.
     pub fn channel_window(&self, index: usize, managed: (u32, u32)) -> Option<(u32, u32, u32, u32)> {
-        let c = self.channels.channel.get(index)?;
+        let own = self.channels.channel.get(index)?;
         let live = index < self.channels.count() || self.channels.option_index() == Some(index);
+        let c = &self.channels.channel[self.channels.shown(index)];
         let (w, h) = managed;
-        if !live || !c.enabled || c.input[2] == 0 || c.input[3] == 0 {
+        if !live || !own.enabled || c.input[2] == 0 || c.input[3] == 0 {
             return None;
         }
         let [x, top_from_bottom, cw, ch] = c.input;
@@ -1676,7 +1681,8 @@ impl KonaBackend {
                 }
             }
             Job::Video { command, data } => {
-                let timings = |c: &display::channels::Channels| c.channel.iter().map(|c| (c.enabled, c.timing)).collect::<Vec<_>>();
+                // A channel's timing is the one it shows: a dependent channel follows its source's.
+                let timings = |c: &display::channels::Channels| (0..c.channel.len()).map(|i| (c.channel[i].enabled, c.shown(i), c.channel[c.shown(i)].timing)).collect::<Vec<_>>();
                 let before = timings(&self.channels);
                 // The option board's side of the request first: what the firmware does on the display bus, and
                 // whether its channel exists for the channel setters that follow.

@@ -266,6 +266,16 @@ impl Channels {
         }
     }
 
+    /// The channel whose picture and timing channel `index` shows: its source when it runs dependent and that
+    /// one runs (one hop; a source that is itself dependent shows its own picture), else itself. Approximated:
+    /// what a dependent channel shows while its source is off is not in the sources; it keeps its own.
+    pub fn shown(&self, index: usize) -> usize {
+        match self.source(index) {
+            Source::Channel(s) if self.channel[s].enabled => s,
+            _ => index,
+        }
+    }
+
     pub fn reset(&mut self) {
         *self = Channels::new(self.rm_count).with_count(self.count).with_option_mask(self.option_mask);
     }
@@ -754,16 +764,20 @@ mod tests {
         // The boot combination copies channel 0 into channel 1.
         c.set(VIDEO_VAMPIRE, &[1, 0]);
         assert_eq!((c.source(0), c.source(1)), (Source::Own, Source::Channel(0)));
+        assert_eq!((c.shown(1), c.shown(0)), (0, 0), "channel 0 runs: channel 1 shows its picture");
         // The GVO names itself by its VOC id (198): independent, as by its index.
+        c.channel[2].enabled = true;
         for word in [GVO_ID, 2] {
             c.set(VIDEO_VAMPIRE, &[GVO_ID, word]);
-            assert_eq!(c.source(2), Source::Own, "word {word}");
+            assert_eq!((c.source(2), c.shown(2)), (Source::Own, 2), "word {word}");
         }
         c.set(VIDEO_VAMPIRE, &[GVO_ID, 0]);
-        assert_eq!(c.source(2), Source::Channel(0));
-        // A source the board lacks is unknown.
+        assert_eq!((c.source(2), c.shown(2)), (Source::Channel(0), 0));
+        c.channel[0].enabled = false;
+        assert_eq!(c.shown(2), 2, "a source that is off shows nothing to copy");
+        // A source the board lacks is unknown, and the channel keeps its own picture.
         c.set(VIDEO_VAMPIRE, &[1, 5]);
-        assert_eq!(c.source(1), Source::Unknown);
+        assert_eq!((c.source(1), c.shown(1)), (Source::Unknown, 1));
     }
 
     #[test]
