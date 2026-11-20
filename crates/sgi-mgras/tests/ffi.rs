@@ -326,3 +326,41 @@ fn a_c_shell_replays_a_recording_and_saves_it() {
         assert_eq!(window(d.h, drb, page), pixels, "a refused load changed the engine");
     }
 }
+
+unsafe extern "C" fn bus_read(user: *mut c_void, dev: u32, crs: u32, _width: u32, data: *mut u32) -> c_int {
+    // Slot 20 block 0 is an option board's probe byte; nothing else is its.
+    if dev == 20 && crs == 0 {
+        unsafe { *data = *(user as *const u32) };
+        return 1;
+    }
+    0
+}
+
+unsafe extern "C" fn bus_write(user: *mut c_void, dev: u32, _crs: u32, _width: u32, data: u32) -> c_int {
+    if dev == 20 {
+        unsafe { *(user as *mut u32) = data };
+        return 1;
+    }
+    0
+}
+
+/// The C ABI's display-bus call-out: an option board's slot is answered by the shell's callbacks, and
+/// detaching returns it to the engine's scratch register.
+#[test]
+fn a_c_shell_attaches_a_device_to_the_display_bus() {
+    let mut probe = 0xa5u32;
+    let c = CEngine::new(0, 0);
+    let slot = |dev: u32, crs: u32| 0x60000 + dev * 0x400 + (crs << 7);
+    let mut v = 0u64;
+    assert_eq!(unsafe { iris_engine_read(c.h, slot(20, 0), 32, &mut v) }, IRIS_ENGINE_OK);
+    assert_eq!(v, 0, "no device: the engine's scratch register");
+    let user = (&mut probe) as *mut u32 as *mut c_void;
+    assert_eq!(unsafe { sgi_mgras_set_display_bus(c.h, user, Some(bus_read), Some(bus_write)) }, IRIS_ENGINE_OK);
+    assert_eq!(unsafe { iris_engine_read(c.h, slot(20, 0), 32, &mut v) }, IRIS_ENGINE_OK);
+    assert_eq!(v, 0xa5, "the shell's probe byte");
+    assert_eq!(unsafe { iris_engine_write(c.h, slot(20, 1), 32, 0x77) }, IRIS_ENGINE_OK);
+    assert_eq!(probe, 0x77, "the store went to the shell");
+    assert_eq!(unsafe { sgi_mgras_set_display_bus(c.h, null_mut(), None, None) }, IRIS_ENGINE_OK);
+    assert_eq!(unsafe { iris_engine_read(c.h, slot(20, 0), 32, &mut v) }, IRIS_ENGINE_OK);
+    assert_eq!(v, 0, "detached");
+}

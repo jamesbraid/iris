@@ -64,6 +64,19 @@ int sgi_mgras_pixel(IrisEngine *h, const IrisMgrasRegion *r, uint32_t x,
 int sgi_mgras_read_row(IrisEngine *h, const IrisMgrasRegion *r, uint32_t y, uint32_t x0,
                        uint32_t x1, uint32_t *out);
 
+/*
+ * The shell's device on the display control bus, for an option board such as the Digital
+ * Video board: the engine calls read for a load and write for a store on a slot it has no
+ * device for (not the colour maps, DAC, XMAP, VC3 or the board-version byte), register block
+ * crs of slot dev, width bytes. read returns 1 with *data set when it answers, 0 to leave the
+ * access to the engine's scratch register; write returns 1 when it took the store. Both run
+ * with the engine's display lock held and must not call the engine. NULL for both detaches.
+ * It survives a reset and a load.
+ */
+int sgi_mgras_set_display_bus(IrisEngine *h, void *user,
+                              int (*read)(void *user, uint32_t dev, uint32_t crs, uint32_t width, uint32_t *data),
+                              int (*write)(void *user, uint32_t dev, uint32_t crs, uint32_t width, uint32_t data));
+
 /* The HQ flags as the board holds them (a debug accessor: the interrupt
  * line is iris_engine_irq_levels). */
 uint32_t sgi_mgras_flags(IrisEngine *h);

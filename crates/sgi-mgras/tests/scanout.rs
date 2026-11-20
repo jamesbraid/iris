@@ -202,3 +202,55 @@ fn without_a_gpu_unit_there_is_nothing_to_lend() {
     let (gpu_less, _) = (&mut p.e, ());
     assert_eq!(gpu_less.compose_into(0, &5u32, 1280), Ok(None));
 }
+
+/// An option board's device on the display bus: the engine calls out for a slot it has no device for, the
+/// device answers and takes stores there, and what the engine models is not offered to it. Without a device
+/// (or where it declines) the slot keeps the engine's scratch register, and the device survives a reset.
+#[test]
+fn a_shell_device_on_the_display_bus_answers_the_slots_the_engine_has_none_for() {
+    use sgi_mgras::dev::mgras::display::BusSlave;
+    struct Board44 {
+        stores: Arc<parking_lot::Mutex<Vec<(u32, u32, u32, u32)>>>,
+    }
+    impl BusSlave for Board44 {
+        fn read(&mut self, dev: u32, crs: u32, _width: u32) -> Option<u32> {
+            // Slot 20 answers a probe byte at block 0 and a counter at block 2; any other is left alone.
+            match (dev, crs) {
+                (20, 0) => Some(0xa5),
+                (20, 2) => Some(self.stores.lock().len() as u32),
+                _ => None,
+            }
+        }
+        fn write(&mut self, dev: u32, crs: u32, width: u32, data: u32) -> bool {
+            if dev == 20 {
+                self.stores.lock().push((dev, crs, width, data));
+            }
+            dev == 20
+        }
+    }
+    let mut e = MgrasEngine::new(Config::new(Board::High, Mode::Inline), Mem::default(), None, None).unwrap();
+    let read = |e: &mut MgrasEngine<Mem>, dev: u32, crs: u32| match e.read(0x60000 + dev * 0x400 + (crs << 7), 32) {
+        sgi_engine::Read::Value(v) => v as u32,
+        other => panic!("{other:?}"),
+    };
+    // No device attached: the engine's scratch register holds what was stored.
+    bus(&mut e, 20, 1, 4, 0x1234);
+    assert_eq!(read(&mut e, 20, 1), 0x1234);
+    assert_eq!(read(&mut e, 20, 0), 0);
+    let stores = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    e.set_display_bus(Some(Box::new(Board44 { stores: stores.clone() })));
+    assert_eq!(read(&mut e, 20, 0), 0xa5, "the device answers its probe byte");
+    bus(&mut e, 20, 1, 4, 0x77);
+    assert_eq!(stores.lock().len(), 1, "and takes the store");
+    assert_eq!(stores.lock()[0], (20, 1, 4, 0x77));
+    assert_eq!(read(&mut e, 20, 2), 1, "a block it answers by its own state");
+    assert_eq!(read(&mut e, 20, 1), 0x1234, "a block it declines is the engine's scratch register, unchanged by the device's store");
+    // The engine's own devices are not offered to it: the board-version slot answers as before.
+    assert_ne!(read(&mut e, 9, 0), 0xa5);
+    assert_eq!(stores.lock().len(), 1);
+    e.quiesce(u64::MAX).unwrap();
+    e.reset().unwrap();
+    assert_eq!(read(&mut e, 20, 0), 0xa5, "the device is the shell's: it stays through a reset");
+    e.set_display_bus(None);
+    assert_eq!(read(&mut e, 20, 0), 0, "detached");
+}

@@ -783,6 +783,12 @@ impl<M: HostMem> MgrasEngine<M> {
         Ok(())
     }
 
+    /// Attach (or with None detach) the shell's device on the display control bus: an option board such as
+    /// the Digital Video board answers the slots the engine has no device for (`display::BusSlave`).
+    pub fn set_display_bus(&self, slave: Option<Box<dyn display::BusSlave>>) {
+        self.display.lock().set_slave(slave);
+    }
+
     /// The 24 colour planes of the displayed buffer at display (`x`, `y`), `y` = 0 the top row. For tests.
     pub fn fb_pixel(&mut self, x: usize, y: usize) -> u32 {
         let (_, h) = self.display.lock().size();
@@ -1207,7 +1213,13 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         self.need_parked(false)?;
         let inner = Inner::new(&self.cfg, self.gpu.as_ref(), self.mem.clone(), self.sh.out.clone(), self.sh.front.clone()).map_err(Refused::Faulted)?;
         *self.sh.inner.lock() = inner;
-        *self.display.lock() = Display::new(self.cfg.bdvers.unwrap_or_else(|| display::default_bdvers(self.cfg.board)), self.cfg.cmap_rev);
+        {
+            // The shell's bus device is the shell's, not the board's state: it stays through a reset.
+            let mut display = self.display.lock();
+            let slave = display.take_slave();
+            *display = Display::new(self.cfg.bdvers.unwrap_or_else(|| display::default_bdvers(self.cfg.board)), self.cfg.cmap_rev);
+            display.set_slave(slave);
+        }
         self.sh.generation.fetch_add(1, Ordering::Release);
         let f = &self.sh.front;
         f.flags.store(0, Ordering::Release);
