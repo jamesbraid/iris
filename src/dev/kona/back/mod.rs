@@ -223,9 +223,9 @@ pub struct KonaBackend {
     /// Swaps wait here for the next `frame` instead of showing at once (`latch_swaps`).
     latch: bool,
     swaps: Vec<(u32, u8)>,
-    /// Moves when a video format load, disable, enable, reset, start or state load may have changed the
-    /// scan-out timing (`head_timing`). Not saved.
-    timing_generation: u64,
+    /// Per channel, moves when a video format load, disable, enable, reset, start or state load may have changed
+    /// the channel's scan-out timing (`channel_timing`). Not saved.
+    timing_generation: [u64; display::channels::CHANNELS],
     /// The window the board shows the guest, which the machine keeps a clone
     /// of (`KonaBackend::display`).
     display: Arc<Display>,
@@ -383,7 +383,7 @@ impl KonaBackend {
             manual: None,
             latch: false,
             swaps: Vec::new(),
-            timing_generation: 0,
+            timing_generation: [0; display::channels::CHANNELS],
             layouts: 0,
             refused: [0; Refusal::ALL.len()],
             malformed: 0,
@@ -500,7 +500,7 @@ impl KonaBackend {
         self.contexts.visit(s);
         self.channels.visit(s);
         if s.loading() {
-            self.timing_generation += 1;
+            self.timing_generation.iter_mut().for_each(|g| *g += 1);
         }
         self.sync_blank();
         if s.loading() {
@@ -822,11 +822,17 @@ impl KonaBackend {
         self.latch = on;
     }
 
-    /// The scan-out timing of head 0: the lowest running channel's format-load timing (`Channel::head_timing`), as
+    /// The channels that run, each a head of the pipe: the display channels in order, then the option board's.
+    pub fn running_channels(&self) -> Vec<usize> {
+        let option = self.channels.option_index();
+        (0..self.channels.count()).chain(option).filter(|&c| self.channels.channel[c].enabled).collect()
+    }
+
+    /// The scan-out timing of channel `index`: its format-load timing (`Channel::head_timing`), as
     /// (clock Hz, frame clocks, fields, lines, generation).
-    pub fn head_timing(&self) -> Option<(u32, u64, u32, u32, u64)> {
-        let (hz, frame_clocks, fields, lines) = self.channels.channel[..self.channels.count()].iter().find_map(|c| c.head_timing())?;
-        Some((hz, frame_clocks, fields, lines, self.timing_generation))
+    pub fn channel_timing(&self, index: usize) -> Option<(u32, u64, u32, u32, u64)> {
+        let (hz, frame_clocks, fields, lines) = self.channels.channel.get(index)?.head_timing()?;
+        Some((hz, frame_clocks, fields, lines, self.timing_generation[index]))
     }
 
     /// The DAC cursor of the current frame drawn over `out`, ten-bit pixels (`0x00` then red, green,
@@ -940,7 +946,7 @@ impl KonaBackend {
         self.dac_cursor_refused = 0;
         self.channels.reset();
         self.option.reset();
-        self.timing_generation += 1;
+        self.timing_generation.iter_mut().for_each(|g| *g += 1);
         self.sync_blank();
         self.tex_counts = Default::default();
         self.pix_counts = Default::default();
@@ -1449,7 +1455,7 @@ impl KonaBackend {
                 // The store keeps the configured size; a combination that sets another is logged and the
                 // configured size is what the configuration request reports.
                 let frame = self.channels.start(combination);
-                self.timing_generation += 1;
+                self.timing_generation.iter_mut().for_each(|g| *g += 1);
                 self.sync_blank();
                 if frame != self.cfg.managed {
                     crate::dlog!(LogModule::Kona, "kona: the combination set a managed area of {}x{}; the board keeps {}x{}", frame.0, frame.1, self.cfg.managed.0, self.cfg.managed.1);
@@ -1665,16 +1671,17 @@ impl KonaBackend {
                 }
             }
             Job::Video { command, data } => {
-                // The display channels' timing is the head's; the option board's channel has none of its own to report.
-                let timings = |c: &display::channels::Channels| c.channel[..c.count()].iter().map(|c| (c.enabled, c.timing)).collect::<Vec<_>>();
+                let timings = |c: &display::channels::Channels| c.channel.iter().map(|c| (c.enabled, c.timing)).collect::<Vec<_>>();
                 let before = timings(&self.channels);
                 // The option board's side of the request first: what the firmware does on the display bus, and
                 // whether its channel exists for the channel setters that follow.
                 let from_board = self.option.request(command, data);
                 self.channels.set_option_channel(self.option.present());
                 self.channels.set(command, data);
-                if timings(&self.channels) != before {
-                    self.timing_generation += 1;
+                for (i, (was, now)) in before.iter().zip(timings(&self.channels)).enumerate() {
+                    if *was != now {
+                        self.timing_generation[i] += 1;
+                    }
                 }
                 self.sync_blank();
                 // A Get's reply: the id, the data and their sum from byte 8, then the ready word.

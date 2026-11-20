@@ -183,3 +183,64 @@ fn the_probe_survives_a_save_and_a_load_and_a_reset_forgets_it() {
     f.reset().unwrap();
     assert_eq!(f.channel_window_of(0xc6), None, "power-on: not probed yet");
 }
+
+/// A format load for `channel` at `rate` frames a second.
+fn load_format_at(e: &mut Engine, channel: u32, pixels: u32, lines: u32, rate: u32) {
+    let mut format = [0u32; 383];
+    (format[0], format[1], format[19], format[20], format[21], format[22], format[23], format[24]) = (channel, 1, rate << 16, 1, lines + 40, pixels + 100, lines, pixels);
+    video(e, VIDEO_LOAD_FORMAT, &format);
+}
+
+#[test]
+fn each_running_channel_is_a_head_with_its_own_size_timing_and_window() {
+    let mut e = engine("dg5-2");
+    assert_eq!((e.heads(), e.frame_size(0), e.frame_size(1)), (1, Some((1280, 1024)), None), "channel 0 alone: the whole managed area");
+    assert_eq!(e.head_timing(0), None, "no format loaded");
+    load_format_at(&mut e, 0, 1280, 1024, 60);
+    // Channel 1 shows a 640 by 480 window whose top row is the 500th from the bottom, at x 16.
+    load_format_at(&mut e, 1, 640, 480, 50);
+    video(&mut e, VIDEO_RESIZE, &[1, 16, 499, 640, 480, 1, 1, 0]);
+    assert_eq!(e.heads(), 2);
+    assert_eq!((e.frame_size(0), e.frame_size(1), e.frame_size(2)), (Some((1280, 1024)), Some((640, 480)), None));
+    let (t0, t1) = (e.head_timing(0).unwrap(), e.head_timing(1).unwrap());
+    assert_eq!((t0.clock_hz, t0.lines, t1.clock_hz, t1.lines), (60 << 16, 1064, 50 << 16, 520), "each head has its channel's timing");
+    assert_eq!(e.head_timing(2), None);
+    let mut out = Vec::new();
+    assert_eq!(BoardEngine::scanout(&mut e, 1, &mut out), Ok(Some((640, 480))));
+    assert_eq!(out.len(), 640 * 480);
+    assert_eq!(e.channel_window(1), Some((16, 1024 - 1 - 499, 640, 480)));
+    assert_eq!(BoardEngine::scanout(&mut e, 2, &mut out), Ok(None));
+    assert!(out.is_empty());
+    assert!(e.frame_generation(1) > 0 && e.frame_generation(2) == 0);
+    // Changing channel 1's format moves its timing's generation and not channel 0's.
+    load_format_at(&mut e, 1, 640, 480, 25);
+    assert_eq!((e.head_timing(0).unwrap().generation, e.head_timing(1).unwrap().generation > t1.generation), (t0.generation, true));
+    video(&mut e, VIDEO_DISABLE_CHANNEL, &[1]);
+    assert_eq!(e.heads(), 1, "a disabled channel is no head");
+}
+
+#[test]
+fn the_gvo_channel_is_the_last_head_and_shows_its_window_at_one_to_one() {
+    let (mut e, _) = the_probed_pipe();
+    load_format_at(&mut e, 0, 1280, 1024, 60);
+    load_format_at(&mut e, 0xc6, 720, 486, 30);
+    // The combination file's slot 11 reads the top-left 720 by 486 of the managed area.
+    video(&mut e, VIDEO_RESIZE, &[0xc6, 0, 1023, 720, 486, 1, 1, 0]);
+    assert_eq!(e.heads(), 2);
+    assert_eq!((e.frame_size(0), e.frame_size(1)), (Some((1280, 1024)), Some((720, 486))));
+    assert_eq!(e.channel_window(2), Some((0, 0, 720, 486)));
+    let (t0, t1) = (e.head_timing(0).unwrap(), e.head_timing(1).unwrap());
+    assert_eq!((t0.clock_hz, t1.clock_hz), (60 << 16, 30 << 16), "channel 0 keeps the desktop's timing, the GVO has its own");
+    let (mut desk, mut gvo) = (Vec::new(), Vec::new());
+    BoardEngine::scanout(&mut e, 0, &mut desk).unwrap();
+    BoardEngine::scanout(&mut e, 1, &mut gvo).unwrap();
+    assert_eq!((desk.len(), gvo.len()), (1280 * 1024, 720 * 486));
+    for row in [0usize, 100, 485] {
+        assert_eq!(gvo[row * 720..(row + 1) * 720], desk[row * 1280..row * 1280 + 720], "row {row} of the window is the top-left of the desktop");
+    }
+    let (mut ten, mut ten0) = (Vec::new(), Vec::new());
+    assert_eq!(BoardEngine::scanout10(&mut e, 1, &mut ten), Ok(Some((720, 486))));
+    BoardEngine::scanout10(&mut e, 0, &mut ten0).unwrap();
+    assert_eq!((ten.len(), ten0.len()), (720 * 486, 1280 * 1024));
+    assert!(BoardEngine::lend_frame(&mut e, 1).unwrap().is_none(), "a window is not a lendable frame");
+}
