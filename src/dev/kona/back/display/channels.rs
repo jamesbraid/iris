@@ -72,6 +72,10 @@ use crate::devlog::LogModule;
 /// The channels a display generator drives (the board reports eight).
 pub const CHANNELS: usize = crate::dev::kona::ident::CHANNELS as usize;
 
+/// The GVO option board's video output chip: the VOC id the display requests name its channel by, and so the
+/// first of its pair (the second is the next id).
+pub const GVO_ID: u32 = 0xc6;
+
 /// The words a channel's format is named by: sixteen of the file's name and its datestamp.
 pub const NAME_WORDS: usize = 17;
 
@@ -175,6 +179,11 @@ pub struct Channels {
     rm_count: u32,
     /// The channels the display board has, at most `CHANNELS`: those past it do not exist.
     count: usize,
+    /// The option mask the board reports (request 18), and whether the option board's channel exists: the
+    /// firmware found its video output chips. That channel is the one after the display channels, named
+    /// by its VOC id, `GVO_ID`.
+    option_mask: u32,
+    option_channel: bool,
 }
 
 impl Channels {
@@ -191,7 +200,7 @@ impl Channels {
         c.loaded = true;
         c.format = FB;
         c.input = [0, FB.1 - 1, FB.0, FB.1];
-        Channels { channel, blanked: false, frame: FB, error: false, rm_count, count: CHANNELS }
+        Channels { channel, blanked: false, frame: FB, error: false, rm_count, count: CHANNELS, option_mask: 0, option_channel: false }
     }
 
     /// The same display generator with a board of `count` channels, 1 to `CHANNELS`.
@@ -200,18 +209,43 @@ impl Channels {
         self
     }
 
-    /// The channels the board has.
+    /// The board's option mask, as request 18 reports it.
+    pub fn with_option_mask(mut self, mask: u32) -> Self {
+        self.option_mask = mask;
+        self
+    }
+
+    /// The display channels the board has (not the option board's).
     pub fn count(&self) -> usize {
         self.count
     }
 
+    /// The option board's channel exists, or not: the firmware's probe found its chips or did not.
+    pub fn set_option_channel(&mut self, present: bool) {
+        self.option_channel = present;
+    }
+
+    /// The index of the option board's channel, when it exists.
+    pub fn option_index(&self) -> Option<usize> {
+        (self.option_channel && self.count < CHANNELS).then_some(self.count)
+    }
+
+    /// The channel a request's channel word names: a display channel by its number, the option board's by
+    /// its VOC id or its index; None for one the board lacks.
+    pub fn physical(&self, word: u32) -> Option<usize> {
+        match self.option_index() {
+            Some(option) if word == GVO_ID || word as usize == option => Some(option),
+            _ => ((word as usize) < self.count).then_some(word as usize),
+        }
+    }
+
     pub fn reset(&mut self) {
-        *self = Channels::new(self.rm_count).with_count(self.count);
+        *self = Channels::new(self.rm_count).with_count(self.count).with_option_mask(self.option_mask);
     }
 
     /// The state, as the stream module reads and writes it.
     pub fn visit<S: Stream>(&mut self, s: &mut S) {
-        let Self { channel: _, blanked: _, frame: _, error: _, rm_count: _, count: _ } = self;
+        let Self { channel: _, blanked: _, frame: _, error: _, rm_count: _, count: _, option_mask: _, option_channel: _ } = self;
         self.channel.iter_mut().for_each(|c| c.visit(s));
         s.bool(&mut self.blanked);
         s.u32(&mut self.frame.0);
@@ -250,14 +284,23 @@ impl Channels {
     /// the data words and their sum with the id, big-endian. None for a command nobody waits on,
     /// one past the table, or a per-channel Get naming a channel the board lacks (logged).
     pub fn reply(&self, command: u32, data: &[u32]) -> Option<Vec<u8>> {
+        self.reply_with(command, data, None)
+    }
+
+    /// `reply`, the first data word being `first` when the option board gave one (the word read from the display
+    /// bus, the logic load's status).
+    pub fn reply_with(&self, command: u32, data: &[u32], first: Option<u32>) -> Option<Vec<u8>> {
         let (id, bytes) = crate::dev::kona::tables::VIDEO_REPLY.get(command as usize).copied().flatten()?;
-        let channel = if names_channel(command) { data.first().copied().unwrap_or(0) as usize } else { 0 };
-        if channel >= self.count {
-            crate::dlog!(LogModule::Kona, "kona: unsupported video channel {channel} for {command:#x}");
+        let word = if names_channel(command) { data.first().copied().unwrap_or(0) } else { 0 };
+        let Some(channel) = self.physical(word) else {
+            crate::dlog!(LogModule::Kona, "kona: unsupported video channel {word} for {command:#x}");
             return None;
-        }
+        };
         let mut words = vec![0u32; bytes as usize / 4];
         self.reply_words(command, channel, &mut words);
+        if let (Some(w), Some(slot)) = (first, words.first_mut()) {
+            *slot = w;
+        }
         let sum = words.iter().fold(id as u32, |s, w| s.wrapping_add(*w));
         let mut out = Vec::with_capacity(8 + bytes as usize);
         out.extend_from_slice(&(id as u32).to_be_bytes());
@@ -277,7 +320,8 @@ impl Channels {
             }
         };
         match command {
-            VIDEO_GET_BOARD_CONFIG => put(0, &[1, (1u32 << self.count) - 1]),
+            // The version, the channel mask (the display channels), 0, and the option mask.
+            VIDEO_GET_BOARD_CONFIG => put(0, &[1, (1u32 << self.count) - 1, 0, self.option_mask]),
             VIDEO_GET_CHANNEL_CONFIG => {
                 put(0, &[1 | if channel == 0 { 2 } else { 0 } | if ch.enabled { 0xc } else { 0 }]);
                 put(1, &ch.name);
@@ -357,11 +401,10 @@ impl Channels {
             }
             VIDEO_SETUP_FRAME_BUFFER => self.setup_frame_buffer(d(0), d(1), d(2)),
             VIDEO_DISABLE_CHANNEL | VIDEO_LOAD_FORMAT | VIDEO_ENABLE_CHANNEL | VIDEO_RESIZE | VIDEO_CHANNEL_BLANKING | VIDEO_CHANNEL_GAMMA_MAP | VIDEO_CURSOR_PRIORITY | VIDEO_VAMPIRE | VIDEO_BIND_TO_X_WINDOW | VIDEO_PLACEMENT_RES => {
-                let channel = d(0) as usize;
-                if channel >= self.count {
-                    crate::dlog!(LogModule::Kona, "kona: unsupported video channel {channel} for {command:#x}");
+                let Some(channel) = self.physical(d(0)) else {
+                    crate::dlog!(LogModule::Kona, "kona: unsupported video channel {} for {command:#x}", d(0));
                     return;
-                }
+                };
                 self.set_channel(command, channel, data);
             }
             _ => {}
@@ -650,6 +693,31 @@ mod tests {
     /// The words of a reply after the id, without the closing sum.
     fn words(reply: &[u8]) -> Vec<u32> {
         reply.chunks(4).map(|c| u32::from_be_bytes(c.try_into().unwrap())).collect()
+    }
+
+    #[test]
+    fn a_board_with_the_gvo_option_reports_its_mask_and_has_its_channel_once_probed() {
+        let mut c = Channels::new(2).with_count(2).with_option_mask(0x10);
+        let r = c.reply(VIDEO_GET_BOARD_CONFIG, &[0]).unwrap();
+        assert_eq!(&words(&r)[..5], &[6, 1, 3, 0, 0x10], "version 1, the two display channels, no 0, the option mask");
+        assert_eq!(c.physical(0xc6), None, "not probed: no such channel");
+        c.set(VIDEO_LOAD_FORMAT, &[GVO_ID, 1]);
+        assert!(c.channel.iter().all(|ch| !ch.loaded || ch.format == FB), "nothing named the option channel");
+        c.set_option_channel(true);
+        assert_eq!((c.physical(0xc6), c.physical(2), c.physical(1), c.physical(3)), (Some(2), Some(2), Some(1), None));
+        let mut format = [0u32; 383];
+        (format[0], format[23], format[24]) = (GVO_ID, 486, 720);
+        c.set(VIDEO_LOAD_FORMAT, &format);
+        assert_eq!(c.channel[2].format, (720, 486));
+        assert_eq!(c.channel[0].format, FB, "the display channel keeps its format");
+        let r = c.reply(VIDEO_GET_CHANNEL_CONFIG, &[GVO_ID]).unwrap();
+        assert_eq!(words(&r)[1] & 1, 1, "the option channel's configuration reads");
+        // A reply's first word may come from the board.
+        let r = c.reply_with(VIDEO_GET_BOARD_CONFIG, &[0], Some(9)).unwrap();
+        assert_eq!(words(&r)[1], 9);
+        c.reset();
+        assert_eq!((c.physical(0xc6), c.option_index()), (None, None));
+        assert_eq!(&words(&c.reply(VIDEO_GET_BOARD_CONFIG, &[0]).unwrap())[..5], &[6, 1, 3, 0, 0x10], "the mask is the board's, not the probe's");
     }
 
     #[test]

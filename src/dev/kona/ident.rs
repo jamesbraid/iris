@@ -43,8 +43,9 @@ pub(super) const CHANNELS: u32 = 8;
 ///
 /// Limit: the display model's channel arrays are eight long, so a board with
 /// fewer channels answers for its own and refuses the rest. The DG5-2 with a
-/// GVO option is not presented: its option channel is not modelled. Its word,
-/// as the Onyx2 rack capture reads it, is checked in a test.
+/// GVO option presents its option channel only when a shell's device on the display
+/// bus answers for the option board (`display::option`). Its word, as the Onyx2
+/// rack capture reads it, is checked in a test.
 pub(super) struct Display {
     pub channels: u32,
     /// 3 TVO, 4 DPLEX, 5 DVP, 6 GVO, 7 none.
@@ -89,11 +90,25 @@ pub(super) const DG5_2: Display = Display {
     board: BoardSpec { name: "DG5-2", part: "030-1055-001", revision: "" },
 };
 
+/// The DG5-2 with the GVO option board: the rack capture's word, `f9311002` (option 6), and its part,
+/// 030-1242-001 (rev D seen). The option board's own record (030-1184-002, `DGOPT`) is not on the
+/// one-wire chain here.
+pub(super) const DG5_2_GVO: Display = Display {
+    channels: 2,
+    option: 6,
+    colour_map: false,
+    external_gamma: false,
+    high: 0xf9,
+    board: BoardSpec { name: "DG5-2", part: "030-1242-001", revision: "D" },
+};
+
 /// The display generators a pipe takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayBoard {
     Dg5_8,
     Dg5_2,
+    /// A DG5-2 with the GVO option: option type 6 in its identity word, option mask 0x10.
+    Dg5_2Gvo,
 }
 
 impl DisplayBoard {
@@ -101,6 +116,7 @@ impl DisplayBoard {
         match self {
             DisplayBoard::Dg5_8 => "dg5-8",
             DisplayBoard::Dg5_2 => "dg5-2",
+            DisplayBoard::Dg5_2Gvo => "dg5-2-gvo",
         }
     }
 
@@ -108,6 +124,7 @@ impl DisplayBoard {
         match self {
             DisplayBoard::Dg5_8 => &DG5_8,
             DisplayBoard::Dg5_2 => &DG5_2,
+            DisplayBoard::Dg5_2Gvo => &DG5_2_GVO,
         }
     }
 }
@@ -389,6 +406,9 @@ pub struct KonaConfig {
     pub shared_identity: Option<u8>,
     /// The ROM serial of the geometry board's part, 48 bits; None is the synthetic one.
     pub geometry_serial: Option<u64>,
+    /// The shell models the display option board as a device of its own on the display bus
+    /// (`KonaEngine::set_display_bus`); it lets `display` name `dg5-2-gvo`.
+    pub option_slave: bool,
 }
 
 impl KonaConfig {
@@ -506,14 +526,28 @@ impl KonaConfig {
         Ok(self)
     }
 
-    /// The display generator `name` (`dg5-8`, `dg5-2`; empty for the default) and its channel
+    /// The shell has a device for the display option board, so `display` may name a board with one.
+    /// Set before `with_display`.
+    pub fn with_option_slave(mut self) -> Self {
+        self.option_slave = true;
+        self
+    }
+
+    /// The option mask the firmware reports in the board configuration (request 18): 0x10 for a GVO,
+    /// 0 for no option.
+    pub fn option_mask(&self) -> u32 {
+        if self.display_board().option == 6 { 0x10 } else { 0 }
+    }
+
+    /// The display generator `name` (`dg5-8`, `dg5-2`, `dg5-2-gvo`; empty for the default) and its channel
     /// count, 0 or the board's own. Set after the host board, which picks the default.
     pub fn with_display(mut self, name: &str, channels: u32) -> Result<Self, String> {
         self.display = match name {
             "" => None,
             "dg5-8" => Some(DisplayBoard::Dg5_8),
             "dg5-2" => Some(DisplayBoard::Dg5_2),
-            "dg5-2-gvo" => return Err("kona: display dg5-2-gvo: the GVO option's channel, mask and logic download are not modelled; use dg5-2".into()),
+            "dg5-2-gvo" if self.option_slave => Some(DisplayBoard::Dg5_2Gvo),
+            "dg5-2-gvo" => return Err("kona: display dg5-2-gvo needs the option board's device on the display bus (the shell's option slave); without one use dg5-2".into()),
             other => return Err(format!("kona: display {other:?} is not a display board the model presents: dg5-8 or dg5-2")),
         };
         let board = self.display_board();
@@ -624,7 +658,7 @@ impl KonaConfig {
 
 impl Default for KonaConfig {
     fn default() -> Self {
-        KonaConfig { product: Product::Ir2, rm_count: 2, identity_index: 0, host_widget: 0, widget: 0, probe: 0, managed: (1280, 1024), threads: 2, tile: 32, geometry: None, display: None, pixel_depth: PixelDepth::Small, host_board: HostBoard::Deskside, shared_identity: None, geometry_serial: None }
+        KonaConfig { product: Product::Ir2, rm_count: 2, identity_index: 0, host_widget: 0, widget: 0, probe: 0, managed: (1280, 1024), threads: 2, tile: 32, geometry: None, display: None, pixel_depth: PixelDepth::Small, host_board: HostBoard::Deskside, shared_identity: None, geometry_serial: None, option_slave: false }
     }
 }
 
@@ -944,7 +978,10 @@ pub(in crate::dev::kona) mod tests {
         assert_eq!(word(&block, CFG_DG_CHANNELS + 4 * 2), 0, "no word for a third channel");
         assert!(KonaConfig::ir2(1).unwrap().with_display("dg5-2", 8).is_err());
         assert!(KonaConfig::ir2(1).unwrap().with_display("dg5-8", 2).is_err());
-        assert!(KonaConfig::ir2(1).unwrap().with_display("dg5-2-gvo", 0).unwrap_err().contains("not modelled"));
+        assert!(KonaConfig::ir2(1).unwrap().with_display("dg5-2-gvo", 0).unwrap_err().contains("option slave"));
+        let gvo = KonaConfig::ir2(1).unwrap().with_option_slave().with_display("dg5-2-gvo", 2).unwrap();
+        assert_eq!((gvo.option_mask(), gvo.display_board().word()), (0x10, 0xf931_1002), "bits 21:19 are 6");
+        assert_eq!(KonaConfig::ir2(1).unwrap().with_display("dg5-2", 2).unwrap().option_mask(), 0);
         assert!(KonaConfig::ir2(1).unwrap().with_display("dg9", 0).is_err());
     }
 

@@ -48,6 +48,7 @@ fn config(product: *const std::ffi::c_char) -> IrisKonaConfig {
         flash_len: 0,
         flash_write: None,
         dma_widget: None,
+        flags: 0,
     }
 }
 
@@ -111,7 +112,61 @@ fn the_boards_are_inputs_and_what_a_product_cannot_have_is_refused() {
     assert!(!builds(&one), "a DG5-2 has two channels");
     one.channels = 0;
     one.display = gvo.as_ptr();
-    assert!(!builds(&one), "the GVO option channel is not modelled");
+    assert!(!builds(&one), "the GVO option needs the shell's device for it");
+    one.flags = 1;
+    assert!(builds(&one), "with the option slave announced, a DG5-2 with a GVO");
+}
+
+unsafe extern "C" fn board_read(user: *mut c_void, addr: u32, data: *mut u32) -> c_int {
+    let regs = unsafe { &*(user as *const std::sync::Mutex<std::collections::BTreeMap<u32, u32>>) };
+    unsafe { *data = regs.lock().unwrap().get(&addr).copied().unwrap_or(0) };
+    1
+}
+
+unsafe extern "C" fn board_write(user: *mut c_void, addr: u32, data: u32) -> c_int {
+    let regs = unsafe { &*(user as *const std::sync::Mutex<std::collections::BTreeMap<u32, u32>>) };
+    regs.lock().unwrap().insert(addr, data);
+    1
+}
+
+/// A C shell gives the engine the option board's device, the engine probes it as the firmware does, and the board's channel
+/// has a window the shell reads.
+#[test]
+fn a_c_shell_attaches_the_option_board_and_reads_its_channels_window() {
+    let (ir2, gvo) = (CString::new("ir2").unwrap(), CString::new("dg5-2-gvo").unwrap());
+    let mut cfg = config(ir2.as_ptr());
+    (cfg.display, cfg.flags) = (gvo.as_ptr(), 1);
+    let h = unsafe { sgi_kona_new(&cfg, &host()) };
+    assert!(!h.is_null());
+    let regs = std::sync::Mutex::new(std::collections::BTreeMap::<u32, u32>::new());
+    let user = &regs as *const _ as *mut c_void;
+    assert_eq!(unsafe { sgi_kona_set_display_bus(h, user, Some(board_read), Some(board_write)) }, IRIS_ENGINE_OK);
+    let video = |command: u32, data: &[u32]| {
+        let sum = data.iter().fold(command, |s, w| s.wrapping_add(*w));
+        for w in [0x1a6, command].into_iter().chain(data.iter().copied()).chain([sum]) {
+            assert_eq!(unsafe { iris_engine_write(h, 0xc10000, 32, w as u64) }, IRIS_ENGINE_OK);
+        }
+        assert_eq!(unsafe { iris_engine_quiesce(h, u64::MAX) }, IRIS_ENGINE_OK);
+    };
+    let (mut x, mut y, mut w, mut hgt) = (0u32, 0u32, 0u32, 0u32);
+    assert_eq!(unsafe { sgi_kona_channel_window(h, 0xc6, &mut x, &mut y, &mut w, &mut hgt) }, IRIS_ENGINE_ERROR, "not probed");
+    video(0x53, &[0]);
+    assert_eq!(regs.lock().unwrap()[&0xc831], 0xc6 + 0x3e8, "the probe reached the callbacks");
+    let mut format = [0u32; 383];
+    (format[0], format[1], format[23], format[24]) = (0xc6, 1, 486, 720);
+    video(0x16, &format);
+    video(0x14, &[0xc6, 0, 485, 720, 486, 1, 1, 0]);
+    assert_eq!(unsafe { sgi_kona_channel_window(h, 0xc6, &mut x, &mut y, &mut w, &mut hgt) }, IRIS_ENGINE_OK);
+    assert_eq!((x, y, w, hgt), (0, 1024 - 1 - 485, 720, 486));
+    let mut small = [0u32; 4];
+    let (mut sw, mut sh) = (0, 0);
+    assert_eq!(unsafe { sgi_kona_channel_scanout(h, 0xc6, small.as_mut_ptr(), 4, &mut sw, &mut sh) }, IRIS_ENGINE_ERROR, "too small: the size comes back");
+    assert_eq!((sw, sh), (720, 486));
+    let mut whole = vec![0u32; 720 * 486];
+    assert_eq!(unsafe { sgi_kona_channel_scanout(h, 0xc6, whole.as_mut_ptr(), whole.len(), &mut sw, &mut sh) }, IRIS_ENGINE_OK);
+    assert_eq!(unsafe { sgi_kona_channel_scanout(h, 7, whole.as_mut_ptr(), whole.len(), &mut sw, &mut sh) }, IRIS_ENGINE_ERROR, "no such channel");
+    assert_eq!(unsafe { sgi_kona_set_display_bus(h, null_mut(), None, None) }, IRIS_ENGINE_OK, "detached");
+    unsafe { iris_engine_free(h) };
 }
 
 /// The scan-out entry hands the shells' 0x00RRGGBB where the engine composes 0xAABBGGRR, and says

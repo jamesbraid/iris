@@ -191,6 +191,7 @@ mod config {
                 flash_len: 0,
                 flash_write: None,
                 dma_widget: None,
+                flags: 0,
             };
             if field(&mut r) { c.product = pick(&mut r) }
             if field(&mut r) { c.rm_count = small(&mut r) }

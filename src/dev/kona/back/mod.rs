@@ -247,6 +247,8 @@ pub struct KonaBackend {
     dac_cursor_refused: u64,
     /// The display generator's channels, which the video commands set.
     channels: display::channels::Channels,
+    /// The display option board's side of the display requests, and the shell's device for it.
+    option: display::option::OptionBoard,
     /// What the texture commands did.
     tex_counts: gl::texture::TexCounts,
     pix_counts: gl::pixels::Counts,
@@ -359,7 +361,8 @@ impl KonaBackend {
             regions: RegionCounts::default(),
             dac_cursor_loads: 0,
             dac_cursor_refused: 0,
-            channels: display::channels::Channels::new(cfg.rm_count).with_count(cfg.display_board().channels as usize),
+            channels: display::channels::Channels::new(cfg.rm_count).with_count(cfg.display_board().channels as usize).with_option_mask(cfg.option_mask()),
+            option: display::option::OptionBoard::new(cfg.option_mask()),
             tex_counts: Default::default(),
             pix_counts: Default::default(),
             query_counts: Default::default(),
@@ -832,6 +835,58 @@ impl KonaBackend {
         self.tables.lock().snapshot().draw_dac_cursor_wide(out, stride, w, h);
     }
 
+    /// The shell's device for the display option board, or none: it answers the display-bus accesses the
+    /// firmware makes for the board. It stays through a reset and a load.
+    pub fn set_display_bus(&mut self, slave: Option<Box<dyn display::option::DisplayBusSlave>>) {
+        self.option.set_slave(slave);
+    }
+
+    /// Whether the option board's channel exists (the firmware's probe found its chips), and its index.
+    pub fn option_channel(&self) -> Option<usize> {
+        self.channels.option_index()
+    }
+
+    /// The channel a request's channel word names (`Channels::physical`).
+    pub fn channel_index(&self, word: u32) -> Option<usize> {
+        self.channels.physical(word)
+    }
+
+    /// The state the option board keeps beside the channels, saved from version 5 of the engine's state.
+    pub fn visit_option<S: stream::Stream>(&mut self, s: &mut S) {
+        let mut present = self.option.present();
+        s.bool(&mut present);
+        if s.loading() {
+            self.option.restore(present);
+            self.channels.set_option_channel(present);
+        }
+    }
+
+    /// A state that carries no option board state: nothing probed.
+    pub fn restore_option(&mut self, present: bool) {
+        self.option.restore(present);
+        self.channels.set_option_channel(present);
+    }
+
+    /// `visit_option` over a throwaway, to read past it.
+    pub fn check_option<S: stream::Stream>(s: &mut S) {
+        s.bool(&mut false);
+    }
+
+    /// Channel `index`'s input rectangle of the managed area as (x, top row from the top, width, height) clipped
+    /// to the `managed` area, the window a channel's output shows; None when the channel does not exist or is not running.
+    pub fn channel_window(&self, index: usize, managed: (u32, u32)) -> Option<(u32, u32, u32, u32)> {
+        let c = self.channels.channel.get(index)?;
+        let live = index < self.channels.count() || self.channels.option_index() == Some(index);
+        let (w, h) = managed;
+        if !live || !c.enabled || c.input[2] == 0 || c.input[3] == 0 {
+            return None;
+        }
+        let [x, top_from_bottom, cw, ch] = c.input;
+        let y = h.checked_sub(1)?.saturating_sub(top_from_bottom);
+        let (cw, ch) = (cw.min(w.saturating_sub(x)), ch.min(h - y));
+        (cw != 0 && ch != 0).then_some((x, y, cw, ch))
+    }
+
     /// Whether a swap waits for a frame.
     pub fn swaps_waiting(&self) -> bool {
         !self.swaps.is_empty()
@@ -884,6 +939,7 @@ impl KonaBackend {
         self.dac_cursor_loads = 0;
         self.dac_cursor_refused = 0;
         self.channels.reset();
+        self.option.reset();
         self.timing_generation += 1;
         self.sync_blank();
         self.tex_counts = Default::default();
@@ -1609,14 +1665,20 @@ impl KonaBackend {
                 }
             }
             Job::Video { command, data } => {
-                let before = self.channels.channel.iter().map(|c| (c.enabled, c.timing)).collect::<Vec<_>>();
+                // The display channels' timing is the head's; the option board's channel has none of its own to report.
+                let timings = |c: &display::channels::Channels| c.channel[..c.count()].iter().map(|c| (c.enabled, c.timing)).collect::<Vec<_>>();
+                let before = timings(&self.channels);
+                // The option board's side of the request first: what the firmware does on the display bus, and
+                // whether its channel exists for the channel setters that follow.
+                let from_board = self.option.request(command, data);
+                self.channels.set_option_channel(self.option.present());
                 self.channels.set(command, data);
-                if self.channels.channel.iter().map(|c| (c.enabled, c.timing)).collect::<Vec<_>>() != before {
+                if timings(&self.channels) != before {
                     self.timing_generation += 1;
                 }
                 self.sync_blank();
                 // A Get's reply: the id, the data and their sum from byte 8, then the ready word.
-                if let Some(reply) = self.channels.reply(command, data) {
+                if let Some(reply) = self.channels.reply_with(command, data, from_board) {
                     port.post_return(VIDEO_REPLY_OFFSET, &reply);
                 }
             }
