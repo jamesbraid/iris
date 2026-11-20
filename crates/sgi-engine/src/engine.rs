@@ -271,11 +271,12 @@ pub trait BoardEngine {
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize;
     fn read(&mut self, off: u32, bits: u32) -> Read;
     /// Name where the stores that follow come from, for flow control: the
-    /// engine returns credits to that source as `Event::Credits`. A packet's
-    /// credits go to the source of the store that completed it, and a
-    /// credit target the driver holds parked keeps credits until the write
-    /// that releases them, which goes to that writer. Boards without
-    /// credits ignore it.
+    /// engine returns credits to that source as `Event::Credits`. Each
+    /// credit goes to the source of the store that earned it: the credits of
+    /// a packet still arriving wait for its last word, and a credit target
+    /// the driver holds parked keeps credits until the write that releases
+    /// it, and both are kept by source, so stores of one packet through two
+    /// Hubs are paid back to their own. Boards without credits ignore it.
     fn set_source(&mut self, _source: Source) {}
     /// `write` with the shell's time (ns, its time base) at the store, for a
     /// register whose effect starts a timer at the moment of the write (a

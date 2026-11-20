@@ -76,13 +76,13 @@ fn textport_packet(e: &mut Engine, senders: [Source; 3]) {
 }
 
 #[test]
-fn a_packets_credits_return_with_its_last_word_to_that_words_sender() {
+fn a_packets_credits_return_to_the_source_of_each_of_its_stores() {
     let mut e = engine();
     textport_packet(&mut e, [A, B, A]);
-    // The sync word is taken at once (1 credit to A); the selector opens the packet, which holds
-    // its credit; the last word returns its own and the held one (2) to its sender, A. The shell
-    // sees them as one event for A.
-    assert_eq!(credits(&drain(&mut e)), [(1, 3)]);
+    // The sync word is taken at once (1 credit to A); the selector, B's, opens the packet, which holds
+    // its credit; the last word, A's, completes it. Each credit goes to the source that sent its store:
+    // A's two, B's one (the pipe once paid all three to the last word's sender).
+    assert_eq!(credits(&drain(&mut e)), [(1, 2), (2, 1)]);
     textport_packet(&mut e, [B, B, B]);
     assert_eq!(credits(&drain(&mut e)), [(2, 3)]);
 }
@@ -91,8 +91,9 @@ fn a_packets_credits_return_with_its_last_word_to_that_words_sender() {
 fn a_store_nobody_charged_earns_no_credit() {
     let mut e = engine();
     textport_packet(&mut e, [NONE, A, NONE]);
-    // Only the charged middle word counts; the last word returns it, with no sender to name.
-    assert_eq!(credits(&drain(&mut e)), [(0, 1)]);
+    // Only the charged middle word counts, and its credit goes to the source that sent it, though the
+    // last word that completes the packet has no sender.
+    assert_eq!(credits(&drain(&mut e)), [(1, 1)]);
 }
 
 #[test]
@@ -101,10 +102,48 @@ fn credits_wait_while_the_driver_has_parked_the_target() {
     store(&mut e, LOW_WINDOW_WRITE, 1, A);
     textport_packet(&mut e, [A, A, A]);
     assert_eq!(credits(&drain(&mut e)), [], "parked credits do not go back");
-    // The three held credits and the parking store's own go to the store that clears the bit, and
-    // that store's own credit follows.
+    // The parking store's credit and the packet's three, all A's, go back to A when the target is
+    // released; the releasing store's own credit goes to its sender, B.
     store(&mut e, LOW_WINDOW_WRITE, 0x22, B);
-    assert_eq!(credits(&drain(&mut e)), [(2, 5)]);
+    assert_eq!(credits(&drain(&mut e)), [(1, 4), (2, 1)]);
+}
+
+/// Stores of one packet through two Hubs, alternating: each Hub gets back exactly as many credits as
+/// it sent charged stores, whether they were held part way through the packet or parked, and across a
+/// save and load in the middle of the packet (state version 4 keeps them by source).
+#[test]
+fn credits_of_a_packet_through_two_sources_go_back_to_each_and_survive_a_save_in_the_middle() {
+    let total = |events: &[Event], hub: u32| credits(events).iter().filter(|c| c.0 == hub).map(|c| c.1).sum::<u32>();
+    // The draw's seven words alternate A, B, A, B, A, B, A: A sends four, B three.
+    let senders = [A, B];
+    let mut e = engine();
+    // Two packets: the colour (sync, selector, operand) and the point (sync, selector, two operands). The
+    // first six words leave the point packet open with A's selector and B's first operand held.
+    textport(&mut e, &DRAW[..6], &senders);
+    let early = drain(&mut e);
+    assert_eq!((total(&early, 1), total(&early, 2)), (2, 2), "the colour packet's and the point's sync word are back; two credits are held");
+    e.quiesce(u64::MAX).unwrap();
+    let mut chunks: Vec<Chunk> = Vec::new();
+    e.save(&mut chunks).expect("a save with credits held");
+    let mut f = engine();
+    f.quiesce(u64::MAX).unwrap();
+    f.load(&mut VecSource::new(chunks)).expect("load");
+    f.resume();
+    for (i, &w) in DRAW[6..].iter().enumerate() {
+        store(&mut f, COMMAND_PAGE, w, senders[(6 + i) % 2]);
+        f.run(usize::MAX);
+    }
+    let late = drain(&mut f);
+    assert_eq!((total(&late, 1), total(&late, 2)), (2, 1), "the last word returns A's two and B's one held across the load");
+    assert_eq!((total(&early, 1) + total(&late, 1), total(&early, 2) + total(&late, 2)), (4, 3), "each Hub gets what its own stores earned");
+    // Parked: the same packet with the target held, released by a store of neither.
+    let mut g = engine();
+    store(&mut g, LOW_WINDOW_WRITE, 1, NONE);
+    textport(&mut g, &DRAW, &senders);
+    assert_eq!(credits(&drain(&mut g)), []);
+    store(&mut g, LOW_WINDOW_WRITE, 0x22, NONE);
+    let released = drain(&mut g);
+    assert_eq!((total(&released, 1), total(&released, 2)), (4, 3), "parked by source, returned by source");
 }
 
 /// A kernel command: its token by a slot store (the first word), the rest at the port.

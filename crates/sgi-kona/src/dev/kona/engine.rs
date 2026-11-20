@@ -9,7 +9,7 @@
 //! `Stalled(Frame)` until the shell calls `frame`. Drawing runs on the pipe's tile workers, or on the
 //! caller's thread when the configuration has none.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -35,8 +35,8 @@ use crate::SharedGpu;
 
 /// The version of the state `save` writes. Version 1 held only a stream between commands;
 /// 2 adds the commands a guest has part way and the credits they owe; 3 the swaps latched for
-/// the next frame. A load takes all three.
-pub const STATE_VERSION: u32 = 3;
+/// the next frame; 4 keeps the credits held and parked by source. A load takes all four.
+pub const STATE_VERSION: u32 = 4;
 
 /// Stores `quiesce` and `wait_idle` run between looks at the clock.
 const SLICE: usize = 1 << 12;
@@ -132,22 +132,45 @@ struct Stored {
     counted: bool,
 }
 
-/// Credits owed to Hubs. QEMU's rule, which the model ported: a charged
-/// store's credit goes back once the pipe has taken its words, and the
-/// credits of a packet still arriving go back together with its last word.
+/// Credits owed to Hubs, by the source whose store earned them: a charged store's credit goes back
+/// once the pipe has taken its words, and the credits of a packet still arriving wait for its last
+/// word, then each goes to the source that sent the store it came from, not all to the last word's
+/// sender. While the driver has parked the credit target they wait in `parked`, again by source.
 #[derive(Default)]
 struct Credits {
-    held: u32,
-    parked: u32,
+    held: BTreeMap<u32, u32>,
+    parked: BTreeMap<u32, u32>,
     /// The sender of the last store, who a settle with no store of its own pays.
     last: u32,
 }
 
+/// The most sources a state may name: a shell has a handful of Hubs.
+const MAX_CREDIT_SOURCES: usize = 64;
+
 impl Credits {
+    /// The state of version 4: both maps, each as a list of (source, count) pairs, then `last`.
     fn visit<S: Stream>(&mut self, s: &mut S) {
-        s.u32(&mut self.held);
-        s.u32(&mut self.parked);
+        for map in [&mut self.held, &mut self.parked] {
+            let mut flat: Vec<u32> = map.iter().flat_map(|(&k, &v)| [k, v]).collect();
+            s.vec_u32(&mut flat);
+            if s.loading() {
+                *map = flat.chunks_exact(2).take(MAX_CREDIT_SOURCES).map(|c| (c[0], c[1])).collect();
+            }
+        }
         s.u32(&mut self.last);
+    }
+
+    /// The state of versions 2 and 3: one held and one parked count for everyone, which the old rule
+    /// paid to the last sender, so they are owed to it now.
+    fn visit_scalar<S: Stream>(&mut self, s: &mut S) {
+        let (mut held, mut parked) = (0u32, 0u32);
+        s.u32(&mut held);
+        s.u32(&mut parked);
+        s.u32(&mut self.last);
+        if s.loading() {
+            self.held = (held != 0).then_some((self.last, held)).into_iter().collect();
+            self.parked = (parked != 0).then_some((self.last, parked)).into_iter().collect();
+        }
     }
 }
 
@@ -348,14 +371,15 @@ impl<M: HostMem> KonaEngine<M> {
         }
         let mut packet: Option<InterruptPacket> = None;
         let idle = off == INT_ENABLE && self.stream.is_empty();
-        let parked_before = self.credits.parked;
+        let parked_before = !self.credits.parked.is_empty();
         host.front.lock().write(off, value, idle, &mut packet);
         if let Some(p) = packet {
             host.deliver(p);
         }
-        if off == LOW_WINDOW_WRITE && value & 1 == 0 && parked_before != 0 {
-            let parked = std::mem::take(&mut self.credits.parked);
-            self.give(self.source.id, parked);
+        if off == LOW_WINDOW_WRITE && value & 1 == 0 && parked_before {
+            for (hub, n) in std::mem::take(&mut self.credits.parked) {
+                self.give(hub, n);
+            }
         }
         if off == INT_CAUSE && self.core.reasons_waiting() {
             self.core.reason_drain(&host);
@@ -367,24 +391,35 @@ impl<M: HostMem> KonaEngine<M> {
     /// before it). `hub` is the store's source id; 0 is a store with no sender.
     fn settle(&mut self, counted: bool, before: u64, hub: u32) {
         let open = self.core.held_words() != 0;
-        let credits = if !open {
-            std::mem::take(&mut self.credits.held) + counted as u32
+        let mut owed = if !open {
+            // Nothing holds credits back: everything held goes, each to its source, and this store's own with it.
+            let mut owed = std::mem::take(&mut self.credits.held);
+            *owed.entry(hub).or_default() += counted as u32;
+            owed
         } else if self.core.packets != before {
-            std::mem::replace(&mut self.credits.held, counted as u32)
+            // This store completed a packet: the held credits go to the sources that earned them, and this
+            // store's own starts the next packet's hold.
+            let owed = std::mem::replace(&mut self.credits.held, counted.then_some((hub, 1)).into_iter().collect());
+            owed
         } else {
-            self.credits.held += counted as u32;
+            if counted {
+                *self.credits.held.entry(hub).or_default() += 1;
+            }
             return;
         };
-        self.give(hub, credits);
+        owed.retain(|_, n| *n != 0);
+        for (hub, n) in owed {
+            self.give(hub, n);
+        }
     }
 
-    /// Return `credits` to `hub`, unless the driver has parked the credit target, when they wait.
+    /// Return `credits` to `hub`, unless the driver has parked the credit target, when they wait for it, by source.
     fn give(&mut self, hub: u32, credits: u32) {
         if credits == 0 {
             return;
         }
         if self.host.front.lock().low_window_write & 1 != 0 {
-            self.credits.parked += credits;
+            *self.credits.parked.entry(hub).or_default() += credits;
             return;
         }
         self.events.out.post(Event::Credits { source: hub, retired: credits });
@@ -706,6 +741,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         }
         let open = meta.version >= 2;
         let swaps = meta.version >= 3;
+        let by_source = meta.version >= 4;
         if meta.state_len as usize > 1 << 28 {
             return Err(bad(format!("a state blob of {} bytes", meta.state_len)));
         }
@@ -733,7 +769,11 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
             if open {
                 KonaBackend::check_small_open(&mut r);
                 core.visit_open(&mut r);
-                Credits::default().visit(&mut r);
+                if by_source {
+                    Credits::default().visit(&mut r);
+                } else {
+                    Credits::default().visit_scalar(&mut r);
+                }
                 if swaps {
                     KonaBackend::check_swaps(&mut r);
                 }
@@ -749,7 +789,11 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         if open {
             self.back.visit_small_open(&mut r).map_err(bad)?;
             self.core.visit_open(&mut r);
-            credits.visit(&mut r);
+            if by_source {
+                credits.visit(&mut r);
+            } else {
+                credits.visit_scalar(&mut r);
+            }
             if swaps {
                 self.back.visit_swaps(&mut r);
             } else {
