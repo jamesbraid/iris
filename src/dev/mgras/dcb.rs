@@ -112,6 +112,9 @@ pub struct Dac {
 
 /// DAC register: the pixel read mask; zero blanks the screen.
 pub const DAC_PIXMASK: u32 = 4;
+/// The part's ID and revision registers.
+const DAC_ID: u32 = 0x03;
+const DAC_REVISION: u32 = 0x0B;
 /// The pixel clock PLL's control, reference divisor and VCO multiplier registers.
 const PLL_CONTROL: u32 = 0x09;
 const PLL_R: u32 = 0x0C;
@@ -166,6 +169,13 @@ impl Dac {
 
     pub fn pixmask(&self) -> u32 {
         self.regs.lookup(DAC_PIXMASK).unwrap_or(0xFF)
+    }
+
+    /// Registers 3 and 0x0b answer as the ID and revision of the part (0x79 and 1 are the pair the stock IDE
+    /// diagnostic accepts without a warning; the part is unidentified).
+    pub fn set_identity(&mut self, id: u32, revision: u32) {
+        self.regs.insert(DAC_ID, id);
+        self.regs.insert(DAC_REVISION, revision);
     }
 
     /// The address register as the CPU's halfword: the register number in bits 15:8.

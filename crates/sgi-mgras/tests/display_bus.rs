@@ -1,4 +1,4 @@
-//! What the engine answers on the display bus where the guest's own software looks: the DAC's address register and pixel mask, the XMAP's and the VC3's revisions, and the video timing the VC3's tables and the DAC's PLL give.
+//! What the engine answers on the display bus where the guest's own software looks: the DAC's address register, pixel mask and identity, the XMAP's and the VC3's revisions, and the video timing the VC3's tables and the DAC's PLL give.
 //! Offsets are the Octane's `0x07xxxx` window less `0x10000`.
 
 mod support;
@@ -173,4 +173,13 @@ fn a_reset_forgets_the_timing_and_the_generation_does_not_go_back() {
     load_stock_timing(&mut e);
     vc3(&mut e, 0x1E, 4);
     assert!(e.head_timing(0).unwrap().generation > first);
+}
+
+#[test]
+fn the_dac_answers_the_id_and_revision_the_stock_diagnostic_accepts() {
+    let mut e = engine(|_| {});
+    put(&mut e, DAC_ADDRESS, 16, 0x0300);
+    assert_eq!(get(&mut e, DAC_DATA, 8), 0x79, "ID");
+    put(&mut e, DAC_ADDRESS, 16, 0x0B00);
+    assert_eq!(get(&mut e, DAC_DATA, 8), 1, "revision");
 }

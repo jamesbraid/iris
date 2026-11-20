@@ -68,6 +68,7 @@ impl Display {
         let mut dcb = boxed_zeroed::<Dcb>();
         dcb.init(bdvers, cmap_rev);
         dcb.xmap.set_pp1_revision(pp1_revision);
+        dcb.dac.set_identity(0x79, 1);
         Display { dcb, slave: None, frame: None, timing: None, timing_generation: 0 }
     }
 
