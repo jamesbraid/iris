@@ -254,3 +254,25 @@ fn a_shell_device_on_the_display_bus_answers_the_slots_the_engine_has_none_for()
     e.set_display_bus(None);
     assert_eq!(read(&mut e, 20, 0), 0, "detached");
 }
+
+/// A shell's refresh takes the frame on its main thread: `scanout` does not run or wait for the queued work, so a
+/// long draw behind it does not hold the refresh up. The frame is what the planes hold.
+#[test]
+fn scanout_does_not_wait_for_the_queued_work() {
+    use sgi_engine::Read;
+    use sgi_mgras::dev::mgras::hq3::host;
+    let mut cfg = Config::new(Board::High, Mode::Inline);
+    cfg.queue_ops = 64;
+    let mut e = MgrasEngine::new(cfg, Mem::default(), None, None).unwrap();
+    for i in 0..8 {
+        assert_eq!(e.write(host::RASTER + 0x40, 32, i), Write::Done);
+    }
+    let idle = |e: &mut MgrasEngine<Mem>| match e.read(host::STATUS, 32) {
+        Read::Value(v) => v as u32 & (host::STATUS_HQ_IDLE | host::STATUS_BOARD_IDLE),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(idle(&mut e), 0, "work is queued");
+    let mut out = Vec::new();
+    assert!(e.scanout(0, &mut out).unwrap().is_some());
+    assert_eq!(idle(&mut e), 0, "and the scan-out left it queued");
+}

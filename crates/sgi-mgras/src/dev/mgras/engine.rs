@@ -1119,8 +1119,9 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         1 + self.sh.generation.load(Ordering::Acquire)
     }
 
-    /// Waits for the queued work, as `observe` does: the planes are the
-    /// worker's until it is done.
+    /// Does not wait for the queued work, so a shell's refresh on its main thread never waits for a long draw: the
+    /// frame is the planes between the worker's batches, and a drawing in progress shows for a frame (`observe`
+    /// waits). The staged operations are handed to the worker first.
     fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
         out.clear();
         if let Some(f) = self.fault() {
@@ -1129,7 +1130,7 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         if head != 0 {
             return Ok(None);
         }
-        self.settle(None);
+        self.flush();
         let mut inner = self.sh.inner.lock();
         let mut display = self.display.lock();
         let back = &mut inner.core.back;
