@@ -382,7 +382,13 @@ pub struct Vc3 {
     pub regs: [u16; 32],
     pub sram: [u16; 0x8000],
     line_counter: u16,
+    /// A write to the line count register (0xb) holds it until the display is next enabled: the stock IDE diagnostic
+    /// stops the timing and reads its registers 0 to 0x13 back whole. Kept in the padding after `line_counter`.
+    line_held: bool,
 }
+
+// The held flag sits in the padding: a saved engine's display state has the same size as before.
+const _: () = assert!(std::mem::size_of::<Vc3>() == 65608);
 
 pub const VC3_SRAM_POINTER: usize = 7;
 const VC3_CURRENT_LINE: usize = 0xB;
@@ -507,6 +513,16 @@ impl Vc3 {
         }
     }
 
+    /// A write of register `index`: it stores, and the line count holds what was written until the display is enabled.
+    fn store(&mut self, index: usize, v: u16) {
+        self.regs[index] = v;
+        if index == VC3_CURRENT_LINE {
+            self.line_held = true;
+        } else if index == VC3_CONTROL as usize && v & VC3_CONTROL_DISPLAY != 0 {
+            self.line_held = false;
+        }
+    }
+
     fn sram_write(&mut self, v: u16) {
         let a = self.regs[VC3_SRAM_POINTER] as usize & 0x7FFF;
         crate::pf_instant!(crate::perfetto::events::MGRAS_VC3_SRAM, (a as u64) << 16 | v as u64);
@@ -526,11 +542,11 @@ impl Vc3 {
             // Index and 16-bit value in one three-byte transfer.
             (0, _) => {
                 self.index = (d >> 16) & 0x1F;
-                self.regs[self.index as usize] = d as u16;
+                self.store(self.index as usize, d as u16);
                 crate::pf_instant!(crate::perfetto::events::MGRAS_VC3_WRITE, (self.index as u64) << 16 | (d & 0xFFFF) as u64);
             }
             (1, _) => {
-                self.regs[self.index as usize] = d as u16;
+                self.store(self.index as usize, d as u16);
                 crate::pf_instant!(crate::perfetto::events::MGRAS_VC3_WRITE, (self.index as u64) << 16 | (d & 0xFFFF) as u64);
             }
             (3, 4) => { self.sram_write((d >> 16) as u16); self.sram_write(d as u16); }
@@ -542,7 +558,7 @@ impl Vc3 {
     fn read(&mut self, t: Txn) -> u32 {
         match (t.crs, t.width) {
             (0, _) => self.index,
-            (1, _) if self.index as usize == VC3_CURRENT_LINE => {
+            (1, _) if self.index as usize == VC3_CURRENT_LINE && !self.line_held => {
                 // Keep moving so vertical-blank polls terminate.
                 self.line_counter = (self.line_counter + 1) % 1066;
                 crate::pf_instant!(crate::perfetto::events::MGRAS_VC3_LINE, self.line_counter);
