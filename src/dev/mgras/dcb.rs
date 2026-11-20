@@ -196,6 +196,17 @@ impl Dac {
         self.regs.lookup(DAC_PIXMASK).unwrap_or(0xFF)
     }
 
+    /// The address register as the CPU's halfword: the register number in bits 15:8.
+    pub fn address_halfword(&self) -> u32 {
+        (self.addr & 0xFF) << 8 | (self.addr >> 8 & 0xFF)
+    }
+
+    /// A byte store to the halfword's second byte (offset +1): it sets the register number, bits 15:8.
+    pub fn set_register_number(&mut self, number: u32) {
+        self.addr = (self.addr & 0xFF00) | (number & 0xFF);
+        self.gamma_comp = 0;
+    }
+
     /// Set the pixel mask (tests).
     #[cfg(test)]
     pub fn set_pixmask(&mut self, v: u32) {
