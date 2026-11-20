@@ -9,9 +9,12 @@
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
+use super::dcb::Dcb;
 use super::pixmem::Buffer;
 use super::plain::boxed_zeroed;
 use super::rss::{Entry, Planes, Rss};
+#[cfg(feature = "scanout")]
+use super::wgpu::scanout::MgrasScanout;
 use super::wgpu::{GpuLink, GpuRaster, Observation};
 use crate::locks::SpinLock;
 use crate::wgpu::Gpu;
@@ -23,6 +26,9 @@ pub struct ImpactBack {
     // first and drop first.
     pub(super) rss: Vec<Box<Rss>>,
     gpu: Option<Box<GpuRaster>>,
+    /// The display kernel over the unit's pixel pages.
+    #[cfg(feature = "scanout")]
+    scanout: Option<Box<MgrasScanout>>,
     fault: Box<SpinLock<Option<String>>>,
     planes: Box<Planes>,
 }
@@ -55,9 +61,15 @@ impl ImpactBack {
             e.step_te(engines as u32);
             rss.push(e);
         }
+        #[cfg(feature = "scanout")]
+        let mut scanout = None;
         let gpu = match gpu {
             Some(g) => {
                 let mut unit = Box::new(GpuRaster::new(g)?);
+                #[cfg(feature = "scanout")]
+                {
+                    scanout = Some(Box::new(MgrasScanout::new(g, &unit.pix_buffer())?));
+                }
                 unit.attach(&planes.mem, &planes.cid, &mut planes.te);
                 rss[0].gpu = GpuLink::new(&mut unit);
                 rss[0].gpu_fault = &*fault;
@@ -65,7 +77,14 @@ impl ImpactBack {
             }
             None => None,
         };
-        Ok(ImpactBack { rss, gpu, fault, planes })
+        Ok(ImpactBack {
+            rss,
+            gpu,
+            #[cfg(feature = "scanout")]
+            scanout,
+            fault,
+            planes,
+        })
     }
 
     /// How many raster engines draw.
@@ -128,6 +147,61 @@ impl ImpactBack {
             unit.attach(&self.planes.mem, &self.planes.cid, &mut self.planes.te);
             self.rss[0].gpu = GpuLink::new(unit);
             self.rss[0].gpu_fault = &*self.fault;
+        }
+    }
+
+    /// Whether the frame can be composed on the GPU.
+    pub fn has_gpu_scanout(&self) -> bool {
+        #[cfg(feature = "scanout")]
+        return self.scanout.is_some();
+        #[cfg(not(feature = "scanout"))]
+        false
+    }
+
+    /// The frame composed on the GPU behind the work submitted so far and
+    /// read back as `0xFFBBGGRR`, rows of `stride` (`MgrasScanout::read`).
+    /// None without a GPU unit.
+    pub fn gpu_frame(&mut self, dcb: &Dcb, out: &mut [u32], stride: usize) -> Option<Result<(usize, usize), String>> {
+        #[cfg(feature = "scanout")]
+        {
+            let sc = self.scanout.as_mut()?;
+            self.rss[0].gpu_flush();
+            return Some(sc.read(&self.rss[0], dcb, out, stride));
+        }
+        #[cfg(not(feature = "scanout"))]
+        {
+            let _ = (dcb, out, stride);
+            None
+        }
+    }
+
+    /// The frame composed on the GPU and left there (`MgrasScanout::lend`).
+    pub fn gpu_lend(&mut self, dcb: &Dcb) -> Option<Result<(wgpu::Buffer, u32, u32), String>> {
+        #[cfg(feature = "scanout")]
+        {
+            let sc = self.scanout.as_mut()?;
+            self.rss[0].gpu_flush();
+            return Some(sc.lend(&self.rss[0], dcb));
+        }
+        #[cfg(not(feature = "scanout"))]
+        {
+            let _ = dcb;
+            None
+        }
+    }
+
+    /// The frame composed into `dst` (`MgrasScanout::compose_into`).
+    pub fn gpu_compose_into(&mut self, dcb: &Dcb, dst: &wgpu::Buffer, stride: u32) -> Option<Result<(u32, u32), String>> {
+        #[cfg(feature = "scanout")]
+        {
+            let sc = self.scanout.as_mut()?;
+            self.rss[0].gpu_flush();
+            return Some(sc.compose_into(&self.rss[0], dcb, dst, stride));
+        }
+        #[cfg(not(feature = "scanout"))]
+        {
+            let _ = (dcb, dst, stride);
+            None
         }
     }
 

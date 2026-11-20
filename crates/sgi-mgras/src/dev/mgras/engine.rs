@@ -38,6 +38,7 @@ use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
 use super::back::ImpactBack;
+use super::display::{self, Display};
 use super::hostmem::{Fault as DmaFault, HostMem as DmaMem};
 use super::hq3::{host, Hq3Board, Hq3Engine, Hq3Regs, Hq3Sink, Hq3Stats};
 use super::pixmem::{Buffer, Kind, PAGE_WORDS};
@@ -47,7 +48,7 @@ use super::rss::{Entry, Rss};
 use super::te1::Te1;
 use crate::display::{Mark, Rect};
 use sgi_engine::inject::{hit, Point};
-use sgi_engine::{BoardEngine, Chunk, Event, Fault, HostMem, Idle, Outbox, Pump, Read, Refused, StateSink, StateSource, Swap, Write, DAMAGE_ANY};
+use sgi_engine::{BoardEngine, Chunk, Event, Fault, FrameWords, HostMem, Idle, LentFrame, Outbox, Pump, Read, Refused, StateSink, StateSource, Swap, Write, DAMAGE_ANY};
 use crate::wgpu::Gpu;
 
 /// The boards that share this engine; they differ in the geometry engine
@@ -74,6 +75,10 @@ pub struct Config {
     pub octane: bool,
     /// Bytes of a DMA page-table entry: 4, or 8 on the Origin 2000 and Onyx2.
     pub entry_bytes: u32,
+    /// The two board-version bytes the display bus answers; None for the board's own.
+    pub bdvers: Option<[u32; 2]>,
+    /// The two colour maps' revision registers.
+    pub cmap_rev: [u32; 2],
     pub mode: Mode,
     /// Operations queued before `write` answers `Busy`.
     pub queue_ops: usize,
@@ -88,6 +93,8 @@ impl Config {
             board,
             octane: false,
             entry_bytes: 4,
+            bdvers: None,
+            cmap_rev: [0xFB, 0xFB],
             mode,
             queue_ops: 1 << 16,
             #[cfg(feature = "gr4-jit")]
@@ -151,6 +158,8 @@ struct Shared<M: HostMem> {
     /// Operations, and FIFO words among them, finished.
     done: AtomicU64,
     words_done: AtomicU64,
+    /// Moves whenever the picture may have changed (`frame_generation`).
+    generation: AtomicU64,
     front: Arc<Front>,
     out: Arc<Outbox>,
     fault: Mutex<Option<String>>,
@@ -181,7 +190,9 @@ impl<M: HostMem> Shared<M> {
                     hit(Point::Exec);
                     inner.exec(*op);
                 }
-                inner.finish_batch();
+                if inner.finish_batch() {
+                    self.generation.fetch_add(1, Ordering::Release);
+                }
             }));
             if let Err(p) = r {
                 self.fail(&format!("the engine panicked: {}", panic_text(&*p)));
@@ -277,10 +288,12 @@ impl<M: HostMem> Inner<M> {
     }
 
     /// The end of a run of operations: submit GPU work and post damage.
-    fn finish_batch(&mut self) {
+    /// True when pixels were drawn.
+    fn finish_batch(&mut self) -> bool {
         self.core.back.rss[0].gpu_flush();
         let marks: Vec<sgi_engine::Mark> = std::mem::take(&mut self.core.damage).into_iter().map(mark).collect();
         self.core.out.damage(&marks);
+        !marks.is_empty()
     }
 
     fn read(&mut self, off: u32, bits: u32) -> u64 {
@@ -413,7 +426,7 @@ struct Meta {
     interrupt_enable: u32,
 }
 
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
 const CID_CHUNK: usize = 4096;
 
 fn chunk(name: &str, index: u64, bytes: Vec<u8>) -> Chunk {
@@ -424,7 +437,7 @@ impl<M: HostMem> Inner<M> {
     /// The state as chunks: `meta`, `front` (`Hq3Regs` as bytes), `hq3`, one
     /// `rss` per raster engine, `te1`, and the pixel memory by page and the
     /// clip IDs by 4 KiB, all-zero pieces left out.
-    fn save(&mut self, board: Board, sink: &mut dyn StateSink) -> Result<(), Refused> {
+    fn save(&mut self, board: Board, display: &Display, sink: &mut dyn StateSink) -> Result<(), Refused> {
         let bad = |e: String| Refused::Faulted(e);
         for r in self.core.back.rss.iter_mut() {
             r.gpu_flush();
@@ -461,13 +474,14 @@ impl<M: HostMem> Inner<M> {
         for (i, c) in planes.cid.chunks(CID_CHUNK).enumerate().filter(|(_, c)| c.iter().any(|&x| x != 0)) {
             put(sink, chunk("cid", i as u64, c.to_vec()))?;
         }
+        put(sink, chunk("dcb", 0, display.snapshot_bytes()))?;
         Ok(())
     }
 
     /// Check the whole state, then apply it.
-    fn load(&mut self, board: Board, src: &mut dyn StateSource) -> Result<(), Refused> {
+    fn load(&mut self, board: Board, display: &mut Display, src: &mut dyn StateSource) -> Result<(), Refused> {
         let bad = |m: String| Refused::Mismatch(m);
-        let (mut meta, mut front, mut hq3, mut te1) = (None, None, None, None);
+        let (mut meta, mut front, mut hq3, mut te1, mut dcb) = (None, None, None, None, None);
         let (mut rss, mut pixels, mut cid) = (BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
         while let Some(c) = src.next().map_err(|e| Refused::Mismatch(e.0))? {
             let dup = |first: bool| if first { Ok(()) } else { Err(bad(format!("state has two {} chunks", c.name))) };
@@ -476,13 +490,14 @@ impl<M: HostMem> Inner<M> {
                 "front" => dup(front.replace(c.bytes).is_none())?,
                 "hq3" => dup(hq3.replace(c.bytes).is_none())?,
                 "te1" => dup(te1.replace(c.bytes).is_none())?,
+                "dcb" => dup(dcb.replace(c.bytes).is_none())?,
                 "rss" => dup(rss.insert(c.index, c.bytes).is_none())?,
                 "pixels" => dup(pixels.insert(c.index, c.bytes).is_none())?,
                 "cid" => dup(cid.insert(c.index, c.bytes).is_none())?,
                 other => return Err(bad(format!("unknown state chunk {other}"))),
             }
         }
-        let (Some(meta), Some(front), Some(hq3), Some(te1)) = (meta, front, hq3, te1) else {
+        let (Some(meta), Some(front), Some(hq3), Some(te1), Some(dcb)) = (meta, front, hq3, te1, dcb) else {
             return Err(bad("state lacks a part".into()));
         };
         let engines = self.core.back.rss.len();
@@ -509,6 +524,9 @@ impl<M: HostMem> Inner<M> {
                 return Err(bad(format!("clip-ID chunk {i} runs past the plane")));
             }
         }
+        if dcb.len() != std::mem::size_of::<super::dcb::Dcb>() {
+            return Err(bad(format!("display bus state is {} bytes, expected {}", dcb.len(), std::mem::size_of::<super::dcb::Dcb>())));
+        }
         // SAFETY: the length was checked and `Hq3Regs` is plain numeric state.
         unsafe { std::ptr::copy_nonoverlapping(front.as_ptr(), (&mut *self.core.regs as *mut Hq3Regs).cast::<u8>(), front.len()) };
         self.hq.apply_snapshot(hq);
@@ -529,6 +547,7 @@ impl<M: HostMem> Inner<M> {
             planes.cid[*i as usize * CID_CHUNK..][..c.len()].copy_from_slice(c);
         }
         self.core.back.reattach_gpu();
+        display.apply_snapshot(&dcb).map_err(bad)?;
         let f = &self.core.front;
         f.flags.store(meta.flags, Ordering::Release);
         f.flag_enable.store(meta.flag_enable, Ordering::Release);
@@ -546,6 +565,8 @@ pub struct MgrasEngine<M: HostMem> {
     cfg: Config,
     gpu: Option<Arc<Gpu>>,
     mem: Arc<M>,
+    /// The display bus and the CPU frame; lock order: `Shared::inner`, then this.
+    display: Mutex<Display>,
     stage: Vec<Op>,
     /// Operations accepted so far, staged and queued, and FIFO words among
     /// them; the worker's counters are `done` and `words_done`.
@@ -571,12 +592,14 @@ impl<M: HostMem> MgrasEngine<M> {
             idle_cv: Condvar::new(),
             done: AtomicU64::new(0),
             words_done: AtomicU64::new(0),
+            generation: AtomicU64::new(0),
             front,
             out,
             fault: Mutex::new(None),
             dead: AtomicBool::new(false),
         });
-        let mut e = MgrasEngine { sh, cfg, gpu: gpu.cloned(), mem, stage: Vec::new(), submitted: 0, words: 0, worker: None, parked: false, now: 0 };
+        let display = Mutex::new(Display::new(cfg.bdvers.unwrap_or_else(|| display::default_bdvers(cfg.board)), cfg.cmap_rev));
+        let mut e = MgrasEngine { sh, cfg, gpu: gpu.cloned(), mem, display, stage: Vec::new(), submitted: 0, words: 0, worker: None, parked: false, now: 0 };
         e.spawn();
         Ok(e)
     }
@@ -871,6 +894,12 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
                 }
                 self.stage_op(Op::Ucode { index: ((off - host::UCODE) / 4) as u16, w: lo & 0xFF_FFFF });
             }
+            // The display bus is the board's own side bus: it answers at once, whatever the raster side is doing.
+            display::DCB_FIRST..=display::DCB_LAST => {
+                if self.display.lock().write(off, bits, val) {
+                    self.sh.generation.fetch_add(1, Ordering::Release);
+                }
+            }
             _ => {
                 if !self.room(1) {
                     return Write::Busy;
@@ -918,6 +947,7 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
             host::SET_FLAGS | host::CLEAR_FLAGS | host::SET_FLAGS_PRIVILEGED | host::CLEAR_FLAGS_PRIVILEGED => return Read::Value(self.flags() as u64),
             host::FLAG_ENABLE_SET | host::FLAG_ENABLE_CLEAR => return Read::Value(self.sh.front.flag_enable.load(Ordering::Acquire) as u64),
             host::INTERRUPT_ENABLE_SET | host::INTERRUPT_ENABLE_CLEAR => return Read::Value(self.sh.front.interrupt_enable.load(Ordering::Acquire) as u64),
+            display::DCB_FIRST..=display::DCB_LAST => return Read::Value(self.display.lock().read(off, bits)),
             _ => {}
         }
         if !self.is_idle() {
@@ -945,7 +975,7 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
             let queued = matches!(off, host::CFIFO | 0x70084 | host::CFIFO_GL | host::CFIFO_PRIVILEGED | 0x50084 | host::RASTER..=0x7FFFF | host::CONTEXT_SWITCH | host::UCODE..=0x45FFF);
             return queued && self.pending_ops() + if bits == 64 { 2 } else { 1 } > self.cfg.queue_ops as u64;
         }
-        let at_once = matches!(off, host::STATUS | host::FIFOSTATUS | host::GIOSTATUS | host::DMABUSY | host::SET_FLAGS | host::CLEAR_FLAGS | host::SET_FLAGS_PRIVILEGED | host::CLEAR_FLAGS_PRIVILEGED | host::FLAG_ENABLE_SET | host::FLAG_ENABLE_CLEAR | host::INTERRUPT_ENABLE_SET | host::INTERRUPT_ENABLE_CLEAR);
+        let at_once = matches!(off, host::STATUS | host::FIFOSTATUS | host::GIOSTATUS | host::DMABUSY | host::SET_FLAGS | host::CLEAR_FLAGS | host::SET_FLAGS_PRIVILEGED | host::CLEAR_FLAGS_PRIVILEGED | host::FLAG_ENABLE_SET | host::FLAG_ENABLE_CLEAR | host::INTERRUPT_ENABLE_SET | host::INTERRUPT_ENABLE_CLEAR | display::DCB_FIRST..=display::DCB_LAST);
         !at_once && !self.is_idle()
     }
 
@@ -988,6 +1018,97 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         inner.core.back.observe(&[region.buffer], (r.x0, r.y0, r.x1, r.y1)).map_err(Fault)
     }
 
+    fn heads(&self) -> u32 {
+        1
+    }
+
+    fn frame_size(&self, head: u32) -> Option<(u32, u32)> {
+        (head == 0).then(|| self.display.lock().size())
+    }
+
+    fn frame_generation(&self, head: u32) -> u64 {
+        if head != 0 {
+            return 0;
+        }
+        // The count only grows, so the sum moves whenever it does; never 0.
+        1 + self.sh.generation.load(Ordering::Acquire)
+    }
+
+    /// Waits for the queued work, as `observe` does: the planes are the
+    /// worker's until it is done.
+    fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
+        out.clear();
+        if let Some(f) = self.fault() {
+            return Err(Fault(f));
+        }
+        if head != 0 {
+            return Ok(None);
+        }
+        self.settle(None);
+        let mut inner = self.sh.inner.lock();
+        let mut display = self.display.lock();
+        let back = &mut inner.core.back;
+        let (w, h) = display.size();
+        out.resize(w as usize * h as usize, 0);
+        match back.gpu_frame(display.dcb(), out, w as usize) {
+            Some(Ok(_)) => out.iter_mut().for_each(|p| *p = display::rgb(*p)),
+            Some(Err(e)) => return Err(Fault(e)),
+            None => return Ok(Some(display.compose(&back.rss[0], out))),
+        }
+        Ok(Some((w, h)))
+    }
+
+    #[cfg(feature = "scanout")]
+    fn lend_frame(&mut self, head: u32) -> Result<Option<LentFrame>, Fault> {
+        if head != 0 || self.gpu.is_none() {
+            return Ok(None);
+        }
+        if let Some(f) = self.fault() {
+            return Err(Fault(f));
+        }
+        self.settle(None);
+        let generation = self.frame_generation(0);
+        let mut inner = self.sh.inner.lock();
+        let display = self.display.lock();
+        match inner.core.back.gpu_lend(display.dcb()) {
+            Some(Ok((buffer, width, height))) => Ok(Some(LentFrame { width, height, stride: width, words: FrameWords::Abgr, generation, buffer: Arc::new(buffer) })),
+            Some(Err(e)) => Err(Fault(e)),
+            None => Ok(None),
+        }
+    }
+
+    /// `dst` is a `wgpu::Buffer`, or an `Arc` of one, on the engine's device.
+    #[cfg(feature = "scanout")]
+    fn compose_into(&mut self, head: u32, dst: &dyn std::any::Any, stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
+        if head != 0 || self.gpu.is_none() {
+            return Ok(None);
+        }
+        let dst = match (dst.downcast_ref::<wgpu::Buffer>(), dst.downcast_ref::<Arc<wgpu::Buffer>>()) {
+            (Some(b), _) => b,
+            (None, Some(b)) => b.as_ref(),
+            (None, None) => return Err(Fault("compose_into: the destination is not a wgpu buffer".into())),
+        };
+        // The mode's size bounds every frame: a bad destination is an error of the call, with the engine and the device untouched.
+        let (w, h) = self.display.lock().size();
+        crate::wgpu::Scanout::check_into(w, h, dst, stride_words).map_err(|why| Fault(format!("compose_into: {why}")))?;
+        if let Some(f) = self.fault() {
+            return Err(Fault(f));
+        }
+        self.settle(None);
+        let mut inner = self.sh.inner.lock();
+        let display = self.display.lock();
+        let composed = inner.core.back.gpu_compose_into(display.dcb(), dst, stride_words);
+        drop((display, inner));
+        match composed {
+            Some(Ok(size)) => match self.fault() {
+                Some(f) => Err(Fault(f)),
+                None => Ok(Some(size)),
+            },
+            Some(Err(e)) => Err(Fault(format!("compose_into: {e}"))),
+            None => Ok(None),
+        }
+    }
+
     fn observe_all(&mut self) -> Result<(), Refused> {
         self.need_parked(true)?;
         self.sh.inner.lock().core.back.sync().map_err(Refused::Faulted)
@@ -1017,13 +1138,19 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
     fn save(&mut self, sink: &mut dyn StateSink) -> Result<(), Refused> {
         self.need_parked(true)?;
         let board = self.cfg.board;
-        self.sh.inner.lock().save(board, sink)
+        let display = self.display.lock();
+        self.sh.inner.lock().save(board, &display, sink)
     }
 
     fn load(&mut self, src: &mut dyn StateSource) -> Result<(), Refused> {
         self.need_parked(true)?;
         let board = self.cfg.board;
-        self.sh.inner.lock().load(board, src)
+        let mut display = self.display.lock();
+        let loaded = self.sh.inner.lock().load(board, &mut display, src);
+        if loaded.is_ok() {
+            self.sh.generation.fetch_add(1, Ordering::Release);
+        }
+        loaded
     }
 
     fn state_version(&self) -> u32 {
@@ -1034,6 +1161,8 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         self.need_parked(false)?;
         let inner = Inner::new(&self.cfg, self.gpu.as_ref(), self.mem.clone(), self.sh.out.clone(), self.sh.front.clone()).map_err(Refused::Faulted)?;
         *self.sh.inner.lock() = inner;
+        *self.display.lock() = Display::new(self.cfg.bdvers.unwrap_or_else(|| display::default_bdvers(self.cfg.board)), self.cfg.cmap_rev);
+        self.sh.generation.fetch_add(1, Ordering::Release);
         let f = &self.sh.front;
         f.flags.store(0, Ordering::Release);
         f.flag_enable.store(0, Ordering::Release);

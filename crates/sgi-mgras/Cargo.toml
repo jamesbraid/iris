@@ -12,7 +12,9 @@ doctest = false
 
 [features]
 default = ["wgpu"]
-wgpu = []
+wgpu = ["scanout"]
+# The GPU scan-out over the unit's pixel pages (src/dev/mgras/wgpu/scanout.rs).
+scanout = []
 # Panic injection points for the tests (`sgi_engine::inject`).
 fault-injection = ["sgi-engine/fault-injection"]
 # `tools/check-header`: cbindgen compares the C header with src/ffi.rs.

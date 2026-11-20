@@ -1,9 +1,13 @@
 //! The files of `src/dev/mgras` the engine is made of, in place: the HQ3
-//! command parser, the GE11 stand-in, the raster engine and the texture
-//! engine.
+//! command parser, the GE11 stand-in, the raster engine, the texture
+//! engine and the display side: the display control bus and the scan-out.
 
+#[path = "../../../../src/dev/mgras/dcb.rs"]
+pub mod dcb;
 #[path = "../../../../src/dev/mgras/fixed.rs"]
 pub mod fixed;
+#[path = "../../../../src/dev/mgras/frame.rs"]
+pub mod frame;
 #[path = "../../../../src/dev/mgras/ge11.rs"]
 pub mod ge11;
 #[path = "../../../../src/dev/mgras/gl.rs"]
@@ -35,4 +39,5 @@ pub mod wgpu;
 pub use gl::Gl;
 
 pub mod back;
+pub mod display;
 pub mod engine;

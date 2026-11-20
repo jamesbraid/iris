@@ -238,6 +238,7 @@ pub mod debug_overlay;
 pub mod disp;
 pub mod status;
 pub mod ports;
+pub mod disp_timing;
 pub mod exp;
 pub mod gdb_stub;
 pub mod snapshot;

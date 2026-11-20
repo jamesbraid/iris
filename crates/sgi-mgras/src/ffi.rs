@@ -4,6 +4,7 @@
 //! cbindgen's.
 
 use std::ffi::{c_int, c_void};
+use std::sync::Arc;
 
 use sgi_engine::ffi::{build, call, host_parts, read_config, CMem, IrisEngine, IrisEngineConfig, IrisEngineHost, IRIS_ENGINE_ERROR, IRIS_ENGINE_FAULT, IRIS_ENGINE_OK};
 use sgi_engine::inject::Point;
@@ -22,9 +23,13 @@ pub struct IrisMgrasConfig {
     /// 0 Solid IMPACT, 1 High, 2 Maximum.
     pub board: u32,
     /// Bit 0: the Octane's HQ4 front. Bit 1: 8-byte DMA page-table entries (Origin 2000, Onyx2).
+    /// Bit 2: `bdvers` and `cmap_rev` are given; otherwise the board's own.
     pub flags: u32,
     /// -1 the default, 0 interpreter only, 1 compile on first use, 2 compile in the background.
     pub jit: i32,
+    /// The display bus's two board-version bytes and the two colour maps' revision registers.
+    pub bdvers: [u32; 2],
+    pub cmap_rev: [u32; 2],
 }
 
 #[repr(C)]
@@ -51,6 +56,21 @@ fn region(r: &IrisMgrasRegion) -> Region {
 /// stay valid until `iris_engine_free`.
 #[no_mangle]
 pub unsafe extern "C" fn sgi_mgras_new(cfg: *const IrisMgrasConfig, host: *const IrisEngineHost) -> *mut IrisEngine {
+    unsafe { new_with(cfg, host, None) }
+}
+
+/// As `sgi_mgras_new` for a Rust shell that already owns the process's GPU device: the engine draws
+/// and composes on `gpu`, so a buffer it lends or composes into is on the device the shell's own
+/// display uses (a wgpu buffer cannot cross devices). `loss` is the target of that device's loss
+/// callback; the configuration's `gpu` request is not read.
+///
+/// # Safety
+/// As `sgi_mgras_new`.
+pub unsafe fn new_on(cfg: *const IrisMgrasConfig, host: *const IrisEngineHost, gpu: Arc<Gpu>, loss: Arc<GpuLoss>) -> *mut IrisEngine {
+    unsafe { new_with(cfg, host, Some((gpu, loss))) }
+}
+
+unsafe fn new_with(cfg: *const IrisMgrasConfig, host: *const IrisEngineHost, given: Option<(Arc<Gpu>, Arc<GpuLoss>)>) -> *mut IrisEngine {
     build(|| {
         let c = unsafe { read_config(cfg) }?;
         let (mem, notify) = unsafe { host_parts(host) }?;
@@ -72,6 +92,10 @@ pub unsafe extern "C" fn sgi_mgras_new(cfg: *const IrisMgrasConfig, host: *const
         if c.flags & 2 != 0 {
             config.entry_bytes = 8;
         }
+        if c.flags & 4 != 0 {
+            config.bdvers = Some(c.bdvers);
+            config.cmap_rev = c.cmap_rev;
+        }
         if c.common.queue_ops != 0 {
             config.queue_ops = c.common.queue_ops as usize;
         }
@@ -85,16 +109,22 @@ pub unsafe extern "C" fn sgi_mgras_new(cfg: *const IrisMgrasConfig, host: *const
                 _ => None,
             };
         }
-        let loss = GpuLoss::new();
-        let gpu = match unsafe { c.common.gpu_request() } {
-            None => None,
-            Some((backend, software)) => match Gpu::new(&GpuOptions { backend, software, ..Default::default() }, loss.callback()) {
-                Ok(g) => Some(g),
-                Err(e) => {
-                    log::error!("sgi_mgras_new: GPU: {e}");
-                    return None;
-                }
-            },
+        let (gpu, loss) = match given {
+            Some((gpu, loss)) => (Some(gpu), loss),
+            None => {
+                let loss = GpuLoss::new();
+                let gpu = match unsafe { c.common.gpu_request() } {
+                    None => None,
+                    Some((backend, software)) => match Gpu::new(&GpuOptions { backend, software, ..Default::default() }, loss.callback()) {
+                        Ok(g) => Some(g),
+                        Err(e) => {
+                            log::error!("sgi_mgras_new: GPU: {e}");
+                            return None;
+                        }
+                    },
+                };
+                (gpu, loss)
+            }
         };
         match MgrasEngine::new(config, mem, gpu.as_ref(), notify) {
             Ok(engine) => {

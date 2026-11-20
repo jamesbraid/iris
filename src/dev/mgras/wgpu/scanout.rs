@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "present")]
 use crate::gfx_display::ScanoutShow;
 use crate::wgpu::{Fragment, Gpu, Scanout, ScanoutPipeline, ScanoutShaders};
 
@@ -214,6 +215,7 @@ impl MgrasScanout {
     }
 
     /// Compose the frame for this tick's consumer (`Scanout::show`).
+    #[cfg(feature = "present")]
     pub fn show(&mut self, r: &Rss, dcb: &Dcb, need: crate::gfx_display::Need, frame: &mut crate::gfx_display::Frame) -> Result<(), String> {
         let n = self.build(r, dcb);
         let (w, h) = (self.width, self.height);
@@ -221,9 +223,26 @@ impl MgrasScanout {
         self.scanout.show(w, h, need, frame)
     }
 
+    /// Compose the frame and leave it in [`output`](Scanout::output) (0xAABBGGRR, rows of
+    /// the width) with no readback; the frame's size.
+    pub fn lend(&mut self, r: &Rss, dcb: &Dcb) -> Result<(wgpu::Buffer, u32, u32), String> {
+        let n = self.build(r, dcb);
+        let (w, h) = (self.width, self.height);
+        self.scanout.compose(&self.pipeline, w, h, bytemuck::cast_slice(&self.slot[..n]), &[&self.group])?;
+        Ok((self.scanout.output().clone(), w, h))
+    }
+
+    /// Compose the frame straight into `dst` as 0x00RRGGBB words, `stride` a row
+    /// (`Scanout::compose_into`); the frame's size.
+    pub fn compose_into(&mut self, r: &Rss, dcb: &Dcb, dst: &wgpu::Buffer, stride: u32) -> Result<(u32, u32), String> {
+        let n = self.build(r, dcb);
+        let (w, h) = (self.width, self.height);
+        self.scanout.compose_into(&self.pipeline, w, h, bytemuck::cast_slice(&self.slot[..n]), &[&self.group], dst, stride)?;
+        Ok((w, h))
+    }
+
     /// Compose the frame and read it back as `frame.rs` composes it:
     /// `0xFFBBGGRR`, rows of `stride`, `out` at least `stride * height`.
-    #[cfg(test)]
     pub fn read(&mut self, r: &Rss, dcb: &Dcb, out: &mut [u32], stride: usize) -> Result<(usize, usize), String> {
         let n = self.build(r, dcb);
         let (w, h) = (self.width as usize, self.height as usize);
