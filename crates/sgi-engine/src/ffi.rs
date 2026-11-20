@@ -248,6 +248,7 @@ trait DynEngine: Send {
     fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write;
     fn heads(&self) -> u32;
     fn head_timing(&self, head: u32) -> Option<HeadTiming>;
+    fn busy_ns(&self) -> u64;
     fn scanout10(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault>;
     fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault>;
     fn head_deadline(&self, head: u32) -> Option<u64>;
@@ -291,6 +292,9 @@ impl<E: BoardEngine + Send + 'static> DynEngine for E {
     }
     fn head_timing(&self, head: u32) -> Option<HeadTiming> {
         BoardEngine::head_timing(self, head)
+    }
+    fn busy_ns(&self) -> u64 {
+        BoardEngine::busy_ns(self)
     }
     fn scanout10(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
         BoardEngine::scanout10(self, head, out)
@@ -680,6 +684,16 @@ pub unsafe extern "C" fn iris_engine_head_timing(h: *mut IrisEngine, head: u32, 
         }
         _ => 0,
     })
+}
+
+/// Wall time in ns the engine's own worker threads have spent running work since it was built; 0 for an engine
+/// with none.
+///
+/// # Safety
+/// `h` is a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn iris_engine_busy_ns(h: *mut IrisEngine) -> u64 {
+    guard(h, Point::Flags, 0, |s| s.eng.busy_ns())
 }
 
 /// As `iris_engine_scanout`, `x2r10g10b10` a pixel (the top 8 bits of each colour are the 8-bit scan-out's).

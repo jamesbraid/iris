@@ -508,6 +508,13 @@ fn a_c_shell_takes_a_timed_write_a_head_s_picture_and_a_stopped_stream() {
 }
 
 #[test]
+fn a_c_shell_reads_the_workers_busy_time() {
+    let f = Fixture::new(false);
+    assert_eq!(unsafe { iris_engine_busy_ns(f.h) }, 12_345);
+    assert_eq!(unsafe { iris_engine_busy_ns(std::ptr::null_mut()) }, 0);
+}
+
+#[test]
 fn a_c_shell_reads_a_heads_timing_and_its_ten_bit_picture() {
     let f = Fixture::new(false);
     let h = f.h;
