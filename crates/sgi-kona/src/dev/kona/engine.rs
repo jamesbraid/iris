@@ -546,6 +546,20 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         Ok((w != 0 && h != 0).then_some((w, h)))
     }
 
+    /// The pixels reach the DAC as eight bits a colour (the colour map's ten bits and the gamma RAM's
+    /// twelve are cut to eight on the way, established for the board's wiring), so they are widened by
+    /// repeating their top bits; how the DAC widens its bypass input is unknown. The DAC cursor's colours
+    /// are the one place the model holds ten bits, and are given as they are.
+    fn scanout10(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
+        let size = self.scanout(head, out)?;
+        let widen = |c: u32| (c << 2) | (c >> 6);
+        out.iter_mut().for_each(|p| *p = widen(*p >> 16 & 0xff) << 20 | widen(*p >> 8 & 0xff) << 10 | widen(*p & 0xff));
+        if let Some((w, h)) = size {
+            self.back.draw_dac_cursor_wide(out, w as usize, w as usize, h as usize);
+        }
+        Ok(size)
+    }
+
     fn head_timing(&self, head: u32) -> Option<HeadTiming> {
         if head != 0 {
             return None;

@@ -826,6 +826,12 @@ impl KonaBackend {
         Some((hz, frame_clocks, fields, lines, self.timing_generation))
     }
 
+    /// The DAC cursor of the current frame drawn over `out`, ten-bit pixels (`0x00` then red, green,
+    /// blue, ten bits each) in rows of `stride`: the one place the model's colours are wider than eight bits.
+    pub fn draw_dac_cursor_wide(&self, out: &mut [u32], stride: usize, w: usize, h: usize) {
+        self.tables.lock().snapshot().draw_dac_cursor_wide(out, stride, w, h);
+    }
+
     /// Whether a swap waits for a frame.
     pub fn swaps_waiting(&self) -> bool {
         !self.swaps.is_empty()
