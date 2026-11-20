@@ -79,6 +79,9 @@ pub struct Config {
     pub bdvers: Option<[u32; 2]>,
     /// The two colour maps' revision registers.
     pub cmap_rev: [u32; 2],
+    /// What the GE readback registers hold until the first GE query is answered: the GE revision
+    /// the kernel reads at 0x028004 (2 is a GE11 rev B, 3 a GE12 rev A). 0 reads as no GE.
+    pub ge_revision: u32,
     pub mode: Mode,
     /// Operations queued before `write` answers `Busy`.
     pub queue_ops: usize,
@@ -95,6 +98,7 @@ impl Config {
             entry_bytes: 4,
             bdvers: None,
             cmap_rev: [0xFB, 0xFB],
+            ge_revision: 0,
             mode,
             queue_ops: 1 << 16,
             #[cfg(feature = "gr4-jit")]
@@ -269,7 +273,9 @@ impl<M: HostMem> Inner<M> {
                 r.jit.mode = m;
             }
         }
-        Ok(Inner { hq, core: Core { back, regs: boxed_zeroed::<Hq3Regs>(), mem, out, front, damage: Vec::new() } })
+        let mut regs = boxed_zeroed::<Hq3Regs>();
+        regs.ge_readback = [0, cfg.ge_revision];
+        Ok(Inner { hq, core: Core { back, regs, mem, out, front, damage: Vec::new() } })
     }
 
     fn exec(&mut self, op: Op) {
