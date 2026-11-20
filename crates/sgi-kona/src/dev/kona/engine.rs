@@ -136,10 +136,12 @@ struct Stored {
 /// once the pipe has taken its words, and the credits of a packet still arriving wait for its last
 /// word, then each goes to the source that sent the store it came from, not all to the last word's
 /// sender. While the driver has parked the credit target they wait in `parked`, again by source.
-/// Evidence: that a credit goes back to the Hub that sent its store is a software expectation (the IRIX
-/// kernel charges the storing processor's interface and waits for that count) and the KONA page's
-/// statement; holding a packet's credits to its last word, and returning parked ones to their own Hub,
-/// are inferred, the pipe's rule being unknown.
+/// Evidence, from the KONA manual page's "Credits and flow control" ratings: the IRIX kernel charges one
+/// credit in the storing processor's interface per store and waits for that count, a *software
+/// expectation*, so a credit goes back to the Hub that sent its store; that the pipe returns credits as its
+/// front end takes words is *inferred*, and so is holding a packet's credits to its last word; how the pipe
+/// holds credits while the target is parked is *unknown*, so returning them to their own Hub is the model's
+/// reading.
 #[derive(Default)]
 struct Credits {
     held: BTreeMap<u32, u32>,
