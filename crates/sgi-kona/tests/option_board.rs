@@ -130,6 +130,23 @@ fn the_logic_download_and_the_data_format_reach_the_board() {
     assert_eq!((regs[&0x8400], regs[&0xc006], regs[&0xc214], regs[&0xc215], regs[&0xc216]), (0x800, 0x484, 0x31, 0xa7, 0));
 }
 
+/// The X server loads the logic (request 82) before the firmware probe (requests 17 and 83): the download reaches the board
+/// whether or not the probe has run, and the board's channel still waits for the probe.
+#[test]
+fn the_logic_download_reaches_the_board_before_the_probe() {
+    let mut e = engine("dg5-2-gvo");
+    let board = Board::default();
+    e.set_display_bus(Some(Box::new(board.clone())));
+    video(&mut e, 0x52, &[0, u32::MAX, 0, 0, 0, 0]);
+    video(&mut e, 0x52, &[0, 2, 0x1234_0000, 0, 0, 0]);
+    assert_eq!(*board.log.lock().unwrap(), vec![(0x8900, 1), (0x8a02, 0x12), (0x8a02, 0x34)]);
+    assert_eq!(e.channel_window_of(0xc6), None, "no channel until the probe finds the board");
+    video(&mut e, 0x53, &[0]);
+    load_format(&mut e, 0xc6, 720, 486);
+    video(&mut e, VIDEO_RESIZE, &[0xc6, 0, 485, 720, 486, 1, 1, 0]);
+    assert!(e.channel_window_of(0xc6).is_some());
+}
+
 #[test]
 fn requests_1_and_2_read_and_write_the_boards_registers() {
     let (mut e, board) = the_probed_pipe();
