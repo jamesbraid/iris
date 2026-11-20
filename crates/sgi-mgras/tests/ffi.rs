@@ -289,6 +289,29 @@ fn a_c_shell_replays_a_recording_and_saves_it() {
         let want: Vec<u64> = (820..=930).flat_map(|y| (90..=230).map(move |x| (x, y))).map(|(x, y)| r.e.pixel(&b, x, y)).collect();
         assert_eq!(pixels, want, "mode {mode}: the C ABI stored other words");
 
+        // A row in one call is the same words, the low 32 bits of each pixel; the overlay's are 9 bits.
+        let region = IrisMgrasRegion { page, overlay: 0, drbsize: drb, x0: 0, y0: 0, x1: 0, y1: 0 };
+        let mut row = vec![0u32; 141];
+        assert_eq!(unsafe { sgi_mgras_read_row(c.h, &region, 875, 90, 231, row.as_mut_ptr()) }, IRIS_ENGINE_OK);
+        let at = (875 - 820) * 141;
+        assert!(row.iter().zip(&pixels[at..at + 141]).all(|(r, p)| *r == *p as u32), "mode {mode}: a row differs from its pixels");
+        assert!(row.iter().any(|&p| p != 0));
+        let overlay = IrisMgrasRegion { overlay: 1, page: 0x1C0, ..region };
+        assert_eq!(unsafe { sgi_mgras_read_row(c.h, &overlay, 875, 90, 231, row.as_mut_ptr()) }, IRIS_ENGINE_OK);
+        for (i, r) in row.iter().enumerate() {
+            let mut v = 0;
+            assert_eq!(unsafe { sgi_mgras_pixel(c.h, &overlay, 90 + i as u32, 875, &mut v) }, IRIS_ENGINE_OK);
+            assert_eq!(*r as u64, v, "overlay pixel {i}");
+        }
+        // Ranges outside the planes, and no buffer, are refused and read nothing.
+        let mut one = [0xAAu32; 1];
+        for (y, x0, x1) in [(2048, 0, 1), (0, 0, 2049), (0, 5, 4)] {
+            assert_eq!(unsafe { sgi_mgras_read_row(c.h, &region, y, x0, x1, one.as_mut_ptr()) }, IRIS_ENGINE_ERROR, "({y}, {x0}, {x1})");
+        }
+        assert_eq!(unsafe { sgi_mgras_read_row(c.h, &region, 0, 3, 3, one.as_mut_ptr()) }, IRIS_ENGINE_OK, "an empty row");
+        assert_eq!(unsafe { sgi_mgras_read_row(c.h, std::ptr::null(), 0, 0, 1, one.as_mut_ptr()) }, IRIS_ENGINE_ERROR);
+        assert_eq!(one, [0xAA]);
+
         // Save through the C ABI, load into a second engine, same window.
         c.quiesce(u64::MAX).unwrap();
         let mut chunks = Vec::new();

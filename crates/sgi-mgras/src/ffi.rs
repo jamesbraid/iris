@@ -12,6 +12,7 @@ use sgi_engine::{BoardEngine, GpuLoss};
 
 use crate::dev::mgras::engine::{Board, Config, MgrasEngine, Mode, Region};
 use crate::dev::mgras::pixmem::{Buffer, Kind};
+use crate::dev::mgras::rss;
 use crate::display::Rect;
 use crate::wgpu::{Gpu, GpuOptions};
 
@@ -171,6 +172,28 @@ pub unsafe extern "C" fn sgi_mgras_pixel(h: *mut IrisEngine, r: *const IrisMgras
             }
             *val = e.pixel(&region(&*r).buffer, x, y);
             IRIS_ENGINE_OK
+        })
+    }
+}
+
+/// Pixels `x0` up to `x1` (exclusive) of row `y` of the buffer `r` names, current after one observe:
+/// the low 32 bits of each wide pixel, or its 9 bits for an overlay buffer. `out` has room for
+/// `x1 - x0` words. A range outside the planes answers `IRIS_ENGINE_ERROR`.
+///
+/// # Safety
+/// `h` is a live MGRAS handle, `r` a region (only its buffer is read) and `out` points to `x1 - x0` words.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_mgras_read_row(h: *mut IrisEngine, r: *const IrisMgrasRegion, y: u32, x0: u32, x1: u32, out: *mut u32) -> c_int {
+    unsafe {
+        call::<MgrasEngine<CMem>, _>(h, Point::Pixel, IRIS_ENGINE_FAULT, |e| {
+            if r.is_null() || out.is_null() || x0 > x1 || x1 as usize > rss::WIDTH || y as usize >= rss::HEIGHT {
+                return IRIS_ENGINE_ERROR;
+            }
+            if e.fault().is_some() {
+                return IRIS_ENGINE_FAULT;
+            }
+            let row = std::slice::from_raw_parts_mut(out, (x1 - x0) as usize);
+            e.read_row(&region(&*r).buffer, y, x0, x1, row).map_or(IRIS_ENGINE_FAULT, |_| IRIS_ENGINE_OK)
         })
     }
 }

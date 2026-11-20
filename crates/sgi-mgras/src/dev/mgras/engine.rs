@@ -44,7 +44,7 @@ use super::hq3::{host, Hq3Board, Hq3Engine, Hq3Regs, Hq3Sink, Hq3Stats};
 use super::pixmem::{Buffer, Kind, PAGE_WORDS};
 use super::plain::boxed_zeroed;
 use super::quirks::Hq4Quirks;
-use super::rss::{Entry, Rss};
+use super::rss::{self, Entry, Rss};
 use super::te1::Te1;
 use crate::display::{Mark, Rect};
 use sgi_engine::inject::{hit, Point};
@@ -755,6 +755,26 @@ impl<M: HostMem> MgrasEngine<M> {
         let r = Rect::new(x as i32, y as i32, x as i32, y as i32);
         let _ = self.observe(&Region { buffer: *buffer, rect: r });
         self.sh.inner.lock().core.back.pixel(buffer, x, y)
+    }
+
+    /// Pixels `x0..x1` of row `y` of `buffer`, one per word of `out` (which
+    /// must hold `x1 - x0`): the low 32 bits of a wide pixel, the 9 bits of an
+    /// overlay one. One observe covers the row, so a scan-out reading a
+    /// screen takes a call a row, not one a pixel. A range outside the planes
+    /// is a refusal and reads nothing.
+    pub fn read_row(&mut self, buffer: &Buffer, y: u32, x0: u32, x1: u32, out: &mut [u32]) -> Result<(), Fault> {
+        if x0 > x1 || x1 as usize > rss::WIDTH || y as usize >= rss::HEIGHT || out.len() < (x1 - x0) as usize {
+            return Err(Fault(format!("read_row: pixels {x0}..{x1} of row {y} into {} words", out.len())));
+        }
+        if x0 == x1 {
+            return Ok(());
+        }
+        self.observe(&Region { buffer: *buffer, rect: Rect::new(x0 as i32, y as i32, x1 as i32 - 1, y as i32) })?;
+        let inner = self.sh.inner.lock();
+        let mut row = [0u32; rss::WIDTH];
+        inner.core.back.planes().mem.read_row(buffer, y, &mut row[..x1 as usize]);
+        out[..(x1 - x0) as usize].copy_from_slice(&row[x0 as usize..x1 as usize]);
+        Ok(())
     }
 
     /// A hash of pixel memory, the clip IDs and the texture memory: equal
