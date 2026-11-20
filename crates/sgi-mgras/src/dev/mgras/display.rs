@@ -27,8 +27,21 @@ pub fn default_bdvers(board: Board) -> [u32; 2] {
     }
 }
 
+/// A device on the display control bus that the shell models, such as an option board: the bus asks it
+/// first about every transaction on a slot the engine has no device for (the I2C slot and any other
+/// the colour maps, DAC, XMAP, VC3 and the board-version slot do not take), and keeps its own scratch
+/// register for a slot the slave leaves unclaimed. Called under the display lock, with the engine's
+/// call rules: it must not call back into the engine.
+pub trait BusSlave: Send {
+    /// A load of register block `crs` of slot `dev`, `width` bytes: `Some(data)` when the slave answers.
+    fn read(&mut self, dev: u32, crs: u32, width: u32) -> Option<u32>;
+    /// A store of `data`: whether the slave took it.
+    fn write(&mut self, dev: u32, crs: u32, width: u32, data: u32) -> bool;
+}
+
 pub struct Display {
     dcb: Box<Dcb>,
+    slave: Option<Box<dyn BusSlave>>,
     /// The decoded frame; allocated by the first composition on the CPU.
     frame: Option<Box<Frame>>,
 }
@@ -37,17 +50,31 @@ impl Display {
     pub fn new(bdvers: [u32; 2], cmap_rev: [u32; 2]) -> Display {
         let mut dcb = boxed_zeroed::<Dcb>();
         dcb.init(bdvers, cmap_rev);
-        Display { dcb, frame: None }
+        Display { dcb, slave: None, frame: None }
     }
 
     pub fn dcb(&self) -> &Dcb {
         &self.dcb
     }
 
+    /// The shell's device on the bus, or none; it survives a reset and a load.
+    pub fn set_slave(&mut self, slave: Option<Box<dyn BusSlave>>) {
+        self.slave = slave;
+    }
+
+    pub fn take_slave(&mut self) -> Option<Box<dyn BusSlave>> {
+        self.slave.take()
+    }
+
     /// A load from the bus window at `off` (`DCB_FIRST..=DCB_LAST`).
     pub fn read(&mut self, off: u32, bits: u32) -> u64 {
         if off <= DCB_BUS_END {
             let t = Txn::decode(off);
+            if let (false, Some(slave)) = (Dcb::models(t.dev), &mut self.slave) {
+                if let Some(d) = slave.read(t.dev, t.crs, t.width) {
+                    return t.load_value(bits, d);
+                }
+            }
             let d = self.dcb.read(t);
             return t.load_value(bits, d);
         }
@@ -65,6 +92,11 @@ impl Display {
     pub fn write(&mut self, off: u32, bits: u32, val: u64) -> bool {
         if off <= DCB_BUS_END {
             let t = Txn::decode(off);
+            if let (false, Some(slave)) = (Dcb::models(t.dev), &mut self.slave) {
+                if slave.write(t.dev, t.crs, t.width, t.store_data(bits, val)) {
+                    return false;
+                }
+            }
             self.dcb.write(t, t.store_data(bits, val));
             return t.crs >= 2 || t.dev == DEV_VC3;
         }

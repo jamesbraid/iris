@@ -541,6 +541,12 @@ impl Dcb {
         })
     }
 
+    /// Whether the bus models slot `dev` itself: the colour maps, DAC, XMAP, VC3 and the board-version
+    /// slot. Another slot has no device here (an option board's, which a shell may attach).
+    pub fn models(dev: u32) -> bool {
+        matches!(dev, DEV_CMAP_ALL | DEV_CMAP0 | DEV_CMAP1 | DEV_DAC | DEV_XMAP | DEV_VC3 | DEV_BDVERS)
+    }
+
     pub fn write_dcbctrl(&mut self, dev: usize, val: u32) {
         if dev < 16 {
             self.dcbctrl[dev] = val;

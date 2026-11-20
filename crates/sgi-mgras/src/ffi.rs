@@ -201,6 +201,48 @@ pub unsafe extern "C" fn sgi_mgras_read_row(h: *mut IrisEngine, r: *const IrisMg
     }
 }
 
+/// The shell's device on the display control bus, for an option board such as the Digital Video board:
+/// the engine calls `read` for a load and `write` for a store on a slot it has no device for (the slots
+/// that are not the colour maps, DAC, XMAP, VC3 or the board-version byte), register block `crs` of slot
+/// `dev`, `width` bytes. `read` returns 1 with `*data` set when it answers, 0 to leave the access to
+/// the engine's scratch register; `write` returns 1 when it took the store. Both are called with the
+/// engine's display lock held and must not call the engine. NULL for both detaches. It survives a reset
+/// and a load.
+///
+/// # Safety
+/// `h` is a live MGRAS handle; the callbacks and `user` stay valid until detached or `iris_engine_free`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_mgras_set_display_bus(
+    h: *mut IrisEngine,
+    user: *mut c_void,
+    read: Option<unsafe extern "C" fn(user: *mut c_void, dev: u32, crs: u32, width: u32, data: *mut u32) -> c_int>,
+    write: Option<unsafe extern "C" fn(user: *mut c_void, dev: u32, crs: u32, width: u32, data: u32) -> c_int>,
+) -> c_int {
+    struct Callbacks {
+        user: *mut c_void,
+        read: Option<unsafe extern "C" fn(*mut c_void, u32, u32, u32, *mut u32) -> c_int>,
+        write: Option<unsafe extern "C" fn(*mut c_void, u32, u32, u32, u32) -> c_int>,
+    }
+    // SAFETY: the caller's contract: the callbacks may be called from any thread the engine's calls come from.
+    unsafe impl Send for Callbacks {}
+    impl crate::dev::mgras::display::BusSlave for Callbacks {
+        fn read(&mut self, dev: u32, crs: u32, width: u32) -> Option<u32> {
+            let f = self.read?;
+            let mut data = 0u32;
+            (unsafe { f(self.user, dev, crs, width, &mut data) } != 0).then_some(data)
+        }
+        fn write(&mut self, dev: u32, crs: u32, width: u32, data: u32) -> bool {
+            self.write.is_some_and(|f| unsafe { f(self.user, dev, crs, width, data) } != 0)
+        }
+    }
+    unsafe {
+        call::<MgrasEngine<CMem>, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| {
+            e.set_display_bus((read.is_some() || write.is_some()).then(|| Box::new(Callbacks { user, read, write }) as Box<dyn crate::dev::mgras::display::BusSlave>));
+            IRIS_ENGINE_OK
+        })
+    }
+}
+
 /// The HQ flags as the board holds them.
 ///
 /// # Safety
