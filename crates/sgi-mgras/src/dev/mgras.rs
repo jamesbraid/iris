@@ -44,3 +44,11 @@ pub use gl::Gl;
 pub mod back;
 pub mod display;
 pub mod engine;
+
+#[cfg(test)]
+mod test_board;
+#[cfg(test)]
+pub use test_board::{record, Mgras};
+#[cfg(test)]
+#[path = "../../../../src/dev/mgras/mgras_tests.rs"]
+mod mgras_tests;

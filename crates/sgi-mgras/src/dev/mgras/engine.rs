@@ -783,6 +783,26 @@ impl<M: HostMem> MgrasEngine<M> {
         Ok(())
     }
 
+    /// The 24 colour planes of the displayed buffer at display (`x`, `y`), `y` = 0 the top row. For tests.
+    pub fn fb_pixel(&mut self, x: usize, y: usize) -> u32 {
+        let (_, h) = self.display.lock().size();
+        let (buffer, row) = {
+            let inner = self.sh.inner.lock();
+            let display = self.display.lock();
+            let (main, _) = super::frame::scanout_buffers(&inner.core.back.rss[0], display.dcb());
+            (main, h - 1 - y as u32)
+        };
+        let _ = self.observe(&Region { buffer, rect: Rect::new(x as i32, row as i32, x as i32, row as i32) });
+        self.sh.inner.lock().core.back.pixel(&buffer, x as u32, row) as u32 & 0xFF_FFFF
+    }
+
+    /// The first raster engine, for the whole-board tests that read its planes once the queue is done.
+    /// Valid until `reset`; reading through it while work is queued is a race.
+    #[doc(hidden)]
+    pub fn first_raster_engine(&mut self) -> *mut Rss {
+        &mut *self.sh.inner.lock().core.back.rss[0] as *mut Rss
+    }
+
     /// A hash of pixel memory, the clip IDs and the texture memory: equal
     /// for runs that stored the same words.
     pub fn state_hash(&mut self) -> Result<u64, Fault> {
