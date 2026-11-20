@@ -535,6 +535,19 @@ impl DisplayShared {
         cell.gen.fetch_add(1, Release);
     }
 
+    /// The scan-out's timing as the mode carries it: frame clocks, clock Hz, fields, lines a frame, the
+    /// time of the write that last restarted the retrace phase (-1 when the poll's time starts it), and a
+    /// number that moves with every new mode and restart. None while there is no timing.
+    pub fn head_timing(&self) -> Option<(u64, u32, u32, u32, i64, u64)> {
+        let m = &self.mode;
+        let (frame_clocks, clock_hz, line_clocks) = (m.frame_clocks.load(Relaxed), m.clock_hz.load(Relaxed), m.line_clocks.load(Relaxed));
+        if frame_clocks == 0 || clock_hz == 0 || line_clocks == 0 {
+            return None;
+        }
+        let (fields, generation) = (m.fields.load(Relaxed).max(1), m.gen.load(Relaxed) + m.restart.load(Relaxed));
+        Some((frame_clocks, clock_hz, fields, (frame_clocks / line_clocks as u64) as u32, m.restart_at.load(Relaxed), generation))
+    }
+
     /// The video mode's size, 0 by 0 while there is none.
     pub fn mode_size(&self) -> (u32, u32) {
         (self.mode.width.load(Relaxed), self.mode.height.load(Relaxed))

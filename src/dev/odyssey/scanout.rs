@@ -131,9 +131,11 @@ impl ScanoutMode {
 }
 
 impl RetraceClock {
-    /// Virtual time of retrace n of the current mode, or -1 with no retrace.
+    /// Virtual time of retrace n of the current mode, or -1 with no retrace. A retrace falls at each field,
+    /// so a mode of two fields (stereo, interlace) retraces twice a frame.
     pub fn retrace_time(&self, n: u64) -> i64 {
-        let hz = self.mode.clock_hz as u64;
+        let fields = self.mode.fields.max(1) as u64;
+        let hz = self.mode.clock_hz as u64 * fields;
         let fc = self.mode.frame_clocks;
 
         if hz == 0 || fc == 0 {
@@ -170,5 +172,30 @@ impl RetraceClock {
         self.epoch = now_ns;
         self.frames = 0;
         self.arm();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A mode of two fields (field-sequential stereo, interlace) retraces at each field, twice a frame; one
+    /// of a single field once. It retraced once a frame whatever the fields.
+    #[test]
+    fn a_mode_of_two_fields_retraces_twice_a_frame() {
+        let mut c = RetraceClock::default();
+        c.mode = ScanoutMode { width: 1280, height: 1024, frame_clocks: 1_000_000, clock_hz: 100_000_000, line_clocks: 1000, blank_lines: 20, fields: 2 };
+        c.restart(1_000);
+        // A frame is 10 ms; a field retrace falls every 5 ms from the epoch.
+        assert_eq!(c.retrace_time(0), 1_000);
+        assert_eq!(c.retrace_time(1) - c.retrace_time(0), 5_000_000);
+        assert_eq!(c.retrace_time(2) - c.retrace_time(0), 10_000_000);
+        let mut due = 0;
+        while c.next_retrace(1_000 + 10_000_000) {
+            due += 1;
+        }
+        assert_eq!(due, 2, "two retraces by the end of the first frame");
+        c.mode.fields = 1;
+        assert_eq!(c.retrace_time(1) - c.retrace_time(0), 10_000_000);
     }
 }

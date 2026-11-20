@@ -627,3 +627,16 @@ fn a_destination_too_small_for_the_frame_is_an_error_and_not_a_fault() {
     assert!(BoardEngine::compose_into(&mut e, 0, &fits, 1280).is_ok(), "and takes a destination that fits");
     assert_eq!(e.fault(), None);
 }
+
+/// The scan-out's timing comes out of the engine for a shell that paces its own retrace by the board's: the
+/// powered board's 1280 by 1024 mode (the model's own default timing, 1688 by 1066 clocks at 107,964,476 Hz),
+/// one field, the shell's clock starting the phase until a write anchors it, a generation that moves with a
+/// new mode. A second head has none.
+#[test]
+fn head_zero_reports_the_scanout_timing_and_a_generation() {
+    let (e, _) = engine(Mode::Inline);
+    let t = BoardEngine::head_timing(&e, 0).expect("the powered board has a mode");
+    assert_eq!((t.frame_clocks, t.clock_hz, t.fields, t.lines, t.epoch_ns), (1688 * 1066, 107_964_476, 1, 1066, -1));
+    assert_ne!(t.generation, 0);
+    assert_eq!(BoardEngine::head_timing(&e, 1), None);
+}
