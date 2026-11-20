@@ -98,6 +98,13 @@ int sgi_kona_scanout(IrisEngine *h, uint32_t *buf, size_t cap, uint32_t *w,
                      uint32_t *hgt);
 
 /*
+ * Channel 0's DAC cursor as the display bus's registers hold it, without waiting for queued stores: the
+ * origin of its 64 by 64 image in screen pixels from the top left (signed) in *x and *y, and in *on whether it is
+ * enabled in X11 mode, for a shell that publishes the pointer. ERROR for a NULL output.
+ */
+int sgi_kona_dac_cursor(IrisEngine *h, int32_t *x, int32_t *y, uint32_t *on);
+
+/*
  * The channels the pipe's display generator has: 8 on a DG5-8, 2 on a DG5-2, with or without its option
  * board (whose channel is one more once the firmware's probe finds it). 0 for a NULL handle.
  */

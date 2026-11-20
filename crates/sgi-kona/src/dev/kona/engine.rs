@@ -489,6 +489,13 @@ impl<M: HostMem> KonaEngine<M> {
         (w, h, self.pixels.frame())
     }
 
+    /// The DAC cursor of channel 0 as the display bus's registers hold it, without waiting for queued stores: the
+    /// origin of its 64 by 64 image in screen pixels from the top left (signed; the hot spot is the image's own),
+    /// and whether it is enabled in X11 mode. For a shell that publishes the pointer.
+    pub fn dac_cursor(&self) -> (i32, i32, bool) {
+        self.back.dac_cursor()
+    }
+
     /// The channels the display generator has (8 on a DG5-8, 2 on a DG5-2), as the configuration chose its board;
     /// the option board's channel is one more once it is probed.
     pub fn display_channels(&self) -> u32 {

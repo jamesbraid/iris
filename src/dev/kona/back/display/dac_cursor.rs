@@ -186,6 +186,16 @@ impl Dac {
         true
     }
 
+    /// Channel 0's cursor as its registers hold it: the origin of the 64 by 64 image (signed, two's complement,
+    /// screen pixels from the top left, as `draw` places it) and whether it is enabled in X11 mode. A cursor with
+    /// no image loaded draws nothing whatever this says.
+    pub fn state(&self) -> (i32, i32, bool) {
+        use dac_cursor_control::*;
+        let control = self.control[0];
+        let p = &self.position[0];
+        (i16::from_le_bytes([p[0], p[1]]) as i32, i16::from_le_bytes([p[2], p[3]]) as i32, MODE.get(control) == MODE_X11 && ENABLE.get(control) != 0)
+    }
+
     /// The cursor a frame draws: channel 0's, X11 mode, enabled, with an image loaded.
     pub fn draw(&self, through: impl Fn([u16; 3]) -> u32) -> Option<DacDraw> {
         use dac_cursor_control::*;
@@ -394,6 +404,20 @@ mod tests {
     /// The kernel writes the position as it does every cursor register: the index (low byte then high),
     /// then one data byte to register 2 of the block, the index sent again before each byte. Nothing
     /// else is a DAC address (the position does not go to bus address 0x22, which no sender writes).
+    #[test]
+    fn the_state_is_the_origin_and_the_enable_without_the_image() {
+        let mut d = Dac::default();
+        assert_eq!(d.state(), (0, 0, false));
+        for (k, v) in [0xfeu8, 0xff, 9, 0].into_iter().enumerate() {
+            set(&mut d, 0, 0x200 + k as u16, &[v]);
+        }
+        set(&mut d, 0, 0x204, &[5]);
+        assert_eq!(d.state(), (-2, 9, true), "no image loaded: nothing is drawn but the pointer is where it is");
+        assert!(d.draw(|_| 0).is_none());
+        set(&mut d, 0, 0x204, &[0]);
+        assert_eq!(d.state(), (-2, 9, false));
+    }
+
     #[test]
     fn the_kernels_position_bytes_arrive_one_index_at_a_time_and_nothing_else_is_the_dacs() {
         let mut d = Dac::default();
