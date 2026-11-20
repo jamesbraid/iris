@@ -338,3 +338,58 @@ fn the_gvo_naming_itself_as_its_source_stays_independent() {
     copy_channel(&mut e, 0xc6, 0);
     assert_eq!((e.frame_size(1), e.head_timing(1).unwrap().clock_hz), (Some((1280, 1024)), 60 << 16), "dependent on channel 0");
 }
+
+/// A blanked channel's head scans out black (the frame is not: the other channels still show it), whichever of
+/// the picture's paths a shell takes; unblanked it shows the frame again.
+#[test]
+fn a_blanked_channels_head_scans_out_black_and_the_others_keep_the_picture() {
+    let mut e = engine("dg5-2");
+    draw_a_point(&mut e);
+    load_format_at(&mut e, 0, 1280, 1024, 60);
+    load_format_at(&mut e, 1, 1280, 1024, 60);
+    video(&mut e, VIDEO_RESIZE, &[1, 0, 1023, 1280, 1024, 1, 1, 0]);
+    let (mut a, mut b, mut wide) = (Vec::new(), Vec::new(), Vec::new());
+    BoardEngine::scanout(&mut e, 0, &mut a).unwrap();
+    BoardEngine::scanout(&mut e, 1, &mut b).unwrap();
+    assert!(a.iter().any(|&p| p != 0) && a == b, "both heads show the point");
+
+    video(&mut e, VIDEO_CHANNEL_BLANKING, &[1, 1]);
+    assert_eq!(BoardEngine::scanout(&mut e, 1, &mut b), Ok(Some((1280, 1024))), "the head keeps its size");
+    assert!(b.iter().all(|&p| p == 0), "channel 1 is black");
+    assert_eq!(BoardEngine::scanout10(&mut e, 1, &mut wide), Ok(Some((1280, 1024))));
+    assert!(wide.iter().all(|&p| p == 0));
+    assert!(e.channel_scanout(1).unwrap().2.iter().all(|&p| p == 0), "and so is what a device takes from it");
+    BoardEngine::scanout(&mut e, 0, &mut b).unwrap();
+    assert_eq!(a, b, "channel 0 still shows the picture");
+    assert!(e.channel_scanout(0).unwrap().2.iter().any(|&p| p != 0));
+    assert!(BoardEngine::lend_frame(&mut e, 1).unwrap().is_none(), "no lent frame for a head that shows none of it");
+
+    video(&mut e, VIDEO_CHANNEL_BLANKING, &[1, 0]);
+    BoardEngine::scanout(&mut e, 1, &mut b).unwrap();
+    assert_eq!(a, b, "unblanked");
+}
+
+/// Blanking the GVO channel zeroes its look-up table, 1024 words at 0xf000 on the display bus (kona devices/dg/
+/// gvo-option.md and arm1_functions.md, `dgBlankChannel`, established); unblanking, another channel's blanking and
+/// a board that has not been probed write nothing there.
+#[test]
+fn blanking_the_gvo_channel_zeroes_its_look_up_table() {
+    let (mut e, board) = the_probed_pipe();
+    load_format_at(&mut e, 0, 1280, 1024, 60);
+    load_format_at(&mut e, 0xc6, 720, 486, 30);
+    let lut = |board: &Board| board.log.lock().unwrap().iter().filter(|(a, _)| (0xf000..0xf400).contains(a)).copied().collect::<Vec<_>>();
+    video(&mut e, VIDEO_CHANNEL_BLANKING, &[0, 1]);
+    video(&mut e, VIDEO_CHANNEL_BLANKING, &[0xc6, 0]);
+    assert!(lut(&board).is_empty(), "channel 0's blanking and the GVO's unblanking leave the table");
+    video(&mut e, VIDEO_CHANNEL_BLANKING, &[0xc6, 1]);
+    assert_eq!(lut(&board), (0..1024).map(|i| (0xf000 + i, 0)).collect::<Vec<_>>());
+    board.log.lock().unwrap().clear();
+    video(&mut e, VIDEO_CHANNEL_BLANKING, &[2, 1]);
+    assert_eq!(lut(&board).len(), 1024, "named by its index as well");
+
+    let mut plain = engine("dg5-2-gvo");
+    let none = Board::default();
+    plain.set_display_bus(Some(Box::new(none.clone())));
+    video(&mut plain, VIDEO_CHANNEL_BLANKING, &[0xc6, 1]);
+    assert!(lut(&none).is_empty(), "no probe, no channel");
+}

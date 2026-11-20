@@ -532,9 +532,15 @@ impl<M: HostMem> KonaEngine<M> {
         }
     }
 
-    /// Head `head` shows the whole managed area, the only frame a GPU buffer can be lent for.
+    /// Head `head` shows the whole managed area, the only frame a GPU buffer can be lent for; a blanked head shows
+    /// none of it.
     fn head_is_whole(&self, head: u32) -> bool {
-        self.head_window(head) == Some((0, 0, self.core.managed.0, self.core.managed.1))
+        self.head_window(head) == Some((0, 0, self.core.managed.0, self.core.managed.1)) && !self.head_blanked(head)
+    }
+
+    /// Head `head`'s channel is blanked (`Back::channel_blanked`): its output is black whatever the frame holds.
+    fn head_blanked(&self, head: u32) -> bool {
+        self.back.running_channels().get(head as usize).is_some_and(|&c| self.back.channel_blanked(c))
     }
 
     /// The pixels of `window` of the composed frame, `0x00RRGGBB` in rows from the top, with its size.
@@ -561,7 +567,11 @@ impl<M: HostMem> KonaEngine<M> {
     /// output shows, for a device that takes the picture (the option board). Composes the frame as `compose`.
     pub fn channel_scanout(&mut self, index: usize) -> Option<(u32, u32, Vec<u32>)> {
         let window = self.channel_window(index)?;
-        Some(self.window_pixels(window)).filter(|(w, h, _)| *w != 0 && *h != 0)
+        let (w, h, mut pixels) = self.window_pixels(window);
+        if self.back.channel_blanked(index) {
+            pixels.fill(0);
+        }
+        Some((w, h, pixels)).filter(|(w, h, _)| *w != 0 && *h != 0)
     }
 
     /// The frame the display would show, composed on the GPU and left there for a scan-out on the
@@ -618,7 +628,8 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         }
         let Some(window) = self.head_window(head) else { return Ok(None) };
         let (w, h, pixels) = self.window_pixels(window);
-        out.extend(pixels);
+        let blanked = self.head_blanked(head);
+        out.extend(pixels.into_iter().map(|p| if blanked { 0 } else { p }));
         Ok((w != 0 && h != 0).then_some((w, h)))
     }
 
@@ -631,7 +642,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         let widen = |c: u32| (c << 2) | (c >> 6);
         out.iter_mut().for_each(|p| *p = widen(*p >> 16 & 0xff) << 20 | widen(*p >> 8 & 0xff) << 10 | widen(*p & 0xff));
         // The DAC cursor is a position on the whole screen: a head that shows only a window of it has none drawn.
-        if let (Some((w, h)), true) = (size, self.head_window(head) == Some((0, 0, self.core.managed.0, self.core.managed.1))) {
+        if let (Some((w, h)), true) = (size, self.head_is_whole(head)) {
             self.back.draw_dac_cursor_wide(out, w as usize, w as usize, h as usize);
         }
         Ok(size)

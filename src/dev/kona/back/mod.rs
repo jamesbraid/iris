@@ -822,6 +822,11 @@ impl KonaBackend {
         self.latch = on;
     }
 
+    /// Whether channel `index` is blanked: by its own blanking, or by the temporary blank of every channel.
+    pub fn channel_blanked(&self, index: usize) -> bool {
+        self.channels.blanked || self.channels.channel.get(index).is_some_and(|c| c.blanked)
+    }
+
     /// The channels that run, each a head of the pipe: the display channels in order, then the option board's.
     pub fn running_channels(&self) -> Vec<usize> {
         let option = self.channels.option_index();
@@ -1689,6 +1694,11 @@ impl KonaBackend {
                 let from_board = self.option.request(command, data);
                 self.channels.set_option_channel(self.option.present());
                 self.channels.set(command, data);
+                let option = self.channels.option_index();
+                let blanked = command == VIDEO_CHANNEL_BLANKING && data.get(1).is_some_and(|&b| b != 0);
+                if blanked && option.is_some() && option == self.channels.physical(data[0]) {
+                    self.option.blank_channel();
+                }
                 for (i, (was, now)) in before.iter().zip(timings(&self.channels)).enumerate() {
                     if *was != now {
                         self.timing_generation[i] += 1;
