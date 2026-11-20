@@ -232,6 +232,8 @@ mod xmap {
 
 /// `CONFIG` index of the byte whose bit 3 makes the index auto-increment.
 const XMAP_AUTOINC: u32 = 1 << 19;
+/// Where `set_pp1_revision` keeps the revision: a select no guest access reaches.
+const PP1_REV_KEY: u32 = 0xFF << 24;
 /// `CONFIG` index 4: the pixel processor revision.
 const XMAP_REV_INDEX: u32 = 4;
 /// `CONFIG` index read before each display-mode write.
@@ -280,14 +282,19 @@ impl Xmap {
                 let v = self.config >> (8 * (4 - self.index - n));
                 if n == 4 { v } else { v & ((1 << (8 * n)) - 1) }
             }
-            xmap::CONFIG if self.index == XMAP_REV_INDEX => 1,
-            // Polled nonzero before every display-mode write: room for a
-            // mode update.
-            xmap::CONFIG if self.index == XMAP_MODE_ROOM_INDEX => 0x10,
+            xmap::CONFIG if self.index == XMAP_REV_INDEX => self.regs.lookup(PP1_REV_KEY).unwrap_or(1),
+            // Polled nonzero before every display-mode write (room for a mode update); the stock IDE
+            // diagnostic wants its low nibble to be 1.
+            xmap::CONFIG if self.index == XMAP_MODE_ROOM_INDEX => 1,
             crs => self.regs.get(key(crs, self.index)),
         };
         if t.crs >= xmap::CONFIG { self.autoinc(t); }
         v
+    }
+
+    /// The pixel processor revision `CONFIG` index 4 reads; 1 until set.
+    pub fn set_pp1_revision(&mut self, rev: u32) {
+        self.regs.insert(PP1_REV_KEY, rev);
     }
 
     /// Display mode of overlay window ID `did` (`OVERLAY_MODE`, index `did * 4`);
@@ -369,6 +376,8 @@ pub struct Vc3 {
 
 pub const VC3_SRAM_POINTER: usize = 7;
 const VC3_CURRENT_LINE: usize = 0xB;
+/// The master configuration register: the revision is in bits 7:6.
+const VC3_CONFIG: usize = 0x1F;
 /// The display control register: bit 2 enables the display.
 pub const VC3_CONTROL: u32 = 0x1E;
 pub const VC3_CONTROL_DISPLAY: u16 = 4;
@@ -524,6 +533,8 @@ impl Vc3 {
                 crate::pf_instant!(crate::perfetto::events::MGRAS_VC3_LINE, self.line_counter);
                 self.line_counter as u32
             }
+            // Bits 7:6 are the silicon revision, 0 on every board; the rest stores.
+            (1, _) if self.index as usize == VC3_CONFIG => self.regs[VC3_CONFIG] as u32 & !0xC0,
             (1, _) => self.regs[self.index as usize] as u32,
             (3, 4) => { let hi = self.sram_read() as u32; (hi << 16) | self.sram_read() as u32 }
             (3, _) => self.sram_read() as u32,

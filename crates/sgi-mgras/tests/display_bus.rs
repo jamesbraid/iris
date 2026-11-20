@@ -1,4 +1,4 @@
-//! What the engine answers on the display bus where the guest's own software looks: the DAC's address register and pixel mask, and the video timing the VC3's tables and the DAC's PLL give.
+//! What the engine answers on the display bus where the guest's own software looks: the DAC's address register and pixel mask, the XMAP's and the VC3's revisions, and the video timing the VC3's tables and the DAC's PLL give.
 //! Offsets are the Octane's `0x07xxxx` window less `0x10000`.
 
 mod support;
@@ -27,6 +27,8 @@ fn engine(config: impl FnOnce(&mut Config)) -> MgrasEngine<Mem> {
 const DAC_ADDRESS: u32 = 0x61810;
 const DAC_NUMBER: u32 = 0x61811;
 const DAC_DATA: u32 = 0x61910;
+const XMAP_INDEX: u32 = 0x61C88;
+const XMAP_CONFIG: u32 = 0x61D00;
 const VC3_INDEX: u32 = 0x62008;
 const VC3_DATA: u32 = 0x62090;
 const VC3_SRAM: u32 = 0x62190;
@@ -76,6 +78,41 @@ fn the_pixel_mask_written_through_the_byte_ports_blanks_the_frame_and_ff_shows_i
     dac(&mut e, 4, 0xFF);
     e.scanout(0, &mut out).unwrap();
     assert!(out.iter().any(|&p| p != 0), "shown again");
+}
+
+#[test]
+fn the_xmap_reports_the_configured_pp1_revision_under_index_4_and_a_capacity_of_one_under_index_8() {
+    for rev in [0, 4, 7] {
+        let mut e = engine(|c| c.pp1_revision = Some(rev));
+        put(&mut e, XMAP_INDEX, 8, 1);
+        put(&mut e, XMAP_CONFIG, 32, 0xFF00_0000);
+        put(&mut e, XMAP_INDEX, 8, 4);
+        assert_eq!(get(&mut e, XMAP_CONFIG, 32) & 7, rev as u64, "revision");
+        put(&mut e, XMAP_INDEX, 8, 8);
+        assert_eq!(get(&mut e, XMAP_CONFIG, 32) & 0xF, 1, "capacity");
+    }
+}
+
+/// Without a revision given, the board's own, as the captured boards print it: A on the GE11 boards (and where no GE
+/// revision is known), E on a one-GE GE12 board, H on a two-GE one.
+#[test]
+fn the_pp1_revision_follows_the_board_when_none_is_given() {
+    let rev = |board, ge| {
+        let mut e = engine(|c| (c.board, c.ge_revision) = (board, ge));
+        put(&mut e, XMAP_INDEX, 8, 4);
+        get(&mut e, XMAP_CONFIG, 32) & 7
+    };
+    assert_eq!([rev(Board::Solid, 0), rev(Board::High, 2), rev(Board::Max, 2)], [0, 0, 0], "GE11 or none: A");
+    assert_eq!([rev(Board::Solid, 3), rev(Board::High, 3)], [4, 4], "one GE12: E");
+    assert_eq!(rev(Board::Max, 3), 7, "two GE12: H");
+}
+
+#[test]
+fn vc3_register_0x1f_has_its_revision_in_bits_7_and_6_and_stores_the_rest() {
+    let mut e = engine(|_| {});
+    vc3(&mut e, 0x1F, 0xFFFF);
+    put(&mut e, VC3_INDEX, 8, 0x1F);
+    assert_eq!(get(&mut e, VC3_DATA, 16), 0xFF3F, "revision 0, the other bits as stored");
 }
 
 /// The IRIX 1280x1024 60 Hz timing: 1065 lines of 840 VC3 clocks in a frame table at 0x380, one line

@@ -64,15 +64,16 @@ pub struct Display {
 }
 
 impl Display {
-    pub fn new(bdvers: [u32; 2], cmap_rev: [u32; 2]) -> Display {
+    pub fn new(bdvers: [u32; 2], cmap_rev: [u32; 2], pp1_revision: u32) -> Display {
         let mut dcb = boxed_zeroed::<Dcb>();
         dcb.init(bdvers, cmap_rev);
+        dcb.xmap.set_pp1_revision(pp1_revision);
         Display { dcb, slave: None, frame: None, timing: None, timing_generation: 0 }
     }
 
     /// Back to power-on state: the shell's bus device stays, and the timing generation moves on.
-    pub fn reset(&mut self, bdvers: [u32; 2], cmap_rev: [u32; 2]) {
-        let mut fresh = Display::new(bdvers, cmap_rev);
+    pub fn reset(&mut self, bdvers: [u32; 2], cmap_rev: [u32; 2], pp1_revision: u32) {
+        let mut fresh = Display::new(bdvers, cmap_rev, pp1_revision);
         fresh.slave = self.slave.take();
         fresh.timing_generation = self.timing_generation + self.timing.is_some() as u64;
         *self = fresh;

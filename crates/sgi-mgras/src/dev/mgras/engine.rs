@@ -79,6 +79,9 @@ pub struct Config {
     pub bdvers: Option<[u32; 2]>,
     /// The two colour maps' revision registers.
     pub cmap_rev: [u32; 2],
+    /// The pixel processor revision the XMAP reports under index 4, bits 2:0; None takes the board's from
+    /// `Config::pp1_revision`.
+    pub pp1_revision: Option<u32>,
     /// What the GE readback registers hold until the first GE query is answered: the GE revision
     /// the kernel reads at 0x028004 (2 is a GE11 rev B, 3 a GE12 rev A). 0 reads as no GE.
     pub ge_revision: u32,
@@ -91,6 +94,18 @@ pub struct Config {
 }
 
 impl Config {
+    /// The pixel processor revision the XMAP reports: the one given, else the board's by the captured boards
+    /// (gr4 c86de26 devices/mgras/board-identity.md, inferred from the owners' `gfxinfo` output): revision A (0) on
+    /// the GE11 boards, E (4) on a one-GE GE12 board (the ESI) and H (7) on a two-GE one (the EMXI, the ESSI).
+    /// The GE revision is the one the kernel reads at 0x028004 (2 a GE11, 3 and up a GE12); none given is A.
+    pub fn pp1_revision(&self) -> u32 {
+        self.pp1_revision.unwrap_or(match (self.ge_revision, self.board) {
+            (0..=2, _) => 0,
+            (_, Board::Max) => 7,
+            _ => 4,
+        })
+    }
+
     pub fn new(board: Board, mode: Mode) -> Config {
         Config {
             board,
@@ -98,6 +113,7 @@ impl Config {
             entry_bytes: 4,
             bdvers: None,
             cmap_rev: [0xFB, 0xFB],
+            pp1_revision: None,
             ge_revision: 0,
             mode,
             queue_ops: 1 << 16,
@@ -609,7 +625,7 @@ impl<M: HostMem> MgrasEngine<M> {
             fault: Mutex::new(None),
             dead: AtomicBool::new(false),
         });
-        let display = Mutex::new(Display::new(cfg.bdvers.unwrap_or_else(|| display::default_bdvers(cfg.board)), cfg.cmap_rev));
+        let display = Mutex::new(Display::new(cfg.bdvers.unwrap_or_else(|| display::default_bdvers(cfg.board)), cfg.cmap_rev, cfg.pp1_revision()));
         let mut e = MgrasEngine { sh, cfg, gpu: gpu.cloned(), mem, display, stage: Vec::new(), submitted: 0, words: 0, worker: None, parked: false, now: 0 };
         e.spawn();
         Ok(e)
@@ -1233,7 +1249,7 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         {
             // The shell's bus device is the shell's, not the board's state: it stays through a reset.
             let mut display = self.display.lock();
-            display.reset(self.cfg.bdvers.unwrap_or_else(|| display::default_bdvers(self.cfg.board)), self.cfg.cmap_rev);
+            display.reset(self.cfg.bdvers.unwrap_or_else(|| display::default_bdvers(self.cfg.board)), self.cfg.cmap_rev, self.cfg.pp1_revision());
         }
         self.sh.generation.fetch_add(1, Ordering::Release);
         let f = &self.sh.front;

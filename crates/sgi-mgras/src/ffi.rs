@@ -25,6 +25,7 @@ pub struct IrisMgrasConfig {
     pub board: u32,
     /// Bit 0: the Octane's HQ4 front. Bit 1: 8-byte DMA page-table entries (Origin 2000, Onyx2).
     /// Bit 2: `bdvers`, `cmap_rev` and `ge_revision` are given; otherwise the board's own bus bytes and no GE revision.
+    /// Bit 3: `pp1_revision` is given; otherwise the board's own, from the GE revision and the board.
     pub flags: u32,
     /// -1 the default, 0 interpreter only, 1 compile on first use, 2 compile in the background.
     pub jit: i32,
@@ -33,6 +34,9 @@ pub struct IrisMgrasConfig {
     pub cmap_rev: [u32; 2],
     /// The GE revision the kernel reads at 0x028004 before its first GE query.
     pub ge_revision: u32,
+    /// The XMAP's pixel processor revision, bits 2:0, read when `flags` bit 3 is set; else the board's own
+    /// (A on the GE11 boards, E on a one-GE GE12 board, H on a two-GE one).
+    pub pp1_revision: u32,
 }
 
 #[repr(C)]
@@ -99,6 +103,9 @@ unsafe fn new_with(cfg: *const IrisMgrasConfig, host: *const IrisEngineHost, giv
             config.bdvers = Some(c.bdvers);
             config.cmap_rev = c.cmap_rev;
             config.ge_revision = c.ge_revision;
+        }
+        if c.flags & 8 != 0 {
+            config.pp1_revision = Some(c.pp1_revision);
         }
         if c.common.queue_ops != 0 {
             config.queue_ops = c.common.queue_ops as usize;
