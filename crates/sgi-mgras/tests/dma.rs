@@ -73,6 +73,11 @@ fn an_eight_byte_table_read_as_four_byte_entries_moves_the_wrong_data() {
 /// Move `words` from host memory at logical byte `from` through pool 0's
 /// table into ERAM, then out again at logical byte `to`.
 fn run(e: &mut MgrasEngine<Mem>, table: (u32, u32), words: u32, from: u32, to: u32) {
+    run_with_start(e, table, words, from, to, 1)
+}
+
+/// As `run`, the host to board DMA started with `start` (bit 0 runs it).
+fn run_with_start(e: &mut MgrasEngine<Mem>, table: (u32, u32), words: u32, from: u32, to: u32, start: u32) {
     let mut fifo = Vec::new();
     fifo.extend(dma_reg(0x20, &[table.0, table.1]));
     for (reg, v) in [(0x04, 0), (0x05, 0), (0x07, 1), (0x08, 4 * words)] {
@@ -81,7 +86,7 @@ fn run(e: &mut MgrasEngine<Mem>, table: (u32, u32), words: u32, from: u32, to: u
     // Host to ERAM word 0x40: the chunk, the DMA behind it, then the address.
     fifo.extend(packet(0x0FD, &[words]));
     fifo.extend(dma_reg(0x06, &[from]));
-    fifo.extend(dma_reg(0x0B, &[1]));
+    fifo.extend(dma_reg(0x0B, &[start]));
     fifo.extend(packet(0x0FB, &[0x40, words]));
     fifo.extend(packet(0x0FA, &[]));
     // ERAM to host: the DMA armed first, then the read.
@@ -90,4 +95,15 @@ fn run(e: &mut MgrasEngine<Mem>, table: (u32, u32), words: u32, from: u32, to: u
     fifo.extend(packet(0x0FC, &[0x40, words]));
     assert_eq!(e.push_words(0, &fifo), fifo.len());
     drive(e);
+}
+
+/// The synthetic DMA recording kicks its transfer with a start word of 0.
+#[test]
+fn a_start_word_without_bit_0_runs_nothing() {
+    let mem = Mem::default();
+    mem.put(0x4018, &[0, 0, 0, 7, 0, 0, 0, 9]);
+    mem.put(0x7010, &pattern(8));
+    let mut e = MgrasEngine::new(Config::new(Board::Solid, Mode::Inline), mem.clone(), None, None).unwrap();
+    run_with_start(&mut e, (0, 0x4019), 8, 0x10, 0x1020, 0);
+    assert_eq!(mem.get(0x9020, 32), vec![0; 32]);
 }
