@@ -401,6 +401,12 @@ pub const VC3_CONTROL: u32 = 0x1E;
 pub const VC3_CONTROL_DISPLAY: u16 = 4;
 
 impl Vc3 {
+    /// The cursor's glyph origin from the position registers (less the 31 they are offset by) and whether it is shown
+    /// (`cursor`'s rule: function and display bits both set), whatever the registers hold.
+    pub fn cursor_position(&self) -> (i32, i32, bool) {
+        (self.regs[CURSOR_X_REG] as i32 - 31, self.regs[CURSOR_Y_REG] as i32 - 31, self.regs[CURSOR_CONTROL_REG] & 3 == 3)
+    }
+
     /// The hardware cursor, when shown: the screen position of its top-left
     /// corner, its size (32 or 64), and the SRAM address of its glyph. The
     /// glyph is two bit planes, one after the other, a row at a time, most

@@ -244,3 +244,22 @@ fn the_vc3_sweep_reads_back_whole_and_word_reads_put_the_data_in_the_top_bytes()
     put(&mut e, 0x61988, 32, 0x5A00_0000);
     assert_eq!((get(&mut e, 0x61988, 8), get(&mut e, 0x61988, 32)), (0x5A, 0x5A00_0000));
 }
+
+/// The shell publishes the guest's pointer from the VC3's cursor registers: the position registers (2 and 3) less the
+/// 31 they are offset by, and the control register's (0x1d) enable, as the frame draws it.
+#[test]
+fn the_cursor_position_is_the_vc3s_registers_less_their_offset() {
+    let mut e = engine(|_| {});
+    assert_eq!(e.cursor_position(), (-31, -31, false), "reset: registers 0, hidden");
+    vc3(&mut e, 0x02, 131);
+    vc3(&mut e, 0x03, 231);
+    assert_eq!(e.cursor_position(), (100, 200, false), "positioned, not shown");
+    vc3(&mut e, 0x1D, 1);
+    assert!(!e.cursor_position().2, "the display bit is needed too");
+    vc3(&mut e, 0x1D, 3);
+    assert_eq!(e.cursor_position(), (100, 200, true));
+    vc3(&mut e, 0x02, 10);
+    assert_eq!(e.cursor_position(), (-21, 200, true), "left of the screen: signed");
+    vc3(&mut e, 0x1D, 0);
+    assert!(!e.cursor_position().2);
+}

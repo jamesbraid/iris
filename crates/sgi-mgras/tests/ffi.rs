@@ -365,3 +365,21 @@ fn a_c_shell_attaches_a_device_to_the_display_bus() {
     assert_eq!(unsafe { iris_engine_read(c.h, slot(20, 0), 32, &mut v) }, IRIS_ENGINE_OK);
     assert_eq!(v, 0, "detached");
 }
+
+/// A C shell reads the hardware cursor from the VC3's registers as the guest wrote them (index and data stores at 0x0720xx).
+#[test]
+fn a_c_shell_reads_the_cursor_position_and_whether_it_is_shown() {
+    let c = CEngine::new(0, 0);
+    // The three-byte index-and-data store at 0x072038: the index in bits 31:24, the value in 23:8.
+    let vc3 = |index: u32, value: u32| assert_eq!(unsafe { iris_engine_write(c.h, 0x62038, 32, ((index << 24) | (value << 8)) as u64) }, IRIS_ENGINE_OK);
+    let (mut x, mut y) = (0i32, 0i32);
+    assert_eq!(unsafe { sgi_mgras_cursor_position(c.h, &mut x, &mut y) }, 0);
+    assert_eq!((x, y), (-31, -31));
+    vc3(2, 131);
+    vc3(3, 231);
+    assert_eq!(unsafe { sgi_mgras_cursor_position(c.h, &mut x, &mut y) }, 0, "positioned, not shown");
+    assert_eq!((x, y), (100, 200));
+    vc3(0x1d, 3);
+    assert_eq!(unsafe { sgi_mgras_cursor_position(c.h, &mut x, &mut y) }, 1);
+    assert_eq!(unsafe { sgi_mgras_cursor_position(c.h, null_mut(), &mut y) }, 0, "a NULL output");
+}
