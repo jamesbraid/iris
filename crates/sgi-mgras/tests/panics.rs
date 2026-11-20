@@ -46,6 +46,7 @@ fn config(mode: u32) -> IrisMgrasConfig {
         bdvers: [0; 2],
         cmap_rev: [0; 2],
         ge_revision: 0,
+        pp1_revision: 0,
     }
 }
 

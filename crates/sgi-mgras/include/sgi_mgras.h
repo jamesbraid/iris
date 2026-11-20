@@ -24,11 +24,14 @@ typedef struct IrisMgrasConfig {
     uint32_t board;         /* 0 Solid IMPACT, 1 High, 2 Maximum */
     uint32_t flags;         /* bit 0: the Octane's HQ4 front; bit 1: 8-byte DMA page-table entries;
                                bit 2: bdvers, cmap_rev and ge_revision are given (else the
-                               board's own bus bytes and no GE revision) */
+                               board's own bus bytes and no GE revision); bit 3: pp1_revision is given */
     int32_t jit;            /* -1 default, 0 off, 1 on first use, 2 background */
     uint32_t bdvers[2];     /* the display bus's two board-version bytes */
     uint32_t cmap_rev[2];   /* the two colour maps' revision registers */
     uint32_t ge_revision;   /* read at 0x028004 before the first GE query: 2 GE11 rev B, 3 GE12 rev A */
+    uint32_t pp1_revision;  /* the XMAP's pixel processor revision, bits 2:0, read when flags bit 3 is set;
+                               else the board's own: A on the GE11 boards, E on a one-GE GE12 board,
+                               H on a two-GE one */
 } IrisMgrasConfig;
 
 /* A box of pixels in one buffer. */
