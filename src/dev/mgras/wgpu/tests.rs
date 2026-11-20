@@ -8,8 +8,10 @@
 //! interpreter's: pixel pages, clip-ID planes, and the CPU-side state
 //! (character stipple position, GL line stipple position). Several
 //! primitives go into each batch, so order within a batch is tested too.
-//! They need a GPU (or lavapipe) and skip without one; they take turns, one
-//! at a time to a process.
+//! They need a GPU (or lavapipe) and skip without one. On a software
+//! rasteriser they take turns, one at a time to a process; on a hardware GPU
+//! up to `HARDWARE_AT_ONCE` run side by side (a plain `cargo test` ran each
+//! of the 13 sweeps, about 80 s apiece and 1.5 GB, one after another).
 
 use std::sync::Arc;
 
@@ -20,12 +22,39 @@ use super::super::test_gen::{self, hilo, pos, Prim, Regs, Rng};
 use super::{xline_step, GpuLink, GpuRaster, Observation};
 use crate::wgpu::{Gpu, GpuOptions};
 
-/// One GPU test at a time in a process: lavapipe crashes when several tests open devices at once.
+/// One software-rasteriser test at a time in a process: lavapipe crashes when several tests open
+/// devices at once. Devices open one at a time everywhere; a hardware GPU lets go after that.
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Sweeps that run together on a hardware GPU: 8 of them hold about 12 GB.
+const HARDWARE_AT_ONCE: usize = 8;
+static SLOTS: (std::sync::Mutex<usize>, std::sync::Condvar) = (std::sync::Mutex::new(HARDWARE_AT_ONCE), std::sync::Condvar::new());
+
+/// A place among the sweeps running on a hardware GPU, given back on drop.
+struct Slot;
+
+impl Slot {
+    fn take() -> Slot {
+        let mut free = SLOTS.0.lock().unwrap_or_else(|e| e.into_inner());
+        while *free == 0 {
+            free = SLOTS.1.wait(free).unwrap_or_else(|e| e.into_inner());
+        }
+        *free -= 1;
+        Slot
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        *SLOTS.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        SLOTS.1.notify_one();
+    }
+}
 
 struct Held {
     gpu: Arc<Gpu>,
-    _turn: std::sync::MutexGuard<'static, ()>,
+    _turn: Option<std::sync::MutexGuard<'static, ()>>,
+    _slot: Option<Slot>,
 }
 
 impl std::ops::Deref for Held {
@@ -40,7 +69,10 @@ fn gpu() -> Option<Held> {
     match Gpu::new(&GpuOptions::default(), Box::new(|_| {})) {
         Ok(g) => {
             eprintln!("GPU unit on {} ({:?}, {:?})", g.caps.adapter, g.caps.backend, g.caps.device_type);
-            Some(Held { gpu: g, _turn })
+            let software = g.caps.device_type == wgpu::DeviceType::Cpu;
+            // A hardware GPU's sweep lets the next device open, then waits for a slot.
+            let (turn, slot) = if software { (Some(_turn), None) } else { drop(_turn); (None, Some(Slot::take())) };
+            Some(Held { gpu: g, _turn: turn, _slot: slot })
         }
         Err(e) => {
             if std::env::var_os("IRIS_REQUIRE_GPU").is_some_and(|v| v == "1") { panic!("no GPU: {e}") }
