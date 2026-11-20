@@ -195,3 +195,33 @@ fn the_dac_answers_the_id_and_revision_the_stock_diagnostic_accepts() {
     put(&mut e, DAC_ADDRESS, 16, 0x0B00);
     assert_eq!(get(&mut e, DAC_DATA, 8), 1, "revision");
 }
+
+/// Word reads of the bus's registers put the data in the top bytes, as the page says for the registers it lists with
+/// both widths (the VC3's data register, 0x0720b0: "a 32-bit read puts it in bits 31:16"; the board-version and monitor
+/// bytes: "bits 31:24") and as the bus's data rides (the byte registers are byte-wide, their 32-bit reads the byte
+/// in bits 31:24). The old model's sweep of the VC3 registers, 34 patterns, reads back whole at both widths.
+#[test]
+fn the_vc3_sweep_reads_back_whole_and_word_reads_put_the_data_in_the_top_bytes() {
+    let mut e = engine(|_| {});
+    let data = 0x620b0;
+    vc3(&mut e, 0x1E, 0);
+    for step in 0..34u32 {
+        let pattern = match step {
+            0..=15 => 1 << step,
+            16..=31 => !(1u32 << (step - 16)) & 0xFFFF,
+            32 => 0,
+            _ => 0xFFFF,
+        };
+        for reg in 0..=0x13u32 {
+            put(&mut e, 0x62038, 32, (reg << 24 | pattern << 8) as u64);
+            put(&mut e, VC3_INDEX, 8, reg as u64);
+            assert_eq!(get(&mut e, data, 16), pattern as u64, "register {reg:#x}, pattern {pattern:#x}");
+            assert_eq!(get(&mut e, data, 32), (pattern as u64) << 16, "register {reg:#x}, as a word");
+        }
+    }
+    // The DAC mode byte: stored by a byte store or a word store (its top byte), read as a byte or as a word.
+    put(&mut e, 0x61988, 8, 0x1C);
+    assert_eq!((get(&mut e, 0x61988, 8), get(&mut e, 0x61988, 32)), (0x1C, 0x1C00_0000));
+    put(&mut e, 0x61988, 32, 0x5A00_0000);
+    assert_eq!((get(&mut e, 0x61988, 8), get(&mut e, 0x61988, 32)), (0x5A, 0x5A00_0000));
+}
