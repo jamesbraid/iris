@@ -157,6 +157,22 @@ mod tests {
         assert_eq!(t.drawn, 1, "the position draws nothing");
     }
 
+    /// A box that reaches the edges of the store: the fill rule leaves out its left column and bottom row, so column 0 and row 0
+    /// stay dark under a box from (0, 0), and the right column and the top row (the display's top line) are lit. The
+    /// kernel decrements a box's left x and bottom y, clamped at 0, before it sends it, so it too cannot light column 0 or
+    /// row 0 (kona devices/rm/README.md, the fill rule for rectangles, established from `kona_box` and the textport).
+    #[test]
+    fn a_box_to_the_edges_leaves_column_0_and_row_0_dark() {
+        let (mut t, s) = tp();
+        t.command(sf(&s), 2, &[3]);
+        t.command(sf(&s), 5, &[0, 0, 31, 31]);
+        for i in 0..32 {
+            assert_eq!(s.read(0, i, COLOUR_WORD), 0, "column 0, row {i}");
+            assert_eq!(s.read(i, 0, COLOUR_WORD), 0, "row 0, column {i}");
+        }
+        assert_eq!((s.read(1, 1, COLOUR_WORD), s.read(31, 31, COLOUR_WORD), s.read(31, 1, COLOUR_WORD), s.read(1, 31, COLOUR_WORD)), (3, 3, 3, 3));
+    }
+
     /// A box with negative corners (sent as 32-bit words) is clipped.
     #[test]
     fn corners_are_signed() {
