@@ -56,6 +56,12 @@ int sgi_mgras_observe(IrisEngine *h, const IrisMgrasRegion *r);
 int sgi_mgras_pixel(IrisEngine *h, const IrisMgrasRegion *r, uint32_t x,
                      uint32_t y, uint64_t *val);
 
+/* Pixels x0 up to x1 (exclusive) of row y of the buffer r names, current after one observe: the
+   low 32 bits of each wide pixel, 9 bits of an overlay one. out holds x1 - x0 words. A range
+   outside the planes answers IRIS_ENGINE_ERROR. */
+int sgi_mgras_read_row(IrisEngine *h, const IrisMgrasRegion *r, uint32_t y, uint32_t x0,
+                       uint32_t x1, uint32_t *out);
+
 /* The HQ flags as the board holds them (a debug accessor: the interrupt
  * line is iris_engine_irq_levels). */
 uint32_t sgi_mgras_flags(IrisEngine *h);
