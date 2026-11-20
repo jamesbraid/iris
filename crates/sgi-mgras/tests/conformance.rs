@@ -96,3 +96,21 @@ fn a_gpu_loss_posts_gpu_lost_faults_the_engine_and_wakes_the_shell() {
     assert_eq!(seen.iter().filter(|x| matches!(x, Event::DeviceFault(_))).count(), 1, "{seen:?}");
     assert!(e.fault().unwrap().contains("RTX 4090"));
 }
+
+/// `busy_ns` is the wall time the engine's worker spent executing: none before work, some after a threaded
+/// engine ran a store, and none for an inline one, whose work runs inside the calls.
+#[test]
+fn the_workers_busy_time_counts_its_batches_and_not_a_calls() {
+    use sgi_engine::{BoardEngine, Idle, Write};
+    for (mode, threaded) in [(Mode::Inline, false), (Mode::Threaded, true)] {
+        let mut e = MgrasEngine::new(Config::new(Board::High, mode), Ram, None, None).unwrap();
+        assert_eq!(e.busy_ns(), 0);
+        for v in 0..64 {
+            assert_eq!(e.write(REG, 32, v), Write::Done);
+        }
+        assert_eq!(e.wait_idle(0, u64::MAX), Idle::Yes);
+        assert_eq!(e.busy_ns() > 0, threaded, "{mode:?}");
+        let busy = e.busy_ns();
+        assert!(e.busy_ns() >= busy);
+    }
+}

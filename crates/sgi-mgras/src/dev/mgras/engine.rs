@@ -162,6 +162,8 @@ struct Shared<M: HostMem> {
     /// Operations, and FIFO words among them, finished.
     done: AtomicU64,
     words_done: AtomicU64,
+    /// Wall time the worker thread has spent executing batches, in ns.
+    busy_ns: AtomicU64,
     /// Moves whenever the picture may have changed (`frame_generation`).
     generation: AtomicU64,
     front: Arc<Front>,
@@ -232,7 +234,9 @@ fn worker<M: HostMem>(sh: Arc<Shared<M>>) {
             let n = q.ops.len().min(BATCH_MAX);
             batch.extend(q.ops.drain(..n));
         }
+        let began = std::time::Instant::now();
         sh.execute(&mut batch);
+        sh.busy_ns.fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 }
 
@@ -598,6 +602,7 @@ impl<M: HostMem> MgrasEngine<M> {
             idle_cv: Condvar::new(),
             done: AtomicU64::new(0),
             words_done: AtomicU64::new(0),
+            busy_ns: AtomicU64::new(0),
             generation: AtomicU64::new(0),
             front,
             out,
@@ -1068,6 +1073,10 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         let r = region.rect;
         let mut inner = self.sh.inner.lock();
         inner.core.back.observe(&[region.buffer], (r.x0, r.y0, r.x1, r.y1)).map_err(Fault)
+    }
+
+    fn busy_ns(&self) -> u64 {
+        self.sh.busy_ns.load(Ordering::Relaxed)
     }
 
     fn heads(&self) -> u32 {
