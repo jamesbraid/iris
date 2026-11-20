@@ -22,8 +22,11 @@ extern "C" {
 typedef struct IrisMgrasConfig {
     IrisEngineConfig common;
     uint32_t board;         /* 0 Solid IMPACT, 1 High, 2 Maximum */
-    uint32_t flags;         /* bit 0: the Octane's HQ4 front; bit 1: 8-byte DMA page-table entries */
+    uint32_t flags;         /* bit 0: the Octane's HQ4 front; bit 1: 8-byte DMA page-table entries;
+                               bit 2: bdvers and cmap_rev are given (else the board's own) */
     int32_t jit;            /* -1 default, 0 off, 1 on first use, 2 background */
+    uint32_t bdvers[2];     /* the display bus's two board-version bytes */
+    uint32_t cmap_rev[2];   /* the two colour maps' revision registers */
 } IrisMgrasConfig;
 
 /* A box of pixels in one buffer. */

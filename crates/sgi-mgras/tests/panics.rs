@@ -43,6 +43,8 @@ fn config(mode: u32) -> IrisMgrasConfig {
         board: 1,
         flags: 0,
         jit: 0,
+        bdvers: [0; 2],
+        cmap_rev: [0; 2],
     }
 }
 

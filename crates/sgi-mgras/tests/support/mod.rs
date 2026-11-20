@@ -325,8 +325,13 @@ pub fn config(rep_head: &str, mode: Mode, jit: Option<u32>) -> Config {
 
 impl Player {
     pub fn new(cfg: Config, drive: Drive) -> Player {
+        Player::on(cfg, drive, None)
+    }
+
+    /// As `new`, drawing on `gpu`.
+    pub fn on(cfg: Config, drive: Drive, gpu: Option<&Arc<sgi_mgras::wgpu::Gpu>>) -> Player {
         let mem = Mem::default();
-        let e = MgrasEngine::new(cfg, mem.clone(), None, None).expect("engine");
+        let e = MgrasEngine::new(cfg, mem.clone(), gpu, None).expect("engine");
         Player { e, mem, front: Front::new(), reads: Vec::new(), notes: Vec::new(), damage: BTreeMap::new(), drive, bus_faults: Vec::new() }
     }
 
