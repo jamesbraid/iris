@@ -19,6 +19,9 @@
 //!   mode, external clock, true 10-bit output) and the converter's control registers 0xc214 to 0xc216 for
 //!   the format. The converter matrix (0xc200 to 0xc213, its values from two tables the firmware holds) and the
 //!   genlock chip's image are not written: their values are not in the sources read.
+//! - Blanking the board's channel (request 31) writes 1024 zero words to its colour look-up table at 0xf000, so the
+//!   board outputs black (established). The blank field the firmware also sets in 0xc104 is not modelled: its value
+//!   is not in the sources read.
 //! - Requests 1 and 2 write and read a display-bus word, so the diagnostic's register tests reach the device.
 //!
 //! The board's logic family and what the download implements are unknown, so the model keeps no more of it
@@ -46,6 +49,8 @@ const SOFT_RESET: u32 = 0xc000;
 const CONTROL: u32 = 0xc006;
 const CONTROL_DEFAULT: u32 = 0x484;
 const CONVERTER_CONTROL: u32 = 0xc214;
+const LUT: u32 = 0xf000;
+const LUT_WORDS: u32 = 1024;
 
 /// Reads of the load data's bit 7 before the firmware gives a byte up.
 const LOAD_POLLS: u32 = 999;
@@ -139,6 +144,15 @@ impl OptionBoard {
                 None
             }
             _ => None,
+        }
+    }
+
+    /// The board's channel is blanked: the firmware zeroes the colour look-up table.
+    pub fn blank_channel(&mut self) {
+        if let (Some(slave), true) = (self.slave.as_mut(), self.present) {
+            (0..LUT_WORDS).for_each(|i| {
+                slave.write(LUT + i, 0);
+            });
         }
     }
 
