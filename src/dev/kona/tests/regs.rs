@@ -664,3 +664,37 @@ fn widget_control_resets_to_the_host_widget() {
     f.kona.power_on();
     assert_eq!(f.r(WIDGET_CONTROL), 9 << 22);
 }
+
+/// The registers the driver's adaptor reset touches after each pipe reset (kona devices/xg/README.md steps 8 to 11, XG.h and
+/// HIP.h, established as accesses): the request timeout, the water marks and the host interface's two error words are
+/// plain storage with unknown reset values (0 here); the error status reads clear, since no error is modelled, and takes
+/// the write-back. The reset's own sequence runs through them without a log of an unimplemented offset.
+#[test]
+fn the_adaptor_resets_registers_are_storage_and_the_error_status_reads_clear() {
+    const XG_REQ_TIMEOUT: u64 = 0x2c;
+    const XG_ERR_STATUS: u64 = 0x6c;
+    const XG_HI_LO_WATER: u64 = 0x74;
+    const HH_ERR_STAT1: u64 = 0x800390;
+    const HH_ERR_STAT2: u64 = 0x800398;
+    let f = Fixture::new();
+    for off in [XG_REQ_TIMEOUT, XG_ERR_STATUS, XG_HI_LO_WATER, HH_ERR_STAT1, HH_ERR_STAT2] {
+        assert_eq!(f.r(off), 0, "{off:#x} at power-on");
+    }
+    // The sequence of the reset: read the error status, clear the timeout, read it again and write the value back; read
+    // the water marks and write them back with the output-DMA marks 0x3f40; clear the host interface's error words.
+    let status = f.r(XG_ERR_STATUS);
+    f.w(XG_REQ_TIMEOUT, 0);
+    assert_eq!(f.r(XG_ERR_STATUS), status);
+    f.w(XG_ERR_STATUS, status);
+    let marks = f.r(XG_HI_LO_WATER);
+    f.w(XG_HI_LO_WATER, (marks & 0x0fff_0000) | 0x3f40);
+    f.w(HH_ERR_STAT1, 0);
+    f.w(HH_ERR_STAT2, 0);
+    assert_eq!(f.r(XG_HI_LO_WATER), 0x3f40);
+    // Values written are kept; the error status stays clear whatever is written to it.
+    f.w(XG_REQ_TIMEOUT, 0x1234);
+    f.w(HH_ERR_STAT1, 0xffff_ffff);
+    f.w(HH_ERR_STAT2, 0x5a5a_5a5a);
+    f.w(XG_ERR_STATUS, 0xffff_ffff);
+    assert_eq!((f.r(XG_REQ_TIMEOUT), f.r(HH_ERR_STAT1), f.r(HH_ERR_STAT2), f.r(XG_ERR_STATUS)), (0x1234, 0xffff_ffff, 0x5a5a_5a5a, 0));
+}

@@ -28,11 +28,22 @@ pub const INT_DEST_LOWER: u32 = 0x3c;
 pub const INT_VECTORS: u32 = 0x5c;
 pub const PROBE: u32 = 0x64;
 pub const LOW_WINDOW_WRITE: u32 = 0x7c;
+/// The widget's request-timeout register: the driver's adaptor reset writes 0 (kona 9d9f07de devices/xg/XG.h).
+pub const XG_REQ_TIMEOUT: u32 = 0x2c;
+/// The pipe's error status (XG_ERR_STAT, 31 error bits): read by the driver's error report and its adaptor reset,
+/// which writes the value read back (write-one-to-clear, inferred).
+pub const XG_ERR_STATUS: u32 = 0x6c;
+/// The water marks (XG_HI_LO_WATER): the reset keeps the command marks it reads and writes 0x3f40 as the output-DMA marks.
+pub const XG_HI_LO_WATER: u32 = 0x74;
 pub const ONEWIRE: u32 = 0x98;
 pub const NIC: u32 = 0x9c;
 
 // Register window at +0x800000.
 pub const CREDIT: u32 = 0x800208;
+/// The host interface's two error capture words (HH_FCI_ERR_STAT1 and STAT2 on the first generation, HH_GV_ERR_* on the
+/// second), which the adaptor reset writes 0 after every pipe reset.
+pub const HH_ERR_STAT1: u32 = 0x800390;
+pub const HH_ERR_STAT2: u32 = 0x800398;
 pub const CREDIT_CONFIG: u32 = 0x800210;
 pub const RESET_ARG: u32 = 0x800220;
 pub const INTR_END: u32 = 0x800228;

@@ -64,6 +64,11 @@ pub(super) struct Front {
     /// it completes, a frame it announces) is dropped instead of raising a
     /// cause the reset cleared. Not itself reset.
     epoch: u64,
+    /// The registers the adaptor reset writes (`visit_xg`): plain storage, reset values unknown.
+    xg_req_timeout: u32,
+    xg_hi_lo_water: u32,
+    hh_err_stat1: u32,
+    hh_err_stat2: u32,
 }
 
 /// The host widget field of the widget control register.
@@ -101,6 +106,10 @@ impl Front {
             video_delivered: false,
             video_unrouted_logged: false,
             epoch: 0,
+            xg_req_timeout: 0,
+            xg_hi_lo_water: 0,
+            hh_err_stat1: 0,
+            hh_err_stat2: 0,
         }
     }
 
@@ -124,7 +133,7 @@ impl Front {
     /// guest's, and stay. The identity chain's state goes as the text its own save makes.
     pub fn visit<S: super::stream::Stream>(&mut self, s: &mut S) {
         // Every field is named, so a new one fails to compile until it is saved here or left out on purpose.
-        let Self { widget_control: _, dma_widget: _, widget_control_reset: _, widget: _, identity: _, onewire_reg: _, probe_value: _, low_window_write: _, int_dest_upper: _, int_dest_lower: _, int_vectors: _, reset_arg: _, int_enable: _, credit_config: _, int_cause: _, mailbox: _, mailbox_len: _, mailbox_pos: _, completions: _, retrace_tag: _, reset_strobe: _, eeprom_enable: _, loader_3b0: _, loader_328: _, video_delivered: _, video_unrouted_logged: _, epoch: _ } = self;
+        let Self { widget_control: _, dma_widget: _, widget_control_reset: _, widget: _, identity: _, onewire_reg: _, probe_value: _, low_window_write: _, int_dest_upper: _, int_dest_lower: _, int_vectors: _, reset_arg: _, int_enable: _, credit_config: _, int_cause: _, mailbox: _, mailbox_len: _, mailbox_pos: _, completions: _, retrace_tag: _, reset_strobe: _, eeprom_enable: _, loader_3b0: _, loader_328: _, video_delivered: _, video_unrouted_logged: _, epoch: _, xg_req_timeout: _, xg_hi_lo_water: _, hh_err_stat1: _, hh_err_stat2: _ } = self;
         s.u32(&mut self.widget_control);
         self.publish_widget();
         let mut bus = self.identity.bus.save_state().to_string();
@@ -168,10 +177,24 @@ impl Front {
         s.bool(&mut self.video_unrouted_logged);
     }
 
+    /// The registers the driver's adaptor reset touches after each pipe reset (`XG_REQ_TIMEOUT`, `XG_HI_LO_WATER` and the
+    /// two host-interface error words), saved from version 6 of the engine's state.
+    pub fn visit_xg<S: super::stream::Stream>(&mut self, s: &mut S) {
+        for v in [&mut self.xg_req_timeout, &mut self.xg_hi_lo_water, &mut self.hh_err_stat1, &mut self.hh_err_stat2] {
+            s.u32(v);
+        }
+    }
+
+    /// A state that carries none of them: the power-on values.
+    pub fn clear_xg(&mut self) {
+        (self.xg_req_timeout, self.xg_hi_lo_water, self.hh_err_stat1, self.hh_err_stat2) = (0, 0, 0, 0);
+    }
+
     /// Power-on state. The identity chain and the probe value are the
     /// board's, not the driver's, and stay.
     pub fn reset(&mut self) {
         self.set_widget_control(self.widget_control_reset);
+        self.clear_xg();
         self.onewire_reg = 0;
         self.low_window_write = 0;
         self.int_dest_upper = 0;
@@ -332,6 +355,14 @@ impl Front {
             PROBE => self.probe_value,
             ONEWIRE | NIC => self.onewire_reg,
             LOW_WINDOW_WRITE => self.low_window_write,
+            // The registers below are plain storage: the sources give the accesses, not what the pipe does with the
+            // values (kona devices/xg/XG.h and devices/hip/HIP.h). Their reset values are unknown, 0 here.
+            XG_REQ_TIMEOUT => self.xg_req_timeout,
+            // No error is modelled, so the status reads clear.
+            XG_ERR_STATUS => 0,
+            XG_HI_LO_WATER => self.xg_hi_lo_water,
+            HH_ERR_STAT1 => self.hh_err_stat1,
+            HH_ERR_STAT2 => self.hh_err_stat2,
             INT_DEST_UPPER => self.int_dest_upper,
             INT_DEST_LOWER => self.int_dest_lower,
             INT_VECTORS => self.int_vectors,
@@ -368,6 +399,12 @@ impl Front {
             WIDGET_CONTROL => self.set_widget_control(value),
             ONEWIRE | NIC => self.onewire_reg = self.identity.write(value),
             LOW_WINDOW_WRITE => self.low_window_write = value,
+            XG_REQ_TIMEOUT => self.xg_req_timeout = value,
+            // The reset writes back the bits it read, which are none: taken, nothing to clear.
+            XG_ERR_STATUS => {}
+            XG_HI_LO_WATER => self.xg_hi_lo_water = value,
+            HH_ERR_STAT1 => self.hh_err_stat1 = value,
+            HH_ERR_STAT2 => self.hh_err_stat2 = value,
             INT_DEST_UPPER => self.int_dest_upper = value,
             INT_DEST_LOWER => self.int_dest_lower = value,
             INT_VECTORS => self.int_vectors = value,

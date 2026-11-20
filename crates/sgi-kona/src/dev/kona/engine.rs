@@ -37,8 +37,8 @@ use crate::SharedGpu;
 /// The version of the state `save` writes. Version 1 held only a stream between commands;
 /// 2 adds the commands a guest has part way and the credits they owe; 3 the swaps latched for
 /// the next frame; 4 keeps the credits held and parked by source; 5 whether the display option board's
-/// channel exists. A load takes all five.
-pub const STATE_VERSION: u32 = 5;
+/// channel exists; 6 the registers the adaptor reset writes. A load takes all six.
+pub const STATE_VERSION: u32 = 6;
 
 /// Stores `quiesce` and `wait_idle` run between looks at the clock.
 const SLICE: usize = 1 << 12;
@@ -830,6 +830,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         self.credits.visit(&mut w);
         self.back.visit_swaps(&mut w);
         self.back.visit_option(&mut w);
+        self.host.front.lock().visit_xg(&mut w);
         let meta = Meta { version: STATE_VERSION, state_len: w.out.len() as u32, bulk: self.back.bulk_layout() };
         let put = |sink: &mut dyn StateSink, name: &str, index: u64, bytes: Vec<u8>| sink.put(Chunk { name: name.into(), index, bytes }).map_err(|e| e.0);
         let sent = (|| {
@@ -859,6 +860,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         let swaps = meta.version >= 3;
         let by_source = meta.version >= 4;
         let with_option = meta.version >= 5;
+        let with_xg = meta.version >= 6;
         if meta.state_len as usize > 1 << 28 {
             return Err(bad(format!("a state blob of {} bytes", meta.state_len)));
         }
@@ -897,6 +899,9 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
                 if with_option {
                     KonaBackend::check_option(&mut r);
                 }
+                if with_xg {
+                    Front::new(&cfg).visit_xg(&mut r);
+                }
             } else {
                 KonaBackend::check_small(&mut r);
             }
@@ -923,6 +928,11 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
                 self.back.visit_option(&mut r);
             } else {
                 self.back.restore_option(false);
+            }
+            if with_xg {
+                self.host.front.lock().visit_xg(&mut r);
+            } else {
+                self.host.front.lock().clear_xg();
             }
         } else {
             self.back.visit_small(&mut r).map_err(bad)?;
