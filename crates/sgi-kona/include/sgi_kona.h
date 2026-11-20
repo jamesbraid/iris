@@ -98,6 +98,12 @@ int sgi_kona_scanout(IrisEngine *h, uint32_t *buf, size_t cap, uint32_t *w,
                      uint32_t *hgt);
 
 /*
+ * The channels the pipe's display generator has: 8 on a DG5-8, 2 on a DG5-2, with or without its option
+ * board (whose channel is one more once the firmware's probe finds it). 0 for a NULL handle.
+ */
+uint32_t sgi_kona_display_channels(IrisEngine *h);
+
+/*
  * The shell's device for the display option board (a GVO), for a pipe configured with "dg5-2-gvo":
  * the engine calls read for a read of display-bus word addr and write for a store, as the display
  * generator's firmware does for the board when the X server probes it (a write of id + 0x3e8 to the

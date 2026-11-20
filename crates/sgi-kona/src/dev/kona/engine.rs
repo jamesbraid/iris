@@ -489,6 +489,12 @@ impl<M: HostMem> KonaEngine<M> {
         (w, h, self.pixels.frame())
     }
 
+    /// The channels the display generator has (8 on a DG5-8, 2 on a DG5-2), as the configuration chose its board;
+    /// the option board's channel is one more once it is probed.
+    pub fn display_channels(&self) -> u32 {
+        self.core.cfg.display_channels()
+    }
+
     /// The shell's device for the display option board (a GVO), or none: it answers the display-bus accesses
     /// the firmware makes for the board (`display::option`), and the board's channel exists once the firmware's
     /// probe of it succeeds. The configuration must allow it (`KonaConfig::with_option_slave`). It stays through
