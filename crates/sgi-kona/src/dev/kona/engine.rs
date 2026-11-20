@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use sgi_engine::{BoardEngine, Chunk, Event, Fault, HostMem, Idle, Interrupt, Outbox, Pump, Read, Rect, Refused, Source, StallOn, StateSink, StateSource, Swap, Write};
+use sgi_engine::{BoardEngine, Chunk, Event, Fault, HeadTiming, HostMem, Idle, Interrupt, Outbox, Pump, Read, Rect, Refused, Source, StallOn, StateSink, StateSource, Swap, Write};
 
 use super::back::snapshot::Layout;
 use super::back::KonaBackend;
@@ -532,6 +532,15 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         // The compose is 0xAABBGGRR; the scan-out the shells share is 0x00RRGGBB.
         out.extend(pixels.iter().map(|p| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff)));
         Ok((w != 0 && h != 0).then_some((w, h)))
+    }
+
+    fn head_timing(&self, head: u32) -> Option<HeadTiming> {
+        if head != 0 {
+            return None;
+        }
+        let (clock_hz, frame_clocks, fields, lines, generation) = self.back.head_timing()?;
+        // The pipe's retrace is the shell's: its clock starts the phase.
+        Some(HeadTiming { frame_clocks, clock_hz, fields, lines, epoch_ns: -1, generation })
     }
 
     fn frame_size(&self, head: u32) -> Option<(u32, u32)> {

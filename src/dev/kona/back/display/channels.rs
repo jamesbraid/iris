@@ -108,6 +108,10 @@ pub struct Channel {
     pub pan: [u32; 4],
     /// The resize read's words 8 to 15: the placement resolution's words 1 to 8.
     pub placement: [u32; 8],
+    /// The format load's timing words 19 to 22 (established, the display generator's format-load
+    /// table): frames a second times 65536, fields, total lines, total pixels a line. Zero until a
+    /// format loads. Not saved: the next format load sends them again.
+    pub timing: [u32; 4],
 }
 
 impl Channel {
@@ -126,12 +130,13 @@ impl Channel {
             name: [0; NAME_WORDS],
             pan: [0, 0, FB.0, FB.1],
             placement: [1, 1, 1, 1, FB.0, FB.1, 0, 0],
+            timing: [0; 4],
         }
     }
 
     fn visit<S: Stream>(&mut self, s: &mut S) {
         // Every field is named, so a new one fails to compile until it is saved here or left out on purpose.
-        let Self { enabled: _, loaded: _, format: _, input: _, blanked: _, gamma_map: _, cursor_priority: _, source: _, name: _, pan: _, placement: _ } = self;
+        let Self { enabled: _, loaded: _, format: _, input: _, blanked: _, gamma_map: _, cursor_priority: _, source: _, name: _, pan: _, placement: _, timing: _ } = self;
         s.bool(&mut self.enabled);
         s.bool(&mut self.loaded);
         s.u32(&mut self.format.0);
@@ -144,6 +149,16 @@ impl Channel {
         s.u32s(&mut self.name);
         s.u32s(&mut self.pan);
         s.u32s(&mut self.placement);
+    }
+}
+
+impl Channel {
+    /// The timing the format load gave, as (clock Hz, frame clocks, fields, lines): a frame is 65536 clocks of
+    /// `frames a second * 65536` Hz, so the period is exact. None until a format with a frame rate and a line
+    /// count loads.
+    pub fn head_timing(&self) -> Option<(u32, u64, u32, u32)> {
+        let [rate, fields, lines, _] = self.timing;
+        (self.enabled && rate != 0 && lines != 0).then_some((rate, 65536, fields.max(1), lines))
     }
 }
 
@@ -360,6 +375,7 @@ impl Channels {
             VIDEO_DISABLE_CHANNEL => {
                 ch.enabled = false;
                 ch.loaded = false;
+                ch.timing = [0; 4];
             }
             VIDEO_LOAD_FORMAT => {
                 if d(23) == 0 || d(24) == 0 || d(23) > MAX_DIM || d(24) > MAX_DIM {
@@ -367,6 +383,7 @@ impl Channels {
                     return;
                 }
                 ch.format = (d(24), d(23));
+                ch.timing = [d(19), d(20), d(21), d(22)];
                 for (i, w) in ch.name.iter_mut().enumerate() {
                     *w = d(2 + i);
                 }
