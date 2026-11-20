@@ -11,7 +11,9 @@ test = true
 doctest = false
 
 [features]
-default = ["wgpu"]
+default = ["wgpu", "engine-crate"]
+# Marks the files as built in this crate, not iris: the mounted whole-board tests skip what needs iris's board.
+engine-crate = []
 wgpu = ["scanout"]
 # The GPU scan-out over the unit's pixel pages (src/dev/mgras/wgpu/scanout.rs).
 scanout = []

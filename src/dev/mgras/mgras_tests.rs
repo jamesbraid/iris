@@ -147,6 +147,7 @@ fn fifo_and_direct_writes_keep_program_order() {
     m.stop_engines();
 }
 
+#[cfg(not(feature = "engine-crate"))]
 #[test]
 fn snapshots_round_trip_and_drawing_continues_on_every_impact_product() {
     for kind in [GraphicsBoard::SolidImpact, GraphicsBoard::HighImpact, GraphicsBoard::MaxImpact] {
@@ -181,6 +182,7 @@ fn snapshots_round_trip_and_drawing_continues_on_every_impact_product() {
     }
 }
 
+#[cfg(not(feature = "engine-crate"))]
 #[test]
 fn snapshot_preserves_a_partial_command_fifo_packet() {
     let m = live_board();
@@ -201,6 +203,7 @@ fn snapshot_preserves_a_partial_command_fifo_packet() {
     m.stop_engines();
 }
 
+#[cfg(not(feature = "engine-crate"))]
 #[cfg(feature = "wgpu")]
 #[test]
 fn wgpu_snapshot_reseeds_the_resident_mirror() {
@@ -354,6 +357,7 @@ fn dma_read_to_host_memory() {
     m.stop_engines();
 }
 
+#[cfg(not(feature = "engine-crate"))]
 /// A board in the Octane's order (see `Mgras::start_reads_at_kick`), set
 /// before the engines start.
 fn octane_board() -> Arc<Mgras> {
@@ -386,6 +390,7 @@ fn read_block_armed(m: &Mgras) {
     block(m, 20, 30, 22, 31);
 }
 
+#[cfg(not(feature = "engine-crate"))]
 /// The Octane X server's order: XFRCONTROL 8 arms the read, the block and
 /// the host kick run it, and the XFRCONTROL 9 after the kick finds it
 /// already run. That start is expected, so nothing is reported, and the
@@ -408,6 +413,7 @@ fn octane_read_runs_at_the_kick_and_the_start_after_it_is_silent() {
     m.stop_engines();
 }
 
+#[cfg(not(feature = "engine-crate"))]
 /// A start with no kick behind it is still reported: nothing ran a read.
 #[test]
 fn octane_start_with_no_kick_is_still_reported() {
@@ -422,6 +428,7 @@ fn octane_start_with_no_kick_is_still_reported() {
     m.stop_engines();
 }
 
+#[cfg(not(feature = "engine-crate"))]
 /// A kick with no read armed waits until the raster side is armed and
 /// started. The start that follows takes the waiting read, so nothing is
 /// reported.
@@ -490,6 +497,7 @@ fn switch_away_from_a_slot_outside_eram_is_reported() {
     m.stop_engines();
 }
 
+#[cfg(not(feature = "engine-crate"))]
 #[test]
 fn ge11_microcode_reads_back_as_the_driver_verifies_it() {
     let m = live_board();
@@ -507,6 +515,7 @@ fn ge11_microcode_reads_back_as_the_driver_verifies_it() {
     m.stop_engines();
 }
 
+#[cfg(not(feature = "engine-crate"))]
 #[test]
 fn geometry_diagnostics_follow_the_fitted_engine_count() {
     use crate::config::GraphicsBoard;
@@ -586,6 +595,7 @@ fn maximum_impact_config_routes_work_to_one_raster_engine() {
     m.stop_engines();
 }
 
+#[cfg(not(feature = "engine-crate"))]
 /// A text recording replays through the same engine as the goldens.
 #[test]
 fn text_recording_replays() {
@@ -612,6 +622,7 @@ fn text_recording_replays() {
     m.stop_engines();
 }
 
+#[cfg(not(feature = "engine-crate"))]
 /// A real capture (testdata/xsetroot_red.txt) replayed on a fresh board:
 /// the exposed root takes colour index 1 (red in the IRIS default "4sight"
 /// colormap, loaded long before the capture), and the Console window, not
@@ -631,6 +642,7 @@ fn xsetroot_red_trace() {
     m.stop_engines();
 }
 
+#[cfg(not(feature = "engine-crate"))]
 /// Maximum Impact's two raster engines each draw half the scanlines of
 /// one picture: the captures come out the same as on one engine, word for
 /// word (the state hash covers all pixel memory and the clip IDs).
@@ -709,6 +721,7 @@ fn ci8_window_shows_eight_planes() {
     assert_eq!(out[10], 0xFF56_5656, "index 0x23, stale planes 23:8 ignored");
 }
 
+#[cfg(not(feature = "engine-crate"))]
 /// Probe: the display size a recording's final state programs into the VC3.
 /// MGRAS_SIZE_PROBE=<rec> cargo test --release mgras_size_probe -- --nocapture
 #[test]
@@ -3679,6 +3692,7 @@ fn gl_raster_color_query_is_latched() {
     m.stop_engines();
 }
 
+#[cfg(not(feature = "engine-crate"))]
 /// `bound_busy_status`: STATUS's idle bits read set once a busy stretch
 /// has outlasted the bound, and the stretch ends when the board goes idle.
 /// Without the option, nothing changes.
@@ -3697,6 +3711,7 @@ fn bounded_busy_status_reads_idle_after_the_bound() {
     m.stop_engines();
 }
 
+#[cfg(not(feature = "engine-crate"))]
 /// A stretch that ended without a STATUS read seeing it must not leave the
 /// next one already overdue: the store that restarts work restarts the bound.
 #[test]
@@ -4146,6 +4161,7 @@ fn real_board_fogtest() {
     assert!(bad.is_empty(), "more than 3 levels from the board: {bad:?}");
 }
 
+#[cfg(not(feature = "engine-crate"))]
 /// Composed-frame pins for IMPACT with no guest. A checked-in capture
 /// replays on a fresh board; the board's scan-out (`snapshot_frame` +
 /// `Frame::compose`, what the refresh thread and `save_shot` run) makes the
@@ -4185,6 +4201,7 @@ fn impact_frame_hash(text: &str, kind: crate::config::GraphicsBoard) -> String {
     crate::test_frame_pin::frame_hash(w, h, OUT_STRIDE, &out)
 }
 
+#[cfg(not(feature = "engine-crate"))]
 #[test]
 fn impact_composed_frames_are_pinned() {
     use crate::config::GraphicsBoard::{HighImpact, MaxImpact};
