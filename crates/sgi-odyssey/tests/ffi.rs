@@ -144,6 +144,15 @@ fn the_gpu_counters_are_there_with_a_gpu_unit_and_refused_without() {
 }
 
 #[test]
+fn the_busy_time_accessor_is_the_generic_one_and_a_null_handle_reads_zero() {
+    let v12 = CString::new("v12").unwrap();
+    let h = unsafe { sgi_odyssey_new(&config(v12.as_ptr(), 1), &host()) };
+    assert_eq!(unsafe { sgi_odyssey_busy_ns(h) }, unsafe { iris_engine_busy_ns(h) });
+    assert_eq!(unsafe { sgi_odyssey_busy_ns(null_mut()) }, 0);
+    unsafe { iris_engine_free(h) };
+}
+
+#[test]
 fn the_cursor_accessor_answers_the_registers_and_refuses_a_null_out() {
     let v12 = CString::new("v12").unwrap();
     let h = unsafe { sgi_odyssey_new(&config(v12.as_ptr(), 0), &host()) };

@@ -71,6 +71,13 @@ int sgi_odyssey_slice_open(IrisEngine *h);
  */
 int sgi_odyssey_cursor(IrisEngine *h, int32_t *x, int32_t *y, uint32_t *shown);
 
+/*
+ * Wall time in ns the board's threads (the command FIFO's and the raster unit's) have spent running work since the
+ * engine was built, not waiting for it, summed over them, so it can exceed wall time. The same number as
+ * iris_engine_busy_ns.
+ */
+uint64_t sgi_odyssey_busy_ns(IrisEngine *h);
+
 /* What the GPU unit has done. */
 typedef struct IrisVproGpuCounters {
     uint64_t records;

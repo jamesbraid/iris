@@ -519,6 +519,10 @@ impl BoardEngine for VproEngine {
         }))
     }
 
+    fn busy_ns(&self) -> u64 {
+        self.locks.busy_ns()
+    }
+
     fn head_timing(&self, head: u32) -> Option<HeadTiming> {
         if head != 0 {
             return None;

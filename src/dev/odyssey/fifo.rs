@@ -157,6 +157,8 @@ pub(super) struct CommandFifo {
     hurry: CachePadded<AtomicBool>,
     /// The board's thread is running stores.
     pub slice: CachePadded<AtomicBool>,
+    /// Wall time the board's thread has spent running stores, in ns (`BoardLocks::busy_ns`).
+    pub busy_ns: AtomicU64,
     exit: AtomicBool,
     /// Called each time the board's thread retires stores (`on_retire`).
     retired_hook: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
@@ -206,6 +208,7 @@ impl Default for CommandFifo {
             asleep: CachePadded::new(AtomicBool::new(false)),
             hurry: CachePadded::new(AtomicBool::new(false)),
             slice: CachePadded::new(AtomicBool::new(false)),
+            busy_ns: AtomicU64::new(0),
             exit: AtomicBool::new(false),
             retired_hook: std::sync::OnceLock::new(),
             sleeper: Mutex::new(None),

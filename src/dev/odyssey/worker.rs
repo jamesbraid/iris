@@ -114,6 +114,7 @@ impl BoardLocks {
             #[cfg(not(test))]
             let words = 0;
             self.fifo.slice.store(true, SeqCst);
+            let began = std::time::Instant::now();
             {
                 // SAFETY: this is the board's thread, which owns the state
                 // while it runs stores (BoardCell).
@@ -129,8 +130,16 @@ impl BoardLocks {
                 crate::pf_end!(crate::perfetto::events::ODSY_SLICE);
                 crate::pf_value!(self.fifo.pf_level, crate::perfetto::events::ODSY_CFIFO_LEVEL, self.fifo.level());
             }
+            self.fifo.busy_ns.fetch_add(began.elapsed().as_nanos() as u64, SeqCst);
             self.fifo.slice.store(false, SeqCst);
         }
+    }
+
+    /// Wall time, in ns, the board's thread has spent running stores and the raster thread running jobs, since the
+    /// engine was built: summed over the two, so it can exceed wall time. Work run inside a caller's access (inline
+    /// mode, a drain) is in that call's own time and not here.
+    pub fn busy_ns(&self) -> u64 {
+        self.fifo.busy_ns.load(SeqCst) + self.raster.busy_ns()
     }
 }
 
