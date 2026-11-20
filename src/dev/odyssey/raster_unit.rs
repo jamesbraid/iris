@@ -43,7 +43,7 @@ use super::assembly::{LINES, LINE_LOOP, LINE_STRIP, POINTS, TRIANGLES};
 
 use std::cell::UnsafeCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::{Relaxed, SeqCst}};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -249,6 +249,8 @@ pub(super) struct RasterQueue<const HEADS: usize = 1> {
     /// front end uses it only for a job it runs itself, with no raster thread
     /// (`RasterQueue::ctx`).
     ctx: UnsafeCell<RasterCtx>,
+    /// Wall time the raster thread has spent running jobs, in ns (`BoardLocks::busy_ns`).
+    busy_ns: AtomicU64,
     /// Jobs submitted and not yet finished, and one more while `held`.
     pending: AtomicU32,
     /// The shader and back end hold quads of finished draws: the raster
@@ -323,6 +325,7 @@ impl<const HEADS: usize> Default for RasterQueue<HEADS> {
             // SAFETY: as the ring.
             spare: unsafe { Box::new_zeroed().assume_init() },
             ctx: UnsafeCell::new(RasterCtx::new()),
+            busy_ns: AtomicU64::new(0),
             pending: AtomicU32::new(0),
             held: AtomicBool::new(false),
             flush: AtomicBool::new(false),
@@ -388,6 +391,11 @@ unsafe fn drop_entry(kind: u32, value: u64) {
 }
 
 impl RasterQueue {
+    /// Wall time the raster thread has spent running jobs, in ns.
+    pub fn busy_ns(&self) -> u64 {
+        self.busy_ns.load(Relaxed)
+    }
+
     /// Whether jobs queue for the raster thread.
     pub fn threaded(&self) -> bool {
         self.running.load(SeqCst)
@@ -714,7 +722,8 @@ impl RasterQueue {
             };
             #[cfg(not(test))]
             let slice = RASTER_SLICE;
-            let deadline = Instant::now() + slice;
+            let began = Instant::now();
+            let deadline = began + slice;
             crate::pf_begin!(crate::perfetto::events::ODSY_RASTER_SLICE, self.pending());
             while let Some((kind, value)) = self.ring.peek() {
                 self.ring.consume();
@@ -797,6 +806,7 @@ impl RasterQueue {
                     break;
                 }
             }
+            self.busy_ns.fetch_add(began.elapsed().as_nanos() as u64, Relaxed);
             #[cfg(test)]
             {
                 let ms = self.test_slice_end_ms.load(SeqCst);

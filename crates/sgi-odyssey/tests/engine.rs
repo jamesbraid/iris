@@ -232,6 +232,26 @@ fn a_fence_raises_its_interrupt_only_after_its_write_back() {
     assert!(drain(&mut e).contains(&packet(SOFTSYNC_VECTOR, true)));
 }
 
+/// `busy_ns` is the wall time the board's own threads spent running work: nothing before any, some after a
+/// command ran on the board's thread, and nothing ever for an inline engine, whose work runs inside the calls.
+#[test]
+fn the_board_threads_busy_time_counts_their_work_and_not_a_calls() {
+    let run = |mode| {
+        let (mut e, _) = engine(mode);
+        assert_eq!(BoardEngine::busy_ns(&e), 0, "nothing run yet");
+        route_to_heart(&mut e);
+        put(&mut e, HOST_WRITE_UPPER, 0);
+        put(&mut e, HOST_WRITE_LOWER, 0x10000);
+        e.push_words(CMD_FIFO, &[0x0001_0a5a, 5 | 1 << 15, 0xbeef]);
+        assert_eq!(e.wait_idle(0, u64::MAX), Idle::Yes);
+        let busy = BoardEngine::busy_ns(&e);
+        assert!(busy >= BoardEngine::busy_ns(&e), "never goes back");
+        busy
+    };
+    assert!(run(Mode::Threaded) > 0, "the board's thread ran the command");
+    assert_eq!(run(Mode::Inline), 0, "an inline engine runs it inside the calls");
+}
+
 /// Composing the scan-out on the CPU path does not wait for the board: it returns while the raster
 /// thread is held inside a write, which a shell calling it under the BQL could not outlast.
 #[test]

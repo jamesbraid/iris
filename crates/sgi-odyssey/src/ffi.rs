@@ -193,6 +193,17 @@ pub unsafe extern "C" fn sgi_odyssey_cursor(h: *mut IrisEngine, x: *mut i32, y: 
     }
 }
 
+/// Wall time in ns the board's threads (the command FIFO's and the raster unit's) have spent running work since
+/// the engine was built, not waiting for it, summed over them, so it can exceed wall time. The same number as
+/// `iris_engine_busy_ns`; 0 for a NULL handle.
+///
+/// # Safety
+/// `h` is a live VPro handle.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_odyssey_busy_ns(h: *mut IrisEngine) -> u64 {
+    unsafe { call::<VproEngine, _>(h, Point::Flags, 0, |e| BoardEngine::busy_ns(e)) }
+}
+
 /// What the GPU unit has done, for a shell that asserts a GPU run executed GPU records.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
