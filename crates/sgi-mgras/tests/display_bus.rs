@@ -107,6 +107,25 @@ fn the_pp1_revision_follows_the_board_when_none_is_given() {
     assert_eq!(rev(Board::Max, 3), 7, "two GE12: H");
 }
 
+/// PP1SELECT (0x071c08) reads back what was written whatever the XMAP index is: it was read at a key that carried the
+/// index, so it read 0 once the kernel had selected an index. 0x071f00 is the DIB register file (gr4 CMAP.h
+/// `XMAP_REG_DIB`), which the kernel stores to and the scan-out reads its buffer pointers from, so it stores
+/// and reads back as written.
+#[test]
+fn pp1select_reads_back_at_any_index_and_the_dib_registers_store() {
+    let mut e = engine(|_| {});
+    for index in [0, 4, 8, 0x1c] {
+        put(&mut e, XMAP_INDEX, 8, index);
+        put(&mut e, 0x61C08, 8, 0x06);
+        assert_eq!((get(&mut e, 0x61C08, 8), get(&mut e, 0x61C08, 32)), (0x06, 0x0600_0000), "index {index}");
+        put(&mut e, 0x61C08, 8, 0x01);
+        assert_eq!(get(&mut e, 0x61C08, 8), 0x01);
+    }
+    put(&mut e, XMAP_INDEX, 8, 0);
+    put(&mut e, 0x61F00, 32, 0x1234_5678);
+    assert_eq!(get(&mut e, 0x61F00, 32), 0x1234_5678);
+}
+
 #[test]
 fn vc3_register_0x1f_has_its_revision_in_bits_7_and_6_and_stores_the_rest() {
     let mut e = engine(|_| {});

@@ -304,6 +304,8 @@ impl Xmap {
     fn read(&mut self, t: Txn) -> u32 {
         let v = match t.crs {
             xmap::INDEX => self.index,
+            // Written at key (PP1SELECT, 0), so read there, whatever the index is.
+            xmap::PP1SELECT => self.regs.get(key(xmap::PP1SELECT, 0)),
             // The raster engine to pixel processor link reports its sync
             // signature here; 1 in each nibble lane means "in sync".
             xmap::RE_RAC => 0x0001_0101,
