@@ -338,8 +338,8 @@ impl Front {
             CREDIT => credit,
             CREDIT_CONFIG => self.credit_config,
             RESET_ARG => self.reset_arg,
-            // Software never reads it (inferred); the bits it holds are those
-            // of the status register.
+            // The pipe-manager tool reads it (kona 1b52fca6a49f, software/diags/kpm/hip_registers.tsv);
+            // what the kernel does with it is unknown. The bits it holds are those of the status register.
             INT_ENABLE => self.int_enable,
             INT_CAUSE => self.int_cause,
             RETRACE_TAG => self.retrace_tag,
