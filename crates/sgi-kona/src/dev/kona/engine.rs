@@ -504,6 +504,35 @@ impl<M: HostMem> KonaEngine<M> {
         self.back.channel_window(index, self.core.managed)
     }
 
+    /// Head `head`'s window of the managed area, (x, y from the top, width, height): its channel's input
+    /// rectangle (the whole area for a channel that has not been resized), or the whole area while no channel
+    /// runs; None for no such head.
+    fn head_window(&self, head: u32) -> Option<(u32, u32, u32, u32)> {
+        let (w, h) = self.core.managed;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let running = self.back.running_channels();
+        match running.get(head as usize) {
+            Some(&c) => Some(self.back.channel_window(c, self.core.managed).unwrap_or((0, 0, w, h))),
+            None => (head == 0 && running.is_empty()).then_some((0, 0, w, h)),
+        }
+    }
+
+    /// Head `head` shows the whole managed area, the only frame a GPU buffer can be lent for.
+    fn head_is_whole(&self, head: u32) -> bool {
+        self.head_window(head) == Some((0, 0, self.core.managed.0, self.core.managed.1))
+    }
+
+    /// The pixels of `window` of the composed frame, `0x00RRGGBB` in rows from the top, with its size.
+    fn window_pixels(&mut self, (x, y, w, h): (u32, u32, u32, u32)) -> (u32, u32, Vec<u32>) {
+        let (fw, _, pixels) = self.compose();
+        // The compose is 0xAABBGGRR; the scan-out the shells share is 0x00RRGGBB.
+        let rows = (y..y + h).flat_map(|row| pixels.get((row * fw + x) as usize..(row * fw + x + w) as usize).unwrap_or(&[]).iter().map(|p| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff)));
+        let out: Vec<u32> = rows.collect();
+        if out.len() == (w * h) as usize { (w, h, out) } else { (0, 0, Vec::new()) }
+    }
+
     /// `channel_window` for a channel named as a request names it: a display channel's number, or the option
     /// board's index or VOC id.
     pub fn channel_window_of(&self, channel: u32) -> Option<(u32, u32, u32, u32)> {
@@ -518,11 +547,8 @@ impl<M: HostMem> KonaEngine<M> {
     /// The pixels of `channel_window`, `0x00RRGGBB` in rows from the top, with its size: what the channel's
     /// output shows, for a device that takes the picture (the option board). Composes the frame as `compose`.
     pub fn channel_scanout(&mut self, index: usize) -> Option<(u32, u32, Vec<u32>)> {
-        let (x, y, w, h) = self.channel_window(index)?;
-        let (fw, _, pixels) = self.compose();
-        let rows = (y..y + h).flat_map(|row| pixels.get((row * fw + x) as usize..(row * fw + x + w) as usize).unwrap_or(&[]).iter().map(|p| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff)));
-        let out: Vec<u32> = rows.collect();
-        (out.len() == (w * h) as usize).then_some((w, h, out))
+        let window = self.channel_window(index)?;
+        Some(self.window_pixels(window)).filter(|(w, h, _)| *w != 0 && *h != 0)
     }
 
     /// The frame the display would show, composed on the GPU and left there for a scan-out on the
@@ -566,8 +592,10 @@ impl<M: HostMem> KonaEngine<M> {
 impl<M: HostMem> BoardEngine for KonaEngine<M> {
     type Region = Region;
 
+    /// One head for each running channel (the display channels, then the option board's), each showing its
+    /// input rectangle of the managed area; one head, the whole managed area, while none runs.
     fn heads(&self) -> u32 {
-        1
+        self.back.running_channels().len().max(1) as u32
     }
 
     fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
@@ -575,12 +603,9 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         if let Some(f) = self.fault_now() {
             return Err(Fault(f));
         }
-        if head != 0 {
-            return Ok(None);
-        }
-        let (w, h, pixels) = self.compose();
-        // The compose is 0xAABBGGRR; the scan-out the shells share is 0x00RRGGBB.
-        out.extend(pixels.iter().map(|p| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff)));
+        let Some(window) = self.head_window(head) else { return Ok(None) };
+        let (w, h, pixels) = self.window_pixels(window);
+        out.extend(pixels);
         Ok((w != 0 && h != 0).then_some((w, h)))
     }
 
@@ -592,28 +617,26 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         let size = self.scanout(head, out)?;
         let widen = |c: u32| (c << 2) | (c >> 6);
         out.iter_mut().for_each(|p| *p = widen(*p >> 16 & 0xff) << 20 | widen(*p >> 8 & 0xff) << 10 | widen(*p & 0xff));
-        if let Some((w, h)) = size {
+        // The DAC cursor is a position on the whole screen: a head that shows only a window of it has none drawn.
+        if let (Some((w, h)), true) = (size, self.head_window(head) == Some((0, 0, self.core.managed.0, self.core.managed.1))) {
             self.back.draw_dac_cursor_wide(out, w as usize, w as usize, h as usize);
         }
         Ok(size)
     }
 
     fn head_timing(&self, head: u32) -> Option<HeadTiming> {
-        if head != 0 {
-            return None;
-        }
-        let (clock_hz, frame_clocks, fields, lines, generation) = self.back.head_timing()?;
+        let channel = *self.back.running_channels().get(head as usize)?;
+        let (clock_hz, frame_clocks, fields, lines, generation) = self.back.channel_timing(channel)?;
         // The pipe's retrace is the shell's: its clock starts the phase.
         Some(HeadTiming { frame_clocks, clock_hz, fields, lines, epoch_ns: -1, generation })
     }
 
     fn frame_size(&self, head: u32) -> Option<(u32, u32)> {
-        let (w, h) = self.core.managed;
-        (head == 0 && w != 0 && h != 0).then_some((w, h))
+        self.head_window(head).map(|(_, _, w, h)| (w, h))
     }
 
     fn frame_generation(&self, head: u32) -> u64 {
-        if head != 0 {
+        if self.head_window(head).is_none() {
             return 0;
         }
         1 + self.activity
@@ -621,7 +644,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
 
     #[cfg(feature = "wgpu")]
     fn lend_frame(&mut self, head: u32) -> Result<Option<sgi_engine::LentFrame>, Fault> {
-        if head != 0 {
+        if !self.head_is_whole(head) {
             return Ok(None);
         }
         let generation = self.frame_generation(0);
@@ -631,7 +654,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
 
     #[cfg(feature = "wgpu")]
     fn compose_into(&mut self, head: u32, dst: &dyn std::any::Any, stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
-        if head != 0 {
+        if !self.head_is_whole(head) {
             return Ok(None);
         }
         if let Some(f) = self.fault_now() {
