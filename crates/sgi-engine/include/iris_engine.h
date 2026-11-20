@@ -267,6 +267,28 @@ uint32_t iris_engine_heads(IrisEngine *h);
 int iris_engine_scanout(IrisEngine *h, uint32_t head, uint32_t *buf,
                         size_t cap, uint32_t *w, uint32_t *hgt);
 
+/* A head's scan-out timing: a frame is frame_clocks clocks of clock_hz in fields fields, so retrace n falls at
+ * epoch + n * frame_clocks / (fields * clock_hz); lines lines in all. epoch_ns is when retrace 0 fell in the
+ * iris_engine_advance time base, or -1 where the shell's clock starts the phase. generation changes whenever
+ * the timing or the phase restarts. */
+typedef struct IrisEngineHeadTiming {
+    uint64_t frame_clocks;
+    int64_t epoch_ns;
+    uint64_t generation;
+    uint32_t clock_hz;
+    uint32_t fields;
+    uint32_t lines;
+    uint32_t reserved;
+} IrisEngineHeadTiming;
+
+/* The timing of head's scan-out: 1 with *t set, 0 for none (the shell keeps its default). */
+int iris_engine_head_timing(IrisEngine *h, uint32_t head, IrisEngineHeadTiming *t);
+
+/* As iris_engine_scanout, x2r10g10b10 a pixel (2 unused bits, then red, green, blue of 10): the top 8 bits of
+ * each colour are the 8-bit scan-out's. A board with 8-bit colour maps repeats their top bits. */
+int iris_engine_scanout10(IrisEngine *h, uint32_t head, uint32_t *buf,
+                          size_t cap, uint32_t *w, uint32_t *hgt);
+
 /* When head next needs iris_engine_advance, in ns: 1 with *when set, 0 for none. */
 int iris_engine_head_deadline(IrisEngine *h, uint32_t head, uint64_t *when);
 

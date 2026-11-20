@@ -541,3 +541,24 @@ fn a_frame_composes_into_the_callers_buffer_and_the_generation_says_when_it_chan
     let lent = LentFrame { width: 4, height: 2, stride: 4, words: FrameWords::Abgr, generation: 7, buffer: Arc::new(0u8) };
     assert_eq!((lent.words, lent.generation), (FrameWords::Abgr, 7));
 }
+
+#[test]
+fn a_head_reports_its_timing_or_none_and_widens_its_colours_to_ten_bits() {
+    let (mut e, _) = mock(MockConfig::default());
+    assert_eq!(e.head_timing(0), None, "none loaded: the shell keeps its default");
+    let t = e.head_timing(1).unwrap();
+    assert_eq!((t.frame_clocks, t.clock_hz, t.fields, t.lines, t.epoch_ns, t.generation), (1_000_000, 60_000_000, 2, 525, -1, 3));
+    assert_eq!(e.head_timing(2), None);
+    // The mock's 8-bit frame, widened: the top 8 bits of each ten are the 8-bit colour.
+    let mut eight = Vec::new();
+    let mut ten = Vec::new();
+    assert_eq!(e.scanout(1, &mut eight), Ok(Some((4, 2))));
+    assert_eq!(e.scanout10(1, &mut ten), Ok(Some((4, 2))));
+    for (a, b) in eight.iter().zip(&ten) {
+        let (r, g, bl) = (a >> 16 & 0xff, a >> 8 & 0xff, a & 0xff);
+        assert_eq!((b >> 22, b >> 12 & 0xff, b >> 2 & 0xff), (r, g, bl), "{a:#x} -> {b:#x}");
+        assert_eq!(b >> 30, 0, "the two unused bits");
+    }
+    assert_eq!(e.scanout10(2, &mut ten), Ok(None));
+    assert_eq!(ten.len(), 0);
+}
