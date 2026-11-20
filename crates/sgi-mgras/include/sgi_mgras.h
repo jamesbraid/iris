@@ -22,7 +22,7 @@ extern "C" {
 typedef struct IrisMgrasConfig {
     IrisEngineConfig common;
     uint32_t board;         /* 0 Solid IMPACT, 1 High, 2 Maximum */
-    uint32_t flags;         /* bit 0: the Octane's HQ4 front */
+    uint32_t flags;         /* bit 0: the Octane's HQ4 front; bit 1: 8-byte DMA page-table entries */
     int32_t jit;            /* -1 default, 0 off, 1 on first use, 2 background */
 } IrisMgrasConfig;
 

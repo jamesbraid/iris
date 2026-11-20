@@ -296,23 +296,65 @@ const DL_PORT: usize = 2;
 const DL_MAX_DEPTH: usize = 64;
 const DL_MAX_SEGMENTS: u32 = 1 << 20;
 
+/// A page table in host memory: big-endian entries of `entry` bytes (4 or
+/// 8), one per 4 KB page.
+#[derive(Clone, Copy)]
+struct PageTable {
+    base: u64,
+    entry: u32,
+}
+
+impl PageTable {
+    /// The table a register pair names. With 8-byte entries the high word's
+    /// low byte is the node and the low word is entry 0's byte address
+    /// (flag bits below the entry size); with 4-byte ones the low word is
+    /// the address.
+    fn of(hi: u32, lo: u32, entry: u32) -> PageTable {
+        let base = if entry == 8 { ((hi & 0xFF) as u64) << 32 | (lo & !7) as u64 } else { (lo & !3) as u64 };
+        PageTable { base, entry }
+    }
+
+    /// Whether the table is a real one: between transfers the kernel parks
+    /// the base at a small dummy value.
+    fn is_parked(&self) -> bool {
+        self.base as u32 & 0xFFFF_F000 == 0
+    }
+
+    /// The byte address of the frame of page `idx`.
+    fn frame(&self, mem: &dyn HostMem, idx: u32) -> Option<u64> {
+        if self.entry == 8 {
+            let at = self.base.wrapping_add(8 * idx as u64);
+            let mut b = [0u8; 8];
+            mem.read(at, &mut b).ok()?;
+            Some((u64::from_be_bytes(b) & FRAME_MASK_8) << 12)
+        } else {
+            let at = (self.base as u32).wrapping_add(4 * idx) as u64;
+            mem.read32(at).map(|r| (r << 12) as u64)
+        }
+    }
+}
+
+/// An 8-byte entry's frame number: 28 bits, the node in bits 27:20, so the
+/// frame's byte address stays in the 40-bit physical space.
+const FRAME_MASK_8: u64 = 0xFFF_FFFF;
+
 /// A display-list segment's words from host memory: `offset` in the
 /// display-list space, through `table`.
-fn fetch_dl_segment(mem: &dyn HostMem, table: u32, offset: u32, words: u32) -> Option<Vec<u32>> {
+fn fetch_dl_segment(mem: &dyn HostMem, table: PageTable, offset: u32, words: u32) -> Option<Vec<u32>> {
     let mut out = Vec::with_capacity(words as usize);
-    let mut cached: Option<(u32, u32)> = None;
+    let mut cached: Option<(u32, u64)> = None;
     for i in 0..words {
         let l = offset.wrapping_add(4 * i);
         let page = l >> 12;
         let frame = match cached {
             Some((p, f)) if p == page => f,
             _ => {
-                let r = mem.read32(table.wrapping_add(4 * page) as u64)?;
-                cached = Some((page, r << 12));
-                r << 12
+                let f = table.frame(mem, page)?;
+                cached = Some((page, f));
+                f
             }
         };
-        out.push(mem.read32((frame | (l & 0xFFF)) as u64).unwrap_or(0));
+        out.push(mem.read32(frame | (l & 0xFFF) as u64).unwrap_or(0));
     }
     Some(out)
 }
@@ -546,6 +588,8 @@ pub struct Hq3Engine {
     /// else (a kernel GE context read-out) would take those pixels instead;
     /// nothing captured shows that order yet.
     pub kick_starts_read: bool,
+    /// Bytes of a DMA page-table entry: 4, or 8 on the Origin 2000 and Onyx2.
+    pub entry_bytes: u32,
     /// Set when a kick ran an armed read. The XFRCONTROL 9 that follows
     /// finds nothing pending, which is expected here, so it is not
     /// reported. Any other XFRCONTROL write clears it.
@@ -651,6 +695,7 @@ impl Hq3Engine {
             formatter: 0,
             dma_read_pending: None,
             kick_starts_read: false,
+            entry_bytes: 4,
             kick_read_ran: false,
             board: None,
             dma_logged: 0,
@@ -1428,7 +1473,7 @@ impl Hq3Engine {
     /// materials in lists; long lists chain segments of about 1 K words.
     fn run_display_list(&mut self, offset: u32, words: u32, sink: &mut dyn Hq3Sink) {
         let Some(mem) = sink.sys_mem() else { return };
-        let table = self.dma_regs[dma::DL_TABLE_BASE + 1] & !3;
+        let table = PageTable::of(self.dma_regs[dma::DL_TABLE_BASE], self.dma_regs[dma::DL_TABLE_BASE + 1], self.entry_bytes);
         let saved = std::mem::replace(&mut self.cfifo[DL_PORT], Cfifo::EMPTY);
         let mut stack: Vec<(u32, u32)> = Vec::new();
         let mut cur = Some((offset, words));
@@ -1499,12 +1544,12 @@ impl Hq3Engine {
         let def = if read { &crate::perfetto::events::MGRAS_DMA_TO_HOST } else { &crate::perfetto::events::MGRAS_DMA_TO_BOARD };
         crate::pf_scope!(*def, word);
         let pool = ((word >> 1) & 3) as usize;
-        let table = self.dma_regs[dma::TABLE_BASE + 2 * pool + 1] & !3;
+        let table = PageTable::of(self.dma_regs[dma::TABLE_BASE + 2 * pool], self.dma_regs[dma::TABLE_BASE + 2 * pool + 1], self.entry_bytes);
         // Between transfers the kernel parks a pool's table at a dummy
         // value (0x1, 0x5, 0x9: no page table). A DMA through it would take
         // frame numbers from low memory and scribble over the kernel.
-        if table < 0x1000 {
-            sink.note(format!("host DMA {word:#x} through pool {pool} with no page table ({table:#x}): dropped"));
+        if table.is_parked() {
+            sink.note(format!("host DMA {word:#x} through pool {pool} with no page table ({:#x}): dropped", table.base));
             return;
         }
         // List mode (the texture manager's restores): the page list holds
@@ -1543,8 +1588,9 @@ impl Hq3Engine {
         self.stats.dma_bytes += lines as u64 * len as u64;
         let (pglist, peer_name) = (self.dma_regs[dma::PAGE_LIST], peer.name());
         let desc = || format!(
-            "DMA {} pool {pool} table {table:#x} base {base:#x} stride {stride} lines {lines} bytes {len} pglist {pglist:#x} with {peer_name}",
+            "DMA {} pool {pool} table {:#x} base {base:#x} stride {stride} lines {lines} bytes {len} pglist {pglist:#x} with {peer_name}",
             if read { "read" } else { "write" },
+            table.base,
         );
         if sink.tracing() {
             sink.trace(desc());
@@ -1562,7 +1608,7 @@ impl Hq3Engine {
         // vectors (IP28's low-memory alias).
         let window = self.dma_regs[dma::MAX_PTR_OFFSET + pool];
         let stop_logged = std::cell::Cell::new(false);
-        let frame_of = |page: u32| -> Option<u32> {
+        let frame_of = |page: u32| -> Option<u64> {
             let idx = if list.is_empty() { page } else { *list.get(page as usize)? };
             if window != 0 && idx >= window {
                 if !stop_logged.replace(true) {
@@ -1570,14 +1616,14 @@ impl Hq3Engine {
                 }
                 return None;
             }
-            let r = mem.read32(table.wrapping_add(4 * idx) as u64);
+            let r = table.frame(&*mem, idx);
             if r == Some(0) && !stop_logged.replace(true) {
                 log::warn!("mgras: {} reaches page {page} (table entry {idx}) = frame 0", desc());
             }
-            r.map(|f| f << 12)
+            r
         };
-        let mut cached: Option<(u32, u32)> = None;
-        let mut phys = |l: u32| -> Option<u32> {
+        let mut cached: Option<(u32, u64)> = None;
+        let mut phys = |l: u32| -> Option<u64> {
             let page = l >> 12;
             let f = match cached {
                 Some((p, f)) if p == page => f,
@@ -1587,7 +1633,7 @@ impl Hq3Engine {
                     f
                 }
             };
-            Some(f | (l & 0xFFF))
+            Some(f | (l & 0xFFF) as u64)
         };
         // A read from the raster engine is a byte stream across its lines:
         // the host may take it a row per DMA line, or all rows in one
@@ -1625,8 +1671,8 @@ impl Hq3Engine {
                     // One page at a time: contiguous in host memory.
                     let n = (0x1000 - ((a as usize + k) & 0xFFF)).min(bytes.len() - k);
                     let Some(pa) = phys(a + k as u32) else { return };
-                    if mem.write(pa as u64, &bytes[k..k + n]) == Err(Fault) {
-                        sink.host_fault(pa as u64, true);
+                    if mem.write(pa, &bytes[k..k + n]) == Err(Fault) {
+                        sink.host_fault(pa, true);
                     }
                     k += n;
                 }
@@ -1637,8 +1683,8 @@ impl Hq3Engine {
                     // One page at a time: contiguous in host memory.
                     let n = (0x1000 - ((a + k) & 0xFFF)).min(len - k);
                     let Some(pa) = phys(a + k) else { return };
-                    if mem.read(pa as u64, &mut bytes[k as usize..(k + n) as usize]) == Err(Fault) {
-                        sink.host_fault(pa as u64, false);
+                    if mem.read(pa, &mut bytes[k as usize..(k + n) as usize]) == Err(Fault) {
+                        sink.host_fault(pa, false);
                     }
                     k += n;
                 }

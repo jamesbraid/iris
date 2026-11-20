@@ -72,6 +72,8 @@ pub struct Config {
     pub board: Board,
     /// The Octane's HQ4 front: its microcode's GE layout and read order.
     pub octane: bool,
+    /// Bytes of a DMA page-table entry: 4, or 8 on the Origin 2000 and Onyx2.
+    pub entry_bytes: u32,
     pub mode: Mode,
     /// Operations queued before `write` answers `Busy`.
     pub queue_ops: usize,
@@ -85,6 +87,7 @@ impl Config {
         Config {
             board,
             octane: false,
+            entry_bytes: 4,
             mode,
             queue_ops: 1 << 16,
             #[cfg(feature = "gr4-jit")]
@@ -243,6 +246,7 @@ struct Core<M: HostMem> {
 impl<M: HostMem> Inner<M> {
     fn new(cfg: &Config, gpu: Option<&Arc<Gpu>>, mem: Arc<M>, out: Arc<Outbox>, front: Arc<Front>) -> Result<Inner<M>, String> {
         let mut hq = Hq3Engine::new(if cfg.board == Board::Max { 2 } else { 1 });
+        hq.entry_bytes = cfg.entry_bytes;
         if cfg.octane {
             hq.kick_starts_read = true;
             hq.board = Some(Box::new(Hq4Quirks) as Box<dyn Hq3Board>);
