@@ -6,8 +6,8 @@ description = "Iris's IMPACT (MGRAS) raster engine, CPU and GPU, without the boa
 publish = false
 
 [lib]
-# The tests inside the mounted files drive the whole board and stay with iris.
-test = false
+# The unit tests inside the mounted files run here too (89: raster, parser, texture and GPU equivalence).
+test = true
 doctest = false
 
 [features]

@@ -33,6 +33,9 @@ pub mod rss;
 pub mod rss_jit;
 #[path = "../../../../src/dev/mgras/te1.rs"]
 pub mod te1;
+#[cfg(test)]
+#[path = "../../../../src/dev/mgras/test_gen.rs"]
+pub mod test_gen;
 #[path = "../../../../src/dev/mgras/wgpu/mod.rs"]
 pub mod wgpu;
 

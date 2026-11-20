@@ -8,8 +8,8 @@
 //! interpreter's: pixel pages, clip-ID planes, and the CPU-side state
 //! (character stipple position, GL line stipple position). Several
 //! primitives go into each batch, so order within a batch is tested too.
-//! They need a GPU (or lavapipe) and skip without one; run them with few
-//! test threads (`clanker/wgpu/cpu-written-buffers-live-in-host-memory.md`).
+//! They need a GPU (or lavapipe) and skip without one; they take turns, one
+//! at a time to a process.
 
 use std::sync::Arc;
 
@@ -20,11 +20,27 @@ use super::super::test_gen::{self, hilo, pos, Prim, Regs, Rng};
 use super::{xline_step, GpuLink, GpuRaster, Observation};
 use crate::wgpu::{Gpu, GpuOptions};
 
-fn gpu() -> Option<Arc<Gpu>> {
+/// One GPU test at a time in a process: lavapipe crashes when several tests open devices at once.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct Held {
+    gpu: Arc<Gpu>,
+    _turn: std::sync::MutexGuard<'static, ()>,
+}
+
+impl std::ops::Deref for Held {
+    type Target = Arc<Gpu>;
+    fn deref(&self) -> &Arc<Gpu> {
+        &self.gpu
+    }
+}
+
+fn gpu() -> Option<Held> {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     match Gpu::new(&GpuOptions::default(), Box::new(|_| {})) {
         Ok(g) => {
             eprintln!("GPU unit on {} ({:?}, {:?})", g.caps.adapter, g.caps.backend, g.caps.device_type);
-            Some(g)
+            Some(Held { gpu: g, _turn })
         }
         Err(e) => {
             if std::env::var_os("IRIS_REQUIRE_GPU").is_some_and(|v| v == "1") { panic!("no GPU: {e}") }
