@@ -276,7 +276,12 @@ pub trait BoardEngine {
     /// a packet still arriving wait for its last word, and a credit target
     /// the driver holds parked keeps credits until the write that releases
     /// it, and both are kept by source, so stores of one packet through two
-    /// Hubs are paid back to their own. Boards without credits ignore it.
+    /// Hubs are paid back to their own. That a credit returns to the Hub
+    /// that sent its store is a software expectation (the IRIX kernel charges
+    /// the storing processor's interface and waits for that count to return) and
+    /// the KONA page's statement; that a packet's credits wait for its last
+    /// word, and how a parked target holds them, are inferred (the pipe's own
+    /// rule is unknown). Boards without credits ignore it.
     fn set_source(&mut self, _source: Source) {}
     /// `write` with the shell's time (ns, its time base) at the store, for a
     /// register whose effect starts a timer at the moment of the write (a

@@ -136,6 +136,10 @@ struct Stored {
 /// once the pipe has taken its words, and the credits of a packet still arriving wait for its last
 /// word, then each goes to the source that sent the store it came from, not all to the last word's
 /// sender. While the driver has parked the credit target they wait in `parked`, again by source.
+/// Evidence: that a credit goes back to the Hub that sent its store is a software expectation (the IRIX
+/// kernel charges the storing processor's interface and waits for that count) and the KONA page's
+/// statement; holding a packet's credits to its last word, and returning parked ones to their own Hub,
+/// are inferred, the pipe's rule being unknown.
 #[derive(Default)]
 struct Credits {
     held: BTreeMap<u32, u32>,
@@ -148,7 +152,9 @@ struct Credits {
 const MAX_CREDIT_SOURCES: usize = 64;
 
 impl Credits {
-    /// The state of version 4: both maps, each as a list of (source, count) pairs, then `last`.
+    /// The state of version 4: both maps, each as a list of (source, count) pairs, then `last`. The
+    /// by-source split is inferred, not measured (see `Credits`); a state of version 3 or older held one
+    /// count each and loads as owed to the last sender.
     fn visit<S: Stream>(&mut self, s: &mut S) {
         for map in [&mut self.held, &mut self.parked] {
             let mut flat: Vec<u32> = map.iter().flat_map(|(&k, &v)| [k, v]).collect();
