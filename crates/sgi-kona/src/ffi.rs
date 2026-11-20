@@ -245,6 +245,21 @@ unsafe fn new_with(cfg: *const IrisKonaConfig, host: *const IrisEngineHost, give
     })
 }
 
+/// A Crossbow link reset reached the widget: the widget control, interrupt destination and vector
+/// registers go back to their reset values and the rest of the pipe, the map RAM included, stays.
+///
+/// # Safety
+/// `h` is a live KONA handle.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_link_reset(h: *mut IrisEngine) -> c_int {
+    unsafe {
+        call::<KonaEngine<CMem>, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| {
+            e.link_reset();
+            IRIS_ENGINE_OK
+        })
+    }
+}
+
 /// Bring a box of pixels current for a CPU reader.
 ///
 /// # Safety

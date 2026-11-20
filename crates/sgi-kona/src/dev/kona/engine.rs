@@ -497,6 +497,16 @@ impl<M: HostMem> KonaEngine<M> {
         Ok(lent.map(|(buffer, width, height)| LentFrame { buffer, width, height }))
     }
 
+    /// A Crossbow link reset reached the widget: its crosstalk interface registers (widget control, interrupt
+    /// destination and vectors) go back to their reset values, which the kernel's adaptor reset rewrites after
+    /// it; the map RAM, the interrupt enable and every other register of the pipe stay (`Front::link_reset`,
+    /// inferred; the KONA manual page documents it). A shell calls this for the link reset instead of a power-on.
+    pub fn link_reset(&mut self) {
+        self.host.front.lock().link_reset();
+        self.activity += 1;
+        self.report_widget();
+    }
+
     /// The sections of the last completed firmware load.
     pub fn load_record(&self) -> &[LoadSection] {
         self.core.load_record()
