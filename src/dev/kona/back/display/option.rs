@@ -79,12 +79,25 @@ pub struct OptionBoard {
     slave: Option<Box<dyn DisplayBusSlave>>,
     /// The last probe found the board's VOCs.
     present: bool,
+    /// Display-bus words written by request 1, by address: what a read of a word no shell device answers returns (the
+    /// diagnostics' register tests write patterns and read them back; kona `devices/dg/external-status.md`, the model
+    /// must do this, established). At most `MAX_WORDS`.
+    words: std::collections::BTreeMap<u32, u32>,
+    /// The pipe's own drive of the swap-ready line, from the words the firmware writes, and a change not yet reported.
+    drive: bool,
+    drive_changed: Option<bool>,
 }
+
+/// The words a board keeps at most (the display bus has far fewer addresses the software writes).
+const MAX_WORDS: usize = 8192;
+/// The swap-ready drive bits (bit 0 of each): bus 0x1920 on a DG5, 0x8001 on a board flagged DPLEX, 0xe500 the DPLEX's own
+/// `SWAP_RDY_DRV` (kona `devices/dg/swap-ready-and-swap-barrier.md`, established as writes; the polarity is unknown).
+const SWAP_DRIVE_WORDS: [u32; 3] = [0x1920, 0x8001, 0xe500];
 
 impl OptionBoard {
     /// A board that reports option mask `mask` (0 for none).
     pub fn new(mask: u32) -> OptionBoard {
-        OptionBoard { mask, slave: None, present: false }
+        OptionBoard { mask, slave: None, present: false, words: Default::default(), drive: false, drive_changed: None }
     }
 
     pub fn mask(&self) -> u32 {
@@ -101,9 +114,40 @@ impl OptionBoard {
         self.slave = slave;
     }
 
-    /// Power-on: the firmware has not probed yet.
+    /// Power-on: the firmware has not probed yet, and no display-bus word has been written.
     pub fn reset(&mut self) {
         self.present = false;
+        self.words.clear();
+        self.drive = false;
+        self.drive_changed = None;
+    }
+
+    /// The change of the pipe's swap-ready drive since the last call, if any.
+    pub fn take_drive_change(&mut self) -> Option<bool> {
+        self.drive_changed.take()
+    }
+
+    fn store_word(&mut self, addr: u32, data: u32) {
+        if self.words.len() < MAX_WORDS || self.words.contains_key(&addr) {
+            self.words.insert(addr, data);
+        }
+        let drive = SWAP_DRIVE_WORDS.iter().any(|a| self.words.get(a).is_some_and(|w| w & 1 != 0));
+        if drive != self.drive {
+            self.drive = drive;
+            self.drive_changed = Some(drive);
+        }
+    }
+
+    /// The words as saved (version 7 of the engine's state): address, value pairs.
+    pub fn saved_words(&self) -> Vec<u32> {
+        self.words.iter().flat_map(|(&a, &w)| [a, w]).collect()
+    }
+
+    /// Set from saved words; the drive follows them, with no change to report.
+    pub fn restore_words(&mut self, pairs: &[u32]) {
+        self.words = pairs.chunks_exact(2).take(MAX_WORDS).map(|p| (p[0], p[1])).collect();
+        self.drive = SWAP_DRIVE_WORDS.iter().any(|a| self.words.get(a).is_some_and(|w| w & 1 != 0));
+        self.drive_changed = None;
     }
 
     /// Set from a saved state; the device's own state travels with the shell's.
@@ -129,12 +173,14 @@ impl OptionBoard {
         let d = |i: usize| data.get(i).copied().unwrap_or(0);
         match command {
             0x01 => {
+                self.store_word(d(0), d(1));
                 if let Some(s) = self.slave.as_mut() {
                     s.write(d(0), d(1));
                 }
                 None
             }
-            0x02 => Some(self.slave.as_mut().and_then(|s| s.read(d(0))).unwrap_or(0)),
+            // The shell's device answers its own registers; any other word reads what was last written.
+            0x02 => Some(self.slave.as_mut().and_then(|s| s.read(d(0))).or_else(|| self.words.get(&d(0)).copied()).unwrap_or(0)),
             0x11 => {
                 self.probe();
                 None
@@ -306,6 +352,25 @@ mod tests {
         fake.log.lock().unwrap().clear();
         b.request(0x58, &[0, 3, 0]);
         assert!(fake.log.lock().unwrap().is_empty(), "another VOC's format is not the option board's");
+    }
+
+    #[test]
+    fn a_display_bus_word_nobody_answers_reads_back_what_was_written() {
+        let mut none = OptionBoard::new(0);
+        assert_eq!(none.request(0x02, &[0x1234]), Some(0));
+        none.request(0x01, &[0x1234, 0xa5a5]);
+        assert_eq!(none.request(0x02, &[0x1234]), Some(0xa5a5));
+        assert_eq!(none.request(0x02, &[0x1235]), Some(0));
+        let fake = Fake::default();
+        let mut b = board(&fake);
+        b.request(0x01, &[0x1234, 7]);
+        assert_eq!(b.request(0x02, &[0x1234]), Some(7), "the device answers its own registers");
+        // A word the device has no register for still reads back.
+        let mut refusing = board(&Fake { refuse: true, ..Fake::default() });
+        refusing.request(0x01, &[0x77, 9]);
+        assert_eq!(refusing.request(0x02, &[0x77]), Some(9));
+        none.reset();
+        assert_eq!(none.request(0x02, &[0x1234]), Some(0), "a reset forgets them");
     }
 
     #[test]

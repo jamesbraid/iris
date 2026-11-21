@@ -53,6 +53,7 @@ pub const IRIS_ENGINE_EVENT_DEVICE_FAULT: u32 = 5;
 pub const IRIS_ENGINE_EVENT_GPU_LOST: u32 = 6;
 pub const IRIS_ENGINE_EVENT_INTERRUPT: u32 = 7;
 pub const IRIS_ENGINE_EVENT_CREDITS: u32 = 8;
+pub const IRIS_ENGINE_EVENT_SWAP_READY: u32 = 9;
 
 pub const IRIS_ENGINE_GPU_NONE: u32 = 0;
 pub const IRIS_ENGINE_GPU_AUTO: u32 = 1;
@@ -197,11 +198,18 @@ pub struct IrisEngineCredits {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct IrisEngineSwapReady {
+    pub drive: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub union IrisEngineEventData {
     pub damage: IrisEngineDamage,
     pub bus_fault: IrisEngineBusFault,
     pub packet: IrisEnginePacket,
     pub credits: IrisEngineCredits,
+    pub swap_ready: IrisEngineSwapReady,
     /// NOTE, DEVICE_FAULT, GPU_LOST: NUL-terminated, cut to fit.
     pub text: [c_char; 96],
 }
@@ -920,6 +928,10 @@ fn c_event(e: &Event) -> IrisEngineEvent {
         Event::Credits { source, retired } => {
             c.kind = IRIS_ENGINE_EVENT_CREDITS;
             c.data.credits = IrisEngineCredits { source: *source, retired: *retired };
+        }
+        Event::SwapReady { drive } => {
+            c.kind = IRIS_ENGINE_EVENT_SWAP_READY;
+            c.data.swap_ready = IrisEngineSwapReady { drive: *drive as u32 };
         }
     }
     c

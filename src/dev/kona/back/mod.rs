@@ -223,6 +223,8 @@ pub struct KonaBackend {
     /// Swaps wait here for the next `frame` instead of showing at once (`latch_swaps`).
     latch: bool,
     swaps: Vec<(u32, u8)>,
+    /// The swap-ready line is held low by another pipe (`set_swap_ready_held`); not saved, the shell sets it.
+    swap_held: bool,
     /// Per channel, moves when a video format load, disable, enable, reset, start or state load may have changed
     /// the channel's scan-out timing (`channel_timing`). Not saved.
     timing_generation: [u64; display::channels::CHANNELS],
@@ -383,6 +385,7 @@ impl KonaBackend {
             manual: None,
             latch: false,
             swaps: Vec::new(),
+            swap_held: false,
             timing_generation: [0; display::channels::CHANNELS],
             layouts: 0,
             refused: [0; Refusal::ALL.len()],
@@ -855,6 +858,33 @@ impl KonaBackend {
         self.option.set_slave(slave);
     }
 
+    /// The display-bus words saved from version 7 of the engine's state.
+    pub fn visit_sync<S: stream::Stream>(&mut self, s: &mut S) {
+        let mut words = self.option.saved_words();
+        s.vec_u32(&mut words);
+        if s.loading() {
+            self.option.restore_words(&words);
+        }
+    }
+
+    /// A state that carries none: nothing written yet.
+    pub fn clear_sync(&mut self) {
+        self.option.restore_words(&[]);
+    }
+
+    /// `visit_sync` over a throwaway, to read past it.
+    pub fn check_sync<S: stream::Stream>(s: &mut S) {
+        s.vec_u32(&mut Vec::new());
+    }
+
+    /// Whether the shared swap-ready line is held low by another pipe: the VOC copy from next to now (the swaps)
+    /// waits at the frame boundary while it is. Released, the waiting swaps show at the next frame. The shell
+    /// combines the pipes' drives (`Event::SwapReady`); the polarity and timing of the real line are unknown, so
+    /// "held" is an approximation of a pipe waiting for the others.
+    pub fn set_swap_ready_held(&mut self, held: bool) {
+        self.swap_held = held;
+    }
+
     /// The option board's control register (0xc006) as its device holds it (`OptionBoard::control`).
     pub fn option_control(&mut self) -> Option<u32> {
         self.option.control()
@@ -933,8 +963,10 @@ impl KonaBackend {
     /// that a swap ahead of a retrace request shows in the frame that completes it, then the
     /// waiting retrace requests complete, the video interrupt rises, and the frame is composed.
     pub fn frame(&mut self) {
-        for (id, bank) in std::mem::take(&mut self.swaps) {
-            self.tables.lock().load_bank(id, bank);
+        if !self.swap_held {
+            for (id, bank) in std::mem::take(&mut self.swaps) {
+                self.tables.lock().load_bank(id, bank);
+            }
         }
         if let (Some(h), Some(c)) = (&self.handle, &mut self.manual) {
             self.clock.frame(h);
@@ -1697,6 +1729,9 @@ impl KonaBackend {
                 // The option board's side of the request first: what the firmware does on the display bus, and
                 // whether its channel exists for the channel setters that follow.
                 let from_board = self.option.request(command, data);
+                if let Some(drive) = self.option.take_drive_change() {
+                    port.swap_ready_drive(drive);
+                }
                 self.channels.set_option_channel(self.option.present());
                 self.channels.set(command, data);
                 let option = self.channels.option_index();

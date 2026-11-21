@@ -117,6 +117,8 @@ pub const CAUSE_LOWATER: u32 = 1 << 1;
 pub const CAUSE_VIDEO: u32 = 1 << 3;
 pub const CAUSE_MAILBOX: u32 = 1 << 4;
 pub const CAUSE_GE: u32 = 1 << 5;
+/// A video-output-chip interrupt (external sync detected or lost, inferred; kona `devices/dg/external-status.md`).
+pub const CAUSE_VOC: u32 = 1 << 9;
 
 /// Bit 0 of the activity register: the kernel writes 1 once per video interrupt (established by
 /// the kernel's use; nothing reads it back). Counted, with no effect.

@@ -104,6 +104,13 @@ int sgi_kona_scanout(IrisEngine *h, uint32_t *buf, size_t cap, uint32_t *w,
  */
 int sgi_kona_dac_cursor(IrisEngine *h, int32_t *x, int32_t *y, uint32_t *on);
 
+/* A video-output-chip interrupt: HH_INTR_STATUS bit 9 rises, and the packet goes out when the driver enabled it. */
+int sgi_kona_raise_voc_interrupt(IrisEngine *h);
+
+/* The shared swap-ready line is held low by another pipe (non-zero) or released (zero): the swaps wait while it is held.
+ * The pipe's own drive comes back as IRIS_ENGINE_EVENT_SWAP_READY events. */
+int sgi_kona_set_swap_ready_held(IrisEngine *h, int held);
+
 /*
  * The channels the pipe's display generator has: 8 on a DG5-8, 2 on a DG5-2, with or without its option
  * board (whose channel is one more once the firmware's probe finds it). 0 for a NULL handle.

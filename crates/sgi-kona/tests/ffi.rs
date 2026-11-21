@@ -303,3 +303,19 @@ fn a_c_shell_reads_the_dac_cursor_origin_and_enable() {
     assert_eq!(unsafe { sgi_kona_dac_cursor(h, null_mut(), &mut y, &mut on) }, IRIS_ENGINE_ERROR);
     unsafe { iris_engine_free(h) };
 }
+
+/// A C shell raises the VOC interrupt (HH_INTR_STATUS bit 9, 0x800238) and holds or releases the swap-ready line; a NULL
+/// handle is a fault.
+#[test]
+fn a_c_shell_raises_the_voc_interrupt_and_holds_the_swap_ready_line() {
+    let ir2 = CString::new("ir2").unwrap();
+    let h = unsafe { sgi_kona_new(&config(ir2.as_ptr()), &host()) };
+    assert_eq!(unsafe { sgi_kona_raise_voc_interrupt(h) }, IRIS_ENGINE_OK);
+    let mut cause = 0u64;
+    assert_eq!(unsafe { iris_engine_read(h, 0x800238, 32, &mut cause) }, IRIS_ENGINE_OK);
+    assert_eq!(cause, 1 << 9);
+    assert_eq!(unsafe { sgi_kona_set_swap_ready_held(h, 1) }, IRIS_ENGINE_OK);
+    assert_eq!(unsafe { sgi_kona_set_swap_ready_held(h, 0) }, IRIS_ENGINE_OK);
+    assert_eq!(unsafe { sgi_kona_raise_voc_interrupt(null_mut()) }, IRIS_ENGINE_FAULT);
+    unsafe { iris_engine_free(h) };
+}
