@@ -393,3 +393,44 @@ fn blanking_the_gvo_channel_zeroes_its_look_up_table() {
     video(&mut plain, VIDEO_CHANNEL_BLANKING, &[0xc6, 1]);
     assert!(lut(&none).is_empty(), "no probe, no channel");
 }
+
+/// The GVO head carries ten bits (kona gvo-option.md: ten of the gamma RAM's twelve; `0xc006` bits 10-9 form the two
+/// low bits), a monitor head eight. Words are XB30 (red low); the top eight bits are the 8-bit picture's. The
+/// firmware's own mode (true bits, after the data format) shows the pixels' own bits, a control word with the mode
+/// bits clear zeroes the low two.
+#[test]
+fn the_gvo_head_is_ten_bits_formed_as_the_control_register_says_and_a_monitor_head_is_eight() {
+    let (mut e, _) = the_probed_pipe();
+    // Colour 1: the eight bits 0xff, 0x55 and 0x00, a point 1000 rows up from the bottom, inside the window.
+    for (selector, args) in [(0x3, &[1, 0x3fc, 0x155, 1][..]), (0x2, &[1]), (0x6, &[100, 1000])] {
+        for w in [&[1, selector][..], args].concat() {
+            e.set_source(A);
+            assert_eq!(e.write(COMMAND_PAGE, 32, w as u64), Write::Done);
+            e.run(usize::MAX);
+        }
+    }
+    load_format_at(&mut e, 0, 1280, 1024, 60);
+    load_format_at(&mut e, 0xc6, 720, 486, 30);
+    video(&mut e, VIDEO_RESIZE, &[0xc6, 0, 1023, 720, 486, 1, 1, 0]);
+    video(&mut e, 0x58, &[0xc6, 1, 0]);
+    assert_eq!((BoardEngine::head_bits(&e, 0), BoardEngine::head_bits(&e, 1)), (8, 10));
+    let (mut eight, mut ten) = (Vec::new(), Vec::new());
+    assert_eq!(BoardEngine::scanout(&mut e, 1, &mut eight), Ok(Some((720, 486))));
+    assert_eq!(BoardEngine::scanout10(&mut e, 1, &mut ten), Ok(Some((720, 486))));
+    let lit: Vec<usize> = (0..eight.len()).filter(|&i| eight[i] != 0).collect();
+    assert_eq!(lit.len(), 1, "the point is inside the window");
+    assert_eq!(ten[lit[0]], 0x3ff | 0x155 << 10, "the firmware's data format leaves 0xc006 in true-bits mode");
+    let top = |c: u32| (c >> 2) & 0xff;
+    for (&a, &t) in eight.iter().zip(&ten) {
+        assert_eq!(a, top(t) << 16 | top(t >> 10) << 8 | top(t >> 20), "the top eight bits are scanout's");
+    }
+    // Mode 0 (bits 10-9 clear): the two low bits of every component are zero.
+    video(&mut e, 0x01, &[0xc006, 0x084]);
+    BoardEngine::scanout10(&mut e, 1, &mut ten).unwrap();
+    assert_eq!(ten[lit[0]], 0x3fc | 0x154 << 10);
+    assert!(ten.iter().all(|&t| t & 0xc030_0c03 == 0), "no low bits and no unused bits in any component");
+    // A blanked GVO channel is black at ten bits too.
+    video(&mut e, VIDEO_CHANNEL_BLANKING, &[0xc6, 1]);
+    BoardEngine::scanout10(&mut e, 1, &mut ten).unwrap();
+    assert!(ten.iter().all(|&t| t == 0));
+}

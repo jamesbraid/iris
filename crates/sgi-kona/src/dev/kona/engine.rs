@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sgi_engine::{BoardEngine, Chunk, Event, Fault, HeadTiming, HostMem, Idle, Interrupt, Outbox, Pump, Read, Rect, Refused, Source, StallOn, StateSink, StateSource, Swap, Write};
 
 use super::back::snapshot::Layout;
-use super::back::display::option::DisplayBusSlave;
+use super::back::display::option::{low_bits, DisplayBusSlave};
 use super::back::KonaBackend;
 use super::defs::*;
 use super::flash::{Flash, FlashSink};
@@ -489,6 +489,14 @@ impl<M: HostMem> KonaEngine<M> {
         (w, h, self.pixels.frame())
     }
 
+    /// As `compose`, the managed area with ten of the gamma RAM's twelve bits a channel as `x2b10g10r10` (red low),
+    /// without the DAC cursor: the frame a head whose DAC takes ten bits shows.
+    pub fn compose_wide(&mut self) -> (u32, u32, Vec<u32>) {
+        self.back.drain();
+        let (w, h) = self.core.managed;
+        (w, h, self.pixels.frame_wide())
+    }
+
     /// The DAC cursor of channel 0 as the display bus's registers hold it, without waiting for queued stores: the
     /// origin of its 64 by 64 image in screen pixels from the top left (signed; the hot spot is the image's own),
     /// and whether it is enabled in X11 mode. For a shell that publishes the pointer.
@@ -536,6 +544,39 @@ impl<M: HostMem> KonaEngine<M> {
     /// none of it.
     fn head_is_whole(&self, head: u32) -> bool {
         self.head_window(head) == Some((0, 0, self.core.managed.0, self.core.managed.1)) && !self.head_blanked(head)
+    }
+
+    /// Head `head` is the option board's channel.
+    fn head_is_option(&self, head: u32) -> bool {
+        let running = self.back.running_channels();
+        running.get(head as usize).is_some_and(|&c| Some(c) == self.back.option_channel())
+    }
+
+    /// The option board's head with its ten bits: the window of the wide frame (`compose_wide`), black while the
+    /// channel is blanked, its two low bits formed as the board's control register says (0xc006 bits 10-9: 0 zero,
+    /// 2 the gamma's own bits, 3 a copy of the top two bits; 1 is unnamed, shown as 2).
+    fn scanout_gvo(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
+        out.clear();
+        if let Some(f) = self.fault_now() {
+            return Err(Fault(f));
+        }
+        let Some((x, y, w, h)) = self.head_window(head) else { return Ok(None) };
+        let (fw, _, frame) = self.compose_wide();
+        let blanked = self.head_blanked(head);
+        let mode = self.back.option_control().map_or(2, |c| c >> 9 & 3);
+        let channel = |p: u32| low_bits(p & 0x3ff, mode) | low_bits(p >> 10 & 0x3ff, mode) << 10 | low_bits(p >> 20 & 0x3ff, mode) << 20;
+        for row in y..y + h {
+            let at = (row * fw + x) as usize;
+            match frame.get(at..at + w as usize) {
+                Some(px) if !blanked => out.extend(px.iter().map(|&p| channel(p))),
+                Some(_) => out.extend(std::iter::repeat_n(0, w as usize)),
+                None => {
+                    out.clear();
+                    return Ok(None);
+                }
+            }
+        }
+        Ok((w != 0 && h != 0).then_some((w, h)))
     }
 
     /// Head `head`'s channel is blanked (`Back::channel_blanked`): its output is black whatever the frame holds.
@@ -633,19 +674,29 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         Ok((w != 0 && h != 0).then_some((w, h)))
     }
 
-    /// The pixels reach the DAC as eight bits a colour (the colour map's ten bits and the gamma RAM's
-    /// twelve are cut to eight on the way, established for the board's wiring), so they are widened by
-    /// repeating their top bits; how the DAC widens its bypass input is unknown. The DAC cursor's colours
-    /// are the one place the model holds ten bits, and are given as they are.
+    /// A monitor channel's pixels reach the DAC as eight bits a colour (the colour map's ten bits and the gamma RAM's
+    /// twelve are cut to eight on the way, established for the board's wiring), so they are widened by repeating
+    /// their top bits; how the DAC widens its bypass input is unknown. The DAC cursor's colours are the one place
+    /// a monitor head holds ten bits, and are given as they are. The option board's channel (the GVO) carries ten of
+    /// the gamma RAM's twelve bits (`scanout_gvo`). Words are `x2b10g10r10`, red low.
     fn scanout10(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
+        if self.head_is_option(head) {
+            return self.scanout_gvo(head, out);
+        }
         let size = self.scanout(head, out)?;
         let widen = |c: u32| (c << 2) | (c >> 6);
-        out.iter_mut().for_each(|p| *p = widen(*p >> 16 & 0xff) << 20 | widen(*p >> 8 & 0xff) << 10 | widen(*p & 0xff));
+        out.iter_mut().for_each(|p| *p = widen(*p >> 16 & 0xff) | widen(*p >> 8 & 0xff) << 10 | widen(*p & 0xff) << 20);
         // The DAC cursor is a position on the whole screen: a head that shows only a window of it has none drawn.
         if let (Some((w, h)), true) = (size, self.head_is_whole(head)) {
             self.back.draw_dac_cursor_wide(out, w as usize, w as usize, h as usize);
         }
         Ok(size)
+    }
+
+    /// The monitor channels' output is 8 bits; the option board's (a GVO) is 10 (kona `devices/dg/gvo-option.md`,
+    /// the XMAP's 12-bit option connector and `0xc006` bits 10-9; established).
+    fn head_bits(&self, head: u32) -> u32 {
+        if self.head_is_option(head) { 10 } else { 8 }
     }
 
     fn head_timing(&self, head: u32) -> Option<HeadTiming> {

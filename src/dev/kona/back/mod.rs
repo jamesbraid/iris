@@ -855,6 +855,11 @@ impl KonaBackend {
         self.option.set_slave(slave);
     }
 
+    /// The option board's control register (0xc006) as its device holds it (`OptionBoard::control`).
+    pub fn option_control(&mut self) -> Option<u32> {
+        self.option.control()
+    }
+
     /// Whether the option board's channel exists (the firmware's probe found its chips), and its index.
     pub fn option_channel(&self) -> Option<usize> {
         self.channels.option_index()

@@ -254,9 +254,9 @@ impl DacDraw {
         self.draw_in(self.foreground, self.background, out, stride, w, h)
     }
 
-    /// As `draw`, in the colours the DAC holds: ten bits a channel, `0x00` then red, green and blue.
+    /// As `draw`, in the colours the DAC holds: ten bits a channel as `x2b10g10r10` (red low).
     pub fn draw_wide(&self, out: &mut [u32], stride: usize, w: usize, h: usize) {
-        let wide = |c: [u16; 3]| (c[0] as u32 & 0x3ff) << 20 | (c[1] as u32 & 0x3ff) << 10 | (c[2] as u32 & 0x3ff);
+        let wide = |c: [u16; 3]| (c[2] as u32 & 0x3ff) << 20 | (c[1] as u32 & 0x3ff) << 10 | (c[0] as u32 & 0x3ff);
         self.draw_in(wide(self.cursor.foreground), wide(self.cursor.background), out, stride, w, h)
     }
 

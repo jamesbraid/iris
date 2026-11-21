@@ -157,11 +157,20 @@ pub fn compose(store: &PixelStore, word: usize, map: &ColourMap, tables: &Baked,
         // The scan-out shows black; the store is left as it is.
         let (w, h) = (store.width() as usize, store.height() as usize);
         assert!(out.len() >= stride * h.saturating_sub(1) + w, "the frame buffer is too small");
-        (0..h).for_each(|y| out[y * stride..y * stride + w].fill(0xff00_0000));
+        (0..h).for_each(|y| out[y * stride..y * stride + w].fill(tables.black()));
         return;
     }
     if tables.is_default() {
-        return compose_default(store, word, map, out, stride);
+        compose_default(store, word, map, out, stride);
+        if tables.is_wide() {
+            // The textport's colour map holds eight bits a channel (`ColourMap::load`): widened by repeating the top bits.
+            let widen = |c: u32| (c << 2) | (c >> 6);
+            let (w, h) = (store.width() as usize, store.height() as usize);
+            for y in 0..h {
+                out[y * stride..y * stride + w].iter_mut().for_each(|p| *p = widen(*p >> 16 & 0xff) << 20 | widen(*p >> 8 & 0xff) << 10 | widen(*p & 0xff));
+            }
+        }
+        return;
     }
     let (w, h) = (store.width() as usize, store.height() as usize);
     assert!(out.len() >= stride * h.saturating_sub(1) + w, "the frame buffer is too small");
@@ -203,7 +212,7 @@ pub fn compose(store: &PixelStore, word: usize, map: &ColourMap, tables: &Baked,
                         row[i] = tables.direct(shown.as_ref().map_or(0, |c| unsafe { c.load(src + i) }));
                     })
                 }
-                Window::Cleared | Window::Unsupported(_) | Window::Layer { .. } => row[x..end].fill(0xff00_0000),
+                Window::Cleared | Window::Unsupported(_) | Window::Layer { .. } => row[x..end].fill(tables.black()),
             }
             x = end;
         }
@@ -411,11 +420,21 @@ impl Pixels {
     /// stands, without waiting for a display thread: rows from the top, one word a
     /// pixel (0xAABBGGRR).
     pub fn frame(&self) -> Vec<u32> {
+        self.frame_of(false)
+    }
+
+    /// As `frame` with ten of the gamma RAM's twelve bits a channel, `x2b10g10r10` (`Tables::baked_wide`): the
+    /// frame a head whose DAC takes ten bits shows, without the DAC cursor.
+    pub fn frame_wide(&self) -> Vec<u32> {
+        self.frame_of(true)
+    }
+
+    fn frame_of(&self, wide: bool) -> Vec<u32> {
         let w = self.store.cpu().width() as usize;
         let mut frame = vec![0u32; w * self.store.cpu().height() as usize];
         self.store.observe_all();
         let map = self.map.lock().clone();
-        let tables = self.tables.lock().snapshot();
+        let tables = if wide { Arc::new(self.tables.lock().baked_wide()) } else { self.tables.lock().snapshot() };
         compose(self.store.cpu(), super::textport::COLOUR_WORD, &map, &tables, &mut frame, w);
         frame
     }
@@ -630,11 +649,11 @@ mod tests {
         let (mut wide, mut narrow) = (vec![7u32; 16], vec![0xff00_0007u32; 16]);
         t.snapshot().draw_dac_cursor_wide(&mut wide, 8, 8, 2);
         t.snapshot().draw_dac_cursor(&mut narrow, 8, 8, 2);
-        assert_eq!((wide[10], wide[11]), (0x3fd << 20 | 1 << 10 | 2, 0x155 << 20 | 0x2aa << 10 | 0x3ff));
+        assert_eq!((wide[10], wide[11]), (2 << 20 | 1 << 10 | 0x3fd, 0x3ff << 20 | 0x2aa << 10 | 0x155), "x2b10g10r10: red low");
         assert_eq!(wide.iter().filter(|&&p| p != 7).count(), 2);
         let top = |c: u32| (c >> 2) & 0xff;
         for i in [10, 11] {
-            assert_eq!(narrow[i], 0xff00_0000 | top(wide[i] >> 20) | top(wide[i] >> 10) << 8 | top(wide[i]) << 16);
+            assert_eq!(narrow[i], 0xff00_0000 | top(wide[i]) | top(wide[i] >> 10) << 8 | top(wide[i] >> 20) << 16);
         }
         t.set_blank(true);
         let mut blank = vec![7u32; 16];

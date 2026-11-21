@@ -37,6 +37,17 @@ pub trait DisplayBusSlave: Send {
     fn write(&mut self, addr: u32, data: u32) -> bool;
 }
 
+/// A 10-bit output component with its two low bits formed as `0xc006` bits 10-9 (`mode`) say (established, kona
+/// `devices/dg/gvo-option.md`): 0 zero, 2 the gamma output's own bits, 3 a duplicate of the top bits (bits 9:8). Mode 1 is
+/// unnamed in the sources: shown as 2.
+pub fn low_bits(c: u32, mode: u32) -> u32 {
+    match mode {
+        0 => c & !3,
+        3 => c & !3 | c >> 8 & 3,
+        _ => c,
+    }
+}
+
 /// The option mask a GVO reports (request 18).
 pub const MASK_GVO: u32 = 0x10;
 
@@ -147,6 +158,12 @@ impl OptionBoard {
         }
     }
 
+    /// The control register's value as the board holds it (0xc006: bits 10-9 say how the two low bits of the
+    /// 10-bit output are formed), read from the shell's device; None without one or when it has no such register.
+    pub fn control(&mut self) -> Option<u32> {
+        self.slave.as_mut().filter(|_| self.present).and_then(|s| s.read(CONTROL))
+    }
+
     /// The board's channel is blanked: the firmware zeroes the colour look-up table.
     pub fn blank_channel(&mut self) {
         if let (Some(slave), true) = (self.slave.as_mut(), self.present) {
@@ -224,6 +241,14 @@ mod tests {
         let mut b = OptionBoard::new(MASK_GVO);
         b.set_slave(Some(Box::new(fake.clone())));
         b
+    }
+
+    #[test]
+    fn the_two_low_bits_of_the_output_follow_control_register_bits_10_9() {
+        let c = 0x2a5;
+        assert_eq!([0, 1, 2, 3].map(|m| low_bits(c, m)), [0x2a4, 0x2a5, 0x2a5, 0x2a6]);
+        assert_eq!(low_bits(0x3ff, 0), 0x3fc);
+        assert_eq!(low_bits(0x001, 3), 0x000, "the top bits of 1 are zero");
     }
 
     #[test]

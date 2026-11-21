@@ -122,6 +122,10 @@ pub struct Baked {
     cmap: Vec<u32>,
     /// Direct colour's bytes through the gamma RAM, by channel (red, green, blue).
     lut: [[u8; 256]; 3],
+    /// A wide set (`Tables::baked_wide`): the words are `x2b10g10r10`, ten of the gamma RAM's twelve bits a
+    /// channel with red low, in `cmap`, the cursor's colours and this table in place of `lut`.
+    wide: bool,
+    lut_wide: [[u16; 256]; 3],
     windows: [Window; IDS],
     default: bool,
     /// Some popup or overlay window is decoded, so a frame has layers to compose.
@@ -185,7 +189,7 @@ impl Default for Tables {
             cursor_pos: 0,
             dac: Dac::default(),
             blank: false,
-            baked: Arc::new(Baked { cmap: vec![BLACK; ENTRIES], lut: [[0; 256]; 3], windows: [Window::Textport; IDS], default: true, layers: false, cursor: None, dac_cursor: None, blank: false }),
+            baked: Arc::new(Baked { cmap: vec![BLACK; ENTRIES], lut: [[0; 256]; 3], wide: false, lut_wide: [[0; 256]; 3], windows: [Window::Textport; IDS], default: true, layers: false, cursor: None, dac_cursor: None, blank: false }),
             dropped: 0,
         };
         t.rebake_all();
@@ -263,14 +267,19 @@ impl Tables {
     /// One gamma output: entry `v12` of colour `ch`'s table in the page channel 0
     /// selects (its set-up word's bits 3:0; the page of a channel is chosen per
     /// channel, established), or `v12` itself with no gamma loaded or the channel's
-    /// no-gamma bit (5) set. Only bank 0 of the load address is read.
-    fn gamma_out(&self, ch: usize, v12: u32) -> u32 {
+    /// no-gamma bit (5) set. Only bank 0 of the load address is read. 12 bits.
+    fn gamma12(&self, ch: usize, v12: u32) -> u32 {
         if self.gamma_loaded && ChannelSetup::NO_GAMMA.get(self.channel0) == 0 {
             let address = GammaAddress::PAGE.put(GammaAddress::COLOUR.put(v12, ch as u32), ChannelSetup::GAMMA_PAGE.get(self.channel0));
-            narrow(self.gamma[address as usize] as u32)
+            self.gamma[address as usize] as u32
         } else {
-            narrow(v12)
+            v12
         }
+    }
+
+    /// `gamma12` narrowed to the eight bits a monitor channel's DAC takes.
+    fn gamma_out(&self, ch: usize, v12: u32) -> u32 {
+        narrow(self.gamma12(ch, v12))
     }
 
     /// A 10:10:10 word as the scan-out shows it: each component widened to 12
@@ -282,6 +291,37 @@ impl Tables {
     fn through_gamma(&self, e: u32) -> u32 {
         let w10 = |c: u32| c << 2 | c >> 8;
         BLACK | self.gamma_out(2, w10(e & 0x3ff)) << 16 | self.gamma_out(1, w10((e >> 10) & 0x3ff)) << 8 | self.gamma_out(0, w10((e >> 20) & 0x3ff))
+    }
+
+    /// `through_gamma` for a wide set: the gamma output's top ten bits of its twelve a channel, as `x2b10g10r10`.
+    fn through_gamma_wide(&self, e: u32) -> u32 {
+        let w10 = |c: u32| c << 2 | c >> 8;
+        let out = |ch: usize, c: u32| self.gamma12(ch, w10(c & 0x3ff)) >> 2;
+        out(2, e) << 20 | out(1, e >> 10) << 10 | out(0, e >> 20)
+    }
+
+    /// The tables as a wide set: what a frame reads for a head whose DAC takes ten bits a channel (the GVO),
+    /// made from the tables as they stand, apart from the monitor channels' `snapshot`. Made on request: a
+    /// load costs the monitor path nothing for it. Without a gamma load the RAM is the identity, so the words
+    /// are the colour map's own ten bits.
+    pub fn baked_wide(&self) -> Baked {
+        let mut b = (*self.baked).clone();
+        b.wide = true;
+        for (i, c) in b.cmap.iter_mut().enumerate() {
+            *c = self.through_gamma_wide(self.raw[i]);
+        }
+        for c in 0..256u32 {
+            for ch in 0..3 {
+                b.lut_wide[ch][c as usize] = (self.gamma12(ch, c << 4 | c >> 4) >> 2) as u16;
+            }
+        }
+        if let Some(cur) = &mut b.cursor {
+            let at = self.cursor_at as usize;
+            if let Some(g) = self.cursor_ram.get(at..at + CURSOR_SLOT) {
+                (cur.third, cur.fg, cur.bg) = (self.through_gamma_wide(g[256]), self.through_gamma_wide(g[257]), self.through_gamma_wide(g[258]));
+            }
+        }
+        b
     }
 
     /// Redo the colour map entries `from..to` of the snapshot.
@@ -598,6 +638,16 @@ impl Baked {
         self.default
     }
 
+    /// A wide set (`Tables::baked_wide`): its words are `x2b10g10r10`.
+    pub fn is_wide(&self) -> bool {
+        self.wide
+    }
+
+    /// The word of a black pixel in this set's layout.
+    pub fn black(&self) -> u32 {
+        if self.wide { 0 } else { BLACK }
+    }
+
     /// The whole colour map as opaque `0xAABBGGRR` pixels, for a scan-out that
     /// resolves windows itself.
     #[cfg(feature = "wgpu")]
@@ -660,6 +710,10 @@ impl Baked {
     /// A direct-colour word `0x00RRGGBB` as an opaque `0xAABBGGRR` pixel, through
     /// the gamma RAM.
     pub fn direct(&self, word: u32) -> u32 {
+        if self.wide {
+            let l = &self.lut_wide;
+            return (l[2][(word & 0xff) as usize] as u32) << 20 | (l[1][((word >> 8) & 0xff) as usize] as u32) << 10 | l[0][((word >> 16) & 0xff) as usize] as u32;
+        }
         BLACK | (self.lut[2][(word & 0xff) as usize] as u32) << 16 | (self.lut[1][((word >> 8) & 0xff) as usize] as u32) << 8 | self.lut[0][((word >> 16) & 0xff) as usize] as u32
     }
 
@@ -814,6 +868,29 @@ mod gamma_tests {
         assert_eq!(t.snapshot().direct(0x00ff_ffff), 0xff00_ff7f);
         t.load_gamma((1 << 19) - 1, &[1, 2]);
         assert_eq!(t.dropped, 1, "the last entry fits, the next is past the address space");
+    }
+
+    /// A wide set keeps ten of the gamma RAM's twelve bits where the narrow one keeps eight: red's whole table is
+    /// 0xabd, so red is 0xab narrow and 0x2af wide, red low. Without a gamma load the RAM is the identity and a
+    /// 10-bit colour comes back as it went in.
+    #[test]
+    fn a_wide_set_keeps_ten_of_the_gamma_rams_twelve_bits_red_low() {
+        let mut t = Tables::default();
+        t.load_colours(0, &[0x155 << 20 | 0x2aa << 10 | 0x3ff]);
+        let wide = t.baked_wide();
+        assert!(wide.is_wide() && !t.snapshot().is_wide());
+        assert_eq!(wide.colour(0), 0x3ff << 20 | 0x2aa << 10 | 0x155, "no gamma: the colour map's ten bits");
+        assert_eq!(wide.direct(0x00_ff_80_01), 4 << 20 | 0x202 << 10 | 0x3ff, "and direct colour's eight, widened through 12 bits");
+        t.load_gamma(0, &[0xabd; 4096]);
+        t.load_gamma(0x1000, &(0..4096).collect::<Vec<u32>>());
+        t.load_gamma(0x2000, &[0; 4096]);
+        t.load_colours(0, &[0x3ff << 20 | 0x3ff << 10 | 0x3ff]);
+        assert_eq!(t.snapshot().colour(0), 0xff00_ffab, "narrow: the top eight of 0xabd and 0xfff");
+        let wide = t.baked_wide();
+        assert_eq!(wide.colour(0), 0x3ff << 10 | 0x2af, "wide: the top ten, red low");
+        assert_eq!(wide.direct(0x00ff_ffff), 0x3ff << 10 | 0x2af);
+        assert_eq!(wide.black(), 0);
+        assert_eq!(t.snapshot().black(), 0xff00_0000);
     }
 }
 
