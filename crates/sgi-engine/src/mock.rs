@@ -97,6 +97,9 @@ pub struct Mock<M: HostMem> {
     source: Source,
     dma_data: u32,
     held_swap: bool,
+    /// Swaps consumed since the build or reset, and the shell time last given.
+    swaps: u64,
+    clock_ns: u64,
     stopped: bool,
     wait_until: Option<u64>,
     fences: Vec<(u64, u32)>,
@@ -128,6 +131,8 @@ impl<M: HostMem> Mock<M> {
             source: Source::default(),
             dma_data: 0,
             held_swap: false,
+            swaps: 0,
+            clock_ns: 0,
             stopped: false,
             wait_until: None,
             fences: Vec::new(),
@@ -187,7 +192,11 @@ impl<M: HostMem> Mock<M> {
                     self.out.post(Event::Credits { source: src.id, retired: 1 });
                 }
             }
-            Op::Swap => self.held_swap = true,
+            Op::Swap => {
+                self.held_swap = true;
+                self.swaps += 1;
+                self.out.post(Event::Swap { count: self.swaps, time_ns: self.clock_ns });
+            }
             Op::Wait(t) => self.wait_until = Some(t),
             Op::DmaWrite(addr, data) => {
                 if self.mem.ram_write(addr, &(data as u64).to_be_bytes(), Swap::None).is_err() {
@@ -327,6 +336,7 @@ impl<M: HostMem> BoardEngine for Mock<M> {
     }
 
     fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
+        self.clock_ns = now_ns;
         self.write_times.push(now_ns);
         self.write(off, bits, val)
     }
@@ -337,6 +347,10 @@ impl<M: HostMem> BoardEngine for Mock<M> {
 
     fn busy_ns(&self) -> u64 {
         12_345
+    }
+
+    fn swaps_dropped(&self) -> u64 {
+        self.out.swaps_dropped()
     }
 
     fn head_bits(&self, head: u32) -> u32 {
@@ -465,12 +479,14 @@ impl<M: HostMem> BoardEngine for Mock<M> {
         ran
     }
 
-    fn frame(&mut self, _now_ns: u64) {
+    fn frame(&mut self, now_ns: u64) {
+        self.clock_ns = now_ns;
         self.frames += 1;
         self.held_swap = false;
     }
 
     fn advance(&mut self, now_ns: u64) -> Pump {
+        self.clock_ns = now_ns;
         self.out.rearm();
         if self.dead() {
             return Pump { idle: Idle::Faulted, events: self.out.pending(), next_deadline: None, irq_levels: self.irq_levels() };
@@ -487,7 +503,8 @@ impl<M: HostMem> BoardEngine for Mock<M> {
         Pump { idle: self.idle(), events: self.out.pending(), next_deadline: self.wait_until, irq_levels: self.irq_levels() }
     }
 
-    fn wait_idle(&mut self, _now_ns: u64, _budget_ns: u64) -> Idle {
+    fn wait_idle(&mut self, now_ns: u64, _budget_ns: u64) -> Idle {
+        self.clock_ns = now_ns;
         self.run(usize::MAX);
         self.idle()
     }
@@ -626,6 +643,7 @@ impl<M: HostMem> BoardEngine for Mock<M> {
         }
         self.generation += 1;
         self.held_swap = false;
+        self.swaps = 0;
         self.stopped = false;
         self.wait_until = None;
         self.fences.clear();

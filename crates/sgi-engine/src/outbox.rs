@@ -2,7 +2,7 @@
 //! the shell some wait.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
@@ -12,6 +12,8 @@ use crate::engine::{Event, Interrupt, Mark, Rect, DAMAGE_ANY};
 const DAMAGE_MAX: usize = 16;
 /// Distinct notes and DMA-fault pages kept; the rest are dropped.
 const SEEN_MAX: usize = 256;
+/// Swap events waiting before the next is dropped and counted.
+pub const SWAP_MAX: usize = 4096;
 
 #[derive(Default)]
 struct Queue {
@@ -19,12 +21,14 @@ struct Queue {
     irq_pending: bool,
     notes: HashSet<String>,
     faults: HashSet<(u64, bool)>,
+    swaps: usize,
 }
 
 pub struct Outbox {
     q: Mutex<Queue>,
     notify: Option<Box<dyn Fn() + Send + Sync>>,
     notified: AtomicBool,
+    swaps_dropped: AtomicU64,
 }
 
 impl Outbox {
@@ -32,7 +36,7 @@ impl Outbox {
     /// thread and possibly with engine locks held, and must only schedule the
     /// shell's pump. Once per batch: the next call follows a `drain` or `rearm`.
     pub fn new(notify: Option<Box<dyn Fn() + Send + Sync>>) -> Outbox {
-        Outbox { q: Mutex::new(Queue::default()), notify, notified: AtomicBool::new(false) }
+        Outbox { q: Mutex::new(Queue::default()), notify, notified: AtomicBool::new(false), swaps_dropped: AtomicU64::new(0) }
     }
 
     pub fn wake(&self) {
@@ -64,6 +68,15 @@ impl Outbox {
                             true
                         }
                         None => true,
+                    }
+                }
+                Event::Swap { .. } => {
+                    if q.swaps < SWAP_MAX {
+                        q.swaps += 1;
+                        true
+                    } else {
+                        self.swaps_dropped.fetch_add(1, Ordering::Relaxed);
+                        false
                     }
                 }
                 Event::Credits { source, retired } => {
@@ -121,10 +134,17 @@ impl Outbox {
     pub fn drain(&self, out: &mut Vec<Event>, max: usize) {
         let mut q = self.q.lock();
         let n = q.events.len().min(max);
+        let before = out.len();
         out.extend(q.events.drain(..n));
+        q.swaps -= out[before..].iter().filter(|e| matches!(e, Event::Swap { .. })).count();
         q.irq_pending = q.events.iter().any(|e| matches!(e, Event::Irq));
         // Cleared under the lock, so a post after this drain wakes again.
         self.notified.store(!q.events.is_empty(), Ordering::Release);
+    }
+
+    /// Swap events dropped for want of room since the outbox was made.
+    pub fn swaps_dropped(&self) -> u64 {
+        self.swaps_dropped.load(Ordering::Relaxed)
     }
 
     pub fn pending(&self) -> bool {
@@ -151,4 +171,27 @@ pub fn aliasing_lines<'a>(packets: impl IntoIterator<Item = &'a Interrupt>, bit:
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Swap events are never merged, and past `SWAP_MAX` waiting the rest are dropped and counted; a drain makes room.
+    #[test]
+    fn swap_events_are_bounded_and_the_overflow_is_counted() {
+        let o = Outbox::new(None);
+        for i in 1..=(SWAP_MAX as u64 + 10) {
+            o.post(Event::Swap { count: i, time_ns: i });
+        }
+        assert_eq!(o.swaps_dropped(), 10);
+        let mut v = Vec::new();
+        o.drain(&mut v, 100);
+        assert_eq!(v.len(), 100);
+        assert_eq!(v[99], Event::Swap { count: 100, time_ns: 100 });
+        o.post(Event::Swap { count: 9999, time_ns: 0 });
+        assert_eq!(o.swaps_dropped(), 10, "room again after a drain");
+        o.drain(&mut v, usize::MAX);
+        assert_eq!(v.iter().filter(|e| matches!(e, Event::Swap { .. })).count(), SWAP_MAX + 1);
+    }
 }

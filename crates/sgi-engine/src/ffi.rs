@@ -54,6 +54,7 @@ pub const IRIS_ENGINE_EVENT_GPU_LOST: u32 = 6;
 pub const IRIS_ENGINE_EVENT_INTERRUPT: u32 = 7;
 pub const IRIS_ENGINE_EVENT_CREDITS: u32 = 8;
 pub const IRIS_ENGINE_EVENT_SWAP_READY: u32 = 9;
+pub const IRIS_ENGINE_EVENT_SWAP: u32 = 10;
 
 pub const IRIS_ENGINE_GPU_NONE: u32 = 0;
 pub const IRIS_ENGINE_GPU_AUTO: u32 = 1;
@@ -204,12 +205,20 @@ pub struct IrisEngineSwapReady {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct IrisEngineSwap {
+    pub count: u64,
+    pub time_ns: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub union IrisEngineEventData {
     pub damage: IrisEngineDamage,
     pub bus_fault: IrisEngineBusFault,
     pub packet: IrisEnginePacket,
     pub credits: IrisEngineCredits,
     pub swap_ready: IrisEngineSwapReady,
+    pub swap: IrisEngineSwap,
     /// NOTE, DEVICE_FAULT, GPU_LOST: NUL-terminated, cut to fit.
     pub text: [c_char; 96],
 }
@@ -258,6 +267,7 @@ trait DynEngine: Send {
     fn head_timing(&self, head: u32) -> Option<HeadTiming>;
     fn head_bits(&self, head: u32) -> u32;
     fn busy_ns(&self) -> u64;
+    fn swaps_dropped(&self) -> u64;
     fn scanout10(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault>;
     fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault>;
     fn head_deadline(&self, head: u32) -> Option<u64>;
@@ -307,6 +317,9 @@ impl<E: BoardEngine + Send + 'static> DynEngine for E {
     }
     fn busy_ns(&self) -> u64 {
         BoardEngine::busy_ns(self)
+    }
+    fn swaps_dropped(&self) -> u64 {
+        BoardEngine::swaps_dropped(self)
     }
     fn scanout10(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
         BoardEngine::scanout10(self, head, out)
@@ -708,6 +721,15 @@ pub unsafe extern "C" fn iris_engine_busy_ns(h: *mut IrisEngine) -> u64 {
     guard(h, Point::Flags, 0, |s| s.eng.busy_ns())
 }
 
+/// Swap events dropped for want of room in the outbox since the engine was built; 0 for a board that posts none.
+///
+/// # Safety
+/// `h` is a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn iris_engine_swaps_dropped(h: *mut IrisEngine) -> u64 {
+    guard(h, Point::Flags, 0, |s| s.eng.swaps_dropped())
+}
+
 /// The bits a colour that head `head`'s hardware output carries (8 unless the board keeps more).
 ///
 /// # Safety
@@ -928,6 +950,10 @@ fn c_event(e: &Event) -> IrisEngineEvent {
         Event::Credits { source, retired } => {
             c.kind = IRIS_ENGINE_EVENT_CREDITS;
             c.data.credits = IrisEngineCredits { source: *source, retired: *retired };
+        }
+        Event::Swap { count, time_ns } => {
+            c.kind = IRIS_ENGINE_EVENT_SWAP;
+            c.data.swap = IrisEngineSwap { count: *count, time_ns: *time_ns };
         }
         Event::SwapReady { drive } => {
             c.kind = IRIS_ENGINE_EVENT_SWAP_READY;
