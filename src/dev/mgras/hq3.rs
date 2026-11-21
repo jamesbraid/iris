@@ -54,6 +54,13 @@ pub mod host {
     pub const STATUS_CFIFO_HIGH: u32 = 0x08;
     pub const STATUS_CFIFO_LOW: u32 = 0x10;
     pub const STATUS_FIXED: u32 = 0x40;
+    /// The video DMA is busy (HQ4 `0x020000` bit 12, the Digital Video driver's wait), set from the start store
+    /// to `VIDEO_DMA_CONTROL` until the status has been polled once.
+    pub const STATUS_VIDEO_DMA_BUSY: u32 = 0x1000;
+    /// The video DMA control word (HQ4 `0x081010`): bits 0 and 4 start a transfer, a store of 2 abandons it.
+    pub const VIDEO_DMA_CONTROL: u32 = 0x81010;
+    pub const VIDEO_DMA_START: u32 = 0x11;
+    pub const VIDEO_DMA_ABORT: u32 = 0x2;
 
     /// FIFOSTATUS: command FIFO words in 6:0 (0x7F tells the kernel the
     /// board is wedged), its high-water mark in 28:22.
