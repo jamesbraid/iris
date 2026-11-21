@@ -841,3 +841,26 @@ fn observe_all_submits_the_gpu_batch_and_the_counters_show_the_gpu_did_the_work(
     assert_eq!(after[5], 0, "no op fell back to the CPU: {after:?}");
     assert_eq!(e.pixel(7, 8, 1), 0x5a00, "the mirror holds the box");
 }
+
+/// The swap command (display-mode byte with a window) is one `Event::Swap` each when the stream consumes it, counting from 1,
+/// with the shell time the pipe last had. The stream stalls at a swap until a frame, so a second swap queued behind the first
+/// is consumed, and reported, at the frame that releases it: two swaps and no acknowledge between are still two events.
+#[test]
+fn every_swap_the_stream_consumes_is_its_own_event() {
+    let mut e = engine();
+    let swaps = |e: &mut Engine| drain(e).into_iter().filter_map(|x| if let Event::Swap { count, time_ns } = x { Some((count, time_ns)) } else { None }).collect::<Vec<_>>();
+    e.advance(100);
+    kernel(&mut e, DISPLAY_MODE_BYTE, &SWAP);
+    kernel(&mut e, DISPLAY_MODE_BYTE, &[0x3c0001, 13, 0]);
+    assert_eq!(swaps(&mut e), vec![(1, 100)], "the second waits behind the first's stall");
+    e.frame(200);
+    e.run(usize::MAX);
+    assert_eq!(swaps(&mut e), vec![(2, 200)]);
+    kernel(&mut e, DISPLAY_MODE_BYTE, &SWAP);
+    e.advance(300);
+    assert!(swaps(&mut e).is_empty(), "the second swap stalls the stream too");
+    e.frame(400);
+    e.run(usize::MAX);
+    assert_eq!(swaps(&mut e), vec![(3, 400)], "the time is the one the engine had when it consumed the swap");
+    assert_eq!(BoardEngine::swaps_dropped(&e), 0);
+}

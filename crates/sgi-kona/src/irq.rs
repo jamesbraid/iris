@@ -16,6 +16,9 @@ pub trait InterruptController: Send + Sync {
     /// The pipe's own drive of the swap-ready line changed (`drive` is the new state of its drive bit).
     fn swap_ready(&self, _drive: bool) {}
 
+    /// A KONA pipe consumed a buffer swap (the shell's `Event::Swap`). The default drops it.
+    fn swap_consumed(&self) {}
+
     fn foreign_packet(&self, _source: u8, _widget: u8, _address: u64, _line: u32, _level: bool) -> bool {
         false
     }

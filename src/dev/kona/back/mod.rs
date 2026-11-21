@@ -1643,6 +1643,7 @@ impl KonaBackend {
                     // byte is inferred from the recorded swaps, which set it to 0 and 1
                     // alternately.
                     (DISPLAY_MODE_BYTE, &[window, id, mode]) if window != 0 => {
+                        port.swap_consumed();
                         // A latched swap shows at the retrace, but the pipe is past it: draws after
                         // it already go to the other buffer.
                         if self.latch {

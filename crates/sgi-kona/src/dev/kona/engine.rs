@@ -10,7 +10,7 @@
 //! caller's thread when the configuration has none.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -63,6 +63,9 @@ struct Events {
     out: Outbox,
     /// The widget the host's packets go to (the DMA widget the driver programmed).
     host_widget: Arc<AtomicU8>,
+    /// The shell time the pipe last had, and the swaps consumed since the build or reset (`Event::Swap`).
+    clock_ns: AtomicU64,
+    swaps: AtomicU64,
 }
 
 impl Events {
@@ -82,6 +85,11 @@ impl InterruptController for Events {
     fn foreign_packet(&self, source: u8, widget: u8, address: u64, line: u32, level: bool) -> bool {
         self.post(source, widget, address, line as u8, level);
         true
+    }
+
+    fn swap_consumed(&self) {
+        let count = self.swaps.fetch_add(1, Relaxed) + 1;
+        self.out.post(Event::Swap { count, time_ns: self.clock_ns.load(Relaxed) });
     }
 
     fn swap_ready(&self, drive: bool) {
@@ -224,7 +232,7 @@ impl<M: HostMem> KonaEngine<M> {
         let pixels = back.pixels();
         let mut front = Front::new(&cfg);
         front.probe_value = cfg.probe;
-        let events = Arc::new(Events { out: Outbox::new(notify), host_widget: front.dma_widget_handle() });
+        let events = Arc::new(Events { out: Outbox::new(notify), host_widget: front.dma_widget_handle(), clock_ns: AtomicU64::new(0), swaps: AtomicU64::new(0) });
         let host = Arc::new(Host::new(front, events.clone(), Arc::new(Mem(mem))));
         back.attach_manual(DisplayHandle::new(&host));
         back.latch_swaps(true);
@@ -687,6 +695,11 @@ impl<M: HostMem> KonaEngine<M> {
 impl<M: HostMem> BoardEngine for KonaEngine<M> {
     type Region = Region;
 
+    fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
+        self.events.clock_ns.store(now_ns, Relaxed);
+        self.write(off, bits, val)
+    }
+
     /// One head for each running channel (the display channels, then the option board's), each showing its
     /// input rectangle of the managed area; one head, the whole managed area, while none runs.
     fn heads(&self) -> u32 {
@@ -843,19 +856,22 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         self.run_stream(max_ops)
     }
 
-    fn frame(&mut self, _now_ns: u64) {
+    fn frame(&mut self, now_ns: u64) {
+        self.events.clock_ns.store(now_ns, Relaxed);
         self.activity += 1;
         self.back.frame();
     }
 
-    fn advance(&mut self, _now_ns: u64) -> Pump {
+    fn advance(&mut self, now_ns: u64) -> Pump {
+        self.events.clock_ns.store(now_ns, Relaxed);
         self.events.out.rearm();
         self.notice_fault();
         Pump { idle: self.idle(), events: self.events.out.pending(), next_deadline: None, irq_levels: self.irq_levels() }
     }
 
     /// Runs the stream a slice at a time, so a caller with no budget still makes progress.
-    fn wait_idle(&mut self, _now_ns: u64, budget_ns: u64) -> Idle {
+    fn wait_idle(&mut self, now_ns: u64, budget_ns: u64) -> Idle {
+        self.events.clock_ns.store(now_ns, Relaxed);
         let t0 = Instant::now();
         while self.idle() == Idle::Working {
             self.run_stream(SLICE);
@@ -893,6 +909,10 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
     /// Wall time the tile pool's workers have spent drawing, summed over them. The stream itself runs inside calls.
     fn busy_ns(&self) -> u64 {
         self.back.busy_ns()
+    }
+
+    fn swaps_dropped(&self) -> u64 {
+        self.events.out.swaps_dropped()
     }
 
     fn quiesce(&mut self, budget_ns: u64) -> Result<(), Refused> {
@@ -1074,6 +1094,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         self.host.activity.store(false, Relaxed);
         self.credits = Credits::default();
         self.events.out.clear();
+        self.events.swaps.store(0, Relaxed);
         *self.fault.lock() = None;
         self.events.out.post(Event::Irq);
         self.report_widget();
