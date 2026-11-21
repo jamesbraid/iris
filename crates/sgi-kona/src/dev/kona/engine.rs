@@ -508,6 +508,17 @@ impl<M: HostMem> KonaEngine<M> {
         self.back.dac_cursor()
     }
 
+    /// What the GPU store has done: records, batches, copies, readbacks, copies refused for a word too wide, and the ops that
+    /// ran on the CPU for want of a GPU kernel. None without a GPU store or once the engine has faulted. Drains the
+    /// tile pool first, so the counts include everything submitted.
+    #[cfg(feature = "wgpu")]
+    pub fn gpu_counters(&mut self) -> Option<[u64; 6]> {
+        if self.fault_now().is_some() {
+            return None;
+        }
+        self.back.gpu_counters()
+    }
+
     /// A video-output-chip interrupt for the shell to raise (an external sync reference detected or lost: inferred;
     /// kona `devices/dg/external-status.md`): `HH_INTR_STATUS` bit 9 rises, and the interrupt packet goes out when the
     /// driver has enabled the bit in the mask; write-one-to-clear like the others. The pipe has no external sync of
@@ -874,8 +885,14 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
 
     fn observe_all(&mut self) -> Result<(), Refused> {
         self.need_parked()?;
-        self.back.drain();
-        Ok(())
+        // The open GPU batch is submitted and waited for, then every plane is read back, so a completion fence
+        // built on this means the GPU is done.
+        self.back.sync_all().map_err(Refused::Faulted)
+    }
+
+    /// Wall time the tile pool's workers have spent drawing, summed over them. The stream itself runs inside calls.
+    fn busy_ns(&self) -> u64 {
+        self.back.busy_ns()
     }
 
     fn quiesce(&mut self, budget_ns: u64) -> Result<(), Refused> {

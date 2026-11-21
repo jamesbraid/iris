@@ -335,6 +335,47 @@ pub unsafe extern "C" fn sgi_kona_dac_cursor(h: *mut IrisEngine, x: *mut i32, y:
     }
 }
 
+/// What the GPU store has done, for a shell that asserts a GPU run executed GPU records and fell back to the CPU for none.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct IrisKonaGpuCounters {
+    pub records: u64,
+    pub batches: u64,
+    pub copies: u64,
+    pub readbacks: u64,
+    pub rejections: u64,
+    /// Ops that ran on the CPU for want of a GPU kernel.
+    pub cpu_ops: u64,
+    /// 1 once the engine has faulted.
+    pub faults: u64,
+}
+
+/// Fill `*out` with the GPU store's counters. OK; ERROR when the engine has no GPU store (or `out` is NULL); FAULT on a
+/// faulted engine.
+///
+/// # Safety
+/// `h` is a live KONA handle and `out` points to an `IrisKonaGpuCounters`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_gpu_counters(h: *mut IrisEngine, out: *mut IrisKonaGpuCounters) -> c_int {
+    unsafe {
+        call::<KonaEngine<CMem>, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| {
+            if out.is_null() {
+                return sgi_engine::ffi::IRIS_ENGINE_ERROR;
+            }
+            if e.fault().is_some() {
+                return IRIS_ENGINE_FAULT;
+            }
+            match e.gpu_counters() {
+                Some([records, batches, copies, readbacks, rejections, cpu_ops]) => {
+                    *out = IrisKonaGpuCounters { records, batches, copies, readbacks, rejections, cpu_ops, faults: 0 };
+                    IRIS_ENGINE_OK
+                }
+                None => sgi_engine::ffi::IRIS_ENGINE_ERROR,
+            }
+        })
+    }
+}
+
 /// A video-output-chip interrupt: `HH_INTR_STATUS` bit 9 rises, and the packet goes out when the driver enabled it.
 ///
 /// # Safety

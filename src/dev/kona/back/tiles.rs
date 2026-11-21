@@ -114,6 +114,8 @@ pub struct TileStats {
     /// and those that found jobs still queued, which is what a drain costs.
     pub drains: u64,
     pub busy_drains: u64,
+    /// Wall time the pool's workers have spent drawing tiles, summed over them (so it can exceed wall time).
+    pub busy_ns: u64,
 }
 
 /// One entry of the draw-state table: written by the producer while no job in
@@ -135,6 +137,7 @@ struct Shared {
     states: Vec<StateCell>,
     poisoned: AtomicBool,
     tile_runs: AtomicU64,
+    busy_ns: AtomicU64,
 }
 
 /// The job closure the pool runs, boxed: it holds the shared state, and the
@@ -184,7 +187,7 @@ impl Tiles {
         let (w, h) = (store.cpu().width() as i32, store.cpu().height() as i32);
         debug_assert!(w <= GRID_SPAN && h <= GRID_SPAN, "a {w}x{h} screen wraps the tile grid");
         let states = (0..STATES).map(|_| StateCell(UnsafeCell::new(DrawState::default()))).collect();
-        let shared = Arc::new(Shared { store, states, poisoned: AtomicBool::new(false), tile_runs: AtomicU64::new(0) });
+        let shared = Arc::new(Shared { store, states, poisoned: AtomicBool::new(false), tile_runs: AtomicU64::new(0), busy_ns: AtomicU64::new(0) });
         let pool = (threads > 0).then(|| {
             let s = shared.clone();
             let run: Run = Box::new(move |job, tile| {
@@ -192,10 +195,12 @@ impl Tiles {
                 let ds = unsafe { &*s.states[job.state() as usize].0.get() };
                 // The tile's rectangle, cut at the screen's edge.
                 let clip = Rect { x0: tile.x, y0: tile.y, x1: (tile.x + tile.size).min(w), y1: (tile.y + tile.size).min(h) };
+                let began = std::time::Instant::now();
                 if catch_unwind(AssertUnwindSafe(|| pixel::run(s.store.cpu(), job, ds, clip))).is_err() {
                     s.poisoned.store(true, SeqCst);
                 }
                 s.store.cpu().touch();
+                s.busy_ns.fetch_add(began.elapsed().as_nanos() as u64, Relaxed);
                 s.tile_runs.fetch_add(1, Relaxed);
             });
             TilePool::new("kona-tile", ring, tile, threads, run)
@@ -204,7 +209,7 @@ impl Tiles {
     }
 
     pub fn stats(&self) -> TileStats {
-        TileStats { retired: self.tail, tile_runs: self.shared.tile_runs.load(Relaxed), ..self.stats }
+        TileStats { retired: self.tail, tile_runs: self.shared.tile_runs.load(Relaxed), busy_ns: self.shared.busy_ns.load(Relaxed), ..self.stats }
     }
 
     pub fn is_poisoned(&self) -> bool {

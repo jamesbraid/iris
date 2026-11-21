@@ -796,3 +796,48 @@ fn the_pipes_own_swap_ready_drive_is_an_event_and_display_bus_words_read_back() 
     video(&mut f, 0x01, &[0xe500, 0]);
     assert_eq!(drives(&mut f), [false], "the loaded pipe was driving, and releases");
 }
+
+/// An X box over the whole managed area under a 16-bit index context, foreground 0x5a00 in colour word 1.
+fn fill_box(e: &mut Engine) {
+    const GC: [u32; 13] = [0x5a000, 0x1ffe, 0xa5000, 0x1ffe, 0xf00fff, 0, 0x180c, 0x40001, 1, 6, 5, 1, 1];
+    kernel(e, WINDOW_SYSTEM_GRAPHICS_CONTEXT_LOAD, &GC);
+    kernel(e, FILL_BOXES_TWO_CORNERS, &[0, 1023 << 16 | 1279]);
+}
+
+/// `busy_ns` is the tile pool's drawing time, 0 for a pipe that draws inside its calls (the pool's own count is checked in
+/// `drawing.rs`, where X draws reach it).
+#[test]
+fn busy_ns_is_zero_for_a_pipe_whose_drawing_runs_inside_its_calls() {
+    let mut e = engine();
+    fill_box(&mut e);
+    e.quiesce(u64::MAX).unwrap();
+    assert_eq!(BoardEngine::busy_ns(&e), 0);
+}
+
+/// With a GPU store, `observe_all` submits the open batch and waits for the GPU, so the counters show the batch and the
+/// mirror holds the drawing; the counters are refused without a GPU store. Skips the GPU half without an adapter.
+#[test]
+fn observe_all_submits_the_gpu_batch_and_the_counters_show_the_gpu_did_the_work() {
+    use sgi_kona::wgpu::{Gpu, GpuOptions};
+    let mut cpu = engine();
+    assert_eq!(cpu.gpu_counters(), None, "no GPU store");
+    let gpu = match Gpu::new(&GpuOptions::default(), Box::new(|m| panic!("GPU failed: {m}"))) {
+        Ok(g) => g,
+        Err(e) => {
+            assert!(std::env::var_os("IRIS_REQUIRE_GPU").is_none_or(|v| v != "1"), "no GPU: {e}");
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let opts = Options { gpu: Some(gpu), ..Options::default() };
+    let mut e = Engine::new(KonaConfig::ir2(1).unwrap().with_pool(0, 32), Ram::default(), opts, None).expect("engine");
+    fill_box(&mut e);
+    e.quiesce(u64::MAX).unwrap();
+    let before = e.gpu_counters().expect("a GPU store");
+    assert_eq!(before[1], 0, "nothing has submitted the open batch yet: {before:?}");
+    e.observe_all().unwrap();
+    let after = e.gpu_counters().unwrap();
+    assert!(after[0] > 0 && after[1] > 0, "records went to the GPU and the batch was submitted: {after:?}");
+    assert_eq!(after[5], 0, "no op fell back to the CPU: {after:?}");
+    assert_eq!(e.pixel(7, 8, 1), 0x5a00, "the mirror holds the box");
+}

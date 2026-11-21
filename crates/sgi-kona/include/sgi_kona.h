@@ -104,6 +104,20 @@ int sgi_kona_scanout(IrisEngine *h, uint32_t *buf, size_t cap, uint32_t *w,
  */
 int sgi_kona_dac_cursor(IrisEngine *h, int32_t *x, int32_t *y, uint32_t *on);
 
+/* What the GPU store has done, so a shell can assert that a GPU run executed GPU records and fell back to the CPU for none. */
+typedef struct IrisKonaGpuCounters {
+    uint64_t records;
+    uint64_t batches;
+    uint64_t copies;
+    uint64_t readbacks;
+    uint64_t rejections;
+    uint64_t cpu_ops;       /* ops that ran on the CPU for want of a GPU kernel */
+    uint64_t faults;        /* 1 once the engine has faulted */
+} IrisKonaGpuCounters;
+
+/* Fill *out with the GPU store's counters. ERROR when the engine has no GPU store; FAULT on a faulted engine. */
+int sgi_kona_gpu_counters(IrisEngine *h, IrisKonaGpuCounters *out);
+
 /* A video-output-chip interrupt: HH_INTR_STATUS bit 9 rises, and the packet goes out when the driver enabled it. */
 int sgi_kona_raise_voc_interrupt(IrisEngine *h);
 

@@ -320,6 +320,16 @@ impl GpuStore {
         }
     }
 
+    /// Submit the open batch and wait until the GPU has finished everything submitted so far, so a completion
+    /// reported after it means the GPU is done.
+    pub fn sync(&self) -> Result<(), String> {
+        let mut s = self.state.lock();
+        s.flush();
+        let gpu = s.gpu.clone();
+        drop(s);
+        gpu.wait(None)
+    }
+
     /// Whether no word of `word` inside `r` can be wider than `mask`, from the records so far.
     pub fn proven(&self, word: usize, r: Rect, mask: u32) -> bool {
         resident(word) && self.state.lock().proven(word, r, mask)

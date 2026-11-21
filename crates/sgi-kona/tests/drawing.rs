@@ -141,7 +141,10 @@ fn the_x_state_follows_the_context() {
 /// A 64 x 64 GL window at the origin, double buffered, with a viewport that maps clip coordinates -1
 /// to 1 onto it; draws go to colour word 2.
 fn gl_window() -> Rig {
-    let mut r = rig();
+    gl_window_on(rig())
+}
+
+fn gl_window_on(mut r: Rig) -> Rig {
     r.x(WINDOW_CLIP_SETUP, &[0, 0, 64, 64, 0, 0, 64, 64, 0, 13, 0]);
     r.command(Grammar::Gl, CONFIGURE_FRAME_BUFFER_LAYOUT, &[0, 8, 0, 1, 0, 0, 24, 0, 0, 0]);
     r.command(Grammar::Gl, SET_VIEWPORT, &[0, 0, 64, 64]);
@@ -498,4 +501,26 @@ fn a_draw_header_naming_more_rows_than_the_data_holds_is_refused_at_once() {
         assert_eq!(colour_at(&mut r, 10, 20), 0, "{hdr:x?}: nothing was drawn");
     }
     assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+}
+
+/// The tile pool's workers count the time they spend drawing (`busy_ns`, the engine's own): none with no workers (jobs run
+/// inline), some after GL triangles on a pool, and it only grows.
+#[test]
+fn the_tile_pools_workers_count_their_drawing_time() {
+    let triangles = |r: &mut Rig| {
+        for _ in 0..50 {
+            vertices(r, BEGIN_PRIMITIVE_TRIANGLE_FAN, &[(1.0, 1.0), (63.0, 1.0), (1.0, 63.0)]);
+        }
+        r.back.drain();
+    };
+    let mut inline = gl_window_on(Rig::new(KonaConfig::default().with_pool(0, 32)));
+    triangles(&mut inline);
+    assert_eq!(inline.back.busy_ns(), 0, "no workers");
+    let mut r = gl_window_on(Rig::new(KonaConfig::default().with_pool(3, 32)));
+    triangles(&mut r);
+    let first = r.back.busy_ns();
+    assert!(first > 0, "the workers drew the triangles");
+    assert!(lit_pixels(&mut r).len() > 1000);
+    triangles(&mut r);
+    assert!(r.back.busy_ns() >= first);
 }
