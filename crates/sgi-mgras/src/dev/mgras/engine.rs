@@ -1139,6 +1139,7 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
 
     fn advance(&mut self, now_ns: u64) -> Pump {
         self.now = now_ns;
+        self.display.lock().set_now(now_ns);
         self.flush();
         self.sh.out.rearm();
         Pump { idle: self.idle(), events: self.sh.out.pending(), next_deadline: None, irq_levels: self.irq_levels() }
@@ -1146,6 +1147,7 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
 
     fn wait_idle(&mut self, now_ns: u64, budget_ns: u64) -> Idle {
         self.now = now_ns;
+        self.display.lock().set_now(now_ns);
         self.settle(Some(Duration::from_nanos(budget_ns)));
         self.idle()
     }

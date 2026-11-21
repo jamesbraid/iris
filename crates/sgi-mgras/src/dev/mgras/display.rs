@@ -5,7 +5,7 @@
 //! It has a lock of its own so the shell's bus accesses never wait for the
 //! raster worker; the worker never touches it.
 
-use super::dcb::{Dcb, Txn, DEV_DAC, DEV_VC3, VC3_CONTROL, VC3_CONTROL_DISPLAY};
+use super::dcb::{Dcb, Txn, DEV_DAC, DEV_VC3, VC3_CONTROL, VC3_CONTROL_DISPLAY, VC3_CURRENT_LINE, VC3_CURSOR_X, VC3_CURSOR_X_LATCH};
 use super::frame::{self, Frame};
 use super::plain::boxed_zeroed;
 use super::rss::Rss;
@@ -49,8 +49,30 @@ pub struct Timing {
     pub fields: u32,
 }
 
+/// The VC3's current line (index 0x0b) and current cursor X (index 0x0e) as the beam makes them: driven by the
+/// shell's time and the timing the guest loaded (`Display::beam_line`). Not part of the saved display bus.
+#[derive(Default)]
+struct Beam {
+    /// The shell's time at its last pump, and the beam's origin: the time the display was enabled with the
+    /// timing now loaded, which is the start of line 0.
+    now_ns: u64,
+    origin_ns: u64,
+    /// Line-counter reads since `now_ns` moved: each stands for `BEAM_READ_NS` of beam time.
+    reads: u64,
+    /// The cursor X register was written and has not yet latched, and the frame it was written in.
+    x_pending: bool,
+    x_frame: u64,
+    x_latched: u16,
+}
+
+/// What a read of the line counter adds to the beam's clock between the shell's time updates. A guest that polls
+/// the counter in a loop (the stock diagnostic's frame waits) reaches the next line, and so the next frame,
+/// without the shell calling the pump. Approximation: a display-bus read's own duration is unknown.
+const BEAM_READ_NS: u128 = 1_000;
+
 pub struct Display {
     dcb: Box<Dcb>,
+    beam: Beam,
     slave: Option<Box<dyn BusSlave>>,
     /// The decoded frame; allocated by the first composition on the CPU.
     frame: Option<Box<Frame>>,
@@ -66,13 +88,14 @@ impl Display {
         dcb.init(bdvers, cmap_rev);
         dcb.xmap.set_pp1_revision(pp1_revision);
         dcb.dac.set_identity(0x79, 1);
-        Display { dcb, slave: None, frame: None, timing: None, timing_generation: 0 }
+        Display { dcb, beam: Beam::default(), slave: None, frame: None, timing: None, timing_generation: 0 }
     }
 
     /// Back to power-on state: the shell's bus device stays, and the timing generation moves on.
     pub fn reset(&mut self, bdvers: [u32; 2], cmap_rev: [u32; 2], pp1_revision: u32) {
         let mut fresh = Display::new(bdvers, cmap_rev, pp1_revision);
         fresh.slave = self.slave.take();
+        fresh.beam.now_ns = self.beam.now_ns;
         fresh.timing_generation = self.timing_generation + self.timing.is_some() as u64;
         *self = fresh;
     }
@@ -89,7 +112,52 @@ impl Display {
         if next != self.timing {
             self.timing = next;
             self.timing_generation += 1;
+            self.beam.origin_ns = self.beam.now_ns;
+            self.beam.x_pending = false;
         }
+    }
+
+    /// The shell's time (`advance`, `wait_idle`): the beam moves with it.
+    pub fn set_now(&mut self, now_ns: u64) {
+        if now_ns != self.beam.now_ns {
+            self.beam.now_ns = now_ns;
+            self.beam.reads = 0;
+        }
+    }
+
+    /// The beam's frame length in ns and its position in it: (frame ns, frames since the origin, ns into the
+    /// frame); None while no timing is loaded. `extra_reads` counts the reads of the line counter at this call.
+    fn beam(&self, extra_reads: u64) -> Option<(u128, u64, u128)> {
+        let (t, _) = self.timing()?;
+        let frame_ns = t.frame_clocks as u128 * 1_000_000_000 / t.clock_hz as u128;
+        if frame_ns == 0 {
+            return None;
+        }
+        let since = self.beam.now_ns.saturating_sub(self.beam.origin_ns) as u128 + (self.beam.reads + extra_reads) as u128 * BEAM_READ_NS;
+        Some((frame_ns, (since / frame_ns) as u64, since % frame_ns))
+    }
+
+    /// A read of VC3 index 0x0b: the line the beam is on, 0 at the start of each frame to the frame's last line,
+    /// wrapping every frame (inferred from the stock diagnostic's waits: it waits for 0, then for at least 200,
+    /// then for 0 again, and the Digital Video driver's window around line 27 or 34). None while no timing is
+    /// loaded: the counter then steps per read (`Vc3`).
+    fn beam_line(&mut self) -> Option<u32> {
+        let (frame_ns, _, into) = self.beam(1)?;
+        self.beam.reads += 1;
+        let lines = self.timing?.lines as u128;
+        Some((into * lines / frame_ns) as u32)
+    }
+
+    /// A read of VC3 index 0x0e: the cursor X the beam has latched. The X written takes effect at the next frame
+    /// boundary (the stock diagnostic writes X, waits two frames, and reads it back); with no timing loaded it
+    /// latches at once.
+    fn cursor_x_latched(&mut self) -> u16 {
+        let frame = self.beam(0).map(|b| b.1);
+        if self.beam.x_pending && frame.is_none_or(|f| f > self.beam.x_frame) {
+            self.beam.x_latched = self.dcb.vc3.regs[2];
+            self.beam.x_pending = false;
+        }
+        self.beam.x_latched
     }
 
     /// The tables' and the PLL's timing (`Dcb::video_timing`), in pixel clocks.
@@ -118,6 +186,16 @@ impl Display {
             if let (false, Some(slave)) = (Dcb::models(t.dev), &mut self.slave) {
                 if let Some(d) = slave.read(t.dev, t.crs, t.width) {
                     return t.load_value(bits, d);
+                }
+            }
+            if t.dev == DEV_VC3 && t.crs == 1 && true {
+                let line = (self.dcb.vc3.index() == VC3_CURRENT_LINE && !self.dcb.vc3.line_held()).then(|| self.beam_line()).flatten();
+                if let Some(l) = line {
+                    return t.load_value(bits, l);
+                }
+                if self.dcb.vc3.index() == VC3_CURSOR_X_LATCH {
+                    let x = self.cursor_x_latched();
+                    return t.load_value(bits, x as u32);
                 }
             }
             // The address register reads back as the halfword the CPU wrote, register number in bits 15:8.
@@ -150,6 +228,10 @@ impl Display {
             }
             self.dcb.write(t, t.store_data(bits, val));
             if t.dev == DEV_VC3 && (t.crs == 1 || (t.crs == 0 && t.width >= 2)) {
+                if self.dcb.vc3.index() == VC3_CURSOR_X {
+                    self.beam.x_pending = true;
+                    self.beam.x_frame = self.beam(0).map_or(0, |b| b.1);
+                }
                 let enabled = self.dcb.vc3.index() == VC3_CONTROL && self.dcb.vc3.regs[VC3_CONTROL as usize] & VC3_CONTROL_DISPLAY != 0;
                 if enabled {
                     self.derive_timing();
