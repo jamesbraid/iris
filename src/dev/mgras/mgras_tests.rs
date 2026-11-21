@@ -2387,13 +2387,35 @@ fn draw_pixels_fast_paths_match_plain_ones() {
     }
 }
 
+/// A one-word row of 8-byte pixels, which is no pixel wide: the row copy must leave it to the plain path.
+#[test]
+fn draw_pixels_row_narrower_than_a_pixel() {
+    let m = live_board();
+    x_server(&m);
+    gl_window_400x300(&m);
+    fifo_token(&m, 0x15, &[]);
+    fifo_token(&m, 0x7F, &[1, 2]);
+    write(&m, 32, CFIFO, 0x8000_0008);
+    write(&m, 32, CFIFO, 0x159);
+    write(&m, 32, CFIFO, 0x00C0_0081);
+    fifo_token(&m, 0x38, &[f(10.0), f(20.0), f(0.0)]);
+    fifo_token(&m, 0x8D, &[1, 0, 0, 1, 0, 1, 0x49D0, 0x18]);
+    fifo_pixel_data(&m, &[0x1122_3344]);
+    m.state_hash();
+    m.stop_engines();
+}
+
 /// An image of FIFO pixel data, `w` x `h` pixels of `host_bpp` bytes, through the pipeline of `draw_pixels_setup`:
 /// the board's state hash.
-fn fifo_draw(xfrmode: u32, elem: u32, host_bpp: usize, scale: f32, clamp: f32, (w, h): (usize, usize)) -> [u8; 32] {
+fn fifo_draw(xfrmode: u32, elem: u32, host_bpp: usize, scale: f32, clamp: f32, (w, h): (usize, usize), zoom: Option<f32>) -> [u8; 32] {
     let m = live_board();
     draw_pixels_setup(&m, (0, 0, 400, 300), xfrmode, elem, scale, [clamp.to_bits(); 12]);
+    if let Some(zoom) = zoom {
+        fifo_token(&m, 0x80, &[0, 2, 8, 0x191, 0, 2, 2, 0, f(zoom)]);
+    }
     fifo_token(&m, 0x38, &[f(10.0), f(20.0), f(0.0)]);
-    ge_state(&m, 0xCD, 0xDA8, &[0, 0, 0, 0, (h as u32) << 16 | w as u32, 1]);
+    // A zoomed image's rectangle is its destination's: leave it out, as a draw without one.
+    ge_state(&m, 0xCD, 0xDA8, &[0, 0, 0, 0, if zoom.is_some() { 0 } else { (h as u32) << 16 | w as u32 }, 1]);
     let wpr = (w * host_bpp).div_ceil(4);
     fifo_token(&m, 0x8D, &[wpr as u32, 0, 0, h as u32, 0, 1, 0x49D0, 0x18]);
     let mut s = 12345u32;
@@ -2412,15 +2434,17 @@ fn fifo_draw(xfrmode: u32, elem: u32, host_bpp: usize, scale: f32, clamp: f32, (
 }
 
 /// FIFO images against the plain paths: the pipeline table is for 8-bit elements to 8-bit components only
-/// (bytes to 16-bit components and 16-bit elements to bytes go through `run_row`).
+/// (bytes to 16-bit components and 16-bit elements to bytes go through `run_row`), and the row copy is for
+/// unzoomed images (a zoomed one with no rectangle reaches it too).
 #[test]
 fn draw_pixels_fifo_fast_paths_match_plain_ones() {
-    for (name, xfrmode, elem, host, scale, clamp) in [
-        ("u8 to u16", 0xC0_0081u32, 1u32, 4usize, 1.0f32 / 255.0, 65535.0f32),
-        ("u16 to u8", 0xC0_0080, 3, 8, 1.0 / 65535.0, 255.0),
-        ("u8 to u8", 0xC0_0080, 1, 4, 1.0 / 255.0, 255.0),
+    for (name, xfrmode, elem, host, scale, clamp, zoom) in [
+        ("u8 to u16", 0xC0_0081u32, 1u32, 4usize, 1.0f32 / 255.0, 65535.0f32, None),
+        ("u16 to u8", 0xC0_0080, 3, 8, 1.0 / 65535.0, 255.0, None),
+        ("u8 to u8", 0xC0_0080, 1, 4, 1.0 / 255.0, 255.0, None),
+        ("u8 to u8 zoomed", 0xC0_0080, 1, 4, 1.0 / 255.0, 255.0, Some(2.0)),
     ] {
-        let (fast, plain) = fast_and_plain(|| fifo_draw(xfrmode, elem, host, scale, clamp, (32, 32)));
+        let (fast, plain) = fast_and_plain(|| fifo_draw(xfrmode, elem, host, scale, clamp, (32, 32), zoom));
         assert_eq!(fast, plain, "{name}");
     }
 }
