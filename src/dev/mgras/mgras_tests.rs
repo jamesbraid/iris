@@ -2199,6 +2199,118 @@ fn gl_draw_pixels_zoomed() {
     m.stop_engines();
 }
 
+/// Flat host memory for the draw bench: the page table at 0x1000 and the
+/// image's pages from 0x10000.
+struct FlatMem(Vec<u8>);
+
+impl BusDevice for FlatMem {
+    fn read8(&self, addr: u64) -> BusRead8 {
+        BusRead8::ok(self.0.get(addr as usize).copied().unwrap_or(0))
+    }
+    fn write8(&self, _: u64, _: u8) -> u32 {
+        BUS_OK
+    }
+    fn read32(&self, addr: u64) -> BusRead32 {
+        let at = addr as usize;
+        BusRead32::ok(self.0.get(at..at + 4).map_or(0, |b| u32::from_be_bytes(b.try_into().unwrap())))
+    }
+}
+
+/// A GL window `ww` x `wh` at (`wx`, `wy`) with the transfer mode and the GE pixel pipeline libGLcore
+/// programs for host bytes: int-to-float by `scale`, colour matrix pass-through, clamp to `clamps`.
+#[allow(clippy::too_many_arguments)]
+fn draw_pixels_setup(m: &Mgras, (wx, wy, ww, wh): (u32, u32, u32, u32), xfrmode: u32, elem: u32, scale: f32, clamps: [u32; 12]) {
+    x_server(m);
+    switch_to_gl_context(m, 0xC, wx, wy, ww, wh);
+    fifo_token(m, 0x33, &[0, 0, ww, wh]);
+    fifo_token(m, 0x2A, &[0x1701]);
+    fifo_token(m, 0x2C, &[]);
+    fifo_token(m, 0x35, &[f(0.0), f(ww as f32), f(0.0), f(wh as f32), f(-1.0), f(1.0)]);
+    fifo_token(m, 0x2A, &[0x1700]);
+    fifo_token(m, 0x2C, &[]);
+    fifo_token(m, 0x15, &[]);
+    fifo_token(m, 0x7F, &[1, 2]);
+    write(m, 32, CFIFO, 0x8000_0008);
+    write(m, 32, CFIFO, 0x159);
+    write(m, 32, CFIFO, xfrmode as u64);
+    ge_state(m, 0x80, 0x13B, &[0x1F44, 0, 0x3E65, 0xD05, 0x156A, 0x1B4, 0x352D, 0xD67]);
+    ge_state(m, 0xCD, 0xD05, &[0x34, 0x4064, 0x50C, 2, 4, scale.to_bits()]);
+    ge_state(m, 0x80, 0x1B4, &[6, 4, 0, 0x50C, 0x50C]);
+    let mut clamp = vec![0x50C, 0x1A000, 0x50C, 2, 4];
+    clamp.extend(clamps);
+    ge_state(m, 0xCD, 0xD67, &clamp);
+    ge_state(m, 0xCD, 0xDB7, &[0, 0, 0, 0, elem, 0]);
+}
+
+/// Host memory with `len` pseudo-random bytes behind a page table, and the host DMA armed for `h` lines of
+/// them; returns the first four bytes.
+fn draw_pixels_memory(m: &Mgras, len: usize, h: usize, mut seed: u32) -> [u8; 4] {
+    let pages = len.div_ceil(0x1000);
+    let mut mem = vec![0u8; 0x10000 + pages * 0x1000];
+    for p in 0..pages {
+        mem[0x1000 + 4 * p..][..4].copy_from_slice(&(0x10 + p as u32).to_be_bytes());
+    }
+    for b in &mut mem[0x10000..0x10000 + len] {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *b = (seed >> 24) as u8;
+    }
+    let first = [mem[0x10000], mem[0x10001], mem[0x10002], mem[0x10003]];
+    m.set_phys(Arc::new(FlatMem(mem)));
+    fifo_dma(m, 0x21, 0x1000);
+    let line = len / h;
+    for (reg, val) in [(0x06, 0), (0x05, 0), (0x04, line as u32), (0x07, h as u32), (0x08, line as u32)] {
+        fifo_dma(m, reg, val);
+    }
+    first
+}
+
+/// One glDrawPixels of the armed host DMA: `w` x `h` pixels at the raster position `at`, 0xDA8's rectangle `rect`.
+fn draw_pixels_dma(m: &Mgras, at: [f32; 2], rect: [u32; 4], w: usize, h: usize) {
+    fifo_token(m, 0x38, &[f(at[0]), f(at[1]), f(0.0)]);
+    ge_state(m, 0xCD, 0xDA8, &[rect[0], rect[1], rect[2], rect[3], (h as u32) << 16 | w as u32, 1]);
+    fifo_token(m, 0x9D, &[0, 0, 0, 0x49D0]);
+    fifo_dma(m, 0x0B, 1);
+}
+
+/// A glDrawPixels host format: (name, XFRMODE, host element type word,
+/// int-to-float scale, clamp scale, host bytes a pixel).
+type DrawCase = (&'static str, u32, u32, f32, f32, usize);
+
+/// The formats a 720x486 frame can arrive in; add one here to bench it.
+const DRAW_CASES: [DrawCase; 4] = [
+    ("rgba8-rgb_order", 0xC0_0080, 1, 1.0 / 255.0, 255.0, 4),
+    ("rgba8-abgr", 0x80, 1, 1.0 / 255.0, 255.0, 4),
+    ("rgb8", 0x70, 1, 1.0 / 255.0, 255.0, 3),
+    ("rgba16-rgb_order", 0xC0_0081, 3, 1.0 / 65535.0, 65535.0, 8),
+];
+
+/// ns a pixel of a glDrawPixels by host DMA, a board a case. `BENCH_CASE` picks cases by name, `BENCH_W` and
+/// `BENCH_H` the image (720x486), `BENCH_RUNS` and `BENCH_FRAMES` the repeats. Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn bench_draw_pixels() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (w, h) = (env("BENCH_W", 720), env("BENCH_H", 486));
+    let (runs, frames) = (env("BENCH_RUNS", 5), env("BENCH_FRAMES", (2_000_000 / (w * h)).max(4)));
+    let only = std::env::var("BENCH_CASE").unwrap_or_default();
+    for (name, xfrmode, elem, scale, clamp, bpp) in DRAW_CASES.into_iter().filter(|c| c.0.contains(&only)) {
+        let m = live_board();
+        draw_pixels_setup(&m, (0, 0, w as u32, h as u32), xfrmode, elem, scale, [clamp.to_bits(); 12]);
+        let first = draw_pixels_memory(&m, (w * bpp).div_ceil(4) * 4 * h, h, 0x1234_5678);
+        draw_pixels_dma(&m, [0.0, 0.0], [0; 4], w, h);
+        m.wait_idle();
+        let mut ns = Vec::new();
+        for _ in 0..runs {
+            let t = std::time::Instant::now();
+            (0..frames).for_each(|_| draw_pixels_dma(&m, [0.0, 0.0], [0; 4], w, h));
+            m.wait_idle();
+            ns.push(t.elapsed().as_secs_f64() * 1e9 / (frames * w * h) as f64);
+        }
+        eprintln!("{name:18} ns/px {ns:.1?} px0 {:#010x} (host {first:02x?}) hash {:02x?}", m.fb_pixel(0, 1023), &m.state_hash()[..8]);
+        m.stop_engines();
+    }
+}
+
 /// glReadPixels as snoop sends it (traced, one pixel): the read block and
 /// transfer size through cfifo_cmd_raster_triples (0x07C triples), the transfer
 /// counters and mode through cfifo_cmd_raster_pairs, token_0db (0x0DB), then the
