@@ -2225,6 +2225,10 @@ impl Gl {
     }
 
     fn draw_pixels_words(&mut self, words: &[u32], wpr: usize, rows: usize, bpp: usize, sink: &mut dyn Hq3Sink) {
+        log::debug!(
+            "mgras: draw_pixels {rows} rows x {wpr} words, {bpp} bytes a pixel, xfrmode {:#x} xfrfactor {:#x} zoom_inv {} rect {:x?} raster {:?} scissor {} pipeline {:x?} element {}",
+            self.xfrmode, self.xfr_factor, self.zoom_inv, self.tl_rect, self.raster, self.scissor_test, self.pix.modules(), self.pix.read(super::pixpipe::ELEMENT_TYPE),
+        );
         // Pixel zoom (same both ways, any factor): output pixel i takes
         // source pixel floor(i / zoom), as OpenGL's zoomed rectangles do
         // (the desks overview shrinks its miniatures, snoop magnifies 6x).
