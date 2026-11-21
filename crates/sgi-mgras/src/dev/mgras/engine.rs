@@ -635,6 +635,39 @@ pub struct MgrasEngine<M: HostMem> {
 }
 
 impl<M: HostMem> MgrasEngine<M> {
+    /// `compose_into` and `compose_into10`: into `dst` as 0x00RRGGBB, or with `wide` as x2b10g10r10.
+    #[cfg(feature = "scanout")]
+    fn compose_into_as(&mut self, head: u32, dst: &dyn std::any::Any, stride_words: u32, wide: bool) -> Result<Option<(u32, u32)>, Fault> {
+        if head != 0 || self.gpu.is_none() {
+            return Ok(None);
+        }
+        let dst = match (dst.downcast_ref::<wgpu::Buffer>(), dst.downcast_ref::<Arc<wgpu::Buffer>>()) {
+            (Some(b), _) => b,
+            (None, Some(b)) => b.as_ref(),
+            (None, None) => return Err(Fault("compose_into: the destination is not a wgpu buffer".into())),
+        };
+        // The mode's size bounds every frame: a bad destination is an error of the call, with the engine and the device untouched.
+        let (w, h) = self.display.lock().size();
+        crate::wgpu::Scanout::check_into(w, h, dst, stride_words).map_err(|why| Fault(format!("compose_into: {why}")))?;
+        if let Some(f) = self.fault() {
+            return Err(Fault(f));
+        }
+        self.settle(None);
+        let mut inner = self.sh.inner.lock();
+        let display = self.display.lock();
+        let back = &mut inner.core.back;
+        let composed = if wide { back.gpu_compose_into10(display.dcb(), dst, stride_words) } else { back.gpu_compose_into(display.dcb(), dst, stride_words) };
+        drop((display, inner));
+        match composed {
+            Some(Ok(size)) => match self.fault() {
+                Some(f) => Err(Fault(f)),
+                None => Ok(Some(size)),
+            },
+            Some(Err(e)) => Err(Fault(format!("compose_into: {e}"))),
+            None => Ok(None),
+        }
+    }
+
     /// `notify` is called when work waits (staged operations) or an event
     /// is posted, from any thread, and must only schedule the shell's pump.
     pub fn new(cfg: Config, mem: M, gpu: Option<&Arc<Gpu>>, notify: Option<Box<dyn Fn() + Send + Sync>>) -> Result<Self, String> {
@@ -1188,6 +1221,37 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         Ok(Some((w, h)))
     }
 
+    /// The DAC gamma's ten bits a channel (`x2b10g10r10`), on the CPU or the GPU scan-out: their top eight bits
+    /// are what `scanout` composes.
+    fn scanout10(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
+        out.clear();
+        if let Some(f) = self.fault() {
+            return Err(Fault(f));
+        }
+        if head != 0 {
+            return Ok(None);
+        }
+        self.flush();
+        let mut inner = self.sh.inner.lock();
+        let mut display = self.display.lock();
+        let back = &mut inner.core.back;
+        match back.gpu_frame_wide(display.dcb(), out) {
+            Some(Ok(size)) => {
+                // The kernel's words are x2r10g10b10; the engine's have red low.
+                out.iter_mut().for_each(|p| *p = (*p >> 20 & 0x3ff) | (*p & 0xffc00) | (*p & 0x3ff) << 20);
+                Ok(Some(size))
+            }
+            Some(Err(e)) => Err(Fault(e)),
+            None => Ok(Some(display.compose10(&back.rss[0], out))),
+        }
+    }
+
+    /// The DAC holds ten bits a channel (gr4 `devices/mgras/CMAP.h`; the ADV7161/7162 datasheet's width is
+    /// inferred, not checked).
+    fn head_bits(&self, head: u32) -> u32 {
+        if head == 0 { 10 } else { 8 }
+    }
+
     #[cfg(feature = "scanout")]
     fn lend_frame(&mut self, head: u32) -> Result<Option<LentFrame>, Fault> {
         if head != 0 || self.gpu.is_none() {
@@ -1210,33 +1274,13 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
     /// `dst` is a `wgpu::Buffer`, or an `Arc` of one, on the engine's device.
     #[cfg(feature = "scanout")]
     fn compose_into(&mut self, head: u32, dst: &dyn std::any::Any, stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
-        if head != 0 || self.gpu.is_none() {
-            return Ok(None);
-        }
-        let dst = match (dst.downcast_ref::<wgpu::Buffer>(), dst.downcast_ref::<Arc<wgpu::Buffer>>()) {
-            (Some(b), _) => b,
-            (None, Some(b)) => b.as_ref(),
-            (None, None) => return Err(Fault("compose_into: the destination is not a wgpu buffer".into())),
-        };
-        // The mode's size bounds every frame: a bad destination is an error of the call, with the engine and the device untouched.
-        let (w, h) = self.display.lock().size();
-        crate::wgpu::Scanout::check_into(w, h, dst, stride_words).map_err(|why| Fault(format!("compose_into: {why}")))?;
-        if let Some(f) = self.fault() {
-            return Err(Fault(f));
-        }
-        self.settle(None);
-        let mut inner = self.sh.inner.lock();
-        let display = self.display.lock();
-        let composed = inner.core.back.gpu_compose_into(display.dcb(), dst, stride_words);
-        drop((display, inner));
-        match composed {
-            Some(Ok(size)) => match self.fault() {
-                Some(f) => Err(Fault(f)),
-                None => Ok(Some(size)),
-            },
-            Some(Err(e)) => Err(Fault(format!("compose_into: {e}"))),
-            None => Ok(None),
-        }
+        self.compose_into_as(head, dst, stride_words, false)
+    }
+
+    /// As `compose_into`, with the gamma's ten bits as `x2b10g10r10` words: `scanout10`'s, word for word.
+    #[cfg(feature = "scanout")]
+    fn compose_into10(&mut self, head: u32, dst: &dyn std::any::Any, stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
+        self.compose_into_as(head, dst, stride_words, true)
     }
 
     fn observe_all(&mut self) -> Result<(), Refused> {

@@ -36,7 +36,9 @@ const D_CURSOR_X: usize = 9;
 const D_CURSOR_Y: usize = 10;
 const D_CURSOR_SIZE: usize = 11;
 const D_CURSOR_RGB: usize = 12;
-const D_MAIN_MODE: usize = 16;
+/// Nonzero: compose the gamma's ten bits a channel (x2r10g10b10) instead of eight.
+const D_WIDE: usize = 16;
+const D_MAIN_MODE: usize = 17;
 const D_OVERLAY_MODE: usize = D_MAIN_MODE + 32;
 const D_GAMMA: usize = D_OVERLAY_MODE + 32;
 const D_CMAP: usize = D_GAMMA + 256;
@@ -80,6 +82,7 @@ fn defines() -> Vec<(&'static str, u32)> {
         ("D_CURSOR_Y", D_CURSOR_Y as u32),
         ("D_CURSOR_SIZE", D_CURSOR_SIZE as u32),
         ("D_CURSOR_RGB", D_CURSOR_RGB as u32),
+        ("D_WIDE", D_WIDE as u32),
         ("D_MAIN_MODE", D_MAIN_MODE as u32),
         ("D_OVERLAY_MODE", D_OVERLAY_MODE as u32),
         ("D_GAMMA", D_GAMMA as u32),
@@ -138,8 +141,9 @@ impl MgrasScanout {
 
     /// Resolve the frame's slot from the registers and the DCB; the slot's
     /// used length in words.
-    fn build(&mut self, r: &Rss, dcb: &Dcb) -> usize {
+    fn build(&mut self, r: &Rss, dcb: &Dcb, wide: bool) -> usize {
         let s = &mut self.slot;
+        s[D_WIDE] = wide as u32;
         let (w, h) = frame::display_size(dcb);
         let h = h.min(ROWS);
         let (main, overlay) = frame::scanout_buffers(r, dcb);
@@ -158,7 +162,7 @@ impl MgrasScanout {
             s[D_OVERLAY_MODE + did as usize] = (o != 0) as u32 | (((o >> 3) & 0x1F) * 256) << 16;
         }
         for (k, g) in dcb.dac.gamma.iter().enumerate() {
-            s[D_GAMMA + k] = (g[0] >> 2) as u32 | ((g[1] >> 2) as u32) << 8 | ((g[2] >> 2) as u32) << 16;
+            s[D_GAMMA + k] = g[0] as u32 | (g[1] as u32) << 10 | (g[2] as u32) << 20;
         }
         s[D_CMAP..D_CMAP + 8192].copy_from_slice(&dcb.cmap[0].pal);
         s[D_CURSOR_ON] = 0;
@@ -217,7 +221,7 @@ impl MgrasScanout {
     /// Compose the frame for this tick's consumer (`Scanout::show`).
     #[cfg(feature = "present")]
     pub fn show(&mut self, r: &Rss, dcb: &Dcb, need: crate::gfx_display::Need, frame: &mut crate::gfx_display::Frame) -> Result<(), String> {
-        let n = self.build(r, dcb);
+        let n = self.build(r, dcb, false);
         let (w, h) = (self.width, self.height);
         self.scanout.compose(&self.pipeline, w, h, bytemuck::cast_slice(&self.slot[..n]), &[&self.group])?;
         self.scanout.show(w, h, need, frame)
@@ -226,7 +230,7 @@ impl MgrasScanout {
     /// Compose the frame and leave it in [`output`](Scanout::output) (0xAABBGGRR, rows of
     /// the width) with no readback; the frame's size.
     pub fn lend(&mut self, r: &Rss, dcb: &Dcb) -> Result<(wgpu::Buffer, u32, u32), String> {
-        let n = self.build(r, dcb);
+        let n = self.build(r, dcb, false);
         let (w, h) = (self.width, self.height);
         self.scanout.compose(&self.pipeline, w, h, bytemuck::cast_slice(&self.slot[..n]), &[&self.group])?;
         Ok((self.scanout.output().clone(), w, h))
@@ -235,16 +239,35 @@ impl MgrasScanout {
     /// Compose the frame straight into `dst` as 0x00RRGGBB words, `stride` a row
     /// (`Scanout::compose_into`); the frame's size.
     pub fn compose_into(&mut self, r: &Rss, dcb: &Dcb, dst: &wgpu::Buffer, stride: u32) -> Result<(u32, u32), String> {
-        let n = self.build(r, dcb);
+        let n = self.build(r, dcb, false);
         let (w, h) = (self.width, self.height);
         self.scanout.compose_into(&self.pipeline, w, h, bytemuck::cast_slice(&self.slot[..n]), &[&self.group], dst, stride)?;
+        Ok((w, h))
+    }
+
+    /// As `compose_into`, with the gamma's ten bits a channel as x2b10g10r10 words (`Scanout::compose_into10`).
+    pub fn compose_into10(&mut self, r: &Rss, dcb: &Dcb, dst: &wgpu::Buffer, stride: u32) -> Result<(u32, u32), String> {
+        let n = self.build(r, dcb, true);
+        let (w, h) = (self.width, self.height);
+        self.scanout.compose_into10(&self.pipeline, w, h, bytemuck::cast_slice(&self.slot[..n]), &[&self.group], dst, stride)?;
+        Ok((w, h))
+    }
+
+    /// Compose the frame with the gamma's ten bits a channel and read it back as x2r10g10b10 words (red high, as
+    /// the kernel makes them), rows of the width: `(width, height)`.
+    pub fn read_wide(&mut self, r: &Rss, dcb: &Dcb, out: &mut Vec<u32>) -> Result<(u32, u32), String> {
+        let n = self.build(r, dcb, true);
+        let (w, h) = (self.width, self.height);
+        out.clear();
+        out.resize(w as usize * h as usize, 0);
+        self.scanout.run_wide(&self.pipeline, w, h, bytemuck::cast_slice(&self.slot[..n]), &[&self.group], out)?;
         Ok((w, h))
     }
 
     /// Compose the frame and read it back as `frame.rs` composes it:
     /// `0xFFBBGGRR`, rows of `stride`, `out` at least `stride * height`.
     pub fn read(&mut self, r: &Rss, dcb: &Dcb, out: &mut [u32], stride: usize) -> Result<(usize, usize), String> {
-        let n = self.build(r, dcb);
+        let n = self.build(r, dcb, false);
         let (w, h) = (self.width as usize, self.height as usize);
         self.words.resize(w * h, 0);
         self.scanout.run(&self.pipeline, w as u32, h as u32, bytemuck::cast_slice(&self.slot[..n]), &[&self.group], &mut self.words)?;

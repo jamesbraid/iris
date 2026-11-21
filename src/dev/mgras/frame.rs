@@ -104,6 +104,8 @@ pub struct Frame {
     pub cmap: [u32; 8192],
     /// DAC gamma reduced to 8 bits, per input level: [red, green, blue].
     pub gamma: [[u8; 3]; 256],
+    /// The same table at the DAC's own ten bits (`gamma` is each value >> 2).
+    pub gamma10: [[u16; 3]; 256],
     /// DAC pixel mask is zero: the screen is blanked.
     pub blank: bool,
     pub cursor_on: bool,
@@ -180,6 +182,7 @@ impl Frame {
         for (g, d) in self.gamma.iter_mut().zip(dcb.dac.gamma.iter()) {
             *g = [(d[0] >> 2) as u8, (d[1] >> 2) as u8, (d[2] >> 2) as u8];
         }
+        self.gamma10 = dcb.dac.gamma;
         self.blank = dcb.dac.pixmask() == 0;
         self.cursor_on = false;
         if let Some((cx, cy, size, glyph)) = dcb.vc3.cursor() {
@@ -209,8 +212,31 @@ impl Frame {
     /// One pixel, `0xFFBBGGRR`. `x`, `y` in display coordinates.
     #[inline]
     pub fn pixel(&self, x: usize, y: usize) -> u32 {
+        match self.levels(x, y) {
+            None => 0xFF00_0000,
+            Some([r, g, b]) => self.gamma_rgb(r, g, b),
+        }
+    }
+
+    /// One pixel with the gamma's ten bits a channel, `x2b10g10r10` (red in the low ten bits, bits 31:30
+    /// zero); its top 8 bits of each channel are `pixel`'s.
+    #[inline]
+    pub fn pixel10(&self, x: usize, y: usize) -> u32 {
+        match self.levels(x, y) {
+            None => 0,
+            Some([r, g, b]) => {
+                let lvl = |v: u32, comp: usize| self.gamma10[(v & 0xFF) as usize][comp] as u32;
+                lvl(b, 2) << 20 | lvl(g, 1) << 10 | lvl(r, 0)
+            }
+        }
+    }
+
+    /// The three input levels (red, green, blue; the colormap's entry or the RGB planes' channels) the DAC's gamma
+    /// looks up for a pixel: None while the screen is blanked.
+    #[inline(always)]
+    fn levels(&self, x: usize, y: usize) -> Option<[u32; 3]> {
         if self.blank {
-            return 0xFF00_0000;
+            return None;
         }
         let i = y * W + x;
         let rgb = self.cursor_value(x, y).map(|c| self.cursor_rgb[c as usize])
@@ -219,19 +245,19 @@ impl Frame {
                 let v = self.overlay[i];
                 (o.on && v != 0).then(|| self.cmap[(o.cmap_base as usize + v as usize) & 0x1FFF])
             });
-        match rgb {
-            Some(c) => self.gamma_rgb(c >> 16, c >> 8, c),
+        Some(match rgb {
+            Some(c) => [c >> 16, c >> 8, c],
             None => {
                 let m = self.main_mode[self.did_main[i] as usize & 31];
                 let v = self.main[i];
                 if m.rgb {
-                    self.gamma_rgb(v, v >> 8, v >> 16)
+                    [v, v >> 8, v >> 16]
                 } else {
                     let c = self.cmap[(m.cmap_base as usize + (v & m.index_mask as u32) as usize) & 0x1FFF];
-                    self.gamma_rgb(c >> 16, c >> 8, c)
+                    [c >> 16, c >> 8, c]
                 }
             }
-        }
+        })
     }
 
     /// The cursor's 2-bit value at a screen position, if the cursor covers
