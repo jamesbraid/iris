@@ -234,7 +234,13 @@ pub struct VproEngine {
     /// Moves with every store, push, CPU write, load and reset: what the picture may follow
     /// (`frame_generation`, with the retrace swaps).
     activity: u64,
+    /// Swaps armed since the build or reset (`Event::Swap`), and the shell time last given.
+    swaps: u64,
+    clock_ns: u64,
 }
+
+/// The swap-arm register (`consts::swap::ARM`): a store of a window's bit is the guest's swap request, consumed at once.
+const SWAP_ARM: u32 = 0x10b4;
 
 impl VproEngine {
     /// A board of `config.product`, reset to power-on. `lent` is the region
@@ -315,6 +321,8 @@ impl VproEngine {
             failed: OnceLock::new(),
             fault_sent,
             activity: 0,
+            swaps: 0,
+            clock_ns: 0,
         };
         if config.mode == Mode::Threaded {
             e.locks.work_start();
@@ -565,6 +573,10 @@ impl BoardEngine for VproEngine {
         self.locks.busy_ns()
     }
 
+    fn swaps_dropped(&self) -> u64 {
+        self.out.swaps_dropped()
+    }
+
     fn head_timing(&self, head: u32) -> Option<HeadTiming> {
         if head != 0 {
             return None;
@@ -617,6 +629,7 @@ impl BoardEngine for VproEngine {
     }
 
     fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
+        self.clock_ns = now_ns;
         // A store the board takes inside this call (every one in inline mode) restarts the retrace at `now_ns`.
         let shared = self.locks.shared.clone();
         shared.write_ns.store(now_ns.min(i64::MAX as u64) as i64, Ordering::Relaxed);
@@ -636,6 +649,10 @@ impl BoardEngine for VproEngine {
         }
         if command_store(off as u64, size) {
             self.credits.store(self.source);
+        }
+        if off == SWAP_ARM && size == 4 && val as u32 != 0 {
+            self.swaps += 1;
+            self.out.post(Event::Swap { count: self.swaps, time_ns: self.clock_ns });
         }
         if off as u64 == ODSY_RESET_CONTROL && reset_pulse(val) {
             // The board reset itself; levels may have changed. The store waited for the FIFO to
@@ -690,6 +707,7 @@ impl BoardEngine for VproEngine {
     }
 
     fn advance(&mut self, now_ns: u64) -> Pump {
+        self.clock_ns = now_ns;
         if !self.locks.fifo.running.load(Ordering::SeqCst) {
             // The GPU unit sends the mirror's changes up and submits its open
             // batch at the end of a run of stores; with no board thread to end
@@ -708,7 +726,8 @@ impl BoardEngine for VproEngine {
         Pump { idle: self.idle(), events: out.pending(), next_deadline, irq_levels: 0 }
     }
 
-    fn wait_idle(&mut self, _now_ns: u64, budget_ns: u64) -> Idle {
+    fn wait_idle(&mut self, now_ns: u64, budget_ns: u64) -> Idle {
+        self.clock_ns = now_ns;
         if self.faulted() {
             return Idle::Faulted;
         }
@@ -865,6 +884,7 @@ impl BoardEngine for VproEngine {
         // events that would have returned them.
         self.credits = Credits::default();
         self.failed.take();
+        self.swaps = 0;
         self.fault_sent.store(false, Ordering::Release);
         self.out.post(Event::Irq);
         Ok(())

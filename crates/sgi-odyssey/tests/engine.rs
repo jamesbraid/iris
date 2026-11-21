@@ -755,3 +755,23 @@ fn head_zero_reports_the_scanout_timing_and_a_generation() {
     assert_ne!(t.generation, 0);
     assert_eq!(BoardEngine::head_timing(&e, 1), None);
 }
+
+/// A write of a window's bit to the swap-arm register (0x10b4) is the guest's swap request: one `Event::Swap` each, counting
+/// from 1, with the shell time the engine had, and two with no retrace between them are two events (the arm bits OR together
+/// in the register, the events do not).
+#[test]
+fn every_swap_arm_write_is_its_own_event_with_a_running_count() {
+    let (mut e, _) = engine(Mode::Inline);
+    let swaps = |e: &mut VproEngine| {
+        let mut v = Vec::new();
+        BoardEngine::drain_events(e, &mut v, usize::MAX);
+        v.into_iter().filter_map(|x| if let Event::Swap { count, time_ns } = x { Some((count, time_ns)) } else { None }).collect::<Vec<_>>()
+    };
+    BoardEngine::advance(&mut e, 500);
+    assert_eq!(BoardEngine::write(&mut e, 0x10b4, 32, 1), Write::Done);
+    assert_eq!(BoardEngine::write(&mut e, 0x10b4, 32, 1), Write::Done);
+    assert_eq!(BoardEngine::write_at(&mut e, 900, 0x10b4, 32, 2), Write::Done);
+    assert_eq!(BoardEngine::write(&mut e, 0x10b4, 32, 0), Write::Done, "an empty arm is no swap");
+    assert_eq!(swaps(&mut e), vec![(1, 500), (2, 500), (3, 900)]);
+    assert_eq!(BoardEngine::swaps_dropped(&e), 0);
+}
