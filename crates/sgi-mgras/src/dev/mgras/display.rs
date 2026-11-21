@@ -437,6 +437,12 @@ impl Display {
         Change::None
     }
 
+    /// A copy of the display bus in `to`, for a reader that composes without holding the display lock.
+    pub fn copy_dcb(&self, to: &mut Dcb) {
+        // SAFETY: `Dcb` is plain numeric state (`snapshot_bytes`), so copying its bytes copies it.
+        unsafe { std::ptr::copy_nonoverlapping(&*self.dcb as *const Dcb, to as *mut Dcb, 1) };
+    }
+
     /// The displayed size, from the VC3's tables.
     pub fn size(&self) -> (u32, u32) {
         let (w, h) = frame::display_size(&self.dcb);

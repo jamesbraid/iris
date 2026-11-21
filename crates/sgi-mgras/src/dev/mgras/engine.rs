@@ -7,6 +7,7 @@
 //!   BQL). The engine takes no shell lock and never calls back into the
 //!   shell, but for the notify hook, which only schedules. The rest of the
 //!   call contract is in the `sgi_engine` crate docs.
+//!   The exception is `ScanSource::rows`, which any thread may call beside them.
 //! - `write` and `push_words` stage operations on the caller's side; `advance`
 //!   (or a full stage) hands them to the queue. Status reads are answered from
 //!   counters and never wait. Any other read answers `Busy` while work is
@@ -41,7 +42,9 @@ use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
 use super::back::ImpactBack;
+use super::dcb::Dcb;
 use super::display::{self, Change, Display};
+use super::frame::{self, Frame};
 use super::hostmem::{Fault as DmaFault, HostMem as DmaMem};
 use super::hq3::{host, Hq3Board, Hq3Engine, Hq3Regs, Hq3Sink, Hq3Stats};
 use super::pixmem::{Buffer, Kind, PAGE_WORDS};
@@ -149,8 +152,7 @@ const STAGE_MAX: usize = 256;
 const BATCH_MAX: usize = 4096;
 /// Distinct damage marks waiting before they degrade to "anything".
 const DAMAGE_MAX: usize = 16;
-/// The store of a damage mark for the display bus's cursor: its box is in display pixels from the top left. A
-/// drawing store is a page pointer, below bit 17, and `DAMAGE_ANY` means everything.
+/// The store of the display bus's cursor damage mark (`sgi_mgras.h`); a drawing store is a page pointer, below bit 17.
 pub const DAMAGE_DISPLAY: u64 = crate::ffi::IRIS_MGRAS_DAMAGE_DISPLAY;
 
 /// The registers the shell reads without waiting: the HQ flags and the
@@ -624,6 +626,65 @@ impl<M: HostMem> Inner<M> {
     }
 }
 
+/// A copy of the display bus and the frame decoded from it: what `ScanSource` composes with.
+struct Scratch {
+    dcb: Box<Dcb>,
+    frame: Box<Frame>,
+}
+
+/// The size of a picture a `ScanSource` took rows of: `Short` when `out` could not hold it, nothing composed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scan {
+    Done(u32, u32),
+    Short(u32, u32),
+}
+
+/// The CPU picture without the engine's handle (`sgi_mgras.h` has the contract): any thread may call `rows`. It holds
+/// `Shared::inner` for `snapshot_rows` (plane reads and the window-ID and pixel decode) and the display lock for a
+/// byte copy of the bus; only the per-pixel colour map, gamma and cursor pass runs with neither held. Lock order:
+/// the scratch mutex, `inner`, then the display lock, as everywhere.
+pub struct ScanSource<M: HostMem> {
+    sh: Arc<Shared<M>>,
+    display: Arc<Mutex<Display>>,
+    scratch: Arc<Mutex<Option<Scratch>>>,
+}
+
+impl<M: HostMem> ScanSource<M> {
+    /// Display rows `first..end` (clamped) into `out`, as `scanout` composes them; the other words are left alone.
+    pub fn rows(&self, first: usize, end: usize, out: &mut [u32]) -> Result<Scan, Fault> {
+        if let Some(f) = self.sh.fault.lock().clone() {
+            return Err(Fault(f));
+        }
+        let mut scratch = self.scratch.lock();
+        let sc = scratch.get_or_insert_with(|| Scratch { dcb: boxed_zeroed(), frame: boxed_zeroed() });
+        let inner = self.sh.inner.lock();
+        if let Some(f) = inner.core.back.fault() {
+            drop(inner);
+            self.sh.fail(&f);
+            return Err(Fault(f));
+        }
+        self.display.lock().copy_dcb(&mut sc.dcb);
+        let (w, h) = frame::display_size(&sc.dcb);
+        if w * h > out.len() {
+            return Ok(Scan::Short(w as u32, h as u32));
+        }
+        sc.frame.snapshot_rows(&inner.core.back.rss[0], &sc.dcb, first..end);
+        drop(inner);
+        let end = end.min(h);
+        for y in first.min(end)..end {
+            for (x, p) in out[y * w..(y + 1) * w].iter_mut().enumerate() {
+                *p = display::rgb(sc.frame.pixel(x, y));
+            }
+        }
+        Ok(Scan::Done(w as u32, h as u32))
+    }
+
+    /// Stop the engine with `why`: a panic in a call.
+    pub fn fail(&self, why: &str) {
+        self.sh.fail(why);
+    }
+}
+
 /// The MGRAS engine. `M` is the shell's host memory.
 pub struct MgrasEngine<M: HostMem> {
     sh: Arc<Shared<M>>,
@@ -631,7 +692,9 @@ pub struct MgrasEngine<M: HostMem> {
     gpu: Option<Arc<Gpu>>,
     mem: Arc<M>,
     /// The display bus and the CPU frame; lock order: `Shared::inner`, then this.
-    display: Mutex<Display>,
+    display: Arc<Mutex<Display>>,
+    /// What `ScanSource` composes with, made by its first call.
+    scratch: Arc<Mutex<Option<Scratch>>>,
     stage: Vec<Op>,
     /// Operations accepted so far, staged and queued, and FIFO words among
     /// them; the worker's counters are `done` and `words_done`.
@@ -699,8 +762,8 @@ impl<M: HostMem> MgrasEngine<M> {
             fault: Mutex::new(None),
             dead: AtomicBool::new(false),
         });
-        let display = Mutex::new(Display::new(cfg.bdvers.unwrap_or_else(|| display::default_bdvers(cfg.board)), cfg.cmap_rev, cfg.pp1_revision()));
-        let mut e = MgrasEngine { sh, cfg, gpu: gpu.cloned(), mem, display, stage: Vec::new(), submitted: 0, words: 0, worker: None, parked: false, now: 0, video_dma_polls: AtomicU32::new(0) };
+        let display = Arc::new(Mutex::new(Display::new(cfg.bdvers.unwrap_or_else(|| display::default_bdvers(cfg.board)), cfg.cmap_rev, cfg.pp1_revision())));
+        let mut e = MgrasEngine { sh, cfg, gpu: gpu.cloned(), mem, display, scratch: Arc::new(Mutex::new(None)), stage: Vec::new(), submitted: 0, words: 0, worker: None, parked: false, now: 0, video_dma_polls: AtomicU32::new(0) };
         e.spawn();
         Ok(e)
     }
@@ -722,6 +785,15 @@ impl<M: HostMem> MgrasEngine<M> {
             sh.out.post(Event::GpuLost(why.to_string()));
             sh.fail(why);
         }
+    }
+
+    /// A `ScanSource` after handing the staged work to the worker; none for an engine with a GPU unit.
+    pub fn scan_source(&mut self) -> Option<ScanSource<M>> {
+        if self.gpu.is_some() {
+            return None;
+        }
+        self.flush();
+        Some(ScanSource { sh: self.sh.clone(), display: self.display.clone(), scratch: self.scratch.clone() })
     }
 
     /// The HQ flags as the board holds them.
@@ -1362,15 +1434,17 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
     fn save(&mut self, sink: &mut dyn StateSink) -> Result<(), Refused> {
         self.need_parked(true)?;
         let board = self.cfg.board;
+        let mut inner = self.sh.inner.lock();
         let display = self.display.lock();
-        self.sh.inner.lock().save(board, &display, sink)
+        inner.save(board, &display, sink)
     }
 
     fn load(&mut self, src: &mut dyn StateSource) -> Result<(), Refused> {
         self.need_parked(true)?;
         let board = self.cfg.board;
+        let mut inner = self.sh.inner.lock();
         let mut display = self.display.lock();
-        let loaded = self.sh.inner.lock().load(board, &mut display, src);
+        let loaded = inner.load(board, &mut display, src);
         if loaded.is_ok() {
             self.sh.generation.fetch_add(1, Ordering::Release);
         }

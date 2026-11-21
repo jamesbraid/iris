@@ -4,13 +4,14 @@
 //! cbindgen's.
 
 use std::ffi::{c_int, c_void};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use sgi_engine::ffi::{build, call, host_parts, read_config, CMem, IrisEngine, IrisEngineConfig, IrisEngineHost, IRIS_ENGINE_ERROR, IRIS_ENGINE_FAULT, IRIS_ENGINE_OK};
 use sgi_engine::inject::Point;
 use sgi_engine::{BoardEngine, GpuLoss};
 
-use crate::dev::mgras::engine::{Board, Config, MgrasEngine, Mode, Region};
+use crate::dev::mgras::engine::{Board, Config, MgrasEngine, Mode, Region, Scan, ScanSource};
 use crate::dev::mgras::pixmem::{Buffer, Kind};
 use crate::dev::mgras::rss;
 use crate::display::Rect;
@@ -290,4 +291,55 @@ pub unsafe extern "C" fn sgi_mgras_vc3_control(h: *mut IrisEngine) -> u32 {
 #[no_mangle]
 pub unsafe extern "C" fn sgi_mgras_flags(h: *mut IrisEngine) -> u32 {
     unsafe { call::<MgrasEngine<CMem>, _>(h, Point::Flags, 0, |e| e.flags()) }
+}
+
+/// The CPU picture for composing off the shell's big lock; the contract is in `sgi_mgras.h`.
+pub struct IrisMgrasScan(ScanSource<CMem>);
+
+/// A scan-out source after handing the staged work to the worker; NULL for an engine with a GPU unit. An ordinary call.
+///
+/// # Safety
+/// `h` is a live MGRAS handle.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_mgras_scan_begin(h: *mut IrisEngine) -> *mut IrisMgrasScan {
+    unsafe { call::<MgrasEngine<CMem>, _>(h, Point::Pixel, std::ptr::null_mut(), |e| e.scan_source().map_or(std::ptr::null_mut(), |s| Box::into_raw(Box::new(IrisMgrasScan(s))))) }
+}
+
+/// Rows `first` up to `end` of the picture into `buf`; callable from any thread.
+///
+/// # Safety
+/// `s` is from `sgi_mgras_scan_begin` and not yet ended, `buf` points to `cap` words and `w` and `hgt` to `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_mgras_scan_rows(s: *mut IrisMgrasScan, first: u32, end: u32, buf: *mut u32, cap: usize, w: *mut u32, hgt: *mut u32) -> c_int {
+    if s.is_null() || w.is_null() || hgt.is_null() || (buf.is_null() && cap != 0) {
+        return IRIS_ENGINE_ERROR;
+    }
+    let src = unsafe { &(*s).0 };
+    let out: &mut [u32] = if cap == 0 { &mut [] } else { unsafe { std::slice::from_raw_parts_mut(buf, cap) } };
+    match catch_unwind(AssertUnwindSafe(|| src.rows(first as usize, end as usize, out))) {
+        Ok(Ok(Scan::Done(fw, fh))) => {
+            unsafe { (*w, *hgt) = (fw, fh) };
+            IRIS_ENGINE_OK
+        }
+        Ok(Ok(Scan::Short(fw, fh))) => {
+            unsafe { (*w, *hgt) = (fw, fh) };
+            IRIS_ENGINE_ERROR
+        }
+        Ok(Err(_)) => IRIS_ENGINE_FAULT,
+        Err(_) => {
+            src.fail("panic in the scan-out");
+            IRIS_ENGINE_FAULT
+        }
+    }
+}
+
+/// Free a scan-out source. NULL is ignored.
+///
+/// # Safety
+/// `s` is from `sgi_mgras_scan_begin`, not yet ended, and no `sgi_mgras_scan_rows` is running on it.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_mgras_scan_end(s: *mut IrisMgrasScan) {
+    if !s.is_null() {
+        drop(unsafe { Box::from_raw(s) });
+    }
 }

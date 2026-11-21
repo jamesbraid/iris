@@ -122,8 +122,15 @@ pub struct Frame {
 impl Frame {
     /// Take the frame: copy the planes and decode the display state.
     pub fn snapshot(&mut self, rss: &Rss, dcb: &Dcb) {
+        self.snapshot_rows(rss, dcb, 0..usize::MAX);
+    }
+
+    /// `snapshot` for the display rows `rows` alone (clamped to the screen); every table is decoded, the
+    /// planes and window IDs of the other rows are left as they were.
+    pub fn snapshot_rows(&mut self, rss: &Rss, dcb: &Dcb, rows: std::ops::Range<usize>) {
         (self.width, self.height) = display_size(dcb);
         let (w, h) = (self.width, self.height);
+        let rows = rows.start.min(h)..rows.end.min(h);
         let (main, overlay) = scanout_buffers(rss, dcb);
         // Double buffering: window IDs with their BUF_SELECT bit show
         // buffer B. The window-ID runs are decoded below; this pass needs
@@ -142,7 +149,7 @@ impl Frame {
         let mut runs = Vec::with_capacity(64);
         let mut row = [0u32; W];
         let mut row_b = [0u32; W];
-        for y in 0..h {
+        for y in rows.clone() {
             let dst = y * W;
             let fb_y = (h - 1 - y) as u32;
             dcb.vc3.main_did_runs(y, &mut runs);
@@ -177,7 +184,7 @@ impl Frame {
                 None => self.overlay[dst..dst + w].fill(0),
             }
         }
-        for y in 0..h {
+        for y in rows {
             dcb.vc3.overlay_did_runs(y, &mut runs);
             fill_did_row(&mut self.did_overlay[y * W..(y + 1) * W], &mut runs);
         }
