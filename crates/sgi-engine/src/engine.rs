@@ -209,6 +209,10 @@ pub enum Event {
     /// written: the shell returns that many flow-control credits to it. One
     /// event per source until drained.
     Credits { source: u32, retired: u32 },
+    /// The pipe's own drive of the shared swap-ready line changed: `drive` is the new state of the bit its firmware
+    /// writes to hold or release the line. A shell with several pipes combines them (wired AND) and tells each
+    /// engine the result with its `set_swap_ready_held` (KONA). Every change is one event, in order.
+    SwapReady { drive: bool },
 }
 
 /// How the words of a frame the GPU holds are laid out.

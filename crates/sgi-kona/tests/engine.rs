@@ -720,3 +720,79 @@ fn running_the_stream_notifies_the_shell_once_per_pump() {
     assert_eq!(n.load(Ordering::SeqCst), 2, "the credit the finished store returns");
     assert!(credits(&drain(&mut e)).len() == 1);
 }
+
+/// The shared swap-ready line (kona `devices/dg/swap-ready-and-swap-barrier.md`): a pipe holding it low keeps every pipe's
+/// swap (the VOC copy from next to now) from happening. The shell wires the pipes' drives together and tells each engine
+/// the result; "held" stops the swaps at the frame boundary and releasing it lets the next frame show them. The polarity
+/// and timing of the real line are unknown, so the hold is an approximation.
+#[test]
+fn a_swap_waits_at_the_frame_while_the_swap_ready_line_is_held_and_shows_when_it_is_released() {
+    let mut e = engine();
+    kernel(&mut e, DISPLAY_MODE_BYTE, &SWAP);
+    textport(&mut e, &DRAW, &[A]);
+    e.set_swap_ready_held(true);
+    e.frame(0);
+    assert!(e.swap_waiting(), "held: the frame does not show the swap");
+    assert_eq!(e.wait_idle(0, u64::MAX), Idle::Stalled(StallOn::Frame));
+    assert_eq!(e.pixel(7, 8, COLOUR_WORD), 0);
+    e.frame(0);
+    assert!(e.swap_waiting(), "and neither does the next");
+    e.set_swap_ready_held(false);
+    e.frame(0);
+    assert!(!e.swap_waiting());
+    assert_eq!(e.wait_idle(0, u64::MAX), Idle::Yes);
+    assert_eq!(e.pixel(7, 8, COLOUR_WORD), 9, "released: it lands as it would have");
+}
+
+/// The video-output-chip interrupt, `HH_INTR_STATUS` bit 9 (kona external-status.md): the cause rises when the shell raises
+/// it, the packet goes out once when the driver enabled the bit, and writing the bit back clears it and re-arms it.
+#[test]
+fn a_voc_interrupt_raises_cause_bit_9_and_one_packet_when_enabled() {
+    let mut e = engine();
+    store(&mut e, INT_DEST_LOWER, 0x1000, A);
+    store(&mut e, INT_VECTORS, 0x20000 | 0x11, A);
+    e.run(usize::MAX);
+    e.raise_voc_interrupt();
+    assert_eq!(e.read(INT_CAUSE, 32), Read::Value(1 << 9), "the cause rises whether or not it is enabled");
+    assert!(packets(&drain(&mut e)).is_empty(), "not enabled: no packet");
+    store(&mut e, INT_ENABLE, 1 << 9, A);
+    assert_eq!(packets(&drain(&mut e)).len(), 1, "enabling a pending cause delivers it");
+    e.raise_voc_interrupt();
+    assert!(packets(&drain(&mut e)).is_empty(), "not again until it is cleared");
+    store(&mut e, INT_CAUSE, 1 << 9, A);
+    assert_eq!(e.read(INT_CAUSE, 32), Read::Value(0), "write one to clear");
+    e.raise_voc_interrupt();
+    assert_eq!(packets(&drain(&mut e)).len(), 1);
+}
+
+/// The pipe's own swap-ready drive (display-bus 0x1920, 0x8001 on a DPLEX board, 0xe500 bit 0) comes out as an event each
+/// time it changes; display-bus words nobody answers read back what was written (the diagnostics' register tests).
+#[test]
+fn the_pipes_own_swap_ready_drive_is_an_event_and_display_bus_words_read_back() {
+    let mut e = engine();
+    let video = |e: &mut Engine, command: u32, data: &[u32]| {
+        let sum = data.iter().fold(command, |s, w| s.wrapping_add(*w));
+        for w in [0x1a6, command].into_iter().chain(data.iter().copied()).chain([sum]) {
+            store(e, COMMAND_PAGE, w, A);
+        }
+        e.run(usize::MAX);
+    };
+    let drives = |e: &mut Engine| drain(e).into_iter().filter_map(|ev| if let Event::SwapReady { drive } = ev { Some(drive) } else { None }).collect::<Vec<_>>();
+    video(&mut e, 0x01, &[0x1920, 1]);
+    video(&mut e, 0x01, &[0x1920, 1]);
+    video(&mut e, 0x01, &[0x1920, 0]);
+    video(&mut e, 0x01, &[0xe500, 0x21]);
+    video(&mut e, 0x01, &[0x1234, 1]);
+    assert_eq!(drives(&mut e), [true, false, true], "a change each, nothing for a repeat or another word");
+    // Saved and loaded, the words and the drive stay.
+    e.quiesce(u64::MAX).unwrap();
+    let mut chunks: Vec<Chunk> = Vec::new();
+    e.save(&mut chunks).unwrap();
+    e.resume();
+    let mut f = engine();
+    f.quiesce(u64::MAX).unwrap();
+    f.load(&mut VecSource::new(chunks)).unwrap();
+    f.resume();
+    video(&mut f, 0x01, &[0xe500, 0]);
+    assert_eq!(drives(&mut f), [false], "the loaded pipe was driving, and releases");
+}

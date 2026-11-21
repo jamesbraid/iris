@@ -335,6 +335,34 @@ pub unsafe extern "C" fn sgi_kona_dac_cursor(h: *mut IrisEngine, x: *mut i32, y:
     }
 }
 
+/// A video-output-chip interrupt: `HH_INTR_STATUS` bit 9 rises, and the packet goes out when the driver enabled it.
+///
+/// # Safety
+/// `h` is a live KONA handle.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_raise_voc_interrupt(h: *mut IrisEngine) -> c_int {
+    unsafe {
+        call::<KonaEngine<CMem>, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| {
+            e.raise_voc_interrupt();
+            IRIS_ENGINE_OK
+        })
+    }
+}
+
+/// The shared swap-ready line is held low by another pipe (non-zero) or released (zero): the swaps wait while it is held.
+///
+/// # Safety
+/// `h` is a live KONA handle.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_set_swap_ready_held(h: *mut IrisEngine, held: c_int) -> c_int {
+    unsafe {
+        call::<KonaEngine<CMem>, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| {
+            e.set_swap_ready_held(held != 0);
+            IRIS_ENGINE_OK
+        })
+    }
+}
+
 /// The channels the pipe's display generator has: 8 on a DG5-8, 2 on a DG5-2, with or without its option board
 /// (whose channel is one more once the firmware's probe finds it). 0 for a NULL handle.
 ///

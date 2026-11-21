@@ -56,6 +56,8 @@ pub(super) struct Front {
     pub loader_328: u32,
     /// A video cause has been delivered and not yet acknowledged.
     video_delivered: bool,
+    /// The VOC cause's packet went out and its bit has not been cleared since. Not saved.
+    voc_delivered: bool,
     /// The missing interrupt destination has been logged for the video
     /// cause: it rises every frame, so it says so once.
     video_unrouted_logged: bool,
@@ -104,6 +106,7 @@ impl Front {
             loader_3b0: 0,
             loader_328: 0,
             video_delivered: false,
+            voc_delivered: false,
             video_unrouted_logged: false,
             epoch: 0,
             xg_req_timeout: 0,
@@ -133,7 +136,7 @@ impl Front {
     /// guest's, and stay. The identity chain's state goes as the text its own save makes.
     pub fn visit<S: super::stream::Stream>(&mut self, s: &mut S) {
         // Every field is named, so a new one fails to compile until it is saved here or left out on purpose.
-        let Self { widget_control: _, dma_widget: _, widget_control_reset: _, widget: _, identity: _, onewire_reg: _, probe_value: _, low_window_write: _, int_dest_upper: _, int_dest_lower: _, int_vectors: _, reset_arg: _, int_enable: _, credit_config: _, int_cause: _, mailbox: _, mailbox_len: _, mailbox_pos: _, completions: _, retrace_tag: _, reset_strobe: _, eeprom_enable: _, loader_3b0: _, loader_328: _, video_delivered: _, video_unrouted_logged: _, epoch: _, xg_req_timeout: _, xg_hi_lo_water: _, hh_err_stat1: _, hh_err_stat2: _ } = self;
+        let Self { widget_control: _, dma_widget: _, widget_control_reset: _, widget: _, identity: _, onewire_reg: _, probe_value: _, low_window_write: _, int_dest_upper: _, int_dest_lower: _, int_vectors: _, reset_arg: _, int_enable: _, credit_config: _, int_cause: _, mailbox: _, mailbox_len: _, mailbox_pos: _, completions: _, retrace_tag: _, reset_strobe: _, eeprom_enable: _, loader_3b0: _, loader_328: _, video_delivered: _, voc_delivered: _, video_unrouted_logged: _, epoch: _, xg_req_timeout: _, xg_hi_lo_water: _, hh_err_stat1: _, hh_err_stat2: _ } = self;
         s.u32(&mut self.widget_control);
         self.publish_widget();
         let mut bus = self.identity.bus.save_state().to_string();
@@ -214,6 +217,7 @@ impl Front {
         self.loader_3b0 = 0;
         self.loader_328 = 0;
         self.video_delivered = false;
+        self.voc_delivered = false;
         self.video_unrouted_logged = false;
     }
 
@@ -305,6 +309,23 @@ impl Front {
             return p;
         }
         None
+    }
+
+    /// Deliver the VOC cause once, if the driver enabled it.
+    pub fn voc_deliver(&mut self) -> Option<InterruptPacket> {
+        if self.int_cause & self.int_enable & CAUSE_VOC != 0 && !self.voc_delivered {
+            let p = self.raise_vector(true);
+            self.voc_delivered = p.is_some();
+            return p;
+        }
+        None
+    }
+
+    /// A video-output-chip interrupt: the cause rises (bit 9), and its packet goes out when the driver has enabled it.
+    /// The model has no external sync to detect or lose, so only an external device (a shell's) raises it.
+    pub fn voc_interrupt(&mut self) -> Option<InterruptPacket> {
+        self.int_cause |= CAUSE_VOC;
+        self.voc_deliver()
     }
 
     /// A retrace the back end counted: the tag register reads the request's
@@ -413,7 +434,7 @@ impl Front {
             INT_ENABLE => {
                 let was = self.int_enable;
                 self.int_enable = value & INT_ENABLE_MASK;
-                let video = self.video_deliver();
+                let video = self.video_deliver().or_else(|| self.voc_deliver());
                 // The driver enables the FIFO-low cause to wait for the pipe to drain. If the pipe drained
                 // before it did, no drain is left to raise the cause and the wait would never end, so
                 // enabling it on an idle pipe raises it at once. Both causes use the general vector, so
@@ -426,6 +447,9 @@ impl Front {
                 self.int_cause &= !value;
                 if value & CAUSE_VIDEO != 0 {
                     self.video_delivered = false;
+                }
+                if value & CAUSE_VOC != 0 {
+                    self.voc_delivered = false;
                 }
                 // A completion word is acknowledged by this write alone: the
                 // driver's DMA-write wait reads the mailbox once and writes

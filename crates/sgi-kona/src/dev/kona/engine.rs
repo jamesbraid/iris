@@ -37,8 +37,8 @@ use crate::SharedGpu;
 /// The version of the state `save` writes. Version 1 held only a stream between commands;
 /// 2 adds the commands a guest has part way and the credits they owe; 3 the swaps latched for
 /// the next frame; 4 keeps the credits held and parked by source; 5 whether the display option board's
-/// channel exists; 6 the registers the adaptor reset writes. A load takes all six.
-pub const STATE_VERSION: u32 = 6;
+/// channel exists; 6 the registers the adaptor reset writes; 7 the display-bus words written. A load takes all seven.
+pub const STATE_VERSION: u32 = 7;
 
 /// Stores `quiesce` and `wait_idle` run between looks at the clock.
 const SLICE: usize = 1 << 12;
@@ -82,6 +82,10 @@ impl InterruptController for Events {
     fn foreign_packet(&self, source: u8, widget: u8, address: u64, line: u32, level: bool) -> bool {
         self.post(source, widget, address, line as u8, level);
         true
+    }
+
+    fn swap_ready(&self, drive: bool) {
+        self.out.post(Event::SwapReady { drive });
     }
 }
 
@@ -504,6 +508,22 @@ impl<M: HostMem> KonaEngine<M> {
         self.back.dac_cursor()
     }
 
+    /// A video-output-chip interrupt for the shell to raise (an external sync reference detected or lost: inferred;
+    /// kona `devices/dg/external-status.md`): `HH_INTR_STATUS` bit 9 rises, and the interrupt packet goes out when the
+    /// driver has enabled the bit in the mask; write-one-to-clear like the others. The pipe has no external sync of
+    /// its own, so nothing else raises it.
+    pub fn raise_voc_interrupt(&mut self) {
+        self.activity += 1;
+        self.host.with_front(|f| ((), f.voc_interrupt()));
+    }
+
+    /// The shared swap-ready line is held low by another pipe (the shell's wired-AND of every pipe's
+    /// `Event::SwapReady` drive, its own included): the swaps wait at the frame boundary until it is released. The
+    /// polarity and timing of the real line are unknown, so this is an approximation.
+    pub fn set_swap_ready_held(&mut self, held: bool) {
+        self.back.set_swap_ready_held(held);
+    }
+
     /// The channels the display generator has (8 on a DG5-8, 2 on a DG5-2), as the configuration chose its board;
     /// the option board's channel is one more once it is probed.
     pub fn display_channels(&self) -> u32 {
@@ -893,6 +913,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         self.back.visit_swaps(&mut w);
         self.back.visit_option(&mut w);
         self.host.front.lock().visit_xg(&mut w);
+        self.back.visit_sync(&mut w);
         let meta = Meta { version: STATE_VERSION, state_len: w.out.len() as u32, bulk: self.back.bulk_layout() };
         let put = |sink: &mut dyn StateSink, name: &str, index: u64, bytes: Vec<u8>| sink.put(Chunk { name: name.into(), index, bytes }).map_err(|e| e.0);
         let sent = (|| {
@@ -923,6 +944,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         let by_source = meta.version >= 4;
         let with_option = meta.version >= 5;
         let with_xg = meta.version >= 6;
+        let with_sync = meta.version >= 7;
         if meta.state_len as usize > 1 << 28 {
             return Err(bad(format!("a state blob of {} bytes", meta.state_len)));
         }
@@ -964,6 +986,9 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
                 if with_xg {
                     Front::new(&cfg).visit_xg(&mut r);
                 }
+                if with_sync {
+                    KonaBackend::check_sync(&mut r);
+                }
             } else {
                 KonaBackend::check_small(&mut r);
             }
@@ -995,6 +1020,11 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
                 self.host.front.lock().visit_xg(&mut r);
             } else {
                 self.host.front.lock().clear_xg();
+            }
+            if with_sync {
+                self.back.visit_sync(&mut r);
+            } else {
+                self.back.clear_sync();
             }
         } else {
             self.back.visit_small(&mut r).map_err(bad)?;

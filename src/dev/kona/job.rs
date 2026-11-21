@@ -129,6 +129,11 @@ impl BackPort<'_> {
         self.host.with_front(|f| ((), f.retrace(tag)));
     }
 
+    /// The pipe's own drive of the swap-ready line changed.
+    pub fn swap_ready_drive(&mut self, drive: bool) {
+        self.host.irq.swap_ready(drive);
+    }
+
     /// The managed area's size, which the configuration request reports.
     pub fn set_managed_size(&mut self, width: u32, height: u32) {
         self.core.managed = (width, height);

@@ -118,6 +118,7 @@ extern "C" {
 #define IRIS_ENGINE_EVENT_GPU_LOST      6
 #define IRIS_ENGINE_EVENT_INTERRUPT     7
 #define IRIS_ENGINE_EVENT_CREDITS       8
+#define IRIS_ENGINE_EVENT_SWAP_READY    9
 
 /* IrisEngineConfig.gpu */
 #define IRIS_ENGINE_GPU_NONE      0
@@ -209,17 +210,22 @@ typedef struct IrisEngineCredits {
     uint32_t retired;
 } IrisEngineCredits;
 
+typedef struct IrisEngineSwapReady {
+    uint32_t drive;         /* the new state of the pipe's own drive of the swap-ready line */
+} IrisEngineSwapReady;
+
 typedef union IrisEngineEventData {
     IrisEngineDamage damage;
     IrisEngineBusFault bus_fault;
     IrisEnginePacket packet;
     IrisEngineCredits credits;
+    IrisEngineSwapReady swap_ready;
     char text[96];          /* NUL-terminated, cut to fit */
 } IrisEngineEventData;
 
 /*
  * kind says which member of data is valid: DAMAGE damage, BUS_FAULT
- * bus_fault, INTERRUPT packet, CREDITS credits, NOTE, DEVICE_FAULT and
+ * bus_fault, INTERRUPT packet, CREDITS credits, SWAP_READY swap_ready, NOTE, DEVICE_FAULT and
  * GPU_LOST text; IRQ none.
  */
 typedef struct IrisEngineEvent {
