@@ -527,7 +527,8 @@ fn a_c_shell_reads_a_heads_timing_and_its_ten_bit_picture() {
     assert_eq!(unsafe { iris_engine_scanout10(h, 1, ten.as_mut_ptr(), 8, &mut w, &mut hgt) }, IRIS_ENGINE_OK);
     assert_eq!((w, hgt), (4, 2));
     for (a, b) in eight.iter().zip(&ten) {
-        assert_eq!((b >> 22, b >> 12 & 0xff, b >> 2 & 0xff), (a >> 16 & 0xff, a >> 8 & 0xff, a & 0xff));
+        assert_eq!((b >> 2 & 0xff, b >> 12 & 0xff, b >> 22), (a >> 16 & 0xff, a >> 8 & 0xff, a & 0xff), "XB30: red low");
     }
+    assert_eq!((unsafe { iris_engine_head_bits(h, 0) }, unsafe { iris_engine_head_bits(h, 1) }), (8, 10));
     assert_eq!(unsafe { iris_engine_scanout10(h, 1, ten.as_mut_ptr(), 3, &mut w, &mut hgt) }, IRIS_ENGINE_ERROR, "too small: the size comes back");
 }
