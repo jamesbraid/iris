@@ -36,9 +36,11 @@
 //!   returning (eight rows of 0x2000, 0x2000, 0, 0). The hardware's is not known.
 //! - Select and feedback follow GL's own layouts for the words the table does not decode:
 //!   feedback is the record code, then (polygons) the vertex count, then each vertex as the
-//!   feedback type says; a select record is a marker word of 1, the name count, the nearest and
-//!   farthest depth and the names. The table establishes the record codes and sizes. Inferred:
-//!   the order of the values in a vertex, the vertex scaling (x and y by 0.0625, z by 2^-20, which
+//!   feedback type says; a select record is a tag, the name count, the nearest and farthest depth
+//!   and the names. The table establishes the record codes and sizes. Inferred: the tags, which
+//!   count from 1 in each pass, since the client merges a record whose tag repeats the one before
+//!   it and skips a 0 or 0x2bad2d00 before a record; the order of the values in a vertex, the
+//!   vertex scaling (x and y by 0.0625, z by 2^-20, which
 //!   take the engine's sixteenths of a pixel and its 20-bit depth back to a pixel and a fraction;
 //!   see `defs::reply`) and the select depths, unsigned 32-bit integers clamped at 4294967040.0.
 //!   A hit is a primitive that survives clipping and culling. Names are pushed up to 64 deep (a
@@ -122,6 +124,16 @@ impl Feed {
         self.limit = Some(bytes as usize / 4);
     }
 
+    /// One more than the select records this pass has written.
+    fn next_tag(&self) -> u32 {
+        let (mut at, mut records) = (0, 1);
+        while at + 1 < self.words.len() {
+            at += 4 + self.words[at + 1] as usize;
+            records += 1;
+        }
+        records
+    }
+
     fn push(&mut self, words: &[u32]) {
         let room = self.limit.unwrap_or(usize::MAX).saturating_sub(self.words.len());
         if words.len() > room {
@@ -132,10 +144,10 @@ impl Feed {
         }
     }
 
-    /// A select hit written out: the marker, the name count, the depths, the names.
+    /// A select hit written out: the tag, the name count, the depths, the names.
     fn close(&mut self) {
         if let Some((near, far)) = self.open.take() {
-            let mut r = vec![1, self.names.len() as u32, near, far];
+            let mut r = vec![self.next_tag(), self.names.len() as u32, near, far];
             r.extend_from_slice(&self.names);
             self.push(&r);
         }
@@ -728,7 +740,17 @@ mod tests {
         let (words, overflow) = gl.feed.take();
         assert!(!overflow);
         let z = |x: f32| (x * 4_294_967_040.0) as u32;
-        assert_eq!(words, vec![1, 1, z(0.25), z(0.75), 7, 1, 1, z(1.0), z(1.0), 9]);
+        assert_eq!(words, vec![1, 1, z(0.25), z(0.75), 7, 2, 1, z(1.0), z(1.0), 9]);
+        // The next pass counts from 1 again: its one record is tagged 1, which is what the library's merge rule reads
+        // as a new record after the earlier pass's second tag (kona-select-tags evidence).
+        gl.feed.start(1024);
+        mode_command(&mut gl, &mut c, SWITCH_BETWEEN_RENDER_SELECT_AND_FEEDBACK_MODES, &[SELECT]);
+        mode_command(&mut gl, &mut c, CLEAR_SELECTION_NAME_STACK, &[0]);
+        mode_command(&mut gl, &mut c, PUSH_SELECTION_NAME, &[5]);
+        assert!(gl.feed.primitive(POINT, &[v(0.5)]));
+        mode_command(&mut gl, &mut c, SWITCH_BETWEEN_RENDER_SELECT_AND_FEEDBACK_MODES, &[RENDER]);
+        let (words, _) = gl.feed.take();
+        assert_eq!(words, vec![1, 1, z(0.5), z(0.5), 5]);
     }
 
     #[test]

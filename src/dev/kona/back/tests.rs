@@ -2462,7 +2462,7 @@ fn a_feedback_pass_collects_records_and_draws_nothing() {
     assert!(run(&mut b, &["gl"]).1.contains("1 passes"));
 }
 
-/// A select pass writes a hit per name change: the marker, the name count, the nearest and farthest depth, the names.
+/// A select pass writes a hit per name change: the tag, the name count, the nearest and farthest depth, the names.
 #[test]
 fn a_select_pass_records_hits_by_name() {
     use crate::dev::kona::back::gl::query::*;
@@ -2484,7 +2484,7 @@ fn a_select_pass_records_hits_by_name() {
     command(&mut b, Grammar::Gl, SWITCH_BETWEEN_RENDER_SELECT_AND_FEEDBACK_MODES, &[RENDER]);
     let (words, _) = b.contexts.select(None).gl.feed.take();
     let z = (0.5f32 * 4_294_967_040.0) as u32;
-    assert_eq!(words, vec![1, 1, z, z, 5, 1, 1, z, z, 7]);
+    assert_eq!(words, vec![1, 1, z, z, 5, 2, 1, z, z, 7], "each record has its own tag, counting from 1 in the pass");
     assert!(lit_pixels(&mut b).is_empty());
 }
 
