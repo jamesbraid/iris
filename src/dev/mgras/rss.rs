@@ -23,7 +23,7 @@
 //! (by PIO through the character registers, or by DMA).
 
 use super::fixed;
-use super::pixmem::{Buffer, Kind, PixMem};
+use super::pixmem::{Buffer, Kind, PixMem, PAGE_WORDS, TILE_W, WORD_MASK};
 use super::plain::{RegMap, Slot};
 use super::te1::{reg as te_reg, tex_env, Sampler, Te1, ITER_ONE, TEXMODE1_ENABLE};
 use serde::{Deserialize, Serialize};
@@ -922,6 +922,21 @@ fn comps16(px: u32) -> [u16; 4] {
 pub(crate) fn fb_pixel(f: (u32, u32), b: &[u8]) -> u32 {
     let n = type_size(f.1);
     format_comps(f).iter().enumerate().fold(0, |px, (i, &k)| px | (fb_comp(f.1, &b[(i * n).min(b.len())..]) as u32) << (8 * k))
+}
+
+/// A line of host pixels of transfer format `f`, `bpp` bytes each, as
+/// framebuffer pixels (a short last one as `fb_pixel` takes it).
+fn host_pixels(f: (u32, u32), bytes: &[u8], bpp: usize, out: &mut Vec<u32>) {
+    let one = |c: &[u8]| if generic_format(f) { fb_pixel(f, c) } else { from_host(f, c.iter().fold(0u64, |a, &b| (a << 8) | b as u64)) };
+    let mut whole = bytes.chunks_exact(bpp);
+    match f {
+        (8, 0x10) if bpp == 4 => out.extend(whole.by_ref().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))),
+        (8, 0) if bpp == 4 => out.extend(whole.by_ref().map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))),
+        _ => out.extend(whole.by_ref().map(one)),
+    }
+    if !whole.remainder().is_empty() {
+        out.push(one(whole.remainder()));
+    }
 }
 
 /// A pipeline component for the raster engine: `v` in comp_type `t`'s
@@ -3107,6 +3122,9 @@ impl Rss {
             return;
         }
         let bpp = x.bpp as usize;
+        if super::gl::fast_paths() && !frag && x.format != DEPTH_FORMAT && self.put_line_plain(x, line, bytes) {
+            return;
+        }
         for k in 0..(bytes.len() / bpp.max(1)).min(x.width as usize) {
             let (fx, fy) = self.block_px(&x.block, k as i32, line as i32);
             if self.visible(fx, fy) {
@@ -3147,6 +3165,95 @@ impl Rss {
                 self.put(fx, fy, from_host(x.format, v));
             }
         }
+    }
+
+    /// The buffers `put` stores a colour in, their plane masks and the colour bits kept, when that is all it
+    /// does (no clip-ID write, overlay, pair, colour index, 36-bit pixel or logic op but copy); else None.
+    fn plain_stores(&self) -> Option<([(Buffer, u32); 2], usize, u32)> {
+        let pp1 = self.reg(reg::PP1FILLMODE);
+        let field = draw_buffer(pp1);
+        let logic = pp1 & PP1_LOGIC_OP_ENABLE != 0;
+        if field == DRAW_CID || self.draws_overlay() || logic && (pp1 >> 26) & 0xF != 3 || Pair::of(pp1).is_some() || ci_pixtype(pp1) || self.deep36() {
+            return None;
+        }
+        let keep = if logic && (pp1 >> 8) & 7 != 2 { 0xFF_FFFF } else { u32::MAX };
+        // Only RGBA8888 keeps the planes its mask leaves (`put_in`).
+        let planes = |back: bool| if (pp1 >> 8) & 7 == 2 { self.reg(if back { reg::COLORMASKLSBSB } else { reg::COLORMASKLSBSA }) } else { u32::MAX };
+        let b = self.target();
+        let (mut bufs, mut n) = ([(b, planes(draws_b(field))); 2], 1);
+        if draws_a_and_b(field) {
+            if let Some(p) = self.second_buffer() {
+                let b2 = Buffer::new(p, Kind::Wide, self.reg(reg::MGRAS_PP1_DRB_SIZE));
+                if b2 != b {
+                    (bufs[1], n) = ((b2, planes(true)), 2);
+                }
+            }
+        }
+        Some((bufs, n, keep))
+    }
+
+    /// `put_line` where `plain_stores` holds, the clip-ID test is off and the screen masks keep their inside:
+    /// the stores and counts of `put`, with the registers read once a line and a tile's pixels stored together.
+    fn put_line_plain(&mut self, x: &Xfer, line: u32, bytes: &[u8]) -> bool {
+        let mode = self.reg(reg::CLIP_MODE);
+        if cid_match(self.reg(reg::MGRAS_PP1_WINDOW_MODE)) != 0 || (0..4).any(|n| mode & (1 << n) != 0 && mode & (0x10 << n) == 0) {
+            return false;
+        }
+        let Some((bufs, n, keep)) = self.plain_stores() else { return false };
+        let (bpp, dx) = (x.bpp as usize, x.block.dx());
+        let (fx0, fy) = self.block_px(&x.block, 0, line as i32);
+        if fx0.unsigned_abs() > 1 << 28 {
+            return false;
+        }
+        let owns = self.owns_row(fy);
+        // The columns the screen and the masks leave, if the row is in them.
+        let (mut cols, mut rows_ok) = ((0, WIDTH as i32 - 1), owns && (0..HEIGHT as i32).contains(&fy));
+        for m in (0..4).filter(|m| mode & (1 << m) != 0) {
+            let (mx, my) = (self.reg(reg::CLIP_X + 2 * m), self.reg(reg::CLIP_Y + 2 * m));
+            rows_ok &= (signed16(my >> 16)..=signed16(my)).contains(&fy);
+            cols = (cols.0.max(signed16(mx >> 16)), cols.1.min(signed16(mx)));
+        }
+        // The pixels drawn: k from `from` to `to`, a trailing part pixel too.
+        let (width, whole) = (x.width as usize, (bytes.len() / bpp.max(1)).min(x.width as usize));
+        let count = bytes.chunks(bpp).take(width).count() as i32;
+        let (first, last) = if dx > 0 { (cols.0 - fx0, cols.1 - fx0) } else { (fx0 - cols.1, fx0 - cols.0) };
+        let (from, to) = if rows_ok { (first.max(0), (last + 1).min(count)) } else { (0, 0) };
+        // `put` alternates the two buffers a pixel; this stores one then the other, the same unless a pixel of
+        // one aliases the other's, which cannot happen while the pages the line reaches in each are apart.
+        if n == 2 && from < to {
+            let (lo, hi) = (fx0 + from * dx, fx0 + (to - 1) * dx);
+            let (lo, hi) = (lo.min(hi) as u32, lo.max(hi) as u32);
+            let pages = |b: &Buffer| (b.locate(lo, fy as u32).0 / PAGE_WORDS, b.locate(hi, fy as u32).0 / PAGE_WORDS);
+            let ((a0, a1), (b0, b1)) = (pages(&bufs[0].0), pages(&bufs[1].0));
+            if a0 > a1 || b0 > b1 || (a0 <= b1 && b0 <= a1) {
+                return false;
+            }
+        }
+        let put = (to.min(whole as i32) - from).max(0) as u64;
+        self.stats.dma_px_put += put;
+        if owns {
+            self.stats.dma_px_clipped += whole as u64 - put;
+        }
+        if from >= to {
+            return true;
+        }
+        let mut vals = Vec::with_capacity((to - from) as usize);
+        host_pixels(x.format, &bytes[from as usize * bpp..(to as usize * bpp).min(bytes.len())], bpp, &mut vals);
+        for (b, mask) in &bufs[..n] {
+            let mut k = from;
+            while k < to {
+                let fx = fx0 + k * dx;
+                let (i, _, _) = b.locate(fx as u32, fy as u32);
+                // Ascending, a run to the end of the tile; else one pixel.
+                let run = if dx > 0 { (TILE_W - fx as usize % TILE_W).min((to - k) as usize) } else { 1 };
+                for (w, &v) in self.mem.words[i..i + run].iter_mut().zip(&vals[(k - from) as usize..]) {
+                    let v = v & keep;
+                    *w = (*w & !WORD_MASK) | ((*w as u32 & !mask) | (v & mask)) as u64;
+                }
+                k += run as i32;
+            }
+        }
+        true
     }
 
     /// Whether transferred pixels go through the per-fragment stage, as
@@ -4493,6 +4600,191 @@ mod tests {
         }
     }
 
+    /// `put_line` as it was before `put_line_plain`: every pixel through `visible`, `put` and the fragment
+    /// stage.
+    fn put_line_reference(r: &mut Rss, x: &Xfer, line: u32, bytes: &[u8]) {
+        if r.regs[reg::ZST_STENCIL as usize] != 0 {
+            return r.put_stencil_line(x, line, bytes);
+        }
+        let (frag, bpp) = (r.transfer_fragments(), x.bpp as usize);
+        for k in 0..(bytes.len() / bpp).min(x.width as usize) {
+            let (fx, fy) = r.block_px(&x.block, k as i32, line as i32);
+            if r.visible(fx, fy) {
+                r.stats.dma_px_put += 1;
+            } else if r.owns_row(fy) {
+                r.stats.dma_px_clipped += 1;
+            }
+        }
+        let alpha = transfer_alpha(x.format);
+        for (k, px) in bytes.chunks(bpp).enumerate().take(x.width as usize) {
+            let (fx, fy) = r.block_px(&x.block, k as i32, line as i32);
+            if generic_format(x.format) {
+                let v = fb_pixel(x.format, px);
+                if frag { r.put_fragment(fx, fy, v, alpha) } else { r.put(fx, fy, v) }
+                continue;
+            }
+            let v = px.iter().fold(0u64, |a, &b| (a << 8) | b as u64);
+            if x.format == DEPTH_FORMAT {
+                if r.visible(fx, fy) {
+                    let zbuf = Buffer::new(ZST_PAGE, Kind::Wide, r.reg(reg::MGRAS_PP1_DRB_SIZE));
+                    let old = r.mem.get(&zbuf, fx as u32, fy as u32);
+                    r.mem.put(&zbuf, fx as u32, fy as u32, (old & !0xFF_FFFF) | from_host(x.format, v) as u64);
+                }
+            } else if frag {
+                r.put_fragment(fx, fy, from_host(x.format, v), alpha);
+            } else {
+                r.put(fx, fy, from_host(x.format, v));
+            }
+        }
+    }
+
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn u32(&mut self) -> u32 {
+            (self.next() >> 32) as u32
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            (self.next() >> 11) % n
+        }
+
+        fn range(&mut self, lo: i64, hi: i64) -> i64 {
+            lo + self.below((hi - lo + 1) as u64) as i64
+        }
+
+        fn chance(&mut self, p: f64) -> bool {
+            (self.next() >> 11) as f64 / (1u64 << 53) as f64 <= p
+        }
+    }
+
+    /// DMA lines under random pixel processor, clip, plane mask and block state, through `put_line_plain`
+    /// alone (even trials) and through `put_line` with depth-format and fragment-stage states too (odd
+    /// ones), against `put_line_reference`: the same pixels and counts. It also counts the lines that
+    /// stored, so the plain route and its two-buffer and overlap cases are known to be reached.
+    #[test]
+    fn plain_lines_store_what_the_per_pixel_route_stores() {
+        use super::super::pixmem::{RES, RE_WORDS};
+        let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15);
+        let (mut fast, mut slow) = (x_server(), x_server());
+        // The depth buffer's pages and the colour buffers' (A 0x240, B at most 0x2E0, and what a draw reaches).
+        let pages = [0..0x80 * PAGE_WORDS, 0x23F * PAGE_WORDS..0x360 * PAGE_WORDS];
+        for re in 0..RES {
+            for i in pages.iter().flat_map(|p| p.clone()) {
+                let v = rng.next() & WORD_MASK;
+                fast.mem.words[re * RE_WORDS + i] = v;
+                slow.mem.words[re * RE_WORDS + i] = v;
+            }
+        }
+        // A screen mask or most often one that holds the whole window.
+        let pair = |rng: &mut Xorshift, wide: (i64, i64)| {
+            let (lo, hi) = if rng.chance(0.85) { wide } else { let lo = rng.range(-10, 40); (lo, lo + rng.range(0, 70)) };
+            (lo as u16 as u32) << 16 | hi as u16 as u32
+        };
+        let formats = [0xC0_0080u32, 0x80, 0x70, 0xC0_0081, 0xC0_0070, 0x71, 0x01, 0x00, 0xC0_0030, 0x88];
+        let (mut plain, mut stored, mut two, mut overlap, mut depth, mut fragment) = (0, 0, 0, 0, 0, 0);
+        for trial in 0..1000 {
+            let direct = trial % 2 == 0;
+            let masks = [u32::MAX, 0xFF_FFFF, 0xFFF, rng.u32()];
+            let field = [0, 1, 2, 3, 4, 5, 3, 5, 3, 5, 0x48, 0x50][rng.below(12) as usize];
+            let (pixtype, logic) = ([2, 2, 2, 2, 3, 3, 0, 4][rng.below(8) as usize], [0, 0, 0, 0, 3, 3, 1, 6][rng.below(8) as usize]);
+            let pp1 = pixtype << 8 | (rng.chance(0.2) as u32) << 13 | field << 14 | (logic != 0) as u32 * 4 | logic << 26;
+            let enabled = rng.below(16) as u32;
+            let clip_mode = enabled | if rng.chance(0.9) { enabled << 4 } else { (rng.below(16) as u32) << 4 };
+            let wide = rng.chance(0.4);
+            let w = if wide { 150 + rng.below(300) as u32 } else { 1 + rng.below(60) as u32 };
+            let mut xfrmode = formats[rng.below(formats.len() as u64) as usize];
+            if !direct && rng.chance(0.25) {
+                xfrmode = DEPTH_FORMAT.0 << 4 | DEPTH_FORMAT.1;
+            }
+            let b_page = [0, 0x2E0, 0x2E0, 0x240, 0x241, 0x241, 0x242, 0x23F][rng.below(8) as usize];
+            let mut regs = vec![
+                (reg::PP1FILLMODE, pp1),
+                (reg::COLORMASKLSBSA, masks[rng.below(4) as usize]),
+                (reg::COLORMASKLSBSB, masks[rng.below(4) as usize]),
+                (reg::COLORMASKMSBS, [0, 0xF, 0xFF][rng.below(3) as usize]),
+                (reg::DRBPOINTERS, 0x240 | b_page << 10),
+                (reg::MGRAS_PP1_DRB_SIZE, [0x31E, 0x9000_025A][rng.below(2) as usize]),
+                (reg::CONFIG, [0xCAC, 0xCA4][rng.below(2) as usize]),
+                (reg::XYWIN, (120 + rng.below(60) as u32) << 16 | (rng.range(-30, 100) as u16 as u32)),
+                (reg::CLIP_MODE, clip_mode),
+                (reg::MGRAS_PP1_WINDOW_MODE, if rng.chance(0.1) { (rng.below(16) as u32) << 4 } else { 0 }),
+                (reg::FILLMODE, 5 << 22),
+                (reg::XFRMODE, xfrmode),
+                (reg::XFRSIZE, 4 << 16 | w),
+                (reg::MGRAS_PP1_DEPTH_MODE, 0),
+                (reg::MGRAS_PP1_STENCIL_MODE, 0),
+                (reg::MGRAS_PP1_ALPHA_TEST_MODE, 0),
+                (reg::MGRAS_PP1_BLEND_FACTOR, 0),
+                (reg::XFER_Z, 0x80_0000 << 8),
+            ];
+            if !direct && rng.chance(0.6) {
+                let (r, v) = [
+                    (reg::MGRAS_PP1_DEPTH_MODE, 0xFF_FFFF << 4 | ZMODE_TEST | 1),
+                    (reg::MGRAS_PP1_STENCIL_MODE, TEST_ENABLE),
+                    (reg::MGRAS_PP1_ALPHA_TEST_MODE, 0xE66 << 4 | TEST_ENABLE | 6),
+                    (reg::MGRAS_PP1_BLEND_FACTOR, BLEND_ENABLE | 5 << 4 | 4),
+                ][rng.below(4) as usize];
+                regs.retain(|&(k, _)| k != r);
+                regs.push((r, v));
+            }
+            for m in 0..4 {
+                regs.push((reg::CLIP_X + 2 * m, pair(&mut rng, (-50, 700))));
+                regs.push((reg::CLIP_Y + 2 * m, pair(&mut rng, (0, 2047))));
+            }
+            let (engine, own) = [(0, 0), (0, 1), (1, 1)][rng.below(3) as usize];
+            let (x0, y0, y1) = (rng.range(-10, 70), rng.range(-10, 70), rng.range(-10, 70));
+            let x1 = if rng.chance(0.2) { x0 - (w as i64 - 1) } else { x0 + (w as i64 - 1) };
+            let c = [x0, y0, x1, y1].map(|v| v as u16 as u32);
+            for r in [&mut fast, &mut slow] {
+                r.set_engine(engine, own);
+                for &(reg, v) in &regs {
+                    r.write(reg, v, false);
+                }
+                block(r, c[0], c[1], c[2], c[3]);
+            }
+            let bpp = bytes_per_pixel(slow.reg(reg::XFRMODE));
+            let x = *slow.xfer.as_ref().unwrap();
+            for line in 0..3 {
+                let len = (w * bpp + rng.below(2 * bpp as u64 + 1) as u32).saturating_sub(bpp) as usize;
+                let bytes: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+                let put = fast.stats.dma_px_put;
+                let two_buffers = fast.plain_stores().is_some_and(|s| s.1 == 2);
+                if direct {
+                    if fast.put_line_plain(&x, line, &bytes) {
+                        plain += 1;
+                        stored += (fast.stats.dma_px_put > put) as u32;
+                        two += (two_buffers && fast.stats.dma_px_put > put) as u32;
+                    } else {
+                        put_line_reference(&mut fast, &x, line, &bytes);
+                        overlap += (two_buffers && fast.stats.dma_px_put > put) as u32;
+                    }
+                } else {
+                    fast.put_line(&x, line, &bytes);
+                    let hit = fast.stats.dma_px_put > put;
+                    depth += (hit && x.format == DEPTH_FORMAT) as u32;
+                    fragment += (hit && fast.transfer_fragments()) as u32;
+                }
+                put_line_reference(&mut slow, &x, line, &bytes);
+                assert_eq!((fast.stats.dma_px_put, fast.stats.dma_px_clipped), (slow.stats.dma_px_put, slow.stats.dma_px_clipped), "trial {trial} line {line}");
+            }
+            for re in 0..RES {
+                for p in &pages {
+                    let range = re * RE_WORDS + p.start..re * RE_WORDS + p.end;
+                    assert!(fast.mem.words[range.clone()] == slow.mem.words[range], "trial {trial} re {re}");
+                }
+            }
+        }
+        eprintln!("plain {plain} stored {stored} two-buffer {two} overlapping {overlap} depth {depth} fragment {fragment}");
+        assert!(stored > 100 && two > 40 && overlap > 10 && depth > 10 && fragment > 10, "reach: plain {plain} stored {stored} two-buffer {two} overlapping {overlap} depth {depth} fragment {fragment}");
+    }
 }
 
 /// The armed transfer's shape, for the trace.
