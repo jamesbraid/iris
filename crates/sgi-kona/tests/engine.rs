@@ -564,8 +564,8 @@ fn the_pipe_has_one_head_whose_picture_is_copied_as_rgb_and_not_lent_without_a_g
     assert_eq!(BoardEngine::scanout(&mut e, 0, &mut px), Err(sgi_engine::Fault("gone".into())));
 }
 
-/// `scanout10` of the pipe: its pixels reach the DAC as eight bits, so they are those eight widened by
-/// repeating their top bits and the top eight bits are `scanout`'s; the GPU scan-out gives the same
+/// `scanout10` of the pipe, in XB30 order (red low): its pixels reach the DAC as eight bits, so they are those
+/// eight widened by repeating their top bits, the head says 8 bits and the top eight bits are `scanout`'s; the GPU scan-out gives the same
 /// words as the CPU compose. Skips the GPU half without an adapter.
 #[test]
 fn scanout10_widens_the_eight_bit_pixels_the_same_on_the_cpu_and_the_gpu() {
@@ -586,10 +586,11 @@ fn scanout10_widens_the_eight_bit_pixels_the_same_on_the_cpu_and_the_gpu() {
         let lit: Vec<usize> = (0..eight.len()).filter(|&i| eight[i] != 0).collect();
         assert_eq!(lit.len(), 1, "the point");
         assert_eq!(eight[lit[0]], 0xff_55_00);
-        assert_eq!(ten[lit[0]], 0x3ff << 20 | 0x155 << 10, "0xff and 0x55 widened by repeating their top bits, and 0");
+        assert_eq!(ten[lit[0]], 0x3ff | 0x155 << 10, "0xff and 0x55 widened by repeating their top bits, and 0");
+        assert_eq!((BoardEngine::head_bits(&e, 0), BoardEngine::head_bits(&e, 1)), (8, 8), "a monitor channel's DAC takes 8 bits");
         for (&a, &t) in eight.iter().zip(&ten) {
             let top = |c: u32| (c >> 2) & 0xff;
-            assert_eq!(a, top(t >> 20) << 16 | top(t >> 10) << 8 | top(t));
+            assert_eq!(a, top(t) << 16 | top(t >> 10) << 8 | top(t >> 20));
         }
         frames.push(ten);
     }
