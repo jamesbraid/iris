@@ -1362,9 +1362,9 @@ impl GpuRaster {
         for p in [&self.copy.gather, &self.copy.scatter] {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("vpro copy"), timestamp_writes: None });
             pass.set_pipeline(p);
-            pass.set_bind_group(0, &self.copy.group, &[]);
-            pass.set_bind_group(1, &self.copy.empty, &[]);
-            pass.set_bind_group(2, &self.copy.vram, &[]);
+            crate::wgpu::set_bind_group(&mut pass, 0, &self.copy.group);
+            crate::wgpu::set_bind_group(&mut pass, 1, &self.copy.empty);
+            crate::wgpu::set_bind_group(&mut pass, 2, &self.copy.vram);
             pass.dispatch_workgroups((w * h).div_ceil(64), 1, 1);
         }
         self.pending = Some(self.gpu.submit(enc));

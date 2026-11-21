@@ -1436,7 +1436,7 @@ impl State {
         for pipe in [&self.copy.gather, &self.copy.scatter] {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("kona copy"), timestamp_writes: None });
             pass.set_pipeline(pipe);
-            pass.set_bind_group(0, group, &[]);
+            crate::wgpu::set_bind_group(&mut pass, 0, group);
             pass.dispatch_workgroups(ni.div_ceil(8), nj.div_ceil(8), 1);
         }
         self.gpu.submit(enc);

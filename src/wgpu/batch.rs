@@ -742,20 +742,20 @@ impl<R: Pod, S: Pod> Batch<R, S> {
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("bin"), timestamp_writes: self.timing.as_ref().and_then(|t| t.writes(0)) });
             pass.set_pipeline(&pipelines.bin);
-            pass.set_bind_group(0, &set.bin_group, &[]);
-            pass.set_bind_group(1, &set.records_group, &[]);
+            super::device::set_bind_group(&mut pass, 0, &set.bin_group);
+            super::device::set_bind_group(&mut pass, 1, &set.records_group);
             for (i, g) in groups.iter().enumerate() {
-                pass.set_bind_group(2 + i as u32, *g, &[]);
+                super::device::set_bind_group(&mut pass, 2 + i as u32, *g);
             }
             pass.dispatch_workgroups(coarse_cols, coarse_rows, 1);
         }
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("raster"), timestamp_writes: self.timing.as_ref().and_then(|t| t.writes(2)) });
             pass.set_pipeline(&pipelines.raster);
-            pass.set_bind_group(0, &set.batch_group, &[]);
-            pass.set_bind_group(1, &set.records_group, &[]);
+            super::device::set_bind_group(&mut pass, 0, &set.batch_group);
+            super::device::set_bind_group(&mut pass, 1, &set.records_group);
             for (i, g) in groups.iter().enumerate() {
-                pass.set_bind_group(2 + i as u32, *g, &[]);
+                super::device::set_bind_group(&mut pass, 2 + i as u32, *g);
             }
             pass.dispatch_workgroups_indirect(&self.args_buf, 0);
         }

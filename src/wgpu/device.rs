@@ -746,3 +746,12 @@ mod failure_tests {
         assert_eq!(failure.error.lock().as_deref(), Some("wgpu device lost (Unknown): gone"), "the stored error is the device's text");
     }
 }
+
+/// `pass.set_bind_group(index, group, &[])`, in one place. `ComputePass::set_bind_group` is generic, so each crate that calls it
+/// compiles its own copy, and rustc's monomorphisation walk of that copy needs a stack of nearly 2 MB (a trait-solver
+/// recursion through wgpu's dispatch types, in `vtable_entries`). The Linux nightly of 2026-10-27 overflows 1.5 MB on one call
+/// and the Mac's codegen threads (2 MiB by default) on a crate that adds depth to it; only this crate pays it now.
+#[inline(never)]
+pub fn set_bind_group(pass: &mut wgpu::ComputePass<'_>, index: u32, group: &wgpu::BindGroup) {
+    pass.set_bind_group(index, group, &[]);
+}
