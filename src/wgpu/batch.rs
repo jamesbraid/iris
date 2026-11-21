@@ -315,9 +315,9 @@ impl Timing {
         };
         self.read.unmap();
         if let Some(args) = args {
-            let expected_x = busy.count.min(crate::wgpu::tiles::MAX_GROUPS);
+            let expected_x = busy.count.min(super::tiles::MAX_GROUPS);
             let expected_y = if busy.count == 0 { 1 } else {
-                (busy.count - 1) / crate::wgpu::tiles::MAX_GROUPS + 1
+                (busy.count - 1) / super::tiles::MAX_GROUPS + 1
             };
             if args.x != expected_x || args.y != expected_y || args.z != 1 {
                 self.failure = Some("GPU-generated indirect dispatch does not match busy tiles");
@@ -771,6 +771,7 @@ impl<R: Pod, S: Pod> Batch<R, S> {
                 k
             }
             SetChoice::Wait(k) => {
+                #[cfg(not(sgi_gpu_core))]
                 crate::pf_scope!(crate::perfetto::events::WGPU_SET_WAIT);
                 let start = Instant::now();
                 self.wait_stats.waits = self.wait_stats.waits.checked_add(1)
@@ -945,11 +946,11 @@ impl<R: Pod, S: Pod> Batch<R, S> {
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("bin"), timestamp_writes: self.timing.as_ref().and_then(|t| t.writes(0)) });
             pass.set_pipeline(&pipelines.bin);
-            pass.set_bind_group(0, &set.bin_group, &[]);
-            pass.set_bind_group(1, &set.records_group, &[]);
+            super::device::set_bind_group(&mut pass, 0, &set.bin_group);
+            super::device::set_bind_group(&mut pass, 1, &set.records_group);
             if pipelines.bin_uses_arch_groups {
                 for (i, g) in groups.iter().enumerate() {
-                    pass.set_bind_group(2 + i as u32, *g, &[]);
+                    super::device::set_bind_group(&mut pass, 2 + i as u32, *g);
                 }
             }
             pass.dispatch_workgroups(coarse_cols, coarse_rows, 1);
@@ -957,10 +958,10 @@ impl<R: Pod, S: Pod> Batch<R, S> {
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("raster"), timestamp_writes: self.timing.as_ref().and_then(|t| t.writes(2)) });
             pass.set_pipeline(&pipelines.raster);
-            pass.set_bind_group(0, &set.batch_group, &[]);
-            pass.set_bind_group(1, &set.records_group, &[]);
+            super::device::set_bind_group(&mut pass, 0, &set.batch_group);
+            super::device::set_bind_group(&mut pass, 1, &set.records_group);
             for (i, g) in groups.iter().enumerate() {
-                pass.set_bind_group(2 + i as u32, *g, &[]);
+                super::device::set_bind_group(&mut pass, 2 + i as u32, *g);
             }
             pass.dispatch_workgroups_indirect(&self.args_buf, 0);
         }

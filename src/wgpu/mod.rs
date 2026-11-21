@@ -70,7 +70,7 @@ pub mod library {
 pub use batch::{ArchShaders, Batch, BatchPipelines, Full, SlotChanges};
 #[cfg(feature = "present")]
 pub use device::set_display;
-pub use device::{Gpu, GpuOptions};
+pub use device::{set_bind_group, Gpu, GpuOptions};
 pub use memory::{GpuMemory, Staging};
 #[cfg(feature = "present")]
 pub use present::{Frame, Placement, Presenter};

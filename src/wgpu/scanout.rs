@@ -214,10 +214,10 @@ impl Scanout {
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("scanout wide"), timestamp_writes: None });
             pass.set_pipeline(&pipeline.pipeline);
-            pass.set_bind_group(0, &wide.frame_group, &[]);
-            pass.set_bind_group(1, &wide.slot_group, &[]);
+            super::device::set_bind_group(&mut pass, 0, &wide.frame_group);
+            super::device::set_bind_group(&mut pass, 1, &wide.slot_group);
             for (i, g) in groups.iter().enumerate() {
-                pass.set_bind_group(2 + i as u32, *g, &[]);
+                super::device::set_bind_group(&mut pass, 2 + i as u32, *g);
             }
             pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
         }
@@ -328,10 +328,10 @@ impl Scanout {
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("scanout into"), timestamp_writes: None });
             pass.set_pipeline(&pipeline.pipeline);
-            pass.set_bind_group(0, &self.into.as_ref().expect("set above").1, &[]);
-            pass.set_bind_group(1, &self.slot_group, &[]);
+            super::device::set_bind_group(&mut pass, 0, &self.into.as_ref().expect("set above").1);
+            super::device::set_bind_group(&mut pass, 1, &self.slot_group);
             for (i, g) in groups.iter().enumerate() {
-                pass.set_bind_group(2 + i as u32, *g, &[]);
+                super::device::set_bind_group(&mut pass, 2 + i as u32, *g);
             }
             pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
         }
@@ -390,10 +390,10 @@ impl Scanout {
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("scanout"), timestamp_writes: None });
             pass.set_pipeline(&pipeline.pipeline);
-            pass.set_bind_group(0, &self.frame_group, &[]);
-            pass.set_bind_group(1, &self.slot_group, &[]);
+            super::device::set_bind_group(&mut pass, 0, &self.frame_group);
+            super::device::set_bind_group(&mut pass, 1, &self.slot_group);
             for (i, g) in groups.iter().enumerate() {
-                pass.set_bind_group(2 + i as u32, *g, &[]);
+                super::device::set_bind_group(&mut pass, 2 + i as u32, *g);
             }
             pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
         }
