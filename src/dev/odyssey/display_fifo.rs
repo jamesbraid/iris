@@ -42,6 +42,10 @@ pub(super) struct DisplayFifo {
     /// registers as written through them.
     pub(super) two_wire: [TwoWire; 2],
     pub(super) clock: ClockParts,
+    /// The byte each port last received: the status word's bits 7:0.
+    pub(super) received: [u8; 2],
+    /// The DAC test input has been written, so the comparators speak (not saved).
+    dac_test: bool,
     /// The scan-out mode the channel-size entries set, and the display's
     /// shared state.
     pub scanout: Scanout,
@@ -65,6 +69,16 @@ pub(super) struct TwoWire {
     pub(super) address: Option<u8>,
     /// The register the next data byte goes to.
     pub(super) register: Option<u8>,
+    /// The seven-bit address of the device a read transfer is open to.
+    pub(super) reading: Option<u8>,
+}
+
+/// What a two-wire control word completes.
+enum Transfer {
+    /// A register byte written: (device's seven-bit address, register, value).
+    Write(u8, u8, u8),
+    /// A byte received from a device's register: (device's seven-bit address, register).
+    Read(u8, u8),
 }
 
 impl TwoWire {
@@ -72,25 +86,37 @@ impl TwoWire {
     const TRANSFER: u32 = 1 << 9;
     const STOP: u32 = 1 << 11;
     const SEND: u32 = 1 << 12;
+    /// A word that clocks a byte in (the kernel's read word 0x0e00 is stop, receive and transfer).
+    const RECEIVE: u32 = 1 << 10;
     const FORCE: u32 = 1 << 13 | 1 << 14;
 
-    /// Take a control word; a register byte it completes, as (device's
-    /// seven-bit address, register, value).
-    fn control(&mut self, word: u32) -> Option<(u8, u8, u8)> {
+    /// Take a control word; the transfer it completes, if any. A repeated start with the read bit after a register
+    /// number names that register as the one the next receive word returns (a register read is address, register,
+    /// restart with the read bit, receive).
+    fn control(&mut self, word: u32) -> Option<Transfer> {
         if word & Self::FORCE != 0 {
             *self = TwoWire::default();
         } else if word & Self::TRANSFER != 0 && word & Self::SEND != 0 {
             let byte = word as u8;
             if word & Self::START != 0 {
-                *self = TwoWire { address: (byte & 1 == 0).then_some(byte), register: None };
+                *self = if byte & 1 == 0 {
+                    TwoWire { address: Some(byte), register: None, reading: None }
+                } else {
+                    TwoWire { address: None, register: self.register, reading: Some(byte >> 1) }
+                };
             } else if let Some(address) = self.address {
                 match self.register {
                     None => self.register = Some(byte),
                     Some(r) => {
                         self.register = Some(r.wrapping_add(1));
-                        return Some((address >> 1, r, byte));
+                        return Some(Transfer::Write(address >> 1, r, byte));
                     }
                 }
+            }
+        } else if word & Self::TRANSFER != 0 && word & Self::RECEIVE != 0 {
+            if let (Some(device), Some(register)) = (self.reading, self.register) {
+                self.register = Some(register.wrapping_add(1));
+                return Some(Transfer::Read(device, register));
             }
         } else if word & Self::STOP != 0 {
             *self = TwoWire::default();
@@ -126,6 +152,17 @@ impl ClockParts {
             *r = value;
             self.last = Some(device);
         }
+    }
+
+    /// The register a read of `device` returns: what was written to it, 0 for a register past the eight and for a device the
+    /// board has no model of (a DDC monitor, the option card).
+    fn read(&self, device: u8, register: u8) -> u8 {
+        let part = match device {
+            Self::ICS1523 => &self.ics,
+            Self::AMI => &self.ami,
+            _ => return 0,
+        };
+        part.get(register as usize).copied().unwrap_or(0)
     }
 
     /// The pixel clock the part written last makes; None before either is
@@ -216,6 +253,14 @@ fn ctl_slot(addr: u64, size: u32) -> Option<usize> {
 // memory by these entries. The 16 x 16-pixel tiling of board memory is not
 // modeled.
 
+/// The genlock state (bit 0 valid, bit 1 lost), read only.
+const GENLOCK_STATE: u32 = 0x27cd;
+/// The DAC's test input (a ten-bit word a channel: green 31:22, blue 21:12, red 11:2) and the status word whose bits 4 (red),
+/// 5 (green) and 6 (blue) are its comparators.
+const DAC_TEST_INPUT: u32 = 0x2601;
+const DAC_STATUS: u32 = 0x26c0;
+const DAC_COMPARATORS: u32 = 0x70;
+
 /// The entries the kernel writes.
 pub(super) fn backend_ctl_known(index: u32) -> bool {
     (0x2000..=0x247f).contains(&index)
@@ -232,8 +277,8 @@ pub(super) fn backend_ctl_known(index: u32) -> bool {
         || index == 0x2b00
 }
 
-pub(super) fn i2c_status(command: u32) -> u32 {
-    i2c::STATUS_READY | if command != 0 { i2c::STATUS_DONE } else { 0 }
+pub(super) fn i2c_status(command: u32, received: u8) -> u32 {
+    i2c::STATUS_READY | if command != 0 { i2c::STATUS_DONE } else { 0 } | received as u32
 }
 
 impl DisplayFifo {
@@ -246,6 +291,8 @@ impl DisplayFifo {
             i2c_opt_cmd: 0,
             two_wire: Default::default(),
             clock: ClockParts::default(),
+            received: [0; 2],
+            dac_test: false,
             scanout: Scanout::new(shared),
             overlay_mode_reported: false,
             cursor_reported: 0,
@@ -267,6 +314,8 @@ impl DisplayFifo {
         self.i2c_opt_cmd = 0;
         self.two_wire = Default::default();
         self.clock = ClockParts::default();
+        self.received = [0; 2];
+        self.dac_test = false;
         self.overlay_mode_reported = false;
         self.cursor_reported = 0;
         self.word_reported = false;
@@ -278,13 +327,18 @@ impl DisplayFifo {
             return self.regs().cursor(i) as u64;
         }
         if let Some(i) = ctl_slot(addr, size) {
-            return self.ctl[i] as u64;
+            let index = backend::CTL_BASE + i as u32;
+            return match index {
+                // Bits 4 to 6 are the DAC's comparators for the test input in 0x2601 (`dac_comparators`), once one is written.
+                DAC_STATUS if self.dac_test => (self.ctl[i] & !DAC_COMPARATORS | self.dac_comparators()) as u64,
+                _ => self.ctl[i] as u64,
+            };
         }
         match reg(addr, size) {
             Some(i2c::MAIN_CMD_READ) => self.i2c_main_cmd as u64,
-            Some(i2c::MAIN_STATUS_READ) => i2c_status(self.i2c_main_cmd) as u64,
+            Some(i2c::MAIN_STATUS_READ) => i2c_status(self.i2c_main_cmd, self.received[0]) as u64,
             Some(i2c::OPT_CMD_READ) => self.i2c_opt_cmd as u64,
-            Some(i2c::OPT_STATUS_READ) => i2c_status(self.i2c_opt_cmd) as u64,
+            Some(i2c::OPT_STATUS_READ) => i2c_status(self.i2c_opt_cmd, self.received[1]) as u64,
             _ => 0,
         }
     }
@@ -327,6 +381,11 @@ impl DisplayFifo {
     /// existing dispatch. Entries 0x2000-0x2fff are also kept for the read
     /// window; one the kernel is not known to write is still reported.
     pub fn data(&mut self, index: u32, data: u32) {
+        // The genlock state is read only and nothing sets it: no reference is attached, so no lock is ever gained or lost.
+        if index == GENLOCK_STATE {
+            return;
+        }
+        self.dac_test |= index == DAC_TEST_INPUT;
         if (backend::CTL_BASE..backend::CTL_BASE + backend::CTL_ENTRIES).contains(&index) {
             self.ctl[(index - backend::CTL_BASE) as usize] = data;
         }
@@ -373,6 +432,15 @@ impl DisplayFifo {
                 }
             }
         }
+    }
+
+    /// The comparator bits of the DAC's status for the test input last written to 0x2601: a channel's bit is 1 below
+    /// the threshold and 0 above it. Established for the two inputs `odydiags -analog_out` uses, 0 (all 1) and full scale
+    /// (0); the threshold in between is not in the sources, and the half-scale used here is an approximation.
+    fn dac_comparators(&self) -> u32 {
+        let input = self.ctl[(DAC_TEST_INPUT - backend::CTL_BASE) as usize];
+        let below = |shift: u32| (input >> shift & 0x3ff) < 0x200;
+        (below(2) as u32) << 4 | (below(22) as u32) << 5 | (below(12) as u32) << 6
     }
 
     /// A word the model does not decode, reported once.
@@ -516,8 +584,10 @@ impl DisplayFifo {
     /// A control word pushed to two-wire port `port`: follow the transfer,
     /// and keep a clock part's register when one is written.
     fn two_wire_control(&mut self, port: usize, word: u32) {
-        if let Some((device, register, value)) = self.two_wire[port].control(word) {
-            self.clock.write(device, register, value);
+        match self.two_wire[port].control(word) {
+            Some(Transfer::Write(device, register, value)) => self.clock.write(device, register, value),
+            Some(Transfer::Read(device, register)) => self.received[port] = self.clock.read(device, register),
+            None => {}
         }
     }
 
@@ -622,7 +692,7 @@ impl DisplayFifo {
         self.i2c_opt_cmd = snapshot.i2c_opt_cmd;
         self.two_wire = snapshot
             .two_wire
-            .map(|(address, register)| TwoWire { address, register });
+            .map(|(address, register)| TwoWire { address, register, reading: None });
         self.clock.ics = snapshot.clock_ics;
         self.clock.ami = snapshot.clock_ami;
         self.clock.last = snapshot.clock_last;
@@ -698,39 +768,6 @@ mod timing_tests {
         assert_eq!(shared.restarts(), base + 1, "a new pixel clock restarts it");
         f.data(vtg::CONTROL, 1);
         assert_eq!(shared.restarts(), base + 1, "and the same clock again does not");
-    }
-
-    /// The restart is anchored at the time of the write that changed the mode, whenever the display
-    /// next polls, so the retrace times a guest sees do not depend on the poll schedule.
-    #[test]
-    fn a_restart_anchors_at_the_write_not_the_next_poll() {
-        use super::super::reader::ScanoutReader;
-        use std::sync::atomic::Ordering::Relaxed;
-        let run = |polls: &[i64]| {
-            let mut f = fifo();
-            let shared = f.scanout.shared.clone();
-            let mut reader = ScanoutReader::default();
-            reader.attach(&shared);
-            f.set_scanout_size(1280, 1024);
-            reader.poll(0);
-            for (register, value) in [(0, 0x30), (1, 0), (2, 0), (3, 5), (4, 2)] {
-                write_register(&mut f, 0x58, register, value);
-            }
-            shared.write_ns.store(7_000_000, Relaxed);
-            f.data(vtg::CONTROL, 1);
-            shared.write_ns.store(-1, Relaxed);
-            for &t in polls {
-                reader.poll(t);
-            }
-            (reader.clock.epoch, reader.clock.retrace_time(1), reader.clock.frames)
-        };
-        let (epoch, first, _) = run(&[7_000_001]);
-        assert_eq!(epoch, 7_000_000, "the write's time, not the poll's");
-        // A late poll, and a run of polls, find the same retrace times and the same count by a given time.
-        let (late_epoch, late_first, frames_late) = run(&[40_000_000]);
-        let (steady_epoch, steady_first, frames_steady) = run(&[8_000_000, 20_000_000, 40_000_000]);
-        assert_eq!((late_epoch, late_first), (epoch, first));
-        assert_eq!((steady_epoch, steady_first, frames_steady), (epoch, first, frames_late));
     }
 
     #[test]

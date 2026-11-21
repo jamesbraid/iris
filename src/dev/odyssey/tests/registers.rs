@@ -690,3 +690,98 @@ fn every_register_the_front_admits_takes_a_read_and_a_write() {
     }
     assert!(admitted > 20, "{admitted} registers");
 }
+
+/// A back-end word at `index`, as the diagnostic writes one: a type-3 header for one word, then the word.
+fn display_write(s: &mut Board, index: u32, word: u32) {
+    backend_push(s, backend_header(index, 1));
+    backend_push(s, word);
+}
+
+/// `odydiags -registers` (odsy video-sync-hooks.md section 4, established): BUZZ registers 0x28 (20 bits), 0x30 (32),
+/// 0x38 (32) and 0x1070 (25) take walking ones and walking zeros and read the masked value back.
+#[test]
+fn the_diagnostics_register_walk_reads_back_the_four_registers_bits() {
+    let (mut s, _) = board("v12");
+    for (reg, bits) in [(0x28u64, 20u32), (0x30, 32), (0x38, 32), (0x1070, 25)] {
+        let mask = if bits == 32 { u32::MAX } else { (1u32 << bits) - 1 };
+        for k in 0..bits {
+            for v in [1u32 << k, !(1u32 << k)] {
+                reg_write(&mut s, reg, v);
+                assert_eq!(reg_read(&mut s, reg) & mask, v & mask, "{reg:#x} bit {k} value {v:#x}");
+            }
+        }
+    }
+}
+
+/// `odydiags -dcb`: the low byte of display register 0x2700 takes walking ones and zeros and reads back through the window.
+#[test]
+fn the_diagnostics_dcb_walk_reads_back_display_register_0x2700() {
+    let (mut s, _) = board("v12");
+    for v in (0..8).map(|k| 1u32 << k).chain((0..8).map(|k| !(1u32 << k) & 0xff)) {
+        display_write(&mut s, 0x2700, v);
+        assert_eq!(backend_readback(&mut s, 0x2700) & 0xff, v);
+    }
+}
+
+/// `odydiags -i2c`: on the option port the clock part at 0x26 (strap board version 0) or 0x58 stores registers 0 and 1 and
+/// returns them: a write is a start word 0x1300 + 2 x address, a register word 0x1200 + register and a data word
+/// 0x1a00 + value; a read is the start and register words, a repeated start 0x1300 + 2 x address + 1 and the receive word
+/// 0x0e00, the byte in the status word's bits 7:0, whose bits 13:10 read 0 (settled).
+#[test]
+fn the_diagnostics_i2c_test_reads_back_the_clock_parts_registers_on_both_ports() {
+    for (port, index, status) in [(1, i2c::OPT_CMD_INDEX, i2c::OPT_STATUS_READ), (0, i2c::MAIN_CMD_INDEX, i2c::MAIN_STATUS_READ)] {
+        for address in [0x26u32, 0x58] {
+            let (mut s, _) = board("v12");
+            let word = |s: &mut Board, w: u32| display_write(s, index, w);
+            for register in [0u32, 1] {
+                for v in (0..8).map(|k| 1u32 << k).chain((0..8).map(|k| !(1u32 << k) & 0xff)) {
+                    for w in [0x1300 + 2 * address, 0x1200 + register, 0x1a00 + v] {
+                        word(&mut s, w);
+                    }
+                    for w in [0x1300 + 2 * address, 0x1200 + register, 0x1300 + 2 * address + 1, 0x0e00] {
+                        word(&mut s, w);
+                    }
+                    let st = reg_read(&mut s, status);
+                    assert_eq!(st & 0xff, v, "port {port} part {address:#x} register {register}");
+                    assert!(matches!((st >> 10) & 0xf, 0 | 0xa), "the controller is idle");
+                }
+            }
+        }
+    }
+}
+
+/// `odydiags -analog_out` (not in the default run): the DAC's test input 0x2601 and the comparator bits of 0x26c0 (4 red,
+/// 5 green, 6 blue), 1 below threshold and 0 above; the five inputs the tool uses give the table its code holds. The saved
+/// and restored words 0x26c0, 0x2600, 0x2680, 0x2481, 0x2482 and 0x2483 read back as written. The threshold between 0 and
+/// full scale is an approximation.
+#[test]
+fn the_dac_test_input_drives_the_comparator_bits_of_0x26c0() {
+    let (mut s, _) = board("v12");
+    for (index, v) in [(0x26c0, 0), (0x2600, 0), (0x2680, 0x0002_0000), (0x2481, 0), (0x2482, 0xffff_ffff), (0x2483, 0)] {
+        display_write(&mut s, index, v);
+        assert_eq!(backend_readback(&mut s, index) & if index == 0x26c0 { !0x70 } else { !0 }, v);
+    }
+    // Input word, then the {red, green, blue} comparator bits the tool expects back.
+    for (input, expect) in [(0x0000_0000u32, [1, 1, 1]), (0xffff_fffc, [0, 0, 0]), (0x0000_0ffc, [0, 1, 1]), (0xffc0_0000, [1, 0, 1]), (0x003f_f000, [1, 1, 0])] {
+        display_write(&mut s, 0x2601, input);
+        let status = backend_readback(&mut s, 0x26c0);
+        assert_eq!([status >> 4 & 1, status >> 5 & 1, status >> 6 & 1], expect, "input {input:#010x}");
+    }
+}
+
+/// The genlock block takes what `odsyLoadTimingTable` writes (0x27c0 to 0x27cc) and reads it back; 0x27cd, the genlock
+/// state, is read only and reads 0, so no lock is ever reported and the genlock handler never runs (odsy
+/// video-sync-hooks.md sections 1.4 and 1.5, established for the layout and the handler, inferred for the register's bits).
+#[test]
+fn the_genlock_block_reads_back_and_its_state_word_reads_zero_whatever_is_written() {
+    let (mut s, _) = board("v12");
+    for (i, index) in (0x27c0..=0x27cc).enumerate() {
+        display_write(&mut s, index, 0x1234_0000 + i as u32);
+    }
+    for (i, index) in (0x27c0..=0x27cc).enumerate() {
+        assert_eq!(backend_readback(&mut s, index), 0x1234_0000 + i as u32, "{index:#x}");
+    }
+    assert_eq!(backend_readback(&mut s, 0x27cd), 0);
+    display_write(&mut s, 0x27cd, 3);
+    assert_eq!(backend_readback(&mut s, 0x27cd), 0, "read only");
+}
