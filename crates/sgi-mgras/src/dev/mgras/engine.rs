@@ -632,6 +632,8 @@ pub struct MgrasEngine<M: HostMem> {
     worker: Option<JoinHandle<()>>,
     parked: bool,
     now: u64,
+    /// Status polls the video DMA's busy bit still shows for (`host::STATUS_VIDEO_DMA_BUSY`); not saved.
+    video_dma_polls: AtomicU32,
 }
 
 impl<M: HostMem> MgrasEngine<M> {
@@ -690,7 +692,7 @@ impl<M: HostMem> MgrasEngine<M> {
             dead: AtomicBool::new(false),
         });
         let display = Mutex::new(Display::new(cfg.bdvers.unwrap_or_else(|| display::default_bdvers(cfg.board)), cfg.cmap_rev, cfg.pp1_revision()));
-        let mut e = MgrasEngine { sh, cfg, gpu: gpu.cloned(), mem, display, stage: Vec::new(), submitted: 0, words: 0, worker: None, parked: false, now: 0 };
+        let mut e = MgrasEngine { sh, cfg, gpu: gpu.cloned(), mem, display, stage: Vec::new(), submitted: 0, words: 0, worker: None, parked: false, now: 0, video_dma_polls: AtomicU32::new(0) };
         e.spawn();
         Ok(e)
     }
@@ -828,7 +830,10 @@ impl<M: HostMem> MgrasEngine<M> {
 
     fn status(&self, off: u32) -> u32 {
         match off {
-            host::STATUS => (if self.is_idle() { host::STATUS_HQ_IDLE | host::STATUS_BOARD_IDLE } else { 0 }) | host::STATUS_FIXED | host::STATUS_CFIFO_LOW,
+            host::STATUS => {
+                let busy = self.video_dma_polls.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1)).is_ok();
+                (if self.is_idle() { host::STATUS_HQ_IDLE | host::STATUS_BOARD_IDLE } else { 0 }) | host::STATUS_FIXED | host::STATUS_CFIFO_LOW | if busy { host::STATUS_VIDEO_DMA_BUSY } else { 0 }
+            }
             host::FIFOSTATUS => ((self.words - self.sh.words_done.load(Ordering::Acquire)) as u32).min(0x7E),
             _ => 0,
         }
@@ -1036,6 +1041,15 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
                     self.sh.front.interrupt_enable.fetch_and(!lo, Ordering::AcqRel);
                 }
                 self.sh.out.post(Event::Irq);
+            }
+            // The video DMA's data path is not modelled (its pixels never reach the raster engines): a transfer shows
+            // busy until the status is polled once, an approximation of the time it takes.
+            host::VIDEO_DMA_CONTROL => {
+                if lo & host::VIDEO_DMA_START == host::VIDEO_DMA_START {
+                    self.video_dma_polls.store(1, Ordering::Release);
+                } else if lo == host::VIDEO_DMA_ABORT {
+                    self.video_dma_polls.store(0, Ordering::Release);
+                }
             }
             0x80000..=0xFFFFF => self.sh.out.post(Event::Note(format!("fast-path command window write at {off:#x}"))),
             host::UCODE..=0x45FFF => {
@@ -1347,6 +1361,7 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         f.flags.store(0, Ordering::Release);
         f.flag_enable.store(0, Ordering::Release);
         f.interrupt_enable.store(0, Ordering::Release);
+        self.video_dma_polls.store(0, Ordering::Release);
         self.sh.out.clear();
         *self.sh.fault.lock() = None;
         self.sh.dead.store(false, Ordering::Release);

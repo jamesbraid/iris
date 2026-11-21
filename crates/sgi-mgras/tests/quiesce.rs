@@ -230,3 +230,27 @@ fn quiesce_with_a_budget_answers_midway_instead_of_running_on() {
     assert_eq!(e.save(&mut Vec::new()), Ok(()));
     assert_eq!(e.wait_idle(0, 0), Idle::Yes, "MGRAS never stalls on the shell");
 }
+
+/// The Digital Video driver starts its video DMA with bits 0 and 4 of the word at HQ4 `+0x081010` and polls bit 12 of the
+/// status (`+0x020000`) up to 200 times for it to clear (gr4 video-sync.md section 3.4, software expectation); a store of 2
+/// abandons the transfer. The transfer's data path is not modelled, so busy lasts one status poll.
+#[test]
+fn the_video_dma_busy_bit_shows_after_the_start_store_and_clears_within_the_drivers_polls() {
+    let (mut e, _) = engine(Mode::Inline, 1024, None);
+    let busy = |e: &mut MgrasEngine<Mem>| matches!(e.read(host::STATUS, 32), Read::Value(v) if v & 0x1000 != 0);
+    assert!(!busy(&mut e), "idle");
+    assert_eq!(e.write(0x81010, 32, 0x1), Write::Done);
+    assert!(!busy(&mut e), "bit 0 alone does not start it");
+    assert_eq!(e.write(0x81010, 32, 0x11), Write::Done);
+    assert!(busy(&mut e), "started");
+    let polls = (0..200).take_while(|_| busy(&mut e)).count();
+    assert!(polls < 200, "it clears within the driver's 200 polls");
+    assert!(!busy(&mut e));
+    assert_eq!(e.write(0x81010, 32, 0x11), Write::Done);
+    assert_eq!(e.write(0x81010, 32, 0x2), Write::Done);
+    assert!(!busy(&mut e), "the abort clears it");
+    assert_eq!(e.write(0x81010, 32, 0x11), Write::Done);
+    e.quiesce(u64::MAX).unwrap();
+    e.reset().unwrap();
+    assert!(!busy(&mut e), "a reset clears it");
+}
