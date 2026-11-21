@@ -256,6 +256,8 @@ fn worker<M: HostMem>(sh: Arc<Shared<M>>) {
         let began = std::time::Instant::now();
         sh.execute(&mut batch);
         sh.busy_ns.fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        // A shell access that found the engine busy waits for this notify.
+        sh.out.wake();
     }
 }
 

@@ -78,6 +78,21 @@ fn the_notify_hook_only_says_that_something_waits() {
     assert_eq!(ev, vec![Event::Irq]);
 }
 
+/// A worker that finishes a batch tells the shell, so a pump that went idle on a quiet queue runs again.
+#[test]
+fn a_worker_finishing_a_batch_calls_the_notify_hook() {
+    let n = Arc::new(AtomicU32::new(0));
+    let (mut e, _) = engine(Mode::Threaded, 1024, Some(n.clone()));
+    // Parked, the write waits for the worker, so the rearm comes before the batch runs.
+    e.quiesce(u64::MAX).unwrap();
+    e.write(REG, 32, 1);
+    assert_eq!(n.load(Ordering::SeqCst), 1, "the queued write");
+    e.advance(0);
+    e.resume();
+    assert_eq!(e.wait_idle(0, 10_000_000_000), Idle::Yes);
+    assert_eq!(n.load(Ordering::SeqCst), 2, "the finished batch");
+}
+
 #[test]
 fn a_worker_runs_the_queue_and_quiescence_parks_it() {
     let rep = parse(REPLAYS.iter().find(|r| r.0 == "gl-swap-tmesh-sphere").unwrap().1);
