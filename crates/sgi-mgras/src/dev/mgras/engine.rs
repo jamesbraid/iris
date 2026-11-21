@@ -41,7 +41,7 @@ use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
 use super::back::ImpactBack;
-use super::display::{self, Display};
+use super::display::{self, Change, Display};
 use super::hostmem::{Fault as DmaFault, HostMem as DmaMem};
 use super::hq3::{host, Hq3Board, Hq3Engine, Hq3Regs, Hq3Sink, Hq3Stats};
 use super::pixmem::{Buffer, Kind, PAGE_WORDS};
@@ -149,6 +149,9 @@ const STAGE_MAX: usize = 256;
 const BATCH_MAX: usize = 4096;
 /// Distinct damage marks waiting before they degrade to "anything".
 const DAMAGE_MAX: usize = 16;
+/// The store of a damage mark for the display bus's cursor: its box is in display pixels from the top left. A
+/// drawing store is a page pointer, below bit 17, and `DAMAGE_ANY` means everything.
+pub const DAMAGE_DISPLAY: u64 = crate::ffi::IRIS_MGRAS_DAMAGE_DISPLAY;
 
 /// The registers the shell reads without waiting: the HQ flags and the
 /// enables that gate them. The worker sets flags too.
@@ -1065,8 +1068,13 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
             }
             // The display bus is the board's own side bus: it answers at once, whatever the raster side is doing.
             display::DCB_FIRST..=display::DCB_LAST => {
-                if self.display.lock().write(off, bits, val) {
+                let change = self.display.lock().write(off, bits, val);
+                if change != Change::None {
                     self.sh.generation.fetch_add(1, Ordering::Release);
+                    match change {
+                        Change::Cursor(r) => self.sh.out.damage(&[sgi_engine::Mark { store: DAMAGE_DISPLAY, planes: !0, rect: sgi_engine::Rect::new(r.x0, r.y0, r.x1, r.y1) }]),
+                        _ => self.sh.out.damage_all(),
+                    }
                 }
                 // The DAC's signature analyzer was clocked: run the frame the display shows through it. The queued
                 // drawing is brought current first, as the diagnostic's frame was drawn before it asked.

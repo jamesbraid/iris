@@ -16,6 +16,9 @@ use crate::dev::mgras::rss;
 use crate::display::Rect;
 use crate::wgpu::{Gpu, GpuOptions};
 
+/// `IrisEngineDamage::store` of a mark the display bus posts for the cursor alone.
+pub const IRIS_MGRAS_DAMAGE_DISPLAY: u64 = 0x20000;
+
 /// The MGRAS configuration: the shared part, then the board's.
 #[repr(C)]
 #[derive(Clone, Copy)]

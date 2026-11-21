@@ -5,11 +5,12 @@
 //! It has a lock of its own so the shell's bus accesses never wait for the
 //! raster worker; the worker never touches it.
 
-use super::dcb::{Dcb, Txn, DEV_DAC, DEV_VC3, VC3_CONTROL, VC3_CONTROL_DISPLAY, VC3_CURRENT_LINE, VC3_CURSOR_X, VC3_CURSOR_X_LATCH};
+use super::dcb::{Dcb, Txn, DEV_CMAP0, DEV_CMAP1, DEV_CMAP_ALL, DEV_DAC, DEV_VC3, DEV_XMAP, VC3_CONTROL, VC3_CONTROL_DISPLAY, VC3_CURRENT_LINE, VC3_CURSOR_X, VC3_CURSOR_X_LATCH, VC3_SRAM_POINTER};
 use super::frame::{self, Frame};
 use super::plain::boxed_zeroed;
 use super::rss::Rss;
 use super::engine::Board;
+use crate::display::Rect;
 
 /// The bus's slot window, and the control registers after it.
 pub const DCB_FIRST: u32 = 0x60000;
@@ -117,6 +118,99 @@ impl Signature {
 /// the counter in a loop (the stock diagnostic's frame waits) reaches the next line, and so the next frame,
 /// without the shell calling the pump. Approximation: a display-bus read's own duration is unknown.
 const BEAM_READ_NS: u128 = 1_000;
+
+/// What a store to the display bus changed of the picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// Nothing the picture is made of: a select or address, a register the picture does not read, or a value
+    /// stored over itself.
+    None,
+    /// The cursor alone: the box its glyph covered or covers, in display pixels, corners included.
+    Cursor(Rect),
+    /// A colour map entry, the DAC's gamma or pixel mask, an XMAP mode or pointer, or a VC3 table.
+    All,
+}
+
+/// VC3 registers that only the cursor reads: the glyph's address, its position and its control.
+const VC3_CURSOR_REGS: [usize; 4] = [1, 2, 3, 0x1D];
+/// VC3 registers no picture reads: the SRAM pointer and the line counter.
+const VC3_INERT_REGS: [usize; 2] = [VC3_SRAM_POINTER, VC3_CURRENT_LINE as usize];
+
+/// The state a bus store can land on and the picture reads, as it was before the store.
+enum Landing {
+    /// Colour map entries of the maps a store reaches: map, entry, value.
+    Cmap([Option<(usize, usize, u32)>; 2]),
+    Gamma(usize, [u16; 3]),
+    PixMask(u32),
+    CursorBase(usize),
+    BufSelect(u32),
+    Dib(u32),
+    MainModes([u32; 32]),
+    OverlayModes([u32; 32]),
+    /// The VC3's registers, the SRAM words at its pointer and the cursor's box.
+    Vc3([u16; 32], usize, [u16; 2], Option<Rect>),
+}
+
+fn cursor_box(dcb: &Dcb) -> Option<Rect> {
+    dcb.vc3.cursor().map(|(x, y, size, _)| Rect::new(x, y, x + size as i32 - 1, y + size as i32 - 1))
+}
+
+impl Landing {
+    /// Where store `t` lands, if on state the picture reads.
+    fn of(dcb: &Dcb, t: Txn) -> Option<Landing> {
+        let modes = |f: &dyn Fn(u32) -> u32| std::array::from_fn(|did| f(did as u32));
+        Some(match (t.dev, t.crs) {
+            (DEV_CMAP_ALL | DEV_CMAP0 | DEV_CMAP1, 2) => {
+                let at = |map: usize| Some((map, dcb.cmap[map].address(), dcb.cmap[map].pal[dcb.cmap[map].address()]));
+                Landing::Cmap(match t.dev {
+                    DEV_CMAP_ALL => [at(0), at(1)],
+                    DEV_CMAP0 => [at(0), None],
+                    _ => [at(1), None],
+                })
+            }
+            (DEV_DAC, 1) => Landing::Gamma(dcb.dac.selected() as usize, dcb.dac.gamma[dcb.dac.selected() as usize]),
+            (DEV_DAC, 2) => Landing::PixMask(dcb.dac.pixmask()),
+            (DEV_XMAP, 2) => Landing::CursorBase(dcb.xmap.cursor_cmap_base()),
+            (DEV_XMAP, 3) => Landing::BufSelect(dcb.xmap.buf_select()),
+            (DEV_XMAP, 4) => Landing::MainModes(modes(&|did| dcb.xmap.main_mode(did))),
+            (DEV_XMAP, 5) => Landing::OverlayModes(modes(&|did| dcb.xmap.overlay_mode(did))),
+            (DEV_XMAP, 6) => Landing::Dib(dcb.xmap.dib_pointers()),
+            (DEV_VC3, 0 | 1 | 3) => {
+                let at = dcb.vc3.regs[VC3_SRAM_POINTER] as usize & 0x7FFF;
+                Landing::Vc3(dcb.vc3.regs, at, [dcb.vc3.sram[at], dcb.vc3.sram[(at + 1) & 0x7FFF]], cursor_box(dcb))
+            }
+            _ => return None,
+        })
+    }
+
+    /// What the store changed, with the state as it is now.
+    fn change(self, dcb: &Dcb) -> Change {
+        let same = match self {
+            Landing::Cmap(e) => e.iter().flatten().all(|&(map, at, v)| dcb.cmap[map].pal[at] == v),
+            Landing::Gamma(i, row) => dcb.dac.gamma[i] == row,
+            Landing::PixMask(v) => dcb.dac.pixmask() == v,
+            Landing::CursorBase(v) => dcb.xmap.cursor_cmap_base() == v,
+            Landing::BufSelect(v) => dcb.xmap.buf_select() == v,
+            Landing::Dib(v) => dcb.xmap.dib_pointers() == v,
+            Landing::MainModes(m) => m.iter().enumerate().all(|(did, &v)| dcb.xmap.main_mode(did as u32) == v),
+            Landing::OverlayModes(m) => m.iter().enumerate().all(|(did, &v)| dcb.xmap.overlay_mode(did as u32) == v),
+            Landing::Vc3(regs, at, words, cursor) => {
+                let moved = |i: &usize| dcb.vc3.regs[*i] != regs[*i];
+                let elsewhere = (0..32).filter(|i| !VC3_CURSOR_REGS.contains(i) && !VC3_INERT_REGS.contains(i)).any(|i| moved(&i));
+                if elsewhere || dcb.vc3.sram[at] != words[0] || dcb.vc3.sram[(at + 1) & 0x7FFF] != words[1] {
+                    return Change::All;
+                }
+                return match (cursor, cursor_box(dcb)) {
+                    _ if !VC3_CURSOR_REGS.iter().any(moved) => Change::None,
+                    (Some(a), Some(b)) => Change::Cursor(a.union(&b)),
+                    (Some(a), None) | (None, Some(a)) => Change::Cursor(a),
+                    (None, None) => Change::None,
+                };
+            }
+        };
+        if same { Change::None } else { Change::All }
+    }
+}
 
 pub struct Display {
     dcb: Box<Dcb>,
@@ -301,22 +395,22 @@ impl Display {
         }
     }
 
-    /// A store to the bus window at `off`. True when what is displayed
-    /// changed: colour maps, modes and the cursor change the picture without
-    /// touching the planes, while an index write alone changes nothing.
-    pub fn write(&mut self, off: u32, bits: u32, val: u64) -> bool {
+    /// A store to the bus window at `off`, and what it changed of the picture: colour maps, modes and the cursor
+    /// change it without touching the planes, while an index write, or a value written over itself, changes nothing.
+    pub fn write(&mut self, off: u32, bits: u32, val: u64) -> Change {
         if off <= DCB_BUS_END {
             let t = Txn::decode(off);
             if let (false, Some(slave)) = (Dcb::models(t.dev), &mut self.slave) {
                 if slave.write(t.dev, t.crs, t.width, t.store_data(bits, val)) {
-                    return false;
+                    return Change::None;
                 }
             }
             // A byte store at +1 of the DAC's address halfword sets the register number, its bits 15:8.
             if t.dev == DEV_DAC && t.crs == 0 && t.width >= 2 && bits == 8 {
                 self.dcb.dac.set_register_number(val as u32);
-                return false;
+                return Change::None;
             }
+            let landing = Landing::of(&self.dcb, t);
             self.dcb.write(t, t.store_data(bits, val));
             if t.dev == DEV_DAC && t.crs == 2 && self.dcb.dac.selected() == CR4 {
                 self.signature_control(self.dcb.dac.register(CR4));
@@ -331,7 +425,7 @@ impl Display {
                     self.derive_timing();
                 }
             }
-            return t.crs >= 2 || t.dev == DEV_VC3;
+            return landing.map_or(Change::None, |l| l.change(&self.dcb));
         }
         let dev = ((off - DCBCTRL) >> 2) as usize;
         if bits == 64 {
@@ -340,7 +434,7 @@ impl Display {
         } else {
             self.dcb.write_dcbctrl(dev, val as u32);
         }
-        false
+        Change::None
     }
 
     /// The displayed size, from the VC3's tables.

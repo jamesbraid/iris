@@ -69,6 +69,11 @@ pub struct Cmap {
 }
 
 impl Cmap {
+    /// The entry the next palette store lands on.
+    pub fn address(&self) -> usize {
+        self.addr as usize
+    }
+
     fn write(&mut self, t: Txn, d: u32) {
         match (t.crs, t.width) {
             // Address: one byte at a time (low, then high), or 16 bits sent low
