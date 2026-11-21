@@ -187,6 +187,20 @@ impl Display {
         (w as u32, h as u32)
     }
 
+    /// As `compose` with the DAC gamma's ten bits a channel, `x2b10g10r10` (red low): the top 8 bits of each are
+    /// `compose`'s.
+    pub fn compose10(&mut self, rss: &Rss, out: &mut Vec<u32>) -> (u32, u32) {
+        let f = self.frame.get_or_insert_with(boxed_zeroed::<Frame>);
+        f.snapshot(rss, &self.dcb);
+        let (w, h) = (f.width, f.height);
+        out.clear();
+        out.reserve(w * h);
+        for y in 0..h {
+            out.extend((0..w).map(|x| f.pixel10(x, y)));
+        }
+        (w as u32, h as u32)
+    }
+
     /// The state as bytes, for a saved engine.
     pub fn snapshot_bytes(&self) -> Vec<u8> {
         // SAFETY: `Dcb` is plain numeric state allocated zeroed (as `Hq3Regs`

@@ -205,6 +205,37 @@ impl ImpactBack {
         }
     }
 
+    /// The frame composed into `dst` with ten bits a channel (`MgrasScanout::compose_into10`).
+    pub fn gpu_compose_into10(&mut self, dcb: &Dcb, dst: &wgpu::Buffer, stride: u32) -> Option<Result<(u32, u32), String>> {
+        #[cfg(feature = "scanout")]
+        {
+            let sc = self.scanout.as_mut()?;
+            self.rss[0].gpu_flush();
+            return Some(sc.compose_into10(&self.rss[0], dcb, dst, stride));
+        }
+        #[cfg(not(feature = "scanout"))]
+        {
+            let _ = (dcb, dst, stride);
+            None
+        }
+    }
+
+    /// The frame composed on the GPU with ten bits a channel and read back (`MgrasScanout::read_wide`), as
+    /// x2r10g10b10 words. None without a GPU unit.
+    pub fn gpu_frame_wide(&mut self, dcb: &Dcb, out: &mut Vec<u32>) -> Option<Result<(u32, u32), String>> {
+        #[cfg(feature = "scanout")]
+        {
+            let sc = self.scanout.as_mut()?;
+            self.rss[0].gpu_flush();
+            return Some(sc.read_wide(&self.rss[0], dcb, out));
+        }
+        #[cfg(not(feature = "scanout"))]
+        {
+            let _ = (dcb, out);
+            None
+        }
+    }
+
     /// The first failure the GPU unit reported.
     pub fn fault(&self) -> Option<String> {
         self.fault.lock().clone()

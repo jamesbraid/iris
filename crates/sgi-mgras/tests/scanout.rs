@@ -276,3 +276,74 @@ fn scanout_does_not_wait_for_the_queued_work() {
     assert!(e.scanout(0, &mut out).unwrap().is_some());
     assert_eq!(idle(&mut e), 0, "and the scan-out left it queued");
 }
+
+/// The DAC gamma entry `index` is `rgb`, ten bits each, written as the ADV716x takes it: red, green, blue in turn,
+/// each a halfword with bits 9:2 in the first byte and 1:0 in the second.
+fn gamma<E: BoardEngine>(e: &mut E, index: u32, rgb: [u32; 3]) {
+    bus(e, 6, 0, 1, index);
+    for v in rgb {
+        bus(e, 6, 1, 2, (v >> 2) << 8 | (v & 3));
+    }
+}
+
+/// Gamma entries the SPOTS' colours index (1, 2 and 3 of each channel's table), with low bits an 8-bit path loses.
+const RAMP: [[u32; 3]; 3] = [[0x111, 0x222, 0x333], [0x2a5, 0x1c7, 0x3fe], [0x0f1, 0x37d, 0x155]];
+
+fn load_gamma<E: BoardEngine>(e: &mut E) {
+    for (i, v) in RAMP.iter().enumerate() {
+        gamma(e, i as u32 + 1, *v);
+    }
+}
+
+/// The 10-bit pixel for colour 0x010203 (red index 1, green index 2, blue index 3), red low.
+fn spot10() -> u32 {
+    RAMP[2][2] << 20 | RAMP[1][1] << 10 | RAMP[0][0]
+}
+
+#[test]
+fn scanout10_gives_the_dacs_ten_bit_gamma_red_low_and_its_top_eight_bits_are_scanouts() {
+    let mut p = drawn_player(None);
+    paint(&mut p.e);
+    load_gamma(&mut p.e);
+    assert_eq!((p.e.head_bits(0), p.e.head_bits(1)), (10, 8));
+    let (mut eight, mut ten) = (Vec::new(), Vec::new());
+    assert_eq!(p.e.scanout(0, &mut eight), Ok(Some((1280, 1024))));
+    assert_eq!(p.e.scanout10(0, &mut ten), Ok(Some((1280, 1024))));
+    assert_eq!(p.e.scanout10(1, &mut Vec::new()), Ok(None), "one head");
+    assert_eq!(ten[195 * 1280 + 96], spot10(), "the gamma's own ten bits, red in the low bits");
+    let top = |c: u32| (c >> 2) & 0xff;
+    for (a, t) in eight.iter().zip(&ten) {
+        assert_eq!(*a, top(*t) << 16 | top(t >> 10) << 8 | top(t >> 20), "the top eight bits are scanout's");
+        assert_eq!(t >> 30, 0);
+    }
+}
+
+#[test]
+fn the_gpu_ten_bit_frame_is_the_cpu_frame_read_back_or_composed_into_a_buffer() {
+    let Some(gpu) = gpu() else { return };
+    let mut p = drawn_player(Some(&gpu));
+    let mut cpu = drawn_player(None);
+    for e in [&mut p.e, &mut cpu.e] {
+        paint(e);
+        load_gamma(e);
+    }
+    let (mut want, mut got) = (Vec::new(), Vec::new());
+    cpu.e.scanout10(0, &mut want).unwrap();
+    assert_eq!(p.e.scanout10(0, &mut got), Ok(Some((1280, 1024))));
+    assert_eq!(got[195 * 1280 + 96], spot10());
+    assert!(got == want, "the GPU's wide frame read back differs from the CPU's");
+    let stride = 1280 + 16;
+    let dst = Arc::new(gpu.buffer("wide destination", (stride * 1024 * 4) as u64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC));
+    assert_eq!(p.e.compose_into10(0, &dst, stride as u32), Ok(Some((1280, 1024))));
+    let words = read_words(&gpu, &dst, stride * 1024);
+    for y in 0..1024 {
+        assert!(words[y * stride..y * stride + 1280] == want[y * 1280..(y + 1) * 1280], "row {y}");
+    }
+    assert!(p.e.compose_into10(0, &dst, 100).is_err(), "a stride under the width");
+    assert_eq!(p.e.compose_into10(1, &dst, stride as u32), Ok(None));
+    // The 8-bit compose after it is as it was.
+    let mut eight = Vec::new();
+    cpu.e.scanout(0, &mut want).unwrap();
+    p.e.scanout(0, &mut eight).unwrap();
+    assert!(eight == want, "the narrow frame is unchanged by the wide one");
+}

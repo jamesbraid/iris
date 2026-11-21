@@ -2,7 +2,8 @@
 // the top row), from the GPU unit's pixel pages and the frame's slot
 // (wgpu/scanout.rs `MgrasScanout::build`): cursor, then the overlay through
 // its window ID's mode, then the main planes through theirs (pairs and the
-// buffer select included), then the DAC gamma. Out: 0x00RRGGBB.
+// buffer select included), then the DAC gamma. Out: 0x00RRGGBB, or with D_WIDE the gamma's ten bits a channel as
+// x2r10g10b10.
 
 #include "pp1.wgsl"
 
@@ -35,10 +36,13 @@ fn did_at(list: u32, y: u32, x: u32) -> u32 {
 }
 
 fn gamma_rgb(r: u32, g: u32, b: u32) -> u32 {
-    let lr = ds(D_GAMMA + (r & 0xffu)) & 0xffu;
-    let lg = (ds(D_GAMMA + (g & 0xffu)) >> 8u) & 0xffu;
-    let lb = (ds(D_GAMMA + (b & 0xffu)) >> 16u) & 0xffu;
-    return (lr << 16u) | (lg << 8u) | lb;
+    let lr = ds(D_GAMMA + (r & 0xffu)) & 0x3ffu;
+    let lg = (ds(D_GAMMA + (g & 0xffu)) >> 10u) & 0x3ffu;
+    let lb = (ds(D_GAMMA + (b & 0xffu)) >> 20u) & 0x3ffu;
+    if ds(D_WIDE) != 0u {
+        return (lr << 20u) | (lg << 10u) | lb;
+    }
+    return ((lr >> 2u) << 16u) | ((lg >> 2u) << 8u) | (lb >> 2u);
 }
 
 // A colormap entry (0x00RRGGBB) through the gamma.
