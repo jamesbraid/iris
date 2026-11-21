@@ -1063,6 +1063,16 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
                 if self.display.lock().write(off, bits, val) {
                     self.sh.generation.fetch_add(1, Ordering::Release);
                 }
+                // The DAC's signature analyzer was clocked: run the frame the display shows through it. The queued
+                // drawing is brought current first, as the diagnostic's frame was drawn before it asked.
+                let due = self.display.lock().take_signature_due();
+                if let Some(frames) = due {
+                    self.settle(None);
+                    let mut pixels = Vec::new();
+                    if let Ok(Some(_)) = self.scanout10(0, &mut pixels) {
+                        self.display.lock().accumulate_signature(&pixels, frames);
+                    }
+                }
             }
             _ => {
                 if !self.room(1) {

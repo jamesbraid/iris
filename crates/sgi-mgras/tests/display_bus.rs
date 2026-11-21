@@ -339,3 +339,77 @@ fn display_control_bits_6_to_0_store_and_read_back() {
         assert_eq!(e.vc3_control(), v);
     }
 }
+
+/// Colour map entry `index` is `rgb` (both maps), through the bus slots the engine takes.
+fn cmap_entry<E: BoardEngine>(e: &mut E, index: u32, rgb: u32) {
+    let bus = |e: &mut E, dev: u32, crs: u32, width: u32, data: u32| {
+        let off = 0x60000 + dev * 0x400 + (crs << 7) + ((width & 3) << 3);
+        assert_eq!(e.write(off, 32, (data as u64) << (8 * (4 - width))), sgi_engine::Write::Done);
+    };
+    bus(e, 3, 0, 1, index & 0xFF);
+    bus(e, 3, 1, 1, index >> 8);
+    bus(e, 3, 2, 4, rgb);
+}
+
+/// A signature register as the diagnostic reads it: the address set to `n`, a 16-bit load of the data port, the top two
+/// bits from bits 15:14.
+fn signature_register<E: BoardEngine>(e: &mut E, n: u32) -> u32 {
+    put(e, DAC_ADDRESS, 16, (n as u64) << 8);
+    let v = get(e, DAC_DATA, 16) as u32;
+    (v >> 8) << 2 | (v & 3)
+}
+
+/// The analyzer by the data sheet's cell-by-cell definition (ADV7160/7162 Appendix 5), for a frame of one colour:
+/// `clocks` clocks with the feedback on, from all zeros.
+fn signature_by_definition(pixel: u32, clocks: usize) -> [u32; 4] {
+    let mut s = [false; 33];
+    for _ in 0..clocks {
+        let mut input = [false; 33];
+        input[0] = s[19];
+        for k in 0..10 {
+            input[1 + k] = pixel >> (20 + k) & 1 == 1;
+            input[11 + k] = pixel >> (10 + k) & 1 == 1;
+            input[21 + k] = pixel >> k & 1 == 1;
+        }
+        let mut next = [false; 33];
+        for i in 0..33 {
+            next[i] = input[i] ^ s[(i + 32) % 33];
+        }
+        s = next;
+    }
+    let field = |from: usize| (0..10).fold(0u32, |v, k| v | (s[from + k] as u32) << k);
+    [field(21), field(11), field(1), (s[32] as u32) << 2 | (s[31] as u32) << 1 | s[0] as u32]
+}
+
+/// The data sheet's procedure, as the stock diagnostic runs it (gr4 video-sync.md section 4.3): CR4 = 0xa0 (feedback and
+/// clock on, reset asserted), 0xe0 (reset released: accumulating), one frame, 0xc0 (clock off), then registers 0x10 to
+/// 0x13. The frame is the display's, here one colour through the gamma's ten bits. The values are the analyzer's by its
+/// definition; the diagnostic's own expected words are fixed numbers that need the exact pixels it displays.
+#[test]
+fn the_dac_signature_analyzer_follows_the_data_sheets_procedure_over_one_frame() {
+    let mut e = engine(|_| {});
+    load_stock_timing(&mut e);
+    e.advance(1_000_000);
+    vc3(&mut e, 0x1E, 4);
+    // A colour of ten-bit gamma values that differ in every channel's low bits: the DAC's power-on gamma is the 8-bit
+    // ramp at ten bits (value << 2), so one entry's channels are 0x0a0b0c << 2 each.
+    cmap_entry(&mut e, 0, 0x0a0b0c);
+    let mut px = Vec::new();
+    let (w, h) = e.scanout10(0, &mut px).unwrap().unwrap();
+    assert!(px.iter().all(|&p| p == px[0]) && px[0] != 0, "one colour, not black");
+    let t = e.head_timing(0).unwrap();
+    let frame_ns = (t.frame_clocks as u128 * 1_000_000_000 / t.clock_hz as u128) as u64;
+    assert_eq!(vc3_read(&mut e, 0xB), 0);
+    dac(&mut e, 8, 0xa0);
+    dac(&mut e, 8, 0xe0);
+    e.advance(1_000_000 + frame_ns + 5_000);
+    dac(&mut e, 8, 0xc0);
+    let got: Vec<u32> = (0x10..=0x13).map(|n| signature_register(&mut e, n)).collect();
+    assert_eq!(got, signature_by_definition(px[0], (w * h) as usize), "one frame's pixels through the chain");
+    assert!(got[..3].iter().any(|&v| v != 0));
+    // The registers hold with the clock off; a reset (CR46 low) clears them, and clocking never started before it is released.
+    dac(&mut e, 8, 0xa0);
+    assert_eq!((0x10..=0x13).map(|n| signature_register(&mut e, n)).collect::<Vec<_>>(), [0, 0, 0, 0]);
+    dac(&mut e, 8, 0x80);
+    assert_eq!((0x10..=0x13).map(|n| signature_register(&mut e, n)).collect::<Vec<_>>(), [0, 0, 0, 0], "no clock, no signature");
+}
