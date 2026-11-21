@@ -1127,6 +1127,30 @@ impl KonaBackend {
         self.tiles.get_or_insert_with(|| make_tiles(store, cfg, handle))
     }
 
+    /// Everything drawn so far is finished and current in the CPU mirror: the raster jobs have run, the GPU's open batch is
+    /// submitted and the GPU done with it, and every allocated plane is read back. For a completion fence.
+    pub fn sync_all(&mut self) -> Result<(), String> {
+        self.drain();
+        self.store.sync_gpu()?;
+        self.store.observe_all();
+        Ok(())
+    }
+
+    /// Wall time the tile pool's workers have spent drawing, summed over them; 0 with no workers.
+    pub fn busy_ns(&self) -> u64 {
+        self.tiles.as_ref().map_or(0, |t| t.stats().busy_ns)
+    }
+
+    /// What the GPU store has done: records, batches, copies, readbacks, copies refused for a word too wide, and the ops
+    /// that ran on the CPU for want of a GPU kernel (a run that must prove the GPU did the work wants that at 0). None on
+    /// the CPU arm.
+    #[cfg(feature = "wgpu")]
+    pub fn gpu_counters(&mut self) -> Option<[u64; 6]> {
+        self.drain();
+        let (s, refused) = self.store.gpu_stats()?;
+        Some([s.records, s.flushes, s.copies, s.readbacks, refused, s.cpu_ops])
+    }
+
     /// Wait until every raster job has run.
     pub fn drain(&mut self) {
         if let Some(t) = &mut self.tiles {

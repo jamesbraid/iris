@@ -319,3 +319,14 @@ fn a_c_shell_raises_the_voc_interrupt_and_holds_the_swap_ready_line() {
     assert_eq!(unsafe { sgi_kona_raise_voc_interrupt(null_mut()) }, IRIS_ENGINE_FAULT);
     unsafe { iris_engine_free(h) };
 }
+
+/// The GPU counters are refused without a GPU store, as the VPro's are; a NULL out is an error.
+#[test]
+fn the_gpu_counters_are_refused_without_a_gpu_store() {
+    let ir2 = CString::new("ir2").unwrap();
+    let h = unsafe { sgi_kona_new(&config(ir2.as_ptr()), &host()) };
+    let mut c = IrisKonaGpuCounters::default();
+    assert_eq!(unsafe { sgi_kona_gpu_counters(h, &mut c) }, IRIS_ENGINE_ERROR, "no GPU store");
+    assert_eq!(unsafe { sgi_kona_gpu_counters(h, null_mut()) }, IRIS_ENGINE_ERROR);
+    unsafe { iris_engine_free(h) };
+}

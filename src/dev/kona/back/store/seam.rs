@@ -154,6 +154,24 @@ impl Store {
         }
     }
 
+    /// Submit the GPU's open batch and wait for the GPU to finish what it holds; nothing on the CPU arm.
+    pub fn sync_gpu(&self) -> Result<(), String> {
+        match self {
+            Store::Cpu(_) => Ok(()),
+            #[cfg(feature = "wgpu")]
+            Store::Gpu(g) => g.sync(),
+        }
+    }
+
+    /// What the GPU arm has done (`gpu::Stats`); None on the CPU arm.
+    #[cfg(feature = "wgpu")]
+    pub fn gpu_stats(&self) -> Option<(super::super::gpu::Stats, u64)> {
+        match self {
+            Store::Cpu(_) => None,
+            Store::Gpu(g) => Some((g.stats(), g.copies_refused())),
+        }
+    }
+
     /// `observe` of the whole managed area of every allocated word position.
     pub fn observe_all(&self) {
         if !self.is_gpu() {
