@@ -416,6 +416,8 @@ pub trait Hq3Sink {
     /// DMA out of the armed transfer: one line of pixel bytes.
     fn dma_read_line(&mut self, line: u32) -> Vec<u8>;
     fn set_flags(&mut self, bits: u32);
+    /// A swap was consumed: `count` swaps so far (1 for the first). A sink that reports swaps to a shell posts them here.
+    fn swapped(&mut self, _count: u64) {}
     /// Clear flags `mask` and return which of them were set.
     fn take_flags(&mut self, _mask: u32) -> u32 {
         0
@@ -1264,6 +1266,7 @@ impl Hq3Engine {
             sink.finish_raster();
             self.stats.swaps += 1;
             self.stats.cp_tokens[cmd as usize] += 1;
+            sink.swapped(self.stats.swaps);
             sink.set_flags(host::FLAG_CP0);
         } else if cmd == cmd::MGRAS_HQ3_CFIFO_CMD_WINDOW_CLIP_PACKET && data.len() >= 12 {
             self.stats.cp_tokens[cmd as usize] += 1;

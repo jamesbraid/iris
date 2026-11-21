@@ -259,3 +259,26 @@ fn the_video_dma_busy_bit_shows_after_the_start_store_and_clears_within_the_driv
     e.reset().unwrap();
     assert!(!busy(&mut e), "a reset clears it");
 }
+
+/// Each CFIFO swap token (0x37) is its own `Event::Swap`, counting from 1, with the shell time the engine had; the FLAG_CP0
+/// flag the kernel acknowledges is one bit, so two swaps with no acknowledge between them still give two events. Inline and
+/// on the worker.
+#[test]
+fn every_swap_token_is_its_own_event_even_with_no_acknowledge_between() {
+    for mode in [Mode::Inline, Mode::Threaded] {
+        let (mut e, _) = engine(mode, 1024, None);
+        e.advance(1_000);
+        for _ in 0..3 {
+            assert_eq!(e.write(host::CFIFO, 32, 0x37 << 8), Write::Done);
+        }
+        assert_eq!(e.wait_idle(2_000, 10_000_000_000), Idle::Yes, "{mode:?}");
+        e.run(usize::MAX);
+        let mut ev = Vec::new();
+        e.drain_events(&mut ev, usize::MAX);
+        let swaps: Vec<(u64, u64)> = ev.iter().filter_map(|x| if let Event::Swap { count, time_ns } = x { Some((*count, *time_ns)) } else { None }).collect();
+        assert_eq!(swaps.iter().map(|s| s.0).collect::<Vec<_>>(), [1, 2, 3], "{mode:?}");
+        assert!(swaps.iter().all(|s| (1_000..=2_000).contains(&s.1)), "{mode:?}: {swaps:?}");
+        assert_eq!(e.read(host::SET_FLAGS, 32), Read::Value(0x400), "{mode:?}: one flag bit for all three");
+        assert_eq!(e.swaps_dropped(), 0);
+    }
+}
