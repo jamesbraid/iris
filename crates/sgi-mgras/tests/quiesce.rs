@@ -90,6 +90,11 @@ fn a_worker_finishing_a_batch_calls_the_notify_hook() {
     e.advance(0);
     e.resume();
     assert_eq!(e.wait_idle(0, 10_000_000_000), Idle::Yes);
+    // Idle can be seen just before the worker's wake: wait for the hook itself.
+    let began = std::time::Instant::now();
+    while n.load(Ordering::SeqCst) < 2 && began.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::yield_now();
+    }
     assert_eq!(n.load(Ordering::SeqCst), 2, "the finished batch");
 }
 
