@@ -701,3 +701,21 @@ fn the_adaptor_reset_registers_survive_a_save_and_a_load() {
         assert_eq!(f.read(off, 32), Read::Value(v), "{off:#x}");
     }
 }
+
+/// KONA has no worker: the stream runs on the caller's thread, and what its completion tells the shell (credits,
+/// packets) goes through the outbox, which calls the notify hook once per pump.
+#[test]
+fn running_the_stream_notifies_the_shell_once_per_pump() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    let n = Arc::new(AtomicU32::new(0));
+    let hook = n.clone();
+    let notify = Box::new(move || drop(hook.fetch_add(1, Ordering::SeqCst))) as Box<dyn Fn() + Send + Sync>;
+    let mut e = Engine::new(KonaConfig::ir2(2).unwrap().with_pool(0, 32), Ram::default(), Options::default(), Some(notify)).expect("engine");
+    store(&mut e, COMMAND_PAGE, 1, A);
+    assert_eq!(n.load(Ordering::SeqCst), 1, "the queued store");
+    e.advance(0);
+    e.run(usize::MAX);
+    assert_eq!(n.load(Ordering::SeqCst), 2, "the credit the finished store returns");
+    assert!(credits(&drain(&mut e)).len() == 1);
+}
