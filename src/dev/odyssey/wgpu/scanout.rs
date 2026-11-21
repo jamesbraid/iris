@@ -160,6 +160,12 @@ impl VproScanout {
         self.scanout.compose_into(&self.pipeline, width, height, bytemuck::bytes_of(&slot), &[&self.vram_group], dst, stride_words)
     }
 
+    /// As `compose_into`, for a wide `frame` (`Frame::snapshot_in`): x2b10g10r10 words (`Scanout::compose_into10`).
+    pub fn compose_into10(&mut self, frame: &Frame, regs: &DisplayRegs, width: u32, height: u32, dst: &wgpu::Buffer, stride_words: u32) -> Result<(), String> {
+        let slot = self.slot(frame, regs)?;
+        self.scanout.compose_into10(&self.pipeline, width, height, bytemuck::bytes_of(&slot), &[&self.vram_group], dst, stride_words)
+    }
+
     /// Whether `dst` can take a `width` by `height` frame of `stride_words` a row (`Scanout::check_into`).
     pub fn check_into(width: u32, height: u32, dst: &wgpu::Buffer, stride_words: u32) -> Result<(), String> {
         Scanout::check_into(width, height, dst, stride_words)

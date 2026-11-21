@@ -11,7 +11,7 @@ struct ScanoutHeader {
     height: u32,
     stride: u32,
     // 0: 0xAABBGGRR words; 1: the board's own 0x00RRGGBB; 2: the board's
-    // x2r10g10b10, ten bits a channel.
+    // x2r10g10b10, ten bits a channel; 3: the same ten bits as x2b10g10r10 (XB30, red low).
     format: u32,
 }
 
@@ -30,6 +30,10 @@ fn scanout(@builtin(global_invocation_id) g: vec3<u32>) {
     }
     if scan.format == 2u {
         scan_out[g.y * scan.stride + g.x] = p & 0x3fffffffu;
+        return;
+    }
+    if scan.format == 3u {
+        scan_out[g.y * scan.stride + g.x] = ((p >> 20u) & 0x3ffu) | (p & 0xffc00u) | ((p & 0x3ffu) << 20u);
         return;
     }
     scan_out[g.y * scan.stride + g.x] = 0xff000000u | ((p & 0xffu) << 16u) | (p & 0xff00u) | ((p >> 16u) & 0xffu);

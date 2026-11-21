@@ -448,15 +448,51 @@ impl VproEngine {
         (r.frame_width != 0).then(|| (r.frame_width, r.frame_height, r.frame.iter().map(rgb).collect()))
     }
 
-    /// As `scanout` with the colour maps' ten bits a channel, x2r10g10b10, whose top eight bits are
-    /// what `scanout` gives.
+    /// As `scanout` with the colour maps' ten bits a channel, x2b10g10r10 (XB30, red low), whose top eight bits
+    /// are what `scanout` gives.
     pub fn scanout10(&mut self) -> Option<(u32, u32, Vec<u32>)> {
         if !self.settle_scanout() {
             return None;
         }
         let r = &mut self.reader;
         r.attach(&self.locks.shared);
-        r.compose_wide()
+        // The reader keeps the maps' own x2r10g10b10; the engine's word order has red low.
+        r.compose_wide().map(|(w, h, mut px)| {
+            px.iter_mut().for_each(|p| *p = (*p >> 20 & 0x3ff) | (*p & 0xffc00) | (*p & 0x3ff) << 20);
+            (w, h, px)
+        })
+    }
+
+    /// `compose_into` and `compose_into10`: the frame into `dst` as 0x00RRGGBB, or with `wide` as x2b10g10r10.
+    #[cfg(feature = "wgpu")]
+    fn compose_into_as(&mut self, head: u32, dst: &dyn std::any::Any, stride_words: u32, wide: bool) -> Result<Option<(u32, u32)>, Fault> {
+        if head != 0 || !self.gpu {
+            return Ok(None);
+        }
+        let dst = match (dst.downcast_ref::<wgpu::Buffer>(), dst.downcast_ref::<Arc<wgpu::Buffer>>()) {
+            (Some(b), _) => b,
+            (None, Some(b)) => b.as_ref(),
+            (None, None) => return Err(Fault("compose_into: the destination is not a wgpu buffer".into())),
+        };
+        // The destination is checked against the mode's size, which no frame exceeds, before the board
+        // or the device is touched: an error of the call, not a fault.
+        if let Some((w, h)) = BoardEngine::frame_size(self, 0) {
+            crate::wgpu::Scanout::check_into(w, h, dst, stride_words).map_err(|why| Fault(format!("compose_into: {why}")))?;
+        }
+        {
+            let g = self.settle()?;
+            g.gpu_upload_tick(true);
+        }
+        let r = &mut self.reader;
+        r.attach(&self.locks.shared);
+        // A refused destination is an error of the call; a fault after it is the device's.
+        let composed = if wide { r.update_into_gpu10(dst, stride_words) } else { r.update_into_gpu(dst, stride_words) }.map_err(|why| Fault(format!("compose_into: {why}")));
+        if composed.is_ok() {
+            if let Some(f) = self.fault() {
+                return Err(Fault(f));
+            }
+        }
+        composed
     }
 
     /// What a scan-out waits for before it composes (see `scanout`); false while the engine has faulted.
@@ -519,6 +555,12 @@ impl BoardEngine for VproEngine {
         }))
     }
 
+    /// The colour maps' ten bits reach a 10-bit DAC (odsy `devices/display/README.md`: established for the maps;
+    /// the DAC's width is inferred from Fuel's datasheet).
+    fn head_bits(&self, head: u32) -> u32 {
+        if head == 0 { 10 } else { 8 }
+    }
+
     fn busy_ns(&self) -> u64 {
         self.locks.busy_ns()
     }
@@ -565,33 +607,13 @@ impl BoardEngine for VproEngine {
     /// 0x00RRGGBB words, `stride_words` a row.
     #[cfg(feature = "wgpu")]
     fn compose_into(&mut self, head: u32, dst: &dyn std::any::Any, stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
-        if head != 0 || !self.gpu {
-            return Ok(None);
-        }
-        let dst = match (dst.downcast_ref::<wgpu::Buffer>(), dst.downcast_ref::<Arc<wgpu::Buffer>>()) {
-            (Some(b), _) => b,
-            (None, Some(b)) => b.as_ref(),
-            (None, None) => return Err(Fault("compose_into: the destination is not a wgpu buffer".into())),
-        };
-        // The destination is checked against the mode's size, which no frame exceeds, before the board
-        // or the device is touched: an error of the call, not a fault.
-        if let Some((w, h)) = BoardEngine::frame_size(self, 0) {
-            crate::wgpu::Scanout::check_into(w, h, dst, stride_words).map_err(|why| Fault(format!("compose_into: {why}")))?;
-        }
-        {
-            let g = self.settle()?;
-            g.gpu_upload_tick(true);
-        }
-        let r = &mut self.reader;
-        r.attach(&self.locks.shared);
-        // A refused destination is an error of the call; a fault after it is the device's.
-        let composed = r.update_into_gpu(dst, stride_words).map_err(|why| Fault(format!("compose_into: {why}")));
-        if composed.is_ok() {
-            if let Some(f) = self.fault() {
-                return Err(Fault(f));
-            }
-        }
-        composed
+        self.compose_into_as(head, dst, stride_words, false)
+    }
+
+    /// As `compose_into`, with the colour maps' ten bits as x2b10g10r10 words: `scanout10`'s, word for word.
+    #[cfg(feature = "wgpu")]
+    fn compose_into10(&mut self, head: u32, dst: &dyn std::any::Any, stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
+        self.compose_into_as(head, dst, stride_words, true)
     }
 
     fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write {

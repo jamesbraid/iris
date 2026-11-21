@@ -715,21 +715,34 @@ impl ScanoutReader {
     /// fails (the device then reports the failure, and nothing is composed).
     #[cfg(feature = "wgpu")]
     pub fn update_on_gpu(&mut self) -> Option<(wgpu::Buffer, u32, u32)> {
-        self.compose_on_gpu(|sc, frame, snap, w, h| sc.compose(frame, snap, w, h).map(|b| (b, w, h)))
+        self.compose_on_gpu(false, |sc, frame, snap, w, h| sc.compose(frame, snap, w, h).map(|b| (b, w, h)))
     }
 
     /// As `update_on_gpu`, composing into the caller's `dst` as 0x00RRGGBB words of `stride` a row
     /// (`VproScanout::compose_into`): the size, or None as there.
     #[cfg(feature = "wgpu")]
     pub fn update_into_gpu(&mut self, dst: &wgpu::Buffer, stride: u32) -> Result<Option<(u32, u32)>, String> {
+        self.update_into_gpu_as(dst, stride, false)
+    }
+
+    /// As `update_into_gpu`, with the colour maps' ten bits a channel as x2b10g10r10 words
+    /// (`VproScanout::compose_into10`).
+    #[cfg(feature = "wgpu")]
+    pub fn update_into_gpu10(&mut self, dst: &wgpu::Buffer, stride: u32) -> Result<Option<(u32, u32)>, String> {
+        self.update_into_gpu_as(dst, stride, true)
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn update_into_gpu_as(&mut self, dst: &wgpu::Buffer, stride: u32, wide: bool) -> Result<Option<(u32, u32)>, String> {
         // A destination that cannot hold the frame is refused before the device is touched.
         let mut refused = None;
-        let composed = self.compose_on_gpu(|sc, frame, snap, w, h| {
+        let composed = self.compose_on_gpu(wide, |sc, frame, snap, w, h| {
             if let Err(e) = GpuScanout::check_into(w, h, dst, stride) {
                 refused = Some(e);
                 return Ok(((), w, h));
             }
-            sc.compose_into(frame, snap, w, h, dst, stride).map(|_| ((), w, h))
+            let done = if wide { sc.compose_into10(frame, snap, w, h, dst, stride) } else { sc.compose_into(frame, snap, w, h, dst, stride) };
+            done.map(|_| ((), w, h))
         });
         match refused {
             Some(e) => Err(e),
@@ -738,7 +751,7 @@ impl ScanoutReader {
     }
 
     #[cfg(feature = "wgpu")]
-    fn compose_on_gpu<T>(&mut self, run: impl FnOnce(&mut GpuScanout, &Frame, &DisplayRegs, u32, u32) -> Result<(T, u32, u32), String>) -> Option<(T, u32, u32)> {
+    fn compose_on_gpu<T>(&mut self, wide: bool, run: impl FnOnce(&mut GpuScanout, &Frame, &DisplayRegs, u32, u32) -> Result<(T, u32, u32), String>) -> Option<(T, u32, u32)> {
         let shared = self.shared();
         let scanout = shared.gpu_scanout.get()?;
         if shared.gpu_fault.lock().is_some() {
@@ -750,7 +763,7 @@ impl ScanoutReader {
         }
         let displayed = shared.front.lock().displayed_buffer;
         self.snap_gen = shared.regs.snapshot(&mut self.snap, self.snap_gen);
-        let frame = Frame::snapshot(&self.snap, displayed)?;
+        let frame = Frame::snapshot_in(&self.snap, displayed, wide)?;
         let (w, h) = (frame.width.min(self.frame_width), frame.height.min(self.frame_height));
         let composed = run(&mut scanout.lock(), &frame, &self.snap, w, h);
         match composed {

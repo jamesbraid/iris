@@ -627,9 +627,10 @@ fn a_cpu_store_announced_with_cpu_wrote_reaches_a_gpu_scanout() {
     assert_ne!(after.2[at], 0, "the CPU's store is in the frame");
 }
 
-/// `scanout10` gives the colour maps' ten bits a channel: its top eight bits are `scanout`'s, its low two
-/// are the map entry's own (not a widened copy), and the CPU compose and the GPU scan-out agree on every
-/// pixel. The GPU half needs an adapter and is skipped without one.
+/// `scanout10` gives the colour maps' ten bits a channel in XB30 order (red low): its top eight bits are
+/// `scanout`'s, its low two are the map entry's own (not a widened copy), and the CPU compose, the GPU scan-out
+/// and `compose_into10` agree on every pixel. The head says 10 bits. The GPU half needs an adapter and is
+/// skipped without one.
 #[test]
 fn scanout10_gives_the_ten_bit_colour_maps_on_the_cpu_and_the_gpu() {
     let bytes = memory_bytes("v12").unwrap() as usize;
@@ -646,7 +647,12 @@ fn scanout10_gives_the_ten_bit_colour_maps_on_the_cpu_and_the_gpu() {
         let lent = unsafe { Lent::new(buf.as_mut_ptr().cast(), bytes) }.unwrap();
         let mut cfg = config("v12", Mode::Inline);
         cfg.gpu = gpu.then(|| "auto".into());
-        let made = VproEngine::new(cfg, Some(lent), Shared(Arc::new(Ram::default())), None);
+        let loss = GpuLoss::new();
+        let adapter = if gpu { sgi_odyssey::wgpu::Gpu::new(&sgi_odyssey::wgpu::GpuOptions::default(), loss.callback()).ok() } else { None };
+        let made = match &adapter {
+            Some(g) => VproEngine::with_gpu(cfg, Some(lent), Shared(Arc::new(Ram::default())), None, Some(g.clone()), loss),
+            None => VproEngine::new(cfg, Some(lent), Shared(Arc::new(Ram::default())), None),
+        };
         // No adapter: the CPU half stands alone.
         let mut e = match made {
             Ok(e) => e,
@@ -690,12 +696,25 @@ fn scanout10_gives_the_ten_bit_colour_maps_on_the_cpu_and_the_gpu() {
         let mut own_low_bits = 0;
         for (&a, &t) in eight.iter().zip(&ten) {
             let top = |c: u32| (c >> 2) & 0xff;
-            assert_eq!(a, top(t >> 20) << 16 | top(t >> 10) << 8 | top(t), "the top eight bits are scanout's");
+            assert_eq!(a, top(t) << 16 | top(t >> 10) << 8 | top(t >> 20), "the top eight bits are scanout's, red low");
             assert_eq!(t >> 30, 0);
-            assert!([t >> 20, t >> 10, t].iter().all(|&c| reachable(c & 0x3ff)), "a channel is a map entry's");
-            own_low_bits += [t >> 20, t >> 10, t].iter().any(|&c| c & 0x3ff != widened((c >> 2) & 0xff)) as u32;
+            assert!([t, t >> 10, t >> 20].iter().all(|&c| reachable(c & 0x3ff)), "a channel is a map entry's");
+            own_low_bits += [t, t >> 10, t >> 20].iter().any(|&c| c & 0x3ff != widened((c >> 2) & 0xff)) as u32;
         }
         assert!(own_low_bits > 0, "the low two bits are the maps' own");
+        assert_eq!((BoardEngine::head_bits(&e, 0), BoardEngine::head_bits(&e, 1)), (10, 8));
+        if let Some(g) = &adapter {
+            // The wide compose into the caller's buffer, with a stride past the width, is scanout10 word for word.
+            let (stride, usage) = (1300u32, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+            let dst = g.buffer("wide", stride as u64 * 1024 * 4, usage);
+            assert_eq!(BoardEngine::compose_into10(&mut e, 0, &dst, stride), Ok(Some((1280, 1024))));
+            let mut got = vec![0u32; stride as usize * 1024];
+            g.read(&dst, &[(0, got.len() as u64 * 4)], bytemuck::cast_slice_mut(&mut got)).unwrap();
+            for y in 0..1024usize {
+                assert!(got[y * stride as usize..y * stride as usize + 1280] == ten[y * 1280..(y + 1) * 1280], "row {y} of compose_into10 differs from scanout10");
+            }
+            assert_eq!(BoardEngine::compose_into10(&mut e, 1, &dst, stride), Ok(None), "no second head");
+        }
         frames.push(ten);
     }
     if let [cpu, gpu] = &frames[..] {
