@@ -7,7 +7,7 @@ mod support;
 use std::sync::Arc;
 
 use sgi_engine::{BoardEngine, Event, FrameWords, Refused, VecSource, Write, DAMAGE_ANY};
-use sgi_mgras::dev::mgras::engine::{Board, Config, MgrasEngine, Mode, DAMAGE_DISPLAY};
+use sgi_mgras::dev::mgras::engine::{Board, Config, MgrasEngine, Mode, Scan, DAMAGE_DISPLAY};
 use sgi_mgras::wgpu::{Gpu, GpuOptions};
 use support::*;
 
@@ -428,4 +428,82 @@ fn a_cursor_store_posts_damage_for_the_rows_the_glyph_covered_and_covers_and_non
     assert_eq!(damage(&mut e), vec![(DAMAGE_DISPLAY, 300, 363)], "a 64 by 64 glyph");
     vc3(&mut e, 0x1d, 0);
     assert_eq!(damage(&mut e), vec![(DAMAGE_DISPLAY, 300, 363)], "hidden: the rows it covered");
+}
+
+#[test]
+fn rows_of_a_scan_source_are_the_rows_scanout_composes_while_the_rest_of_the_buffer_is_left_alone() {
+    let mut p = drawn_player(None);
+    paint(&mut p.e);
+    let mut want = Vec::new();
+    p.e.scanout(0, &mut want).unwrap();
+    let src = p.e.scan_source().expect("a CPU engine has one");
+    let mut out = vec![0xdead_beef; 1280 * 1024];
+    assert_eq!(src.rows(190, 200, &mut out[..10]), Ok(Scan::Short(1280, 1024)), "a buffer too short for the picture");
+    assert_eq!(src.rows(190, 200, &mut out), Ok(Scan::Done(1280, 1024)));
+    assert!(out[190 * 1280..200 * 1280] == want[190 * 1280..200 * 1280]);
+    assert!(out[..190 * 1280].iter().chain(&out[200 * 1280..]).all(|&w| w == 0xdead_beef), "the other rows are not touched");
+    check(&out, 1280, "rows");
+    // A change to the bus shows in the next call, and the whole picture is the same as scanout's.
+    cmap(&mut p.e, 0x160, 0x778899);
+    p.e.scanout(0, &mut want).unwrap();
+    assert_eq!(src.rows(0, 4096, &mut out), Ok(Scan::Done(1280, 1024)));
+    assert!(out == want);
+}
+
+#[test]
+fn a_scan_source_composes_from_another_thread_while_the_engine_is_called() {
+    let mut p = drawn_player(None);
+    paint(&mut p.e);
+    let src = p.e.scan_source().unwrap();
+    let mut want = Vec::new();
+    p.e.scanout(0, &mut want).unwrap();
+    let t = std::thread::spawn(move || {
+        let mut out = vec![0; 1280 * 1024];
+        for _ in 0..8 {
+            assert_eq!(src.rows(0, 1024, &mut out), Ok(Scan::Done(1280, 1024)));
+        }
+        out
+    });
+    for i in 0..64 {
+        bus(&mut p.e, 7, 1, 1, i & 7);
+        let _ = p.e.frame_generation(0);
+    }
+    assert!(t.join().unwrap() == want);
+}
+
+/// `save` and `rows` take `inner` and the display lock in one order: a save while another thread composes must not
+/// deadlock. The watchdog aborts, since a deadlock hangs the test.
+#[test]
+fn a_save_while_another_thread_composes_does_not_deadlock() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let mut e = MgrasEngine::new(Config::new(Board::High, Mode::Inline), Mem::default(), None, None).unwrap();
+    let src = e.scan_source().unwrap();
+    e.quiesce(u64::MAX).unwrap();
+    let (stop, saves) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0)));
+    let (s2, v2) = (stop.clone(), saves.clone());
+    std::thread::spawn(move || {
+        let mut last = u64::MAX;
+        while !s2.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_secs(20));
+            let now = v2.load(Ordering::Relaxed);
+            if now == last && !s2.load(Ordering::Relaxed) {
+                eprintln!("deadlock: {now} saves");
+                std::process::abort();
+            }
+            last = now;
+        }
+    });
+    let s3 = stop.clone();
+    let t = std::thread::spawn(move || {
+        let mut out = vec![0u32; 1280 * 1024];
+        while !s3.load(Ordering::Relaxed) {
+            src.rows(0, 2, &mut out).unwrap();
+        }
+    });
+    for _ in 0..1000 {
+        e.save(&mut Vec::new()).unwrap();
+        saves.fetch_add(1, Ordering::Relaxed);
+    }
+    stop.store(true, Ordering::Relaxed);
+    t.join().unwrap();
 }

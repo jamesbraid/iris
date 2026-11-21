@@ -101,6 +101,22 @@ int sgi_mgras_cursor_position(IrisEngine *h, int32_t *x, int32_t *y);
  * interrupt, bit 2 the display; 0 after a reset. */
 uint32_t sgi_mgras_vc3_control(IrisEngine *h);
 
+/*
+ * The CPU picture, for composing off the shell's big lock. sgi_mgras_scan_begin is an ordinary call (one
+ * caller at a time) and gives NULL for an engine with a GPU unit, whose picture iris_engine_scanout gives.
+ * sgi_mgras_scan_rows may then be called from any thread, also while the handle is in a call: display rows
+ * first up to end (clamped to the picture) as 0x00RRGGBB words into buf (cap words) at y * width, the other
+ * words untouched; *w and *hgt are the picture's size, and with a cap too small for it the answer is
+ * IRIS_ENGINE_ERROR and nothing was composed. It holds the engine's lock for the plane reads and their decode and
+ * the display lock for a copy of the display bus; only the colour map, gamma and cursor pass runs with neither.
+ * End the source with sgi_mgras_scan_end once no rows call is running.
+ */
+typedef struct IrisMgrasScan IrisMgrasScan;
+IrisMgrasScan *sgi_mgras_scan_begin(IrisEngine *h);
+int sgi_mgras_scan_rows(IrisMgrasScan *s, uint32_t first, uint32_t end, uint32_t *buf, size_t cap,
+                        uint32_t *w, uint32_t *hgt);
+void sgi_mgras_scan_end(IrisMgrasScan *s);
+
 /* The HQ flags as the board holds them (a debug accessor: the interrupt
  * line is iris_engine_irq_levels). */
 uint32_t sgi_mgras_flags(IrisEngine *h);
