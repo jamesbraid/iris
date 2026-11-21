@@ -5,7 +5,7 @@
 mod support;
 
 use std::sync::Arc;
-use sgi_engine::mock::{reg, MockConfig, STATE_VERSION};
+use sgi_engine::mock::{reg, Mock, MockConfig, STATE_VERSION};
 use sgi_engine::shell::{drain_stalls, quiesce};
 use sgi_engine::*;
 use support::*;
@@ -571,4 +571,37 @@ fn a_head_reports_its_timing_and_bits_or_none_and_widens_its_colours_to_ten_bits
     assert_eq!(e.compose_into10(2, &buf, 8), Ok(None));
     assert!(e.compose_into10(0, &buf, 2).is_err(), "a stride under the width");
     assert_ne!(FrameWords::Xbgr2101010, FrameWords::Rgb);
+}
+
+/// Every swap the board consumes is one `Event::Swap`, in order, counting from 1, never merged with the next: two swaps with no
+/// frame between them (the second waits behind the first's stall, so it is consumed at the frame) still come out as two events,
+/// and each carries the shell time the engine last had.
+#[test]
+fn every_swap_is_its_own_event_with_a_running_count_and_the_time_it_was_consumed() {
+    let (mut e, _) = mock(MockConfig::default());
+    let swaps = |e: &mut Mock<Ram>| {
+        let mut v = Vec::new();
+        e.drain_events(&mut v, usize::MAX);
+        v.into_iter().filter_map(|x| if let Event::Swap { count, time_ns } = x { Some((count, time_ns)) } else { None }).collect::<Vec<_>>()
+    };
+    e.advance(100);
+    e.write(reg::SWAP, 32, 0);
+    e.write(reg::SWAP, 32, 0);
+    e.write(reg::DATA, 32, 1);
+    assert_eq!(e.wait_idle(150, 1_000), Idle::Stalled(StallOn::Frame));
+    assert_eq!(swaps(&mut e), vec![(1, 150)], "the second waits behind the first's stall");
+    e.frame(200);
+    e.wait_idle(200, 1_000);
+    assert_eq!(swaps(&mut e), vec![(2, 200)], "consumed at the frame, with no acknowledge between");
+    e.frame(300);
+    e.write(reg::SWAP, 32, 0);
+    e.write_at(400, reg::SWAP, 32, 0);
+    e.frame(500);
+    e.wait_idle(500, 1_000);
+    e.frame(600);
+    e.wait_idle(600, 1_000);
+    let got = swaps(&mut e);
+    assert_eq!(got.iter().map(|s| s.0).collect::<Vec<_>>(), vec![3, 4]);
+    assert!(got.windows(2).all(|w| w[0].1 <= w[1].1));
+    assert_eq!(e.swaps_dropped(), 0);
 }

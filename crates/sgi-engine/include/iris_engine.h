@@ -119,6 +119,7 @@ extern "C" {
 #define IRIS_ENGINE_EVENT_INTERRUPT     7
 #define IRIS_ENGINE_EVENT_CREDITS       8
 #define IRIS_ENGINE_EVENT_SWAP_READY    9
+#define IRIS_ENGINE_EVENT_SWAP          10
 
 /* IrisEngineConfig.gpu */
 #define IRIS_ENGINE_GPU_NONE      0
@@ -214,18 +215,24 @@ typedef struct IrisEngineSwapReady {
     uint32_t drive;         /* the new state of the pipe's own drive of the swap-ready line */
 } IrisEngineSwapReady;
 
+typedef struct IrisEngineSwap {
+    uint64_t count;         /* swaps so far, 1 for the first; a jump means swaps were dropped */
+    uint64_t time_ns;       /* the shell time the engine last had when it consumed the swap */
+} IrisEngineSwap;
+
 typedef union IrisEngineEventData {
     IrisEngineDamage damage;
     IrisEngineBusFault bus_fault;
     IrisEnginePacket packet;
     IrisEngineCredits credits;
     IrisEngineSwapReady swap_ready;
+    IrisEngineSwap swap;
     char text[96];          /* NUL-terminated, cut to fit */
 } IrisEngineEventData;
 
 /*
  * kind says which member of data is valid: DAMAGE damage, BUS_FAULT
- * bus_fault, INTERRUPT packet, CREDITS credits, SWAP_READY swap_ready, NOTE, DEVICE_FAULT and
+ * bus_fault, INTERRUPT packet, CREDITS credits, SWAP_READY swap_ready, SWAP swap, NOTE, DEVICE_FAULT and
  * GPU_LOST text; IRQ none.
  */
 typedef struct IrisEngineEvent {
@@ -294,6 +301,9 @@ int iris_engine_head_timing(IrisEngine *h, uint32_t head, IrisEngineHeadTiming *
  * it), summed over them, so it can exceed wall time. Work done inside a call is in that call's time and not here.
  * 0 for an engine with no threads of its own. */
 uint64_t iris_engine_busy_ns(IrisEngine *h);
+
+/* Swap events dropped for want of room in the outbox: 0 for a board that posts none. */
+uint64_t iris_engine_swaps_dropped(IrisEngine *h);
 
 /* The bits a colour that head's hardware output carries: 8 unless the board's maps and DAC keep more (VPro and MGRAS
  * 10; a KONA GVO channel 10, a KONA monitor channel 8). Above 8, iris_engine_scanout10 gives real extra bits. */

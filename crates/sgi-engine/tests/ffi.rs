@@ -532,3 +532,20 @@ fn a_c_shell_reads_a_heads_timing_and_its_ten_bit_picture() {
     assert_eq!((unsafe { iris_engine_head_bits(h, 0) }, unsafe { iris_engine_head_bits(h, 1) }), (8, 10));
     assert_eq!(unsafe { iris_engine_scanout10(h, 1, ten.as_mut_ptr(), 3, &mut w, &mut hgt) }, IRIS_ENGINE_ERROR, "too small: the size comes back");
 }
+
+/// A C shell reads each swap as its own SWAP event with a running count and the time, and the drop counter (0 here) is there.
+#[test]
+fn a_c_shell_reads_each_swap_as_an_event_and_the_drop_counter() {
+    let f = Fixture::new(false);
+    let h = f.h;
+    wr(h, reg::SWAP, 0);
+    wr(h, reg::SWAP, 0);
+    let (_, i) = idle(h, 40);
+    assert_eq!(i.state, IRIS_ENGINE_STALLED_FRAME);
+    assert_eq!(unsafe { iris_engine_frame(h, 50) }, IRIS_ENGINE_OK);
+    let (_, _) = idle(h, 50);
+    let swaps: Vec<(u64, u64)> = events(h, 16).iter().filter(|e| e.kind == IRIS_ENGINE_EVENT_SWAP).map(|e| unsafe { (e.data.swap.count, e.data.swap.time_ns) }).collect();
+    assert_eq!(swaps, vec![(1, 40), (2, 50)]);
+    assert_eq!(unsafe { iris_engine_swaps_dropped(h) }, 0);
+    assert_eq!(unsafe { iris_engine_swaps_dropped(null_mut()) }, 0);
+}

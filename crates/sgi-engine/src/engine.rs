@@ -213,6 +213,12 @@ pub enum Event {
     /// writes to hold or release the line. A shell with several pipes combines them (wired AND) and tells each
     /// engine the result with its `set_swap_ready_held` (KONA). Every change is one event, in order.
     SwapReady { drive: bool },
+    /// A buffer swap reached the board's swap point: `count` swaps so far (1 for the first, since the engine was built or
+    /// reset), and `time_ns` the shell time the engine last had (its `write_at`, `advance`, `wait_idle` and `frame`
+    /// calls) when it consumed the swap, so it can be late by the work between two pumps. Never coalesced: one event
+    /// per swap, in order, up to a bound; beyond it the swap is dropped and counted (`BoardEngine::swaps_dropped`), the
+    /// next event's `count` showing the gap.
+    Swap { count: u64, time_ns: u64 },
 }
 
 /// How the words of a frame the GPU holds are laid out.
@@ -386,6 +392,10 @@ pub trait BoardEngine {
     /// for it), summed over them, so it can exceed wall time. Work done inside a call is in that call's time and
     /// not here; 0 for an engine that runs everything inside calls. Cheap; waits for nothing.
     fn busy_ns(&self) -> u64 {
+        0
+    }
+    /// Swap events (`Event::Swap`) dropped because the outbox held too many unread; 0 for a board that posts none.
+    fn swaps_dropped(&self) -> u64 {
         0
     }
     /// The timing of `head`'s scan-out (`HeadTiming`), `None` while none is loaded or for no such head: the
