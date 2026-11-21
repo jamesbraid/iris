@@ -4456,6 +4456,43 @@ mod tests {
             assert_eq!(pair_drb(&e), [0x5E, 0x5E], "CONFIG {cfg:x?}");
         }
     }
+    /// ns a pixel of `dma_write_line` for 720-pixel lines in a GL window's state, `BENCH_RUNS` runs of a 720x486
+    /// image a format. Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_put_line() {
+        let runs = std::env::var("BENCH_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
+        let mut r = x_server();
+        r.write(reg::PP1FILLMODE, 0x0C00_6204, false);
+        r.write(reg::COLORMASKLSBSA, u32::MAX, false);
+        r.write(reg::XYWIN, 485 << 16, false);
+        r.write(reg::CLIP_MODE, 0x11, false);
+        r.write(reg::CLIP_X, 719, false);
+        r.write(reg::CLIP_Y, 485, false);
+        r.write(reg::FILLMODE, 5 << 22, false);
+        let mut seed = 0x1234_5678u32;
+        let bytes: Vec<u8> = (0..720 * 8)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 24) as u8
+            })
+            .collect();
+        for (name, xfrmode) in [("rgba8 rgb_order", 0xC0_0080u32), ("rgba8 abgr", 0x80), ("rgb8", 0x70), ("rgba16 rgb_order", 0xC0_0081)] {
+            r.write(reg::XFRMODE, xfrmode, false);
+            r.write(reg::XFRSIZE, 486 << 16 | 720, false);
+            let line = &bytes[..720 * bytes_per_pixel(xfrmode) as usize];
+            let ns: Vec<f64> = (0..runs)
+                .map(|_| {
+                    block(&mut r, 0, 0, 719, 485);
+                    let t = std::time::Instant::now();
+                    (0..486).for_each(|l| r.dma_write_line(l, line));
+                    t.elapsed().as_secs_f64() * 1e9 / (486 * 720) as f64
+                })
+                .collect();
+            eprintln!("{name:18} ns/px {ns:.2?} px0 {:#x}", r.mem.get(&main_buffer(), 0, 485));
+        }
+    }
+
 }
 
 /// The armed transfer's shape, for the trace.
