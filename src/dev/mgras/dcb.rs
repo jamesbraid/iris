@@ -167,6 +167,16 @@ impl Dac {
         self.regs.iter()
     }
 
+    /// The internal register the address register names (its low byte).
+    pub fn selected(&self) -> u32 {
+        self.addr & 0xFF
+    }
+
+    /// Internal register `n` as last written, 0 if never.
+    pub fn register(&self, n: u32) -> u32 {
+        self.regs.lookup(n).unwrap_or(0)
+    }
+
     pub fn pixmask(&self) -> u32 {
         self.regs.lookup(DAC_PIXMASK).unwrap_or(0xFF)
     }

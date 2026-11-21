@@ -68,6 +68,54 @@ struct Beam {
     x_latched: u16,
 }
 
+/// The DAC's signature analyzer (ADV7160/7162 data sheet, Appendix 5 and command register 4): a 33-cell chain, S0 to S32,
+/// clocked by the 30-bit pixel after the palette and gamma. Cell i takes `input[i] ^ (feedback & S[i-1])`, with cell 0's
+/// previous cell S32 and its input S19 (taps at stages 33 and 20); the input is B0..B9 into S1..S10, G0..G9 into S11..S20,
+/// R0..R9 into S21..S30 and 0 into S31, S32. With the feedback off the pixel is latched straight in (the data sheet's
+/// words), which is what the gate in this form does; the figure does not show whether the gate after the NAND is an XOR or
+/// its complement, so the form is *inferred*. Reset is taken as all zeros (inferred: "a known starting point").
+#[derive(Default)]
+struct Signature {
+    state: u64,
+    /// CR4 bit 5 and bit 6 are both high: clocking.
+    clocking: bool,
+    /// The frame (since the beam's origin) clocking began in.
+    start_frame: u64,
+    feedback: bool,
+}
+
+const SIGNATURE_CELLS: u32 = 33;
+const SIGNATURE_MASK: u64 = (1 << SIGNATURE_CELLS) - 1;
+/// CR4: bit 5 the signature clock, bit 6 the reset (low resets), bit 7 the feedback.
+const CR4: u32 = 8;
+const CR4_CLOCK: u32 = 0x20;
+const CR4_RUN: u32 = 0x40;
+const CR4_FEEDBACK: u32 = 0x80;
+/// The most frames one clocking is run for, whatever the shell's clock says passed (a paused host would
+/// otherwise run a million).
+const SIGNATURE_MAX_FRAMES: u64 = 16;
+
+impl Signature {
+    /// One clock with the 30-bit `pixel` (`x2b10g10r10`).
+    fn clock(&mut self, pixel: u32) {
+        let (r, g, b) = ((pixel & 0x3ff) as u64, (pixel >> 10 & 0x3ff) as u64, (pixel >> 20 & 0x3ff) as u64);
+        let input = (self.state >> 19 & 1) | b << 1 | g << 11 | r << 21;
+        let previous = (self.state << 1 | self.state >> (SIGNATURE_CELLS - 1)) & SIGNATURE_MASK;
+        self.state = (input ^ if self.feedback { previous } else { 0 }) & SIGNATURE_MASK;
+    }
+
+    /// Register 0x10 to 0x13 of the part: red S21..S30, green S11..S20, blue S1..S10, then S32, S31, S0 in bits 2:0.
+    fn register(&self, n: u32) -> u32 {
+        let field = |from: u32| (self.state >> from & 0x3ff) as u32;
+        match n {
+            0x10 => field(21),
+            0x11 => field(11),
+            0x12 => field(1),
+            _ => ((self.state >> 32 & 1) << 2 | (self.state >> 31 & 1) << 1 | (self.state & 1)) as u32,
+        }
+    }
+}
+
 /// What a read of the line counter adds to the beam's clock between the shell's time updates. A guest that polls
 /// the counter in a loop (the stock diagnostic's frame waits) reaches the next line, and so the next frame,
 /// without the shell calling the pump. Approximation: a display-bus read's own duration is unknown.
@@ -76,6 +124,9 @@ const BEAM_READ_NS: u128 = 1_000;
 pub struct Display {
     dcb: Box<Dcb>,
     beam: Beam,
+    signature: Signature,
+    /// A signature clocking ended and its frames are waiting for a pixel stream (`take_signature_due`).
+    signature_due: Option<u64>,
     slave: Option<Box<dyn BusSlave>>,
     /// The decoded frame; allocated by the first composition on the CPU.
     frame: Option<Box<Frame>>,
@@ -91,7 +142,7 @@ impl Display {
         dcb.init(bdvers, cmap_rev);
         dcb.xmap.set_pp1_revision(pp1_revision);
         dcb.dac.set_identity(0x79, 1);
-        Display { dcb, beam: Beam::default(), slave: None, frame: None, timing: None, timing_generation: 0 }
+        Display { dcb, beam: Beam::default(), signature: Signature::default(), signature_due: None, slave: None, frame: None, timing: None, timing_generation: 0 }
     }
 
     /// Back to power-on state: the shell's bus device stays, and the timing generation moves on.
@@ -117,6 +168,39 @@ impl Display {
             self.timing_generation += 1;
             self.beam.origin_ns = self.beam.now_ns;
             self.beam.x_pending = false;
+        }
+    }
+
+    /// Command register 4 was written: the signature analyzer's reset, clock and feedback.
+    fn signature_control(&mut self, cr4: u32) {
+        let (clock, run) = (cr4 & CR4_CLOCK != 0, cr4 & CR4_RUN != 0);
+        self.signature.feedback = cr4 & CR4_FEEDBACK != 0;
+        if !run {
+            self.signature.state = 0;
+        }
+        let clocking = clock && run;
+        let frame = self.beam(0).map(|b| b.1);
+        if clocking && !self.signature.clocking {
+            self.signature.start_frame = frame.unwrap_or(0);
+        } else if !clocking && self.signature.clocking {
+            // Every frame boundary since clocking began has run one whole frame's pixels through (the stream's place
+            // within a frame is not modelled); with no timing loaded, one frame.
+            let frames = frame.map_or(1, |f| f.saturating_sub(self.signature.start_frame)).min(SIGNATURE_MAX_FRAMES);
+            self.signature_due = Some(frames).filter(|&f| f > 0);
+        }
+        self.signature.clocking = clocking;
+    }
+
+    /// Frames of pixels the analyzer is owed since its clock was switched off, once; the engine composes the frame
+    /// and hands it back (`accumulate_signature`).
+    pub fn take_signature_due(&mut self) -> Option<u64> {
+        self.signature_due.take()
+    }
+
+    /// Run `frames` whole frames of `pixels` (`x2b10g10r10`, the active pixels) through the analyzer.
+    pub fn accumulate_signature(&mut self, pixels: &[u32], frames: u64) {
+        for _ in 0..frames {
+            pixels.iter().for_each(|&p| self.signature.clock(p));
         }
     }
 
@@ -215,7 +299,14 @@ impl Display {
                 }
             }
             // The address register reads back as the halfword the CPU wrote, register number in bits 15:8.
-            let d = if t.dev == DEV_DAC && t.crs == 0 && t.width >= 2 { self.dcb.dac.address_halfword() } else { self.dcb.read(t) };
+            let mut d = if t.dev == DEV_DAC && t.crs == 0 && t.width >= 2 { self.dcb.dac.address_halfword() } else { self.dcb.read(t) };
+            if t.dev == DEV_DAC && t.crs == 2 && (0x10..=0x13).contains(&self.dcb.dac.selected()) {
+                // The ten-bit read-only signature registers, in the palette's two-byte form: bits 9:2 in the first
+                // byte and 1:0 in the second (the stock diagnostic's halfword read takes the top two bits from bits
+                // 15:14). What a single byte read returns is not known; it gets bits 9:2.
+                let v = self.signature.register(self.dcb.dac.selected());
+                d = if t.width >= 2 { (v >> 2) << 8 | (v & 3) } else { v >> 2 };
+            }
             return t.load_value(bits, d);
         }
         let dev = ((off - DCBCTRL) >> 2) as usize;
@@ -243,6 +334,9 @@ impl Display {
                 return false;
             }
             self.dcb.write(t, t.store_data(bits, val));
+            if t.dev == DEV_DAC && t.crs == 2 && self.dcb.dac.selected() == CR4 {
+                self.signature_control(self.dcb.dac.register(CR4));
+            }
             if t.dev == DEV_VC3 && (t.crs == 1 || (t.crs == 0 && t.width >= 2)) {
                 if self.dcb.vc3.index() == VC3_CURSOR_X {
                     self.beam.x_pending = true;
@@ -323,4 +417,70 @@ impl Display {
 /// `0xFFBBGGRR`, what `frame.rs` composes, as `0x00RRGGBB`.
 pub fn rgb(p: u32) -> u32 {
     (p & 0xFF) << 16 | p & 0xFF00 | (p >> 16) & 0xFF
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The chain by its definition, cell by cell, apart from `Signature::clock`'s shifts.
+    fn cells(prev: &[bool; 33], pixel: u32, feedback: bool) -> [bool; 33] {
+        let bit = |v: u32, k: u32| v >> k & 1 == 1;
+        let mut input = [false; 33];
+        input[0] = prev[19];
+        for k in 0..10 {
+            input[1 + k as usize] = bit(pixel >> 20, k);
+            input[11 + k as usize] = bit(pixel >> 10, k);
+            input[21 + k as usize] = bit(pixel, k);
+        }
+        let mut next = [false; 33];
+        for i in 0..33 {
+            next[i] = input[i] ^ (feedback && prev[(i + 32) % 33]);
+        }
+        next
+    }
+
+    fn word(cells: &[bool; 33]) -> u64 {
+        cells.iter().enumerate().fold(0, |w, (i, &c)| w | (c as u64) << i)
+    }
+
+    /// With the feedback off the pixel is latched straight in; with it on the previous state rotates up a cell and
+    /// feeds back. The vector is worked by hand: pixel R 1, G 2, B 3 gives S1, S2 (blue 3), S12 (green 2) and S21 (red 1);
+    /// a zero pixel after it with feedback on moves each up one cell to S2, S3, S13 and S22, and S0 takes S19, which is clear.
+    #[test]
+    fn the_chain_latches_the_pixel_with_feedback_off_and_rotates_the_state_up_with_it_on() {
+        let mut s = Signature::default();
+        s.clock(1 | 2 << 10 | 3 << 20);
+        assert_eq!(s.state, 1 << 1 | 1 << 2 | 1 << 12 | 1 << 21);
+        assert_eq!((s.register(0x10), s.register(0x11), s.register(0x12), s.register(0x13)), (1, 2, 3, 0));
+        s.feedback = true;
+        s.clock(0);
+        assert_eq!(s.state, 1 << 2 | 1 << 3 | 1 << 13 | 1 << 22);
+        assert_eq!((s.register(0x10), s.register(0x11), s.register(0x12)), (2, 4, 6), "S22; S13; S2 and S3");
+        // The ends: S32 feeds S0, S19 feeds S0, and S31, S32 take only the feedback.
+        s.state = 1 << 32;
+        s.clock(0);
+        assert_eq!(s.state, 1, "S32 into S0");
+        s.state = 1 << 19;
+        s.clock(0);
+        assert_eq!(s.state, 1 << 20 | 1, "S19 into S0 and, rotating, into S20");
+        s.state = 1 << 30;
+        s.clock(0);
+        assert_eq!((s.register(0x13), s.state >> 31 & 1), (0b010, 1), "S30 into S31, shown in the misc register");
+    }
+
+    #[test]
+    fn the_shift_form_is_the_cell_by_cell_definition_over_a_pixel_stream() {
+        let mut s = Signature { feedback: true, ..Signature::default() };
+        let mut model = [false; 33];
+        let mut x = 0x2545_f491u32;
+        for _ in 0..5000 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            s.clock(x & 0x3fff_ffff);
+            model = cells(&model, x & 0x3fff_ffff, true);
+            assert_eq!(s.state, word(&model));
+        }
+    }
 }
