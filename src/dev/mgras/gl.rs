@@ -2366,6 +2366,23 @@ impl Gl {
         sink.rss_write(re::IR_ALIAS, IR_BLOCK_SETUP, false);
         sink.rss_write(re::BLOCK_XYSTARTI, xy(cx0, cy0), false);
         sink.rss_write(re::BLOCK_XYENDI, xy(cx1, cy1), true);
+        // Unzoomed, not mirrored in x: each line is the image's row bytes.
+        if fast_paths() && zoom == 1.0 && !flip_x && src_w > 0 && words.len() >= rows * wpr {
+            let (c0, n) = ((cx0 - x0) as usize * bpp, w as usize * bpp);
+            let rev = bpp == 4 && self.xfrmode & 0xFF == 0x80 && self.xfrmode & 1 << 22 == 0;
+            let mut row = vec![0u8; wpr * 4];
+            for (line, y) in (cy0..=cy1).enumerate() {
+                let sr = (if flip_y { y0 - y } else { y - y0 }) as usize;
+                for (b, x) in row.chunks_exact_mut(4).zip(&words[sr * wpr..][..wpr]) {
+                    b.copy_from_slice(&x.to_be_bytes());
+                }
+                if rev {
+                    row[c0..c0 + n].chunks_exact_mut(4).for_each(|px| px.reverse());
+                }
+                sink.dma_write_line(line as u32, &row[c0..c0 + n]);
+            }
+            return self.end_raster(sink);
+        }
         let src_px = |r: usize, c: usize| -> [u8; 16] {
             let mut px = [0u8; 16];
             for (k, b) in px.iter_mut().enumerate().take(bpp) {
@@ -3618,5 +3635,53 @@ impl<const N: usize> MatrixStack for Stack<N> {
     }
     fn pop(&mut self) -> bool {
         Stack::pop(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    /// A sink that keeps the lines of the transfer a draw sends.
+    #[derive(Default)]
+    struct Lines(Vec<Vec<u8>>);
+
+    impl Hq3Sink for Lines {
+        fn rss_write(&mut self, _: u32, _: u32, _: bool) {}
+        fn transfer(&mut self) -> Option<(bool, (u32, u32))> {
+            None
+        }
+        fn dma_write_line(&mut self, _: u32, bytes: &[u8]) {
+            self.0.push(bytes.to_vec());
+        }
+        fn dma_read_line(&mut self, _: u32) -> Vec<u8> {
+            Vec::new()
+        }
+        fn set_flags(&mut self, _: u32) {}
+        fn sys_mem(&mut self) -> Option<std::sync::Arc<dyn super::super::hostmem::HostMem>> {
+            None
+        }
+        fn note(&mut self, _: String) {}
+    }
+
+    /// Fewer words than the header's rows need (the rows are bounded by the words that came, so this is not
+    /// reachable from the FIFO): the row copy must leave the missing words to the plain path, which reads zeros.
+    #[test]
+    fn draw_pixels_words_short_of_their_rows() {
+        let _held = COMPARING.lock();
+        let draw = |plain: bool| {
+            PLAIN_ONLY.store(plain, SeqCst);
+            let mut gl = super::super::plain::boxed_zeroed::<Gl>();
+            gl.xfrmode = 0xC0_0080;
+            gl.tl_rect[4] = 3 << 16 | 4;
+            let mut sink = Lines::default();
+            gl.draw_pixels_words(&[1, 2, 3, 4, 5, 6, 7], 4, 3, 4, &mut sink);
+            PLAIN_ONLY.store(false, SeqCst);
+            sink.0
+        };
+        let (fast, plain) = (draw(false), draw(true));
+        assert_eq!(plain.len(), 3);
+        assert_eq!(fast, plain);
     }
 }
