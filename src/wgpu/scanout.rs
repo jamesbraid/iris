@@ -46,7 +46,7 @@ struct Header {
     height: u32,
     stride: u32,
     /// 0: words are 0xAABBGGRR; 1: 0x00RRGGBB, as the board's kernel produces them; 2: the kernel's
-    /// x2r10g10b10, ten bits a channel.
+    /// x2r10g10b10, ten bits a channel; 3: those ten bits as x2b10g10r10 (XB30, red low).
     format: u32,
 }
 
@@ -268,10 +268,20 @@ impl Scanout {
     /// target, with no second pass. `dst` must hold `(height - 1) * stride_words + width` words and the
     /// stride must be at least the width.
     pub fn compose_into(&mut self, pipeline: &ScanoutPipeline, width: u32, height: u32, slot: &[u8], groups: &[&wgpu::BindGroup], dst: &wgpu::Buffer, stride_words: u32) -> Result<(), String> {
+        self.compose_into_format(pipeline, width, height, slot, groups, dst, stride_words, 1)
+    }
+
+    /// As `compose_into`, for a board kernel whose pixels are x2r10g10b10: `dst` takes them as x2b10g10r10
+    /// (XB30, red in the low ten bits).
+    pub fn compose_into10(&mut self, pipeline: &ScanoutPipeline, width: u32, height: u32, slot: &[u8], groups: &[&wgpu::BindGroup], dst: &wgpu::Buffer, stride_words: u32) -> Result<(), String> {
+        self.compose_into_format(pipeline, width, height, slot, groups, dst, stride_words, 3)
+    }
+
+    fn compose_into_format(&mut self, pipeline: &ScanoutPipeline, width: u32, height: u32, slot: &[u8], groups: &[&wgpu::BindGroup], dst: &wgpu::Buffer, stride_words: u32, format: u32) -> Result<(), String> {
         // A destination that cannot hold the frame is the caller's mistake: refused with the device
         // left as it was (`check_into`). Only what the GPU does wrong fails the device.
         Self::check_into(width, height, dst, stride_words)?;
-        self.compose_into_inner(pipeline, width, height, slot, groups, dst, stride_words).map_err(|e| self.fail(e))
+        self.compose_into_inner(pipeline, width, height, slot, groups, dst, stride_words, format).map_err(|e| self.fail(e))
     }
 
     /// Whether `dst` can take a `width` by `height` frame of `stride_words` a row: the stride at least the
@@ -290,7 +300,7 @@ impl Scanout {
         Ok(())
     }
 
-    fn compose_into_inner(&mut self, pipeline: &ScanoutPipeline, width: u32, height: u32, slot: &[u8], groups: &[&wgpu::BindGroup], dst: &wgpu::Buffer, stride_words: u32) -> Result<(), String> {
+    fn compose_into_inner(&mut self, pipeline: &ScanoutPipeline, width: u32, height: u32, slot: &[u8], groups: &[&wgpu::BindGroup], dst: &wgpu::Buffer, stride_words: u32, format: u32) -> Result<(), String> {
         let pixels = width as u64 * height as u64;
         if pixels == 0 {
             return Ok(());
@@ -312,7 +322,7 @@ impl Scanout {
             });
             self.into = Some((dst.clone(), group));
         }
-        self.gpu.write(&self.into_header, 0, bytemuck::bytes_of(&Header { width, height, stride: stride_words, format: 1 }));
+        self.gpu.write(&self.into_header, 0, bytemuck::bytes_of(&Header { width, height, stride: stride_words, format }));
         self.gpu.write(&self.slot_buf, 0, slot);
         let mut enc = self.gpu.encoder("scanout into");
         {
