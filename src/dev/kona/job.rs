@@ -129,6 +129,11 @@ impl BackPort<'_> {
         self.host.with_front(|f| ((), f.retrace(tag)));
     }
 
+    /// A buffer swap was consumed (the display-mode swap command).
+    pub fn swap_consumed(&mut self) {
+        self.host.irq.swap_consumed();
+    }
+
     /// The pipe's own drive of the swap-ready line changed.
     pub fn swap_ready_drive(&mut self, drive: bool) {
         self.host.irq.swap_ready(drive);

@@ -37,6 +37,9 @@ pub trait InterruptController: Send + Sync {
     /// A KONA pipe's own drive of the shared swap-ready line changed. No machine models the line yet, so the default
     /// drops it.
     fn swap_ready(&self, _drive: bool) {}
+
+    /// A KONA pipe consumed a buffer swap (the shell's `Event::Swap`). The default drops it.
+    fn swap_consumed(&self) {}
 }
 
 /// One input of one controller, as a device sees it.
