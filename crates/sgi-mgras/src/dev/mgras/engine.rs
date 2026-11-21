@@ -157,6 +157,8 @@ struct Front {
     flags: AtomicU32,
     flag_enable: AtomicU32,
     interrupt_enable: AtomicU32,
+    /// The shell time the engine last had (`write_at`, `advance`, `wait_idle`), for the swap report.
+    clock_ns: AtomicU64,
 }
 
 impl Front {
@@ -448,6 +450,9 @@ impl<M: HostMem> Hq3Sink for Core<M> {
     }
     fn finish_raster(&mut self) {
         self.back.rss[0].gpu_flush();
+    }
+    fn swapped(&mut self, count: u64) {
+        self.out.post(Event::Swap { count, time_ns: self.front.clock_ns.load(Ordering::Relaxed) });
     }
     fn set_flags(&mut self, bits: u32) {
         self.front.flags.fetch_or(bits, Ordering::AcqRel);
@@ -1084,6 +1089,15 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         Write::Done
     }
 
+    fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
+        self.sh.front.clock_ns.store(now_ns, Ordering::Relaxed);
+        self.write(off, bits, val)
+    }
+
+    fn swaps_dropped(&self) -> u64 {
+        self.sh.out.swaps_dropped()
+    }
+
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize {
         // The command FIFO's port: 0 the user's, 1 the privileged one, or the window offset of
         // either (the shell may name the port as it does for `write`). Anything else is no FIFO.
@@ -1163,6 +1177,7 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
 
     fn advance(&mut self, now_ns: u64) -> Pump {
         self.now = now_ns;
+        self.sh.front.clock_ns.store(now_ns, Ordering::Relaxed);
         self.display.lock().set_now(now_ns);
         self.flush();
         self.sh.out.rearm();
@@ -1171,6 +1186,7 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
 
     fn wait_idle(&mut self, now_ns: u64, budget_ns: u64) -> Idle {
         self.now = now_ns;
+        self.sh.front.clock_ns.store(now_ns, Ordering::Relaxed);
         self.display.lock().set_now(now_ns);
         self.settle(Some(Duration::from_nanos(budget_ns)));
         self.idle()
