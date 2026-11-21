@@ -339,6 +339,10 @@ impl<M: HostMem> BoardEngine for Mock<M> {
         12_345
     }
 
+    fn head_bits(&self, head: u32) -> u32 {
+        if head == 1 { 10 } else { 8 }
+    }
+
     fn head_timing(&self, head: u32) -> Option<HeadTiming> {
         // Head 1 runs two fields; head 0 has none loaded.
         (head == 1).then_some(HeadTiming { frame_clocks: 1_000_000, clock_hz: 60_000_000, fields: 2, lines: 525, epoch_ns: -1, generation: 3 })
@@ -368,6 +372,29 @@ impl<M: HostMem> BoardEngine for Mock<M> {
         for y in 0..2u32 {
             for x in 0..4u32 {
                 buf[(y * stride_words + x) as usize] = (head + 1) << 16 | (y * 4 + x);
+            }
+        }
+        Ok(Some((4, 2)))
+    }
+
+    /// As `compose_into`, in `XB30` words.
+    fn compose_into10(&mut self, head: u32, dst: &dyn std::any::Any, stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
+        if let Some(f) = self.fault() {
+            return Err(Fault(f));
+        }
+        if head >= 2 {
+            return Ok(None);
+        }
+        let Some(buf) = dst.downcast_ref::<Mutex<Vec<u32>>>() else { return Err(Fault("not a mock buffer".into())) };
+        let mut buf = buf.lock();
+        if stride_words < 4 || buf.len() < (stride_words * 2) as usize {
+            return Err(Fault("a buffer too small for the frame".into()));
+        }
+        for y in 0..2u32 {
+            for x in 0..4u32 {
+                let p = (head + 1) << 16 | (y * 4 + x);
+                let widen = |c: u32| (c << 2) | (c >> 6);
+                buf[(y * stride_words + x) as usize] = widen(p & 0xff) << 20 | widen(p >> 8 & 0xff) << 10 | widen(p >> 16 & 0xff);
             }
         }
         Ok(Some((4, 2)))

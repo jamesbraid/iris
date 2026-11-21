@@ -219,6 +219,9 @@ pub enum FrameWords {
     Abgr,
     /// `0x00RRGGBB`: what `scanout` copies and `compose_into` writes.
     Rgb,
+    /// `x2b10g10r10`, red in the low ten bits (DRM `XBGR2101010`, fourcc `XB30`): what `scanout10` copies
+    /// and `compose_into10` writes.
+    Xbgr2101010,
 }
 
 /// A composed frame left on the GPU for a scan-out on the same device to
@@ -340,15 +343,21 @@ pub trait BoardEngine {
     fn scanout(&mut self, _head: u32, _out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
         Ok(None)
     }
-    /// `scanout` with ten bits a colour, `0x00` then red, green and blue in `x2r10g10b10` (2 unused bits, then
-    /// 10 each): the top 8 bits of each are what `scanout` gives. A board whose colour maps carry only 8 bits
-    /// widens them by repeating their top bits, so the low two bits add no precision; a board with wider maps
-    /// gives the extra.
+    /// `scanout` with ten bits a colour, in `x2b10g10r10` (`XB30`: red in the low ten bits, then green, then blue,
+    /// the top 2 bits zero): the top 8 bits of each are what `scanout` gives. A board whose colour maps carry only
+    /// 8 bits widens them by repeating their top bits, so the low two bits add no precision; a board with wider
+    /// maps gives the extra (`head_bits` says which).
     fn scanout10(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
         let size = self.scanout(head, out)?;
         let widen = |c: u32| (c << 2) | (c >> 6);
-        out.iter_mut().for_each(|p| *p = widen(*p >> 16 & 0xff) << 20 | widen(*p >> 8 & 0xff) << 10 | widen(*p & 0xff));
+        out.iter_mut().for_each(|p| *p = widen(*p & 0xff) << 20 | widen(*p >> 8 & 0xff) << 10 | widen(*p >> 16 & 0xff));
         Ok(size)
+    }
+    /// The bits a colour that `head`'s hardware output carries: 8 unless the board's maps and DAC keep more
+    /// (VPro and MGRAS 10, a KONA GVO channel 10; a KONA monitor channel 8). Where this is above 8,
+    /// `scanout10` gives real extra bits; otherwise its low two bits repeat the top ones. Cheap; waits for nothing.
+    fn head_bits(&self, _head: u32) -> u32 {
+        8
     }
     /// The same picture left on the GPU (`LentFrame`) instead of copied to the
     /// host; `None` where the board has no GPU scan-out (use `scanout`).
@@ -361,6 +370,12 @@ pub trait BoardEngine {
     /// `(width, height)`; `None` where the board has no GPU scan-out, no such head or no frame. A
     /// buffer too small for `(height - 1) * stride_words + width` words, or a stride under the width, is an `Err` that leaves the engine and its GPU running (not a device fault: `fault()` stays `None`).
     fn compose_into(&mut self, _head: u32, _dst: &dyn std::any::Any, _stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
+        Ok(None)
+    }
+    /// `compose_into` with ten bits a colour: `scanout10`'s words (`FrameWords::Xbgr2101010`), word for word,
+    /// with the same destination rules, sizes and errors. `None` where the board has no wide GPU compose (use
+    /// `compose_into`, or `scanout10`).
+    fn compose_into10(&mut self, _head: u32, _dst: &dyn std::any::Any, _stride_words: u32) -> Result<Option<(u32, u32)>, Fault> {
         Ok(None)
     }
     /// Wall time, in ns, the engine's own worker threads have spent running work since it was built (not waiting

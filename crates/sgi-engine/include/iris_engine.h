@@ -289,8 +289,13 @@ int iris_engine_head_timing(IrisEngine *h, uint32_t head, IrisEngineHeadTiming *
  * 0 for an engine with no threads of its own. */
 uint64_t iris_engine_busy_ns(IrisEngine *h);
 
-/* As iris_engine_scanout, x2r10g10b10 a pixel (2 unused bits, then red, green, blue of 10): the top 8 bits of
- * each colour are the 8-bit scan-out's. A board with 8-bit colour maps repeats their top bits. */
+/* The bits a colour that head's hardware output carries: 8 unless the board's maps and DAC keep more (VPro and MGRAS
+ * 10; a KONA GVO channel 10, a KONA monitor channel 8). Above 8, iris_engine_scanout10 gives real extra bits. */
+int iris_engine_head_bits(IrisEngine *h, uint32_t head);
+
+/* As iris_engine_scanout, x2b10g10r10 a pixel (DRM XBGR2101010, fourcc XB30: red in the low ten bits, then green,
+ * then blue, the top two bits zero): the top 8 bits of each colour are the 8-bit scan-out's. A head whose
+ * iris_engine_head_bits is 8 repeats the top bits. */
 int iris_engine_scanout10(IrisEngine *h, uint32_t head, uint32_t *buf,
                           size_t cap, uint32_t *w, uint32_t *hgt);
 

@@ -248,6 +248,7 @@ trait DynEngine: Send {
     fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write;
     fn heads(&self) -> u32;
     fn head_timing(&self, head: u32) -> Option<HeadTiming>;
+    fn head_bits(&self, head: u32) -> u32;
     fn busy_ns(&self) -> u64;
     fn scanout10(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault>;
     fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault>;
@@ -292,6 +293,9 @@ impl<E: BoardEngine + Send + 'static> DynEngine for E {
     }
     fn head_timing(&self, head: u32) -> Option<HeadTiming> {
         BoardEngine::head_timing(self, head)
+    }
+    fn head_bits(&self, head: u32) -> u32 {
+        BoardEngine::head_bits(self, head)
     }
     fn busy_ns(&self) -> u64 {
         BoardEngine::busy_ns(self)
@@ -696,7 +700,16 @@ pub unsafe extern "C" fn iris_engine_busy_ns(h: *mut IrisEngine) -> u64 {
     guard(h, Point::Flags, 0, |s| s.eng.busy_ns())
 }
 
-/// As `iris_engine_scanout`, `x2r10g10b10` a pixel (the top 8 bits of each colour are the 8-bit scan-out's).
+/// The bits a colour that head `head`'s hardware output carries (8 unless the board keeps more).
+///
+/// # Safety
+/// `h` is a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn iris_engine_head_bits(h: *mut IrisEngine, head: u32) -> c_int {
+    guard(h, Point::Flags, 8, |s| s.eng.head_bits(head) as c_int)
+}
+
+/// As `iris_engine_scanout`, `x2b10g10r10` a pixel, red in the low bits (the top 8 bits of each colour are the 8-bit scan-out's).
 ///
 /// # Safety
 /// As `iris_engine_scanout`.

@@ -543,22 +543,32 @@ fn a_frame_composes_into_the_callers_buffer_and_the_generation_says_when_it_chan
 }
 
 #[test]
-fn a_head_reports_its_timing_or_none_and_widens_its_colours_to_ten_bits() {
+fn a_head_reports_its_timing_and_bits_or_none_and_widens_its_colours_to_ten_bits_in_xb30_order() {
     let (mut e, _) = mock(MockConfig::default());
     assert_eq!(e.head_timing(0), None, "none loaded: the shell keeps its default");
     let t = e.head_timing(1).unwrap();
     assert_eq!((t.frame_clocks, t.clock_hz, t.fields, t.lines, t.epoch_ns, t.generation), (1_000_000, 60_000_000, 2, 525, -1, 3));
     assert_eq!(e.head_timing(2), None);
-    // The mock's 8-bit frame, widened: the top 8 bits of each ten are the 8-bit colour.
+    assert_eq!((e.head_bits(0), e.head_bits(1), e.head_bits(2)), (8, 10, 8), "the default is 8; the mock's head 1 says 10");
+    // The mock's 8-bit frame, widened: red in the low ten bits (XB30), and the top 8 bits of each ten are the 8-bit colour.
     let mut eight = Vec::new();
     let mut ten = Vec::new();
     assert_eq!(e.scanout(1, &mut eight), Ok(Some((4, 2))));
     assert_eq!(e.scanout10(1, &mut ten), Ok(Some((4, 2))));
     for (a, b) in eight.iter().zip(&ten) {
         let (r, g, bl) = (a >> 16 & 0xff, a >> 8 & 0xff, a & 0xff);
-        assert_eq!((b >> 22, b >> 12 & 0xff, b >> 2 & 0xff), (r, g, bl), "{a:#x} -> {b:#x}");
+        assert_eq!((b >> 2 & 0xff, b >> 12 & 0xff, b >> 22), (r, g, bl), "{a:#x} -> {b:#x}");
         assert_eq!(b >> 30, 0, "the two unused bits");
     }
     assert_eq!(e.scanout10(2, &mut ten), Ok(None));
     assert_eq!(ten.len(), 0);
+    // The wide compose writes the same words as scanout10, in a destination of the caller's.
+    e.scanout10(1, &mut ten).unwrap();
+    let buf = parking_lot::Mutex::new(vec![0u32; 16]);
+    assert_eq!(e.compose_into10(1, &buf, 8), Ok(Some((4, 2))));
+    let got = buf.lock().clone();
+    assert_eq!([&got[..4], &got[8..12]].concat(), ten, "compose_into10 equals scanout10");
+    assert_eq!(e.compose_into10(2, &buf, 8), Ok(None));
+    assert!(e.compose_into10(0, &buf, 2).is_err(), "a stride under the width");
+    assert_ne!(FrameWords::Xbgr2101010, FrameWords::Rgb);
 }
