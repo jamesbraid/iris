@@ -263,3 +263,79 @@ fn the_cursor_position_is_the_vc3s_registers_less_their_offset() {
     vc3(&mut e, 0x1D, 0);
     assert!(!e.cursor_position().2);
 }
+
+fn vc3_read<E: BoardEngine>(e: &mut E, index: u32) -> u32 {
+    put(e, VC3_INDEX, 8, index as u64);
+    get(e, VC3_DATA, 16) as u32
+}
+
+/// The stock diagnostic's line waits (gr4 video-sync.md section 4.2, software expectation): VC3 index 0x0b reads 0 at the
+/// start of a frame, passes 200 and wraps once a frame, from the shell's time and the loaded timing, and a loop that
+/// only reads it still gets there. The frame here is 1065 lines in 16.68 ms (about 15.7 us a line).
+#[test]
+fn the_line_counter_is_the_beam_of_the_loaded_timing_and_wraps_every_frame() {
+    let mut e = engine(|_| {});
+    // Before a timing is loaded the counter steps per read, as it always has, and holds what is written.
+    let (a, b) = (vc3_read(&mut e, 0xB), vc3_read(&mut e, 0xB));
+    assert_eq!(b, a + 1);
+    load_stock_timing(&mut e);
+    assert_eq!(e.advance(5_000_000).idle, sgi_engine::Idle::Yes);
+    vc3(&mut e, 0x1E, 4);
+    let t = e.head_timing(0).unwrap();
+    let frame_ns = (t.frame_clocks as u128 * 1_000_000_000 / t.clock_hz as u128) as u64;
+    assert_eq!(vc3_read(&mut e, 0xB), 0, "line 0 at the start of the frame, the display having been enabled at the shell's time");
+    // The shell's time moves the beam: half a frame on is about line 532, and a whole frame on is line 0 again.
+    e.advance(5_000_000 + frame_ns / 2);
+    let half = vc3_read(&mut e, 0xB);
+    assert!((530..=535).contains(&half), "half a frame: {half}");
+    e.advance(5_000_000 + frame_ns);
+    assert!(vc3_read(&mut e, 0xB) < 3, "a whole frame: back at 0");
+    // Without a time update a polling loop still sweeps the frame: it passes 200 and wraps within a frame's worth of reads.
+    e.advance(5_000_000 + 2 * frame_ns);
+    let mut seen_200 = false;
+    let mut wrapped = false;
+    let mut last = vc3_read(&mut e, 0xB);
+    for _ in 0..40_000 {
+        let l = vc3_read(&mut e, 0xB);
+        seen_200 |= l >= 200;
+        wrapped |= seen_200 && l < last;
+        last = l;
+    }
+    assert!(seen_200 && wrapped, "a read-only poll reaches 200 and wraps");
+    // A write holds the count until the display is enabled again, as before.
+    vc3(&mut e, 0xB, 77);
+    assert_eq!((vc3_read(&mut e, 0xB), vc3_read(&mut e, 0xB)), (77, 77));
+    vc3(&mut e, 0x1E, 4);
+    assert_ne!(vc3_read(&mut e, 0xB), 77);
+}
+
+/// The cursor X written to index 2 reaches index 0x0e at the next frame boundary (`mg_vc3cursorposition` writes X and Y,
+/// waits two frames, and reads 0x0e back); with no timing loaded it takes the written X at once.
+#[test]
+fn the_current_cursor_x_follows_the_written_x_at_a_frame_boundary() {
+    let mut e = engine(|_| {});
+    vc3(&mut e, 2, 0x155);
+    assert_eq!(vc3_read(&mut e, 0xE), 0x155, "no timing: at once");
+    load_stock_timing(&mut e);
+    e.advance(1_000_000);
+    vc3(&mut e, 0x1E, 4);
+    let t = e.head_timing(0).unwrap();
+    let frame_ns = (t.frame_clocks as u128 * 1_000_000_000 / t.clock_hz as u128) as u64;
+    vc3(&mut e, 2, 0x2aa);
+    assert_eq!(vc3_read(&mut e, 0xE), 0x155, "inside the frame it was written in, the old X stays");
+    e.advance(1_000_000 + frame_ns + 1);
+    assert_eq!(vc3_read(&mut e, 0xE), 0x2aa, "a frame boundary later it has latched");
+}
+
+/// Display control (index 0x1e) bits 6:0 store and read back whole, the genlock bits 5 and 6 and the start and stop
+/// sequence's bits 4:1 among them (software expectation, gr4 video-sync.md section 1.3); the shell reads bit 0, the
+/// retrace interrupt enable, from `vc3_control`.
+#[test]
+fn display_control_bits_6_to_0_store_and_read_back() {
+    let mut e = engine(|_| {});
+    for v in [0x1E, 0x20, 0x40, 0x61, 0x7F, 0x00] {
+        vc3(&mut e, 0x1E, v);
+        assert_eq!(vc3_read(&mut e, 0x1E), v, "{v:#x}");
+        assert_eq!(e.vc3_control(), v);
+    }
+}

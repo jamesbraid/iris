@@ -393,7 +393,10 @@ pub struct Vc3 {
 const _: () = assert!(std::mem::size_of::<Vc3>() == 65608);
 
 pub const VC3_SRAM_POINTER: usize = 7;
-const VC3_CURRENT_LINE: usize = 0xB;
+pub const VC3_CURRENT_LINE: u32 = 0xB;
+/// The cursor X register (written) and the current cursor X (read, latched by the beam).
+pub const VC3_CURSOR_X: u32 = CURSOR_X_REG as u32;
+pub const VC3_CURSOR_X_LATCH: u32 = 0xE;
 /// The master configuration register: the revision is in bits 7:6.
 const VC3_CONFIG: usize = 0x1F;
 /// The display control register: bit 2 enables the display.
@@ -442,6 +445,11 @@ impl Vc3 {
     /// The register the next data access reaches.
     pub fn index(&self) -> u32 {
         self.index
+    }
+
+    /// The line count holds what the guest wrote until the display is next enabled.
+    pub fn line_held(&self) -> bool {
+        self.line_held
     }
 
     /// VC3 clocks in one pass of the frame table and the lines in it, or None when it gives no frame. Register 0
@@ -524,7 +532,7 @@ impl Vc3 {
     /// A write of register `index`: it stores, and the line count holds what was written until the display is enabled.
     fn store(&mut self, index: usize, v: u16) {
         self.regs[index] = v;
-        if index == VC3_CURRENT_LINE {
+        if index == VC3_CURRENT_LINE as usize {
             self.line_held = true;
         } else if index == VC3_CONTROL as usize && v & VC3_CONTROL_DISPLAY != 0 {
             self.line_held = false;
@@ -566,7 +574,7 @@ impl Vc3 {
     fn read(&mut self, t: Txn) -> u32 {
         match (t.crs, t.width) {
             (0, _) => self.index,
-            (1, _) if self.index as usize == VC3_CURRENT_LINE && !self.line_held => {
+            (1, _) if self.index == VC3_CURRENT_LINE && !self.line_held => {
                 // Keep moving so vertical-blank polls terminate.
                 self.line_counter = (self.line_counter + 1) % 1066;
                 crate::pf_instant!(crate::perfetto::events::MGRAS_VC3_LINE, self.line_counter);
