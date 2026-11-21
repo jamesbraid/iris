@@ -6,8 +6,8 @@ mod support;
 
 use std::sync::Arc;
 
-use sgi_engine::{BoardEngine, FrameWords, Refused, VecSource, Write};
-use sgi_mgras::dev::mgras::engine::{Board, Config, MgrasEngine, Mode};
+use sgi_engine::{BoardEngine, Event, FrameWords, Refused, VecSource, Write, DAMAGE_ANY};
+use sgi_mgras::dev::mgras::engine::{Board, Config, MgrasEngine, Mode, DAMAGE_DISPLAY};
 use sgi_mgras::wgpu::{Gpu, GpuOptions};
 use support::*;
 
@@ -346,4 +346,86 @@ fn the_gpu_ten_bit_frame_is_the_cpu_frame_read_back_or_composed_into_a_buffer() 
     cpu.e.scanout(0, &mut want).unwrap();
     p.e.scanout(0, &mut eight).unwrap();
     assert!(eight == want, "the narrow frame is unchanged by the wide one");
+}
+
+/// The damage marks the engine posted since the last call: (store, y0, y1).
+fn damage<E: BoardEngine>(e: &mut E) -> Vec<(u64, i32, i32)> {
+    let mut events = Vec::new();
+    e.drain_events(&mut events, 64);
+    events.into_iter().filter_map(|ev| if let Event::Damage(m) = ev { Some((m.store, m.rect.y0, m.rect.y1)) } else { None }).collect()
+}
+
+/// A VC3 register by the three-byte form that stores an index and a halfword at once.
+fn vc3<E: BoardEngine>(e: &mut E, reg: u32, value: u32) {
+    bus(e, 8, 0, 3, reg << 16 | value);
+}
+
+#[test]
+fn a_bus_store_that_leaves_the_picture_alone_posts_no_damage() {
+    let mut e = MgrasEngine::new(Config::new(Board::High, Mode::Inline), Mem::default(), None, None).unwrap();
+    cmap(&mut e, 5, 0x123456);
+    gamma(&mut e, 7, [0x111, 0x222, 0x333]);
+    vc3(&mut e, 0x1d, 3);
+    damage(&mut e);
+    let g = e.frame_generation(0);
+    // Selects and addresses, the SRAM pointer, the line counter, and values written over themselves.
+    bus(&mut e, 7, 1, 1, 5);
+    bus(&mut e, 3, 0, 1, 9);
+    bus(&mut e, 6, 0, 1, 4);
+    bus(&mut e, 8, 0, 1, 0x1d);
+    vc3(&mut e, 7, 0x100);
+    vc3(&mut e, 0xb, 12);
+    cmap(&mut e, 5, 0x123456);
+    gamma(&mut e, 7, [0x111, 0x222, 0x333]);
+    vc3(&mut e, 0x1d, 3);
+    bus(&mut e, 20, 2, 4, 1);
+    assert_eq!(damage(&mut e), vec![]);
+    assert_eq!(e.frame_generation(0), g);
+}
+
+#[test]
+fn a_colour_map_gamma_mode_or_table_store_that_changes_something_posts_damage_for_everything() {
+    let mut e = MgrasEngine::new(Config::new(Board::High, Mode::Inline), Mem::default(), None, None).unwrap();
+    let all = vec![(DAMAGE_ANY, 0, 4095)];
+    cmap(&mut e, 5, 0x123456);
+    assert_eq!(damage(&mut e), all, "a colour map entry");
+    gamma(&mut e, 7, [0x111, 0x222, 0x333]);
+    assert_eq!(damage(&mut e), all, "a gamma entry");
+    bus(&mut e, 6, 0, 1, 4);
+    bus(&mut e, 6, 2, 1, 0);
+    assert_eq!(damage(&mut e), all, "the pixel mask blanking the screen");
+    bus(&mut e, 7, 1, 1, 0);
+    bus(&mut e, 7, 3, 4, 0xFF);
+    assert_eq!(damage(&mut e), all, "a buffer select");
+    bus(&mut e, 7, 1, 1, 8);
+    bus(&mut e, 7, 4, 4, 0x25);
+    assert_eq!(damage(&mut e), all, "a main mode");
+    bus(&mut e, 7, 5, 4, 0x28);
+    assert_eq!(damage(&mut e), all, "an overlay mode");
+    bus(&mut e, 7, 1, 1, 0);
+    bus(&mut e, 7, 6, 4, 0x1234_5678);
+    assert_eq!(damage(&mut e), all, "the DIB pointers");
+    bus(&mut e, 7, 2, 4, 0x10);
+    assert_eq!(damage(&mut e), all, "the cursor colour base");
+    vc3(&mut e, 4, 0x200);
+    assert_eq!(damage(&mut e), all, "the window-ID frame table's address");
+    vc3(&mut e, 7, 0x300);
+    bus(&mut e, 8, 3, 2, 0x8001);
+    assert_eq!(damage(&mut e), all, "a word of VC3 SRAM");
+}
+
+#[test]
+fn a_cursor_store_posts_damage_for_the_rows_the_glyph_covered_and_covers_and_none_while_it_is_hidden() {
+    let mut e = MgrasEngine::new(Config::new(Board::High, Mode::Inline), Mem::default(), None, None).unwrap();
+    vc3(&mut e, 3, 100 + 31);
+    vc3(&mut e, 2, 40 + 31);
+    assert_eq!(damage(&mut e), vec![], "a hidden cursor moves nothing on the screen");
+    vc3(&mut e, 0x1d, 3);
+    assert_eq!(damage(&mut e), vec![(DAMAGE_DISPLAY, 100, 131)], "shown: its 32 rows");
+    vc3(&mut e, 3, 300 + 31);
+    assert_eq!(damage(&mut e), vec![(DAMAGE_DISPLAY, 100, 331)], "moved: the rows it left and the rows it reaches, joined");
+    vc3(&mut e, 0x1d, 0xb);
+    assert_eq!(damage(&mut e), vec![(DAMAGE_DISPLAY, 300, 363)], "a 64 by 64 glyph");
+    vc3(&mut e, 0x1d, 0);
+    assert_eq!(damage(&mut e), vec![(DAMAGE_DISPLAY, 300, 363)], "hidden: the rows it covered");
 }

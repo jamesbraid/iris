@@ -38,6 +38,14 @@ typedef struct IrisMgrasConfig {
                                H on a two-GE one */
 } IrisMgrasConfig;
 
+/*
+ * The store of an IRIS_ENGINE_EVENT_DAMAGE mark the display bus posts when a store changes the cursor alone: its box
+ * is in display pixels from the top left, y0 to y1 the rows the glyph covered or covers. A mark for anything else the
+ * bus changes has the store UINT64_MAX (everything). A drawing mark's store is the buffer's page pointer, plus
+ * 1 << 16 for the overlay.
+ */
+#define IRIS_MGRAS_DAMAGE_DISPLAY 131072       /* 1 << 17 */
+
 /* A box of pixels in one buffer. */
 typedef struct IrisMgrasRegion {
     uint32_t page;          /* the buffer's page pointer */
