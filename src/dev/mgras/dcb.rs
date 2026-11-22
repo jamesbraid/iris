@@ -121,7 +121,7 @@ pub const DAC_PIXMASK: u32 = 4;
 const DAC_ID: u32 = 0x03;
 const DAC_REVISION: u32 = 0x0B;
 /// The pixel clock PLL's control, reference divisor and VCO multiplier registers.
-const PLL_CONTROL: u32 = 0x09;
+pub const PLL_CONTROL: u32 = 0x09;
 const PLL_R: u32 = 0x0C;
 const PLL_V: u32 = 0x0F;
 
