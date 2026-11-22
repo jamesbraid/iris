@@ -1148,8 +1148,8 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
                     (change, moved && d.dcb().dac.register(super::dcb::PLL_CONTROL) & 4 != 0)
                 };
                 if unknown_clock {
-                    // The timing files' rates fit bit 2 halving the clock, the data sheet's VSEL doubles it.
-                    self.sh.out.post(Event::Note("DAC PLL control bit 2 set: pixel clock unknown, period taken as bit 2 halving it".into()));
+                    // The files disagree on bit 2: most fit halving at 33 MHz, the 30i/25i video formats 32 MHz unhalved.
+                    self.sh.out.post(Event::Note("DAC PLL control bit 2 set: pixel clock unknown; the period assumes bit 2 halves it and may be about twice too long".into()));
                 }
                 if change != Change::None {
                     self.sh.generation.fetch_add(1, Ordering::Release);
