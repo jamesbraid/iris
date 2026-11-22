@@ -2311,8 +2311,8 @@ fn bench_draw_pixels() {
     }
 }
 
-/// `draw` on the fast paths and again on the plain ones: the two state hashes.
-fn fast_and_plain(draw: impl Fn() -> [u8; 32]) -> ([u8; 32], [u8; 32]) {
+/// `draw` on the fast paths and again on the plain ones: what each returns.
+fn fast_and_plain<T>(draw: impl Fn() -> T) -> (T, T) {
     use std::sync::atomic::Ordering::SeqCst;
     let _held = super::gl::COMPARING.lock();
     super::gl::PLAIN_ONLY.store(false, SeqCst);
@@ -2387,22 +2387,30 @@ fn draw_pixels_fast_paths_match_plain_ones() {
     }
 }
 
-/// A one-word row of 8-byte pixels, which is no pixel wide: the row copy must leave it to the plain path.
+/// A one-word row of 8-byte pixels, which is no pixel wide: the row copy must leave it to the plain path, which
+/// takes the one pixel the draw has from the word and zeros (and must not subtract from the zero width: a debug
+/// build aborts on that).
 #[test]
 fn draw_pixels_row_narrower_than_a_pixel() {
-    let m = live_board();
-    x_server(&m);
-    gl_window_400x300(&m);
-    fifo_token(&m, 0x15, &[]);
-    fifo_token(&m, 0x7F, &[1, 2]);
-    write(&m, 32, CFIFO, 0x8000_0008);
-    write(&m, 32, CFIFO, 0x159);
-    write(&m, 32, CFIFO, 0x00C0_0081);
-    fifo_token(&m, 0x38, &[f(10.0), f(20.0), f(0.0)]);
-    fifo_token(&m, 0x8D, &[1, 0, 0, 1, 0, 1, 0x49D0, 0x18]);
-    fifo_pixel_data(&m, &[0x1122_3344]);
-    m.state_hash();
-    m.stop_engines();
+    let draw = || {
+        let m = live_board();
+        x_server(&m);
+        gl_window_400x300(&m);
+        fifo_token(&m, 0x15, &[]);
+        fifo_token(&m, 0x7F, &[1, 2]);
+        write(&m, 32, CFIFO, 0x8000_0008);
+        write(&m, 32, CFIFO, 0x159);
+        write(&m, 32, CFIFO, 0x00C0_0081);
+        fifo_token(&m, 0x38, &[f(10.0), f(20.0), f(0.0)]);
+        fifo_token(&m, 0x8D, &[1, 0, 0, 1, 0, 1, 0x49D0, 0x18]);
+        fifo_pixel_data(&m, &[0x1122_3344]);
+        let (hash, px) = (m.state_hash(), [gl_px(&m, 10, 20), gl_px(&m, 11, 20), gl_px(&m, 10, 21)]);
+        m.stop_engines();
+        (hash, px)
+    };
+    let (fast, plain) = fast_and_plain(draw);
+    assert_eq!(fast, plain);
+    assert_eq!(fast.1, [0x00_3311, 0, 0], "the word's bytes then zeros, at the raster position only");
 }
 
 /// An image of FIFO pixel data, `w` x `h` pixels of `host_bpp` bytes, through the pipeline of `draw_pixels_setup`:

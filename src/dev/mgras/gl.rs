@@ -2387,10 +2387,10 @@ impl Gl {
         // floor(i / zoom).
         let from = |p: i32, o: i32, flip: bool| if flip { o - p } else { p - o };
         for (line, y) in (cy0..=cy1).enumerate() {
-            let sr = ((from(y, y0, flip_y) as f32 / zoom) as usize).min(rows - 1);
+            let sr = ((from(y, y0, flip_y) as f32 / zoom) as usize).min(rows.saturating_sub(1));
             let mut bytes = Vec::with_capacity(w as usize * bpp);
             for x in cx0..=cx1 {
-                let sc = ((from(x, x0, flip_x) as f32 / zoom) as usize).min(src_w - 1);
+                let sc = ((from(x, x0, flip_x) as f32 / zoom) as usize).min(src_w.saturating_sub(1));
                 bytes.extend_from_slice(&src_px(sr, sc)[..bpp]);
             }
             sink.dma_write_line(line as u32, &bytes);
