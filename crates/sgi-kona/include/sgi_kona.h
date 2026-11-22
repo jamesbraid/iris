@@ -98,6 +98,21 @@ int sgi_kona_scanout(IrisEngine *h, uint32_t *buf, size_t cap, uint32_t *w,
                      uint32_t *hgt);
 
 /*
+ * The heads' pictures, for composing off the shell's big lock. sgi_kona_scan_begin is an ordinary call (one caller
+ * at a time) and gives NULL for an engine that has faulted. sgi_kona_scan_rows may then be called from any thread,
+ * also while the handle is in a call: rows first up to end of head's picture (clamped), 0x00RRGGBB, into buf (cap
+ * words) at y * width, the other words untouched; *w and *hgt are the head's size (0 for a head with no picture),
+ * and with a cap too small for it the answer is IRIS_ENGINE_ERROR and nothing was composed. It reads the pixels
+ * as drawing leaves them without waiting for it, so a frame can show a draw part way; the draw's damage then
+ * says so. End the source with sgi_kona_scan_end once no rows call is running.
+ */
+typedef struct IrisKonaScan IrisKonaScan;
+IrisKonaScan *sgi_kona_scan_begin(IrisEngine *h);
+int sgi_kona_scan_rows(IrisKonaScan *s, uint32_t head, uint32_t first, uint32_t end, uint32_t *buf, size_t cap,
+                       uint32_t *w, uint32_t *hgt);
+void sgi_kona_scan_end(IrisKonaScan *s);
+
+/*
  * The rows of head's picture that may have changed since the last call for that head, *first up to *end (both 0
  * for none): the rows the pipe's drawing wrote, or all of them for anything else that can change what the head
  * shows. Drawing in flight marks its rows when it finishes, so ask again at each retrace.

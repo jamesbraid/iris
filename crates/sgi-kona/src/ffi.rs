@@ -3,13 +3,14 @@
 //! `tools/check-header` compares it with cbindgen's.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use sgi_engine::ffi::{build, call, host_parts, read_config, CMem, IrisEngine, IrisEngineConfig, IrisEngineHost, IRIS_ENGINE_ERROR, IRIS_ENGINE_FAULT, IRIS_ENGINE_OK};
 use sgi_engine::inject::Point;
 use sgi_engine::{BoardEngine, GpuLoss, Rect};
 
-use crate::dev::kona::engine::{FlashDrive, KonaEngine, Options, Region};
+use crate::dev::kona::engine::{FlashDrive, KonaEngine, Options, Region, Scan, ScanSource};
 use crate::dev::kona::flash::{fresh_image, FlashSink, FLASH_SIZE};
 use crate::dev::kona::ident::{KonaConfig, Product};
 use crate::wgpu::{Gpu, GpuOptions};
@@ -312,6 +313,57 @@ pub unsafe extern "C" fn sgi_kona_scanout(h: *mut IrisEngine, buf: *mut u32, cap
             }
             IRIS_ENGINE_OK
         })
+    }
+}
+
+/// The heads' pictures for composing off the shell's big lock; the contract is in `sgi_kona.h`.
+pub struct IrisKonaScan(ScanSource);
+
+/// A scan-out source of the heads as they are now; NULL for an engine that has faulted. An ordinary call.
+///
+/// # Safety
+/// `h` is a live KONA handle.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_scan_begin(h: *mut IrisEngine) -> *mut IrisKonaScan {
+    unsafe { call::<KonaEngine<CMem>, _>(h, Point::Pixel, std::ptr::null_mut(), |e| e.scan_source().map_or(std::ptr::null_mut(), |s| Box::into_raw(Box::new(IrisKonaScan(s))))) }
+}
+
+/// Rows `first` up to `end` of head `head`'s picture into `buf`; callable from any thread.
+///
+/// # Safety
+/// `s` is from `sgi_kona_scan_begin` and not yet ended, `buf` points to `cap` words and `w` and `hgt` to `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_scan_rows(s: *mut IrisKonaScan, head: u32, first: u32, end: u32, buf: *mut u32, cap: usize, w: *mut u32, hgt: *mut u32) -> c_int {
+    if s.is_null() || w.is_null() || hgt.is_null() || (buf.is_null() && cap != 0) {
+        return IRIS_ENGINE_ERROR;
+    }
+    let src = unsafe { &(*s).0 };
+    let out: &mut [u32] = if cap == 0 { &mut [] } else { unsafe { std::slice::from_raw_parts_mut(buf, cap) } };
+    match catch_unwind(AssertUnwindSafe(|| src.rows(head, first as usize, end as usize, out))) {
+        Ok(Ok(Scan::Done(fw, fh))) => {
+            unsafe { (*w, *hgt) = (fw, fh) };
+            IRIS_ENGINE_OK
+        }
+        Ok(Ok(Scan::Short(fw, fh))) => {
+            unsafe { (*w, *hgt) = (fw, fh) };
+            IRIS_ENGINE_ERROR
+        }
+        Ok(Err(_)) => IRIS_ENGINE_FAULT,
+        Err(_) => {
+            src.fail("panic in the scan-out");
+            IRIS_ENGINE_FAULT
+        }
+    }
+}
+
+/// Free a scan-out source. NULL is ignored.
+///
+/// # Safety
+/// `s` is from `sgi_kona_scan_begin`, not yet ended, and no `sgi_kona_scan_rows` is running on it.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_scan_end(s: *mut IrisKonaScan) {
+    if !s.is_null() {
+        drop(unsafe { Box::from_raw(s) });
     }
 }
 
