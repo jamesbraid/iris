@@ -27,6 +27,7 @@ fn engine(config: impl FnOnce(&mut Config)) -> MgrasEngine<Mem> {
 const DAC_ADDRESS: u32 = 0x61810;
 const DAC_NUMBER: u32 = 0x61811;
 const DAC_DATA: u32 = 0x61910;
+const DAC_PALETTE: u32 = 0x61890;
 const XMAP_INDEX: u32 = 0x61C88;
 const XMAP_CONFIG: u32 = 0x61D00;
 const VC3_INDEX: u32 = 0x62008;
@@ -179,6 +180,22 @@ fn the_head_timing_follows_the_vc3_tables_and_the_pll_when_the_display_is_enable
     vc3(&mut e, 0, 0x3FE);
     vc3(&mut e, 0x1E, 4);
     assert_eq!(e.head_timing(0), None);
+}
+
+/// The boot loads all 256 palette entries before the PLL bytes, which it addresses by a byte at `+1` alone: the address
+/// must have wrapped to 0 (data sheet p. 24), or the PLL reads as unwritten and the frame as 27.15 ms, not 16.68.
+#[test]
+fn a_full_palette_load_leaves_the_address_at_0_so_the_pll_bytes_reach_the_pll() {
+    let mut e = engine(|_| {});
+    put(&mut e, DAC_ADDRESS, 16, 0);
+    for _ in 0..256 * 3 {
+        put(&mut e, DAC_PALETTE, 16, 0x8002);
+    }
+    assert_eq!(get(&mut e, DAC_ADDRESS, 16), 0);
+    load_stock_timing(&mut e);
+    vc3(&mut e, 0x1E, 4);
+    let t = e.head_timing(0).unwrap();
+    assert_eq!(t.frame_clocks as u128 * 1_000_000_000 / t.clock_hz as u128, 16_682_517, "59.943 Hz");
 }
 
 #[test]
