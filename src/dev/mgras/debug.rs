@@ -525,6 +525,7 @@ impl Mgras {
         writeln!(w, "RSS: primitives by IR opcode {}", prims.join(" "))?;
         let blocks: Vec<String> = r.blocks.iter().enumerate().filter(|(_, n)| **n != 0).map(|(k, n)| format!("{k}:{n}")).collect();
         writeln!(w, "  blocks by type {}  fast fills {}", blocks.join(" "), r.fast_fills)?;
+        writeln!(w, "  draw routes (this process): {}", super::gl::path_counts())?;
         writeln!(w, "  stipple chunks {}  PIO dw written {} read {}  DMA lines in {} (dropped, no write armed: {})",
             r.stipple_chunks, r.pio_write_dw, r.pio_read_dw, r.dma_lines_in, r.dma_lines_dropped)?;
         for id in 0..self.nrss {
