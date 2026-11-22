@@ -14,7 +14,7 @@
 //! the raster engine in the transfer mode libGLcore sets (XFRMODE, type and
 //! RGBA order; `rss::host_bytes`).
 //!
-//! State blocks (as traced on IRIX 6.5.22, `test/gltest/pixtest.c`): words
+//! State blocks (as traced on IRIX 6.5.22 with a pixel transfer test program): words
 //! 0-4 are working-RAM pointers and batch counts (input, ?, output, whole
 //! batches, remainder), the parameters follow:
 //!   inttofloat  \[5\] scale (1/255, 2/255 for signed, 1/65535, 2^-31 ...)

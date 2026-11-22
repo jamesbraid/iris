@@ -804,7 +804,7 @@ fn to_host(format: (u32, u32), v: u32) -> u64 {
 /// XFRMODE's transfer format as `Xfer` keeps it: (pixel format,
 /// component type), and for RGBA (format 8) rgb_order (bit 22) as
 /// comp_type bit 4.
-/// Traced with libGLcore (`test/gltest/pixtest.c`): formats 3 red, 4 green,
+/// Traced with libGLcore and a pixel transfer test program: formats 3 red, 4 green,
 /// 5 blue, 6 alpha, 7 RGB, 8 RGBA (2 depth, 1 stencil, 0 colour index);
 /// types 0 / 4 unsigned / signed bytes, 1 / 5 shorts, 3 / 7 32-bit (8 and
 /// 10 the X server's packed 4-4-4-4 and 5-5-5). rgb_order 1 sends red
