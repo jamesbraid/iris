@@ -2353,6 +2353,120 @@ fn bench_draw_pixels() {
     }
 }
 
+/// `draw` on the fast paths and again on the plain ones: the two state hashes.
+fn fast_and_plain(draw: impl Fn() -> [u8; 32]) -> ([u8; 32], [u8; 32]) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let _held = super::gl::COMPARING.lock();
+    super::gl::PLAIN_ONLY.store(false, SeqCst);
+    let fast = draw();
+    super::gl::PLAIN_ONLY.store(true, SeqCst);
+    let plain = draw();
+    super::gl::PLAIN_ONLY.store(false, SeqCst);
+    (fast, plain)
+}
+
+struct Xorshift(u64);
+
+impl Xorshift {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 >> 11) % n
+    }
+}
+
+/// A random glDrawPixels by host DMA (format, size, window, raster position, scissor, zoom, mirroring,
+/// clamp scales), run on `kind`; the board's state hash.
+fn random_draw(kind: GraphicsBoard, seed: u64) -> [u8; 32] {
+    let mut r = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    // (XFRMODE, host element type word, host bytes a pixel, int-to-float scale, clamp scale)
+    let cases: [(u32, u32, usize, f32, f32); 9] = [
+        (0xC0_0080, 1, 4, 1.0 / 255.0, 255.0),
+        (0x80, 1, 4, 1.0 / 255.0, 255.0),
+        (0x70, 1, 3, 1.0 / 255.0, 255.0),
+        (0xC0_0084, 0, 4, 1.0 / 255.0, 127.0),
+        (0x74, 0, 3, 1.0 / 255.0, 127.0),
+        (0xC0_0081, 3, 8, 1.0 / 65535.0, 65535.0),
+        (0xC0_0080, 3, 8, 1.0 / 65535.0, 255.0),
+        (0xC0_0081, 1, 4, 1.0 / 255.0, 65535.0),
+        (0x70, 3, 6, 1.0 / 65535.0, 255.0),
+    ];
+    let (xfrmode, elem, bpp, scale, clamp) = cases[r.below(9) as usize];
+    // Half the images are big enough for the pipeline table.
+    let (w, h) = if r.below(2) == 0 { (1 + r.below(40) as usize, 1 + r.below(8) as usize) } else { (32 + r.below(48) as usize, 32 + r.below(8) as usize) };
+    let win = (r.below(30) as u32, r.below(30) as u32, 40 + r.below(80) as u32, 40 + r.below(80) as u32);
+    let at = [r.below(70) as f32 - 10.0, r.below(70) as f32 - 10.0];
+    let scissor = (r.below(2) == 0).then(|| [r.below(40) as u32, r.below(30) as u32, r.below(40) as u32, r.below(30) as u32]);
+    let zoom = [1.0f32, 1.0, 1.0, 1.0, 1.0, 2.0, 0.5][r.below(7) as usize];
+    let rect = [[0u32, 0, 0, 0], [3, 0, 0, 0], [0, 3, 0, 0], [3, 3, 0, 0]][r.below(4) as usize];
+    let identity = r.below(2) == 0;
+    let clamps = [(); 12].map(|_| if identity { clamp } else { [clamp, clamp * 0.5, clamp * 0.9, 100.0][r.below(4) as usize] }.to_bits());
+    let m = live_board_of(kind);
+    draw_pixels_setup(&m, win, xfrmode, elem, scale, clamps);
+    if let Some(s) = scissor {
+        fifo_token(&m, 0x39, &s);
+        fifo_token(&m, 0x6E, &[1]);
+    }
+    if zoom != 1.0 {
+        fifo_token(&m, 0x80, &[0, 2, 8, 0x191, 0, 2, 2, 0, f(zoom)]);
+    }
+    draw_pixels_memory(&m, (w * bpp).div_ceil(4) * 4 * h, h, seed as u32 | 1);
+    draw_pixels_dma(&m, at, rect, w, h);
+    m.wait_idle();
+    let hash = m.state_hash();
+    m.stop_engines();
+    hash
+}
+
+/// The draw fast paths (pipeline table, row copy, tile stores) leave the board as the plain ones do, on both
+/// boards, over random formats, sizes, windows, scissors, zooms, mirrored rectangles and clamp scales.
+#[test]
+fn draw_pixels_fast_paths_match_plain_ones() {
+    for kind in [GraphicsBoard::HighImpact, GraphicsBoard::MaxImpact] {
+        let bad: Vec<u64> = (1..=40).filter(|&t| { let (a, b) = fast_and_plain(|| random_draw(kind, t)); a != b }).collect();
+        assert!(bad.is_empty(), "{kind:?}: seeds {bad:?} differ");
+    }
+}
+
+/// An image of FIFO pixel data, `w` x `h` pixels of `host_bpp` bytes, through the pipeline of `draw_pixels_setup`:
+/// the board's state hash.
+fn fifo_draw(xfrmode: u32, elem: u32, host_bpp: usize, scale: f32, clamp: f32, (w, h): (usize, usize)) -> [u8; 32] {
+    let m = live_board();
+    draw_pixels_setup(&m, (0, 0, 400, 300), xfrmode, elem, scale, [clamp.to_bits(); 12]);
+    fifo_token(&m, 0x38, &[f(10.0), f(20.0), f(0.0)]);
+    ge_state(&m, 0xCD, 0xDA8, &[0, 0, 0, 0, (h as u32) << 16 | w as u32, 1]);
+    let wpr = (w * host_bpp).div_ceil(4);
+    fifo_token(&m, 0x8D, &[wpr as u32, 0, 0, h as u32, 0, 1, 0x49D0, 0x18]);
+    let mut s = 12345u32;
+    let words: Vec<u32> = (0..wpr * h)
+        .map(|_| {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            s
+        })
+        .collect();
+    // A pixel command carries at most 255 bytes.
+    words.chunks(32).for_each(|c| fifo_pixel_data(&m, c));
+    m.wait_idle();
+    let hash = m.state_hash();
+    m.stop_engines();
+    hash
+}
+
+/// FIFO images against the plain paths: the pipeline table is for 8-bit elements to 8-bit components only
+/// (bytes to 16-bit components and 16-bit elements to bytes go through `run_row`).
+#[test]
+fn draw_pixels_fifo_fast_paths_match_plain_ones() {
+    for (name, xfrmode, elem, host, scale, clamp) in [
+        ("u8 to u16", 0xC0_0081u32, 1u32, 4usize, 1.0f32 / 255.0, 65535.0f32),
+        ("u16 to u8", 0xC0_0080, 3, 8, 1.0 / 65535.0, 255.0),
+        ("u8 to u8", 0xC0_0080, 1, 4, 1.0 / 255.0, 255.0),
+    ] {
+        let (fast, plain) = fast_and_plain(|| fifo_draw(xfrmode, elem, host, scale, clamp, (32, 32)));
+        assert_eq!(fast, plain, "{name}");
+    }
+}
+
 /// glReadPixels as snoop sends it (traced, one pixel): the read block and
 /// transfer size through cfifo_cmd_raster_triples (0x07C triples), the transfer
 /// counters and mode through cfifo_cmd_raster_pairs, token_0db (0x0DB), then the

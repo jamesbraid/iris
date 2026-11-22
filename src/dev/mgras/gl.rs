@@ -669,6 +669,27 @@ pub struct Gl {
     q: query::Query,
 }
 
+/// Tests set this to compare the draw fast paths with the plain ones, holding `COMPARING`.
+#[cfg(test)]
+pub(crate) static PLAIN_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) static COMPARING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn fast_paths() -> bool {
+    !PLAIN_ONLY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) fn fast_paths() -> bool {
+    true
+}
+
+/// Fewest pixels a draw needs for its pipeline table (about 30 us to build) to pay for itself.
+const TABLE_MIN_PIXELS: usize = 1024;
+
 /// `words` as big-endian bytes.
 fn be_bytes(words: &[u32]) -> Vec<u8> {
     let mut bytes = vec![0u8; words.len() * 4];
@@ -2153,10 +2174,39 @@ impl Gl {
             let v = if index { (v.round() as i64 & wrap) as f64 } else { v };
             super::rss::pack_comp(ty, v, rb);
         };
+        // 8-bit elements to 8-bit components through a one-to-one pipeline:
+        // each element's packed output by place in the cycle and value.
+        let tabulate = fast_paths() && w * h >= TABLE_MIN_PIXELS && esize == 1 && !matches!(ty, 1 | 3 | 5 | 7);
+        let cols = if tabulate { self.pix.byte_columns(lut, comps, out_comps) } else { None }.map(|cols| {
+            let mut one = Vec::new();
+            cols.iter()
+                .map(|col| {
+                    col.map(|v| {
+                        one.clear();
+                        pack(v, &mut one);
+                        one[0]
+                    })
+                })
+                .collect::<Vec<[u8; 256]>>()
+        });
+        // A pipeline that leaves every byte as it is (RGBA bytes through
+        // int-to-float and its clamp's scale back) copies.
+        let same = cols.iter().flatten().all(|col| col.iter().zip(0..=255u8).all(|(&a, b)| a == b));
         for r in 0..h {
             rb.clear();
-            for v in self.pix.run_row(lut, &bytes[r * stride..r * stride + row_in], w, out_comps) {
-                pack(v, &mut rb);
+            let row = &bytes[r * stride..r * stride + row_in];
+            if let Some(cols) = &cols {
+                if same {
+                    rb.extend_from_slice(row);
+                } else {
+                    for blk in row.chunks(cols.len()) {
+                        rb.extend(blk.iter().zip(cols).map(|(&b, col)| col[b as usize]));
+                    }
+                }
+            } else {
+                for v in self.pix.run_row(lut, row, w, out_comps) {
+                    pack(v, &mut rb);
+                }
             }
             rb.resize(wpr_out * 4, 0);
             out.extend(rb.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])));
