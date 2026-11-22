@@ -2259,9 +2259,10 @@ impl BusDevice for FlatMem {
 }
 
 /// A GL window `ww` x `wh` at (`wx`, `wy`) with the transfer mode and the GE pixel pipeline libGLcore
-/// programs for host bytes: int-to-float by `scale`, colour matrix pass-through, clamp to `clamps`.
+/// programs for host bytes: int-to-float by `scale`, then (with `expand`: the EXPAND mode, alpha filled with 1)
+/// components expanded to RGBA, colour matrix pass-through, clamp to `clamps`.
 #[allow(clippy::too_many_arguments)]
-fn draw_pixels_setup(m: &Mgras, (wx, wy, ww, wh): (u32, u32, u32, u32), xfrmode: u32, elem: u32, scale: f32, clamps: [u32; 12]) {
+fn draw_pixels_setup(m: &Mgras, (wx, wy, ww, wh): (u32, u32, u32, u32), xfrmode: u32, elem: u32, scale: f32, clamps: [u32; 12], expand: Option<u32>) {
     x_server(m);
     switch_to_gl_context(m, 0xC, wx, wy, ww, wh);
     fifo_token(m, 0x33, &[0, 0, ww, wh]);
@@ -2275,7 +2276,13 @@ fn draw_pixels_setup(m: &Mgras, (wx, wy, ww, wh): (u32, u32, u32, u32), xfrmode:
     write(m, 32, CFIFO, 0x8000_0008);
     write(m, 32, CFIFO, 0x159);
     write(m, 32, CFIFO, xfrmode as u64);
-    ge_state(m, 0x80, 0x13B, &[0x1F44, 0, 0x3E65, 0xD05, 0x156A, 0x1B4, 0x352D, 0xD67]);
+    match expand {
+        None => ge_state(m, 0x80, 0x13B, &[0x1F44, 0, 0x3E65, 0xD05, 0x156A, 0x1B4, 0x352D, 0xD67]),
+        Some(mode) => {
+            ge_state(m, 0x80, 0x13B, &[0x1F44, 0, 0x1655, 0xD05, 0x3E65, 0x1D6, 0x156A, 0x1B4, 0x352D, 0xD67]);
+            ge_state(m, 0x80, 0x1D6, &[0x50C, 0, 0x50C, 2, 4, mode, 0, 1.0f32.to_bits(), 1.0f32.to_bits(), 1.0f32.to_bits()]);
+        }
+    }
     ge_state(m, 0xCD, 0xD05, &[0x34, 0x4064, 0x50C, 2, 4, scale.to_bits()]);
     ge_state(m, 0x80, 0x1B4, &[6, 4, 0, 0x50C, 0x50C]);
     let mut clamp = vec![0x50C, 0x1A000, 0x50C, 2, 4];
@@ -2299,11 +2306,15 @@ fn draw_pixels_memory(m: &Mgras, len: usize, h: usize, mut seed: u32) -> [u8; 4]
     let first = [mem[0x10000], mem[0x10001], mem[0x10002], mem[0x10003]];
     m.set_phys(Arc::new(FlatMem(mem)));
     fifo_dma(m, 0x21, 0x1000);
-    let line = len / h;
+    draw_pixels_arm(m, len / h, h);
+    first
+}
+
+/// The host DMA armed for `h` lines of `line` bytes, one after another from the start of the memory.
+fn draw_pixels_arm(m: &Mgras, line: usize, h: usize) {
     for (reg, val) in [(0x06, 0), (0x05, 0), (0x04, line as u32), (0x07, h as u32), (0x08, line as u32)] {
         fifo_dma(m, reg, val);
     }
-    first
 }
 
 /// One glDrawPixels of the armed host DMA: `w` x `h` pixels at the raster position `at`, 0xDA8's rectangle `rect`.
@@ -2337,7 +2348,7 @@ fn bench_draw_pixels() {
     let only = std::env::var("BENCH_CASE").unwrap_or_default();
     for (name, xfrmode, elem, scale, clamp, bpp) in DRAW_CASES.into_iter().filter(|c| c.0.contains(&only)) {
         let m = live_board();
-        draw_pixels_setup(&m, (0, 0, w as u32, h as u32), xfrmode, elem, scale, [clamp.to_bits(); 12]);
+        draw_pixels_setup(&m, (0, 0, w as u32, h as u32), xfrmode, elem, scale, [clamp.to_bits(); 12], None);
         let first = draw_pixels_memory(&m, (w * bpp).div_ceil(4) * 4 * h, h, 0x1234_5678);
         draw_pixels_dma(&m, [0.0, 0.0], [0; 4], w, h);
         m.wait_idle();
@@ -2351,6 +2362,43 @@ fn bench_draw_pixels() {
         eprintln!("{name:18} ns/px {ns:.1?} px0 {:#010x} (host {first:02x?}) hash {:02x?}", m.fb_pixel(0, 1023), &m.state_hash()[..8]);
         m.stop_engines();
     }
+}
+
+/// Smoke 5.0's frame on an Octane: six DrawPixels of 486 rows, five 128 pixels wide and one 80, strips of a
+/// 720x486 image at raster position (280.375, 430.375) in a 1280x1024 window, transfer mode 0xC00080, bytes
+/// through int-to-float, EXPAND, the colour matrix and the clamp, scissor on, no zoom, rows by host DMA (the
+/// Discreet session's debug log). The EXPAND mode is not in that log: `BENCH_EXPAND` (default 6, RGB to RGBA)
+/// picks it. ms a frame over `BENCH_RUNS` runs of `BENCH_FRAMES` frames; run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn bench_smoke_frame() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (runs, frames, mode) = (env("BENCH_RUNS", 5), env("BENCH_FRAMES", 4), env("BENCH_EXPAND", 6) as u32);
+    let m = live_board();
+    draw_pixels_setup(&m, (0, 0, 1280, 1024), 0xC0_0080, 1, 1.0 / 255.0, [255.0f32.to_bits(); 12], Some(mode));
+    fifo_token(&m, 0x39, &[280, 719, 430, 485]);
+    fifo_token(&m, 0x6E, &[1]);
+    draw_pixels_memory(&m, 128 * 4 * 486, 486, 0x1234_5678);
+    let frame = |m: &Mgras| {
+        for (x0, w) in [(0, 128), (128, 128), (256, 128), (384, 128), (512, 128), (640, 80)] {
+            draw_pixels_arm(m, w * 4, 486);
+            fifo_token(m, 0x38, &[f(280.375), f(430.375), f(0.0)]);
+            ge_state(m, 0xCD, 0xDA8, &[x0, 0, x0 + w as u32 - 1, 485, 486 << 16 | w as u32, 1]);
+            fifo_token(m, 0x9D, &[0, 0, 0, 0x49D0]);
+            fifo_dma(m, 0x0B, 1);
+        }
+    };
+    frame(&m);
+    m.wait_idle();
+    let mut ms = Vec::new();
+    for _ in 0..runs {
+        let t = std::time::Instant::now();
+        (0..frames).for_each(|_| frame(&m));
+        m.wait_idle();
+        ms.push(t.elapsed().as_secs_f64() * 1e3 / frames as f64);
+    }
+    eprintln!("smoke expand {mode}: ms a frame {ms:.2?} hash {:02x?}", &m.state_hash()[..8]);
+    m.stop_engines();
 }
 
 /// `draw` on the fast paths and again on the plain ones: what each returns.
@@ -2403,7 +2451,7 @@ fn random_draw(kind: GraphicsBoard, seed: u64) -> [u8; 32] {
     let identity = r.below(2) == 0;
     let clamps = [(); 12].map(|_| if identity { clamp } else { [clamp, clamp * 0.5, clamp * 0.9, 100.0][r.below(4) as usize] }.to_bits());
     let m = live_board_of(kind);
-    draw_pixels_setup(&m, win, xfrmode, elem, scale, clamps);
+    draw_pixels_setup(&m, win, xfrmode, elem, scale, clamps, None);
     if let Some(s) = scissor {
         fifo_token(&m, 0x39, &s);
         fifo_token(&m, 0x6E, &[1]);
@@ -2459,7 +2507,7 @@ fn draw_pixels_row_narrower_than_a_pixel() {
 /// the board's state hash.
 fn fifo_draw(xfrmode: u32, elem: u32, host_bpp: usize, scale: f32, clamp: f32, (w, h): (usize, usize), zoom: Option<f32>) -> [u8; 32] {
     let m = live_board();
-    draw_pixels_setup(&m, (0, 0, 400, 300), xfrmode, elem, scale, [clamp.to_bits(); 12]);
+    draw_pixels_setup(&m, (0, 0, 400, 300), xfrmode, elem, scale, [clamp.to_bits(); 12], None);
     if let Some(zoom) = zoom {
         fifo_token(&m, 0x80, &[0, 2, 8, 0x191, 0, 2, 2, 0, f(zoom)]);
     }
