@@ -122,7 +122,7 @@ const DAC_ID: u32 = 0x03;
 const DAC_REVISION: u32 = 0x0B;
 /// DAC registers: the pixel clock PLL's control, reference divider and
 /// feedback divider.
-const DAC_PLL_CONTROL: u32 = 0x09;
+pub const DAC_PLL_CONTROL: u32 = 0x09;
 const DAC_PLL_R: u32 = 0x0C;
 const DAC_PLL_V: u32 = 0x0F;
 /// The PLL's reference: every clock in IRIX's IMPACT video formats is this

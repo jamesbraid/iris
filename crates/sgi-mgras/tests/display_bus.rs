@@ -198,6 +198,25 @@ fn a_full_palette_load_leaves_the_address_at_0_so_the_pll_bytes_reach_the_pll() 
     assert_eq!(t.frame_clocks as u128 * 1_000_000_000 / t.clock_hz as u128, 16_682_517, "59.943 Hz");
 }
 
+/// PLL control bit 2 (the 72 Hz record's 0xc5) has no known clock: deriving a period with it says so.
+#[test]
+fn a_timing_with_pll_control_bit_2_set_posts_a_note() {
+    let notes = |e: &mut MgrasEngine<Mem>| {
+        let mut ev = Vec::new();
+        e.drain_events(&mut ev, 64);
+        ev.into_iter().filter(|x| matches!(x, sgi_engine::Event::Note(t) if t.contains("bit 2"))).count()
+    };
+    let mut e = engine(|_| {});
+    load_stock_timing(&mut e);
+    vc3(&mut e, 0x1E, 4);
+    assert_eq!(notes(&mut e), 0, "the stock 0x91");
+    dac(&mut e, 0x0C, 4);
+    dac(&mut e, 0x0F, 9);
+    dac(&mut e, 0x09, 0xC5);
+    vc3(&mut e, 0x1E, 4);
+    assert_eq!(notes(&mut e), 1);
+}
+
 #[test]
 fn the_vc3_display_control_register_is_there_to_ask() {
     let mut e = engine(|_| {});

@@ -1140,7 +1140,17 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
             }
             // The display bus is the board's own side bus: it answers at once, whatever the raster side is doing.
             display::DCB_FIRST..=display::DCB_LAST => {
-                let change = self.display.lock().write(off, bits, val);
+                let (change, unknown_clock) = {
+                    let mut d = self.display.lock();
+                    let before = d.timing().map(|t| t.1);
+                    let change = d.write(off, bits, val);
+                    let moved = d.timing().is_some_and(|t| Some(t.1) != before);
+                    (change, moved && d.dcb().dac.register(super::dcb::DAC_PLL_CONTROL) & 4 != 0)
+                };
+                if unknown_clock {
+                    // The timing files' rates fit bit 2 halving the clock, the data sheet's VSEL doubles it.
+                    self.sh.out.post(Event::Note("DAC PLL control bit 2 set: pixel clock unknown, period taken as bit 2 halving it".into()));
+                }
                 if change != Change::None {
                     self.sh.generation.fetch_add(1, Ordering::Release);
                     match change {
