@@ -31,6 +31,7 @@ CPU architecture: CP0, TLB and its fast paths, caches, FPU, LL/SC, CPU models. B
 | [cop0-requires-kernel-or-cu0.md](cpu/cop0-requires-kernel-or-cu0.md) | rule | CP0 instructions must be gated on Kernel-or-CU0 |
 | [cp0-index-masks-never-wraps.md](cpu/cp0-index-masks-never-wraps.md) | rule | CP0 `Index` selects a TLB slot by masking, never modulo |
 | [cp0-status-writes-must-resync-privilege-state.md](cpu/cp0-status-writes-must-resync-privilege-state.md) | rule | Every `cp0_status` write must call `resync_privilege_state()` |
+| [countdown-loops-retire-in-one-step.md](cpu/countdown-loops-retire-in-one-step.md) | design | The interpreter retires the passes of a one-register delay loop in one step: what a loop must leave alone, why Count and interrupts need nothing, and what it makes shorter (async devices, calibrating guests, jitv2 not covered) |
 | [cpu-count-is-wallclock-derived.md](cpu/cpu-count-is-wallclock-derived.md) | rule | CP0 Count is wallclock-derived, so Count tests flake |
 | [cpu-model-is-runtime-not-compile-time.md](cpu/cpu-model-is-runtime-not-compile-time.md) | design | The emulated CPU is a runtime flag now, not a cargo feature |
 | [decode-cache-index-must-survive-page-colouring.md](cpu/decode-cache-index-must-survive-page-colouring.md) | rule | Decode cache indexed by `pfn % 64` thrashed on the O2's coloured text pages; hash the page number. Also: O2 shadow model ran with an empty RAM bitmap in interpreter builds |

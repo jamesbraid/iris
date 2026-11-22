@@ -7,6 +7,7 @@ use crate::cpu::mips_tlb::*;
 use crate::cpu::mips_cache_v2::*;
 use crate::devlog::{LogModule, devlog_mask, devlog_is_active};
 use crate::cpu::mips_dis;
+use crate::cpu::countdown::{self, Test};
 use std::fmt::Write as FmtWrite;
 use crate::cpu::mips_dis::SymbolTable;
 use std::sync::Arc;
@@ -1113,6 +1114,9 @@ pub struct MipsExecutor<T: Tlb, C: CpuModel> {
     /// When true, the next call to step() skips all breakpoint checks.
     /// Cleared automatically after one step. Used to resume past a breakpoint.
     pub skip_breakpoints: bool,
+    /// Retire a recognised countdown loop in one step ([`Self::skip_countdown`]).
+    /// `IRIS_NO_COUNTDOWN_SKIP=1` turns it off.
+    pub countdown_skip: bool,
     /// When true, the next call to step() skips the pending-interrupt check.
     /// Cleared automatically after one step. Used by the debugger `s` command
     /// so single-stepping works inside an interrupt handler whose source is
@@ -1794,6 +1798,12 @@ pub static FETCH_VERIFY_CHECKS: std::sync::atomic::AtomicU64 = std::sync::atomic
 #[cfg(feature = "fetchverify")]
 pub static FETCH_VERIFY_MISMATCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+
+/// `IRIS_NO_COUNTDOWN_SKIP=1`, read once at executor construction.
+fn countdown_skip_env_default() -> bool {
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENV.get_or_init(|| !std::env::var("IRIS_NO_COUNTDOWN_SKIP").map(|v| v == "1").unwrap_or(false))
+}
 
 /// `fetchverify`: honour `IRIS_NO_FETCH_VERIFY=1` once, at executor
 /// construction, by clearing the per-core flag. Env-only; there is no runtime
@@ -2895,6 +2905,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             pc_bp_count: 0,
             mem_bp_count: 0,
             skip_breakpoints: false,
+            countdown_skip: countdown_skip_env_default(),
             #[cfg(feature = "developer")]
             skip_interrupts: false,
             ins: DecodedInstr::default(), // scratch slot for uncached fetches
@@ -6459,6 +6470,9 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         let rs_val = self.core.read_gpr(d.rs as u32);
         let rt_val = self.core.read_gpr(d.rt as u32);
         if rs_val != rt_val {
+            if self.countdown_skip && matches!(d.imm as i32, -8 | -4) && (d.rs == 0 || d.rt == 0) {
+                self.skip_countdown(Test::NonZero, (d.rs | d.rt) as u32, d.imm as i32);
+            }
             let target = self.core.pc.wrapping_add(4).wrapping_add(d.immu64());
             self.branch_delay(target)
         } else {
@@ -6472,6 +6486,9 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         let rs_val = self.core.read_gpr(d.rs as u32);
         let rt_val = self.core.read_gpr(d.rt as u32);
         if rs_val != rt_val {
+            if self.countdown_skip && d.imm as i32 == -8 && (d.rs == 0 || d.rt == 0) {
+                self.skip_countdown(Test::NonZero, (d.rs | d.rt) as u32, -8);
+            }
             let target = self.core.pc.wrapping_add(4).wrapping_add(d.immu64());
             if self.core.in_delay_slot {
                 return self.branch_delay(target);
@@ -6496,10 +6513,69 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         }
     }
 
+    /// From a taken branch of a counted delay loop (decrement before the
+    /// branch, `imm` -8, or in its slot, `imm` -4): retire all but its last
+    /// pass at once. See clanker/cpu/countdown-loops-retire-in-one-step.md.
+    #[inline(never)]
+    fn skip_countdown(&mut self, test: Test, reg: u32, imm: i32) {
+        #[cfg(not(feature = "lightning"))]
+        if self.pc_bp_count != 0 {
+            return;
+        }
+        if reg == 0 || self.core.in_delay_slot {
+            return;
+        }
+        let x = self.core.read_gpr(reg) as i64;
+        let pc = self.core.pc;
+        // Uncached code runs from `self.ins`, which a peek overwrites.
+        let saved = (self.ins.handler, self.ins.imm, self.ins.raw, self.ins.flags);
+        let (k, per_pass) = match imm {
+            -8 => match (self.debug_fetch_instr(pc.wrapping_add(4)), self.debug_fetch_instr(pc.wrapping_sub(4))) {
+                (Ok(0), Ok(prev)) => match countdown::decrement(prev) {
+                    Some((r, k)) if r == reg => (k, 3),
+                    _ => (0, 0),
+                },
+                _ => (0, 0),
+            },
+            _ => match self.debug_fetch_instr(pc.wrapping_add(4)) {
+                Ok(slot) => match countdown::decrement(slot) {
+                    Some((r, k)) if r == reg => (k, 2),
+                    _ => (0, 0),
+                },
+                _ => (0, 0),
+            },
+        };
+        (self.ins.handler, self.ins.imm, self.ins.raw, self.ins.flags) = saved;
+        if k == 0 {
+            return;
+        }
+        let Some(passes) = countdown::passes_left(test, x, k) else { return };
+        // `ci_clock` raises Compare at a cycle count: stop short of it.
+        #[cfg(feature = "ci_clock")]
+        let passes = {
+            let room = self.core.count_fire_cycle.saturating_sub(self.core.hot.cycles).saturating_sub(1);
+            passes.min(room / per_pass)
+        };
+        if passes < countdown::MIN_PASSES {
+            return;
+        }
+        self.core.write_gpr(reg, (x - (passes * k as u64) as i64) as u64);
+        let cycles = passes * per_pass;
+        // Not host time: keep them out of the status bars' MIPS, as a park's.
+        unsafe {
+            let p = &mut self.core.hot.cycles as *mut u64;
+            std::ptr::write_volatile(p, std::ptr::read_volatile(p).wrapping_add(cycles));
+        }
+        self.core.hot.parked_cycles = self.core.hot.parked_cycles.wrapping_add(cycles);
+    }
+
     // BGTZ - Branch on Greater Than Zero
     fn exec_bgtz(&mut self, d: &DecodedInstr) -> ExecStatus {
         let rs_val = self.core.read_gpr(d.rs as u32) as i64;
         if rs_val > 0 {
+            if self.countdown_skip && matches!(d.imm as i32, -8 | -4) {
+                self.skip_countdown(Test::Positive, d.rs as u32, d.imm as i32);
+            }
             let target = self.core.pc.wrapping_add(4).wrapping_add(d.immu64());
             self.branch_delay(target)
         } else {

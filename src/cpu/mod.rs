@@ -12,6 +12,7 @@ pub mod mips_cache_shadow;
 mod cache_models_tests;
 pub mod build;
 pub mod parts;
+pub mod countdown;
 pub mod decode_cache;
 pub mod mips_exec;
 pub mod cpu_monitor;

@@ -831,6 +831,7 @@ mistaken for GUI settings.
 | `IRIS_MGRAS_REC` | Record IMPACT bus operations from power-on to this path. | [src/dev/mgras/mod.rs](src/dev/mgras/mod.rs) |
 | `IRIS_MGRAS_TRACE` | Trace IMPACT accesses from power-on to this path (`gputrace` builds). | [src/dev/mgras/mod.rs](src/dev/mgras/mod.rs) |
 | `IRIS_NO_EXIT_ON_POWEROFF` | Any presence prevents process exit on guest power-off/CI quit; set by GUI. | [src/ci.rs](src/ci.rs) |
+| `IRIS_NO_COUNTDOWN_SKIP` | 1 runs counted delay loops (`addiu r,r,-k` and a branch on `r`) pass by pass instead of retiring their passes in one step. | [src/cpu/countdown.rs](src/cpu/countdown.rs) |
 | `IRIS_NO_FETCH_VERIFY` | 1 suppresses fetchverify checks in a fetchverify build. | [src/cpu/mips_exec.rs](src/cpu/mips_exec.rs) |
 | `IRIS_NO_IDLE` | Any presence disables idle parking at startup (`idle-pause` builds); `idle on` re-enables it. | [src/cpu/idle_park.rs](src/cpu/idle_park.rs) |
 | `IRIS_NO_INLINE_MEM` | Any presence disables JIT inline memory emission. | [src/cpu/jitv2/codegen.rs](src/cpu/jitv2/codegen.rs) |

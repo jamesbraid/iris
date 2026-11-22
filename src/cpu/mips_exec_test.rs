@@ -8495,4 +8495,177 @@ mod tests {
             check::<crate::cpu::mips_cache_shadow::R16000ShadowCache>(true);
         });
     }
+
+    // ---- counted delay loops (see countdown.rs) ----
+
+    const LOOP_PC: u64 = 0xFFFF_FFFF_8000_1000;
+    const V0: u32 = 2;
+    const T0: u32 = 8;
+    const T1: u32 = 9;
+
+    type LoopExec = MipsExecutor<PassthroughTlb, PassthroughCache>;
+
+    /// The four shapes of a one-register countdown by `k`, each followed by
+    /// an `ori` marker, with the marker's address: where the run stops.
+    fn countdown_loops(k: i16) -> Vec<(&'static str, Vec<u32>, u64)> {
+        let dec = make_i(OP_ADDIU, V0, V0, (-k) as u16);
+        let marker = make_i(OP_ORI, 0, T0, 0x77);
+        let back2 = (-2i16) as u16;
+        let back1 = (-1i16) as u16;
+        vec![
+            ("addiu, bgtz, nop", vec![dec, make_i(OP_BGTZ, V0, 0, back2), 0, marker], LOOP_PC + 12),
+            ("addiu, bne, nop", vec![dec, make_i(OP_BNE, V0, 0, back2), 0, marker], LOOP_PC + 12),
+            ("bgtz self, addiu in the slot", vec![make_i(OP_BGTZ, V0, 0, back1), dec, marker], LOOP_PC + 8),
+            ("bne self, addiu in the slot", vec![make_i(OP_BNE, V0, 0, back1), dec, marker], LOOP_PC + 8),
+        ]
+    }
+
+    fn loop_executor(words: &[u32], n: u64, skip: bool) -> (LoopExec, Arc<MockMemory>) {
+        let (mut exec, mem) = create_executor();
+        for (i, w) in words.iter().enumerate() {
+            mem.set_word((LOOP_PC & 0x1FFF_FFFF) + 4 * i as u64, *w);
+        }
+        exec.core.pc = LOOP_PC;
+        exec.core.write_gpr(V0, n);
+        exec.countdown_skip = skip;
+        (exec, mem)
+    }
+
+    /// Step until the PC reaches `done`; returns the `step_int` calls.
+    fn run_to(exec: &mut LoopExec, done: u64) -> u64 {
+        let mut steps = 0;
+        while exec.core.pc != done || exec.core.in_delay_slot {
+            assert_eq!(exec.step_int(), EXEC_COMPLETE);
+            steps += 1;
+            assert!(steps < 5_000_000, "loop did not end");
+        }
+        steps
+    }
+
+    fn state(exec: &LoopExec) -> (Vec<u64>, u64, bool, u64) {
+        let gprs = (0..32).map(|r| exec.core.read_gpr(r)).collect();
+        (gprs, exec.core.pc, exec.core.in_delay_slot, exec.core.hot.cycles)
+    }
+
+    /// A skipped countdown ends in the registers, PC and cycle count the
+    /// loop run pass by pass ends in, for every shape and several counters
+    /// and steps, in far fewer steps.
+    #[test]
+    fn a_countdown_loop_retires_in_one_step_with_the_same_result() {
+        for k in [1i16, 3] {
+            for n in [1u64, 2, 31, 33, 100, 1000, 99_999, 100_000] {
+                for (name, words, done) in countdown_loops(k) {
+                    // `bne` ends at zero only from a multiple of the step.
+                    let n = if name.contains("bne") { n - n % k as u64 } else { n };
+                    if n == 0 {
+                        continue;
+                    }
+                    let (mut slow, _m) = loop_executor(&words, n, false);
+                    let slow_steps = run_to(&mut slow, done);
+                    let (mut fast, _m2) = loop_executor(&words, n, true);
+                    let fast_steps = run_to(&mut fast, done);
+                    assert_eq!(state(&fast), state(&slow), "{name} k={k} n={n}");
+                    if n > 200 {
+                        assert!(fast_steps < 50, "{name} k={k} n={n}: {fast_steps} steps");
+                    } else if n < 30 {
+                        assert_eq!(fast_steps, slow_steps, "{name} k={k} n={n}: short loops run as written");
+                    }
+                    assert_eq!(slow_steps, slow.core.hot.cycles, "one cycle per step");
+                }
+            }
+        }
+    }
+
+    /// Where a skip leaves the guest is a state the loop passes through, with
+    /// the same counter and cycle count at the same delay slot, so an
+    /// interrupt taken there returns into the loop and ends as it would.
+    #[test]
+    fn an_interrupt_taken_after_a_skip_returns_into_the_loop_and_ends_the_same() {
+        use crate::cpu::mips_core::{STATUS_IE, STATUS_EXL, STATUS_IM_SHIFT, CAUSE_BD};
+        use std::sync::atomic::Ordering;
+        const IP2: u64 = 1 << 10;
+        for (name, words, done) in countdown_loops(1) {
+            let (mut fast, mem) = loop_executor(&words, 5000, true);
+            // The skip happens at the first taken branch: step to its slot.
+            while !fast.core.in_delay_slot {
+                assert_eq!(fast.step_int(), EXEC_COMPLETE);
+            }
+            let skipped_to = fast.core.read_gpr(V0);
+            assert!(skipped_to < 100, "{name}: left {skipped_to}");
+            let slot_pc = fast.core.pc;
+            let branch_pc = slot_pc - 4;
+
+            // The loop without the skip, run to the same counter at the same slot.
+            let (mut slow, slow_mem) = loop_executor(&words, 5000, false);
+            while !(slow.core.in_delay_slot && slow.core.pc == slot_pc && slow.core.read_gpr(V0) == skipped_to) {
+                assert_eq!(slow.step_int(), EXEC_COMPLETE);
+            }
+            assert_eq!(state(&fast), state(&slow), "{name}: the skip lands on a state the loop reaches");
+
+            // Interrupt both there; the handler is one ERET.
+            mem.set_word(0x180, 0x4200_0018);
+            slow_mem.set_word(0x180, 0x4200_0018);
+            let mut ends = Vec::new();
+            for exec in [&mut fast, &mut slow] {
+                exec.core.cp0_status = STATUS_IE | (1 << (STATUS_IM_SHIFT + 2));
+                exec.core.hot.interrupts.fetch_or(IP2, Ordering::SeqCst);
+                exec.step_int();
+                assert_ne!(exec.core.cp0_status & STATUS_EXL, 0, "{name}: interrupt not taken");
+                assert_eq!(exec.core.cp0_epc, branch_pc, "{name}");
+                assert_ne!(exec.core.cp0_cause & CAUSE_BD, 0, "{name}");
+                exec.core.hot.interrupts.fetch_and(!IP2, Ordering::SeqCst);
+                exec.core.cp0_cause &= !(IP2 as u32);
+                run_to(exec, done);
+                ends.push(state(exec));
+            }
+            assert_eq!(ends[0], ends[1], "{name}: after the interrupt");
+        }
+    }
+
+    /// Under `ci_clock` the Compare interrupt is due at a cycle count, so a
+    /// skip stops short of it and the interrupt rises on the same instruction.
+    #[cfg(feature = "ci_clock")]
+    #[test]
+    fn ci_clock_a_skip_stops_short_of_the_compare_deadline() {
+        use crate::cpu::mips_core::{STATUS_EXL, STATUS_IE, STATUS_IM_SHIFT};
+        for (name, words, _) in countdown_loops(1) {
+            let mut seen = Vec::new();
+            for skip in [false, true] {
+                let (mut exec, _m) = loop_executor(&words, 5000, skip);
+                exec.core.cp0_status = STATUS_IE | (1 << (STATUS_IM_SHIFT + 7));
+                exec.core.count_fire_cycle = 1001;
+                while exec.core.cp0_status & STATUS_EXL == 0 {
+                    exec.step_int();
+                }
+                seen.push(state(&exec));
+            }
+            assert_eq!(seen[0], seen[1], "{name}: the timer interrupt was taken at a different point");
+        }
+    }
+
+    /// A loop whose delay slot does work, or that runs under a breakpoint,
+    /// is not skipped.
+    #[test]
+    fn loops_that_do_more_than_count_are_not_skipped() {
+        let marker = make_i(OP_ORI, 0, T0, 0x77);
+        let back2 = (-2i16) as u16;
+        let counts_in_the_slot = vec![
+            make_i(OP_ADDIU, V0, V0, 0xffff),
+            make_i(OP_BGTZ, V0, 0, back2),
+            make_i(OP_ADDIU, T1, T1, 1),
+            marker,
+        ];
+        let (mut exec, _m) = loop_executor(&counts_in_the_slot, 1000, true);
+        let steps = run_to(&mut exec, LOOP_PC + 12);
+        assert_eq!(exec.core.read_gpr(T1), 1000, "the slot ran once a pass");
+        assert_eq!(steps, 3 * 1000);
+
+        #[cfg(not(feature = "lightning"))]
+        {
+            let (_, words, done) = countdown_loops(1).remove(0);
+            let (mut exec, _m) = loop_executor(&words, 1000, true);
+            exec.pc_bp_count = 1;
+            assert_eq!(run_to(&mut exec, done), 3 * 1000, "a breakpoint keeps the loop running as written");
+        }
+    }
 }
