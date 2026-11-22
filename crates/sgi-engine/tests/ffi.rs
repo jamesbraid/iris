@@ -549,3 +549,15 @@ fn a_c_shell_reads_each_swap_as_an_event_and_the_drop_counter() {
     assert_eq!(unsafe { iris_engine_swaps_dropped(h) }, 0);
     assert_eq!(unsafe { iris_engine_swaps_dropped(null_mut()) }, 0);
 }
+
+#[test]
+fn events_pending_follows_the_outbox() {
+    let f = Fixture::new(false);
+    let h = f.h;
+    assert_eq!(unsafe { iris_engine_events_pending(h) }, 0);
+    wr(h, reg::IRQ_SET, 1);
+    assert_eq!(unsafe { iris_engine_events_pending(h) }, 1);
+    assert!(!events(h, 16).is_empty());
+    assert_eq!(unsafe { iris_engine_events_pending(h) }, 0);
+    assert_eq!(unsafe { iris_engine_events_pending(null_mut()) }, 1, "a NULL handle says events may wait");
+}

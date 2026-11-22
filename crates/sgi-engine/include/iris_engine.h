@@ -11,7 +11,8 @@
  * thread) is refused without touching the engine: it answers as a fault
  * does (IRIS_ENGINE_FAULT, or 0 or NULL) and the device is not faulted by
  * it. Callbacks must not call any iris_engine_ or board function. Guard the
- * device's own MMIO region against DMA with MemReentrancyGuard.
+ * device's own MMIO region against DMA with MemReentrancyGuard. Only
+ * iris_engine_events_pending may run beside another call.
  *
  * NEVER WAITS ON THE SHELL. No call waits for an input only the shell can
  * give. An engine whose stream holds for a frame or a time says so
@@ -304,6 +305,13 @@ uint64_t iris_engine_busy_ns(IrisEngine *h);
 
 /* Swap events dropped for want of room in the outbox: 0 for a board that posts none. */
 uint64_t iris_engine_swaps_dropped(IrisEngine *h);
+
+/*
+ * Whether events wait in the outbox: 1 if they do, or if the board cannot
+ * say (so 1 for NULL). It calls nothing in the engine, so any thread may
+ * ask it while another call runs.
+ */
+uint32_t iris_engine_events_pending(IrisEngine *h);
 
 /* The bits a colour that head's hardware output carries: 8 unless the board's maps and DAC keep more (VPro and MGRAS
  * 10; a KONA GVO channel 10, a KONA monitor channel 8). Above 8, iris_engine_scanout10 gives real extra bits. */

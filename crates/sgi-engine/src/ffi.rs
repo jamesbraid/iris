@@ -17,6 +17,7 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::mem::{size_of, MaybeUninit};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 
@@ -255,6 +256,8 @@ struct State {
 /// The opaque handle.
 pub struct IrisEngine {
     busy: AtomicBool,
+    /// The outbox's "events wait" flag, outside `state` so a reader needs no call into the engine.
+    waiting: Option<Arc<AtomicBool>>,
     state: UnsafeCell<State>,
 }
 
@@ -456,7 +459,7 @@ pub fn build<E: BoardEngine + Send + 'static>(f: impl FnOnce() -> Option<E>) -> 
         hit(Point::New);
         f()
     })) {
-        Ok(Some(e)) => Box::into_raw(Box::new(IrisEngine { busy: AtomicBool::new(false), state: UnsafeCell::new(State { eng: Box::new(e), fault: None, error: None, dirty: Vec::new() }) })),
+        Ok(Some(e)) => Box::into_raw(Box::new(IrisEngine { busy: AtomicBool::new(false), waiting: e.events_waiting(), state: UnsafeCell::new(State { eng: Box::new(e), fault: None, error: None, dirty: Vec::new() }) })),
         Ok(None) => std::ptr::null_mut(),
         Err(p) => {
             log::error!("engine construction panicked: {}", panic_text(&*p));
@@ -728,6 +731,20 @@ pub unsafe extern "C" fn iris_engine_busy_ns(h: *mut IrisEngine) -> u64 {
 #[no_mangle]
 pub unsafe extern "C" fn iris_engine_swaps_dropped(h: *mut IrisEngine) -> u64 {
     guard(h, Point::Flags, 0, |s| s.eng.swaps_dropped())
+}
+
+/// Whether events wait in the outbox: 1 if they do, or if the board cannot say. Makes no call into the engine,
+/// so it may run on any thread while another call is running, and a NULL handle answers 1.
+///
+/// # Safety
+/// `h` is NULL or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn iris_engine_events_pending(h: *mut IrisEngine) -> u32 {
+    // SAFETY: only the shared part is read; `state` is not touched.
+    match unsafe { h.as_ref() }.and_then(|h| h.waiting.as_ref()) {
+        Some(w) => w.load(Ordering::Acquire) as u32,
+        None => 1,
+    }
 }
 
 /// The bits a colour that head `head`'s hardware output carries (8 unless the board keeps more).
