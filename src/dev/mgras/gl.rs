@@ -669,6 +669,15 @@ pub struct Gl {
     q: query::Query,
 }
 
+/// `words` as big-endian bytes.
+fn be_bytes(words: &[u32]) -> Vec<u8> {
+    let mut bytes = vec![0u8; words.len() * 4];
+    for (b, w) in bytes.chunks_exact_mut(4).zip(words) {
+        b.copy_from_slice(&w.to_be_bytes());
+    }
+    bytes
+}
+
 impl Gl {
     /// The state that places drawing (window, buffers, viewport, scissor),
     /// for the monitor.
@@ -2120,7 +2129,7 @@ impl Gl {
             return None;
         }
         let out_comps = super::rss::xfer_comps(self.xfrmode);
-        let bytes: Vec<u8> = words.iter().flat_map(|x| x.to_be_bytes()).collect();
+        let bytes = be_bytes(words);
         let fit = if rows == h { wpr * 4 } else { bytes.len() / h };
         let (comps, esize, _) = self.pix.input_shape_fit(out_comps, Some((fit, w)));
         let row_in = if esize == 0 { (w * comps).div_ceil(8) } else { w * comps * esize };
@@ -2147,7 +2156,7 @@ impl Gl {
                 super::rss::pack_comp(ty, v, &mut rb);
             }
             rb.resize(wpr_out * 4, 0);
-            out.extend(rb.chunks(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])));
+            out.extend(rb.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])));
         }
         Some((out, wpr_out, h))
     }
