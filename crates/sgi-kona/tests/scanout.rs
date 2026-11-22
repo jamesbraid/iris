@@ -2,7 +2,7 @@
 
 use parking_lot::Mutex;
 use std::sync::Arc;
-use sgi_engine::{BoardEngine, HostMem, MemFault, Source, Swap, Write};
+use sgi_engine::{BoardEngine, Chunk, HostMem, MemFault, Source, Swap, VecSource, Write};
 use sgi_kona::dev::kona::back::gl::{class, Class};
 use sgi_kona::dev::kona::back::display::dac_cursor::{DacCursor, WORDS};
 use sgi_kona::dev::kona::back::display::tables::Tables;
@@ -10,7 +10,7 @@ use sgi_kona::dev::kona::back::display::{ColourMap, Pixels};
 use sgi_kona::dev::kona::back::store::layout::MAIN_COLOUR_WORD;
 use sgi_kona::dev::kona::back::store::{Store, StoreOp, DID_PLANE};
 use sgi_kona::dev::kona::defs::*;
-use sgi_kona::dev::kona::engine::{head_rows, KonaEngine, Options};
+use sgi_kona::dev::kona::engine::{head_rows, KonaEngine, Options, Scan};
 use sgi_kona::dev::kona::ident::KonaConfig;
 use sgi_kona::dev::kona::job::{ContextEvent, Grammar, Job};
 use sgi_kona::dev::kona::rig::Rig;
@@ -379,3 +379,133 @@ fn a_buffer_that_cannot_hold_the_window_is_refused() {
     let pixels = patterned();
     pixels.window_rows((0, 0, W, H), 0..H as usize, false, &mut vec![0; 10], &mut Vec::new());
 }
+
+// ---- rows without the engine's handle ----
+
+/// The textport's colour 9 made red, then a box of it from (2, 3) to (20, 21).
+fn draw_box(e: &mut Engine) {
+    for w in [1, 3, 9, 0x3ff, 0, 0, 1, 2, 9, 1, 5, 2, 3, 20, 21] {
+        store(e, COMMAND_PAGE, w);
+    }
+}
+
+#[test]
+fn a_scan_source_composes_the_rows_scanout_does_for_each_head() {
+    let mut e = two_heads();
+    draw_box(&mut e);
+    let src = e.scan_source().expect("a source");
+    for (head, (w, h)) in [(0, (1280, 1024)), (1, (640, 480))] {
+        let mut whole = Vec::new();
+        assert_eq!(BoardEngine::scanout(&mut e, head, &mut whole), Ok(Some((w, h))));
+        assert!(whole.iter().any(|&p| p != 0), "something is drawn");
+        let mut out = vec![0xdead_beef; (w * h) as usize];
+        assert_eq!(src.rows(head, 0, h as usize, &mut out), Ok(Scan::Done(w, h)));
+        assert_eq!(out, whole, "head {head}");
+        // Some rows: only those are written.
+        let mut part = vec![0xdead_beef; (w * h) as usize];
+        assert_eq!(src.rows(head, 10, 12, &mut part), Ok(Scan::Done(w, h)));
+        let (a, b) = (10 * w as usize, 12 * w as usize);
+        assert_eq!(part[a..b], whole[a..b]);
+        assert!(part[..a].iter().chain(&part[b..]).all(|&p| p == 0xdead_beef));
+    }
+}
+
+#[test]
+fn a_scan_source_says_when_the_buffer_is_short_and_when_a_head_has_no_picture() {
+    let mut e = two_heads();
+    let src = e.scan_source().unwrap();
+    assert_eq!(src.rows(1, 0, 480, &mut vec![0; 640 * 480 - 1]), Ok(Scan::Short(640, 480)));
+    assert_eq!(src.rows(2, 0, 10, &mut []), Ok(Scan::Done(0, 0)), "no such head");
+}
+
+/// The source is what the heads showed when it was made; a blanked head is black.
+#[test]
+fn a_scan_source_keeps_the_heads_it_was_made_for() {
+    let mut e = two_heads();
+    draw_box(&mut e);
+    let src = e.scan_source().unwrap();
+    video(&mut e, VIDEO_DISABLE_CHANNEL, &[1]);
+    assert_eq!(e.heads(), 1);
+    let mut out = vec![0; 640 * 480];
+    assert_eq!(src.rows(1, 0, 480, &mut out), Ok(Scan::Done(640, 480)), "the head it saw");
+    assert_eq!(e.take_damage(0), Some((0, 1024)), "and the change is damage for the next look");
+}
+
+/// Another thread composes while this one calls the engine.
+#[test]
+fn rows_compose_on_another_thread_beside_the_engines_calls() {
+    let mut e = two_heads();
+    draw_box(&mut e);
+    let mut whole = Vec::new();
+    BoardEngine::scanout(&mut e, 0, &mut whole).unwrap();
+    let src = e.scan_source().unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let composer = s.spawn(|| {
+            let mut out = vec![0; 1280 * 1024];
+            let mut n = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) || n == 0 {
+                assert_eq!(src.rows(0, 0, 1024, &mut out), Ok(Scan::Done(1280, 1024)));
+                assert_eq!(out, whole, "the picture does not change under the engine's own writes");
+                n += 1;
+            }
+        });
+        for i in 0..200 {
+            store(&mut e, COMMAND_PAGE, 0);
+            let _ = e.read(0x800208, 32);
+            e.take_damage(i % 2);
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        composer.join().unwrap();
+    });
+}
+
+/// Save, load and reset take the engine's locks while another thread composes: a deadlock hangs this test until
+/// the watchdog aborts the process. The compose takes its band, then the colour map and the tables one at a
+/// time; nothing takes them in another order.
+#[test]
+fn save_load_and_reset_do_not_deadlock_against_a_composing_thread() {
+    let mut e = two_heads();
+    draw_box(&mut e);
+    let src = e.scan_source().unwrap();
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let mut last = (0, std::time::Instant::now());
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let n = PROGRESS.load(std::sync::atomic::Ordering::Relaxed);
+                if n != last.0 {
+                    last = (n, std::time::Instant::now());
+                } else if last.1.elapsed() > std::time::Duration::from_secs(20) {
+                    eprintln!("no progress in 20 s: deadlock");
+                    std::process::abort();
+                }
+            }
+        });
+        let composer = s.spawn(|| {
+            let mut out = vec![0; 1280 * 1024];
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = src.rows(0, 0, 1024, &mut out);
+                COMPOSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        for i in 0..100 {
+            e.quiesce(u64::MAX).unwrap();
+            let mut chunks: Vec<Chunk> = Vec::new();
+            e.save(&mut chunks).unwrap();
+            e.load(&mut VecSource::new(chunks)).unwrap();
+            if i % 10 == 0 {
+                e.reset().unwrap();
+            }
+            e.resume();
+            PROGRESS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        composer.join().unwrap();
+    });
+    assert!(COMPOSED.load(std::sync::atomic::Ordering::Relaxed) > 0, "the composing thread ran");
+}
+
+static PROGRESS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static COMPOSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

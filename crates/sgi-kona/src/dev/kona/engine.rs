@@ -211,6 +211,56 @@ pub fn head_rows((first, end): (usize, usize), y: u32, h: u32) -> Option<(u32, u
     (lo < hi).then(|| ((lo - y as usize) as u32, (hi - y as usize) as u32))
 }
 
+/// A head's window and blanking as they were when its `ScanSource` was made.
+#[derive(Clone, Copy)]
+struct HeadView {
+    window: (u32, u32, u32, u32),
+    blanked: bool,
+}
+
+/// The head's size, and whether `rows` composed (`Short`: the buffer was too small).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scan {
+    Done(u32, u32),
+    Short(u32, u32),
+}
+
+/// The heads' pictures without the engine's handle (`sgi_kona.h`): any thread may call `rows`. Lock order: `band`,
+/// then the colour map and the tables, one at a time; nothing takes `band` while it holds either.
+pub struct ScanSource {
+    pixels: super::back::display::Pixels,
+    band: Arc<Mutex<Vec<u32>>>,
+    heads: Vec<Option<HeadView>>,
+    fault: Arc<Mutex<Option<String>>>,
+    events: Arc<Events>,
+}
+
+impl ScanSource {
+    /// Rows `first..end` (clamped) of head `head`'s picture into `out`, as `0x00RRGGBB` at the head's width a row
+    /// from its first; the other words are left alone. A head with no picture is `Done(0, 0)`.
+    pub fn rows(&self, head: u32, first: usize, end: usize, out: &mut [u32]) -> Result<Scan, Fault> {
+        if let Some(f) = self.fault.lock().clone() {
+            return Err(Fault(f));
+        }
+        let Some(Some(view)) = self.heads.get(head as usize) else { return Ok(Scan::Done(0, 0)) };
+        let (_, _, w, h) = view.window;
+        if out.len() < w as usize * h as usize {
+            return Ok(Scan::Short(w, h));
+        }
+        self.pixels.window_rows(view.window, first..end, view.blanked, out, &mut self.band.lock());
+        Ok(Scan::Done(w, h))
+    }
+
+    /// Stop the engine with `why`: a panic in a call.
+    pub fn fail(&self, why: &str) {
+        let mut f = self.fault.lock();
+        if f.is_none() {
+            *f = Some(why.to_string());
+            self.events.out.post(Event::DeviceFault(why.to_string()));
+        }
+    }
+}
+
 pub struct KonaEngine<M: HostMem> {
     host: Arc<Host>,
     core: Core,
@@ -708,6 +758,17 @@ impl<M: HostMem> KonaEngine<M> {
         let (_, y, _, h) = self.head_window(head)?;
         let hull = self.damage.get_mut(head as usize)?.take()?;
         head_rows(hull, y, h)
+    }
+
+    /// The heads as they are now, for composing rows from any thread. None for an engine that has faulted.
+    pub fn scan_source(&mut self) -> Option<ScanSource> {
+        if self.dead() {
+            return None;
+        }
+        let heads = (0..self.heads())
+            .map(|head| self.head_window(head).filter(|&w| self.window_fits(w)).map(|window| HeadView { window, blanked: self.head_blanked(head) }))
+            .collect();
+        Some(ScanSource { pixels: self.pixels.clone(), band: self.band.clone(), heads, fault: self.fault.clone(), events: self.events.clone() })
     }
 
     /// The sections of the last completed firmware load.
