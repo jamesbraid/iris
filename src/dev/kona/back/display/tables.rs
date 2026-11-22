@@ -621,8 +621,13 @@ impl Baked {
 
     /// Draw the DAC cursor over the composed frame, as `draw_cursor` does the XMAP's.
     pub fn draw_dac_cursor(&self, out: &mut [u32], stride: usize, w: usize, h: usize) {
+        self.draw_dac_cursor_rows(out, stride, w, 0..h)
+    }
+
+    /// As `draw_dac_cursor` for the frame rows `rows`, which `out` holds from its first.
+    pub fn draw_dac_cursor_rows(&self, out: &mut [u32], stride: usize, w: usize, rows: std::ops::Range<usize>) {
         if let Some(d) = &self.dac_cursor {
-            d.draw(out, stride, w, h);
+            d.draw_rows(out, stride, w, rows);
         }
     }
 
@@ -756,10 +761,15 @@ impl Baked {
     /// disagree about transparency. The crosshair (mode 1) is not drawn. The DAC
     /// cursor is drawn by `draw_dac_cursor`.
     pub fn draw_cursor(&self, out: &mut [u32], stride: usize, w: usize, h: usize) {
+        self.draw_cursor_rows(out, stride, w, 0..h)
+    }
+
+    /// As `draw_cursor` for the frame rows `rows`, which `out` holds from its first.
+    pub fn draw_cursor_rows(&self, out: &mut [u32], stride: usize, w: usize, rows: std::ops::Range<usize>) {
         let Some(c) = &self.cursor else { return };
         for r in 0..64usize {
             let y = c.y0 + r as i64;
-            if y < 0 || y >= h as i64 {
+            if y < rows.start as i64 || y >= rows.end as i64 {
                 continue;
             }
             let row = &c.rows[4 * r..4 * r + 4];
@@ -775,7 +785,7 @@ impl Baked {
                     (0, 1) => c.bg,
                     _ => c.third,
                 };
-                out[y as usize * stride + x as usize] = px;
+                out[(y as usize - rows.start) * stride + x as usize] = px;
             }
         }
     }
