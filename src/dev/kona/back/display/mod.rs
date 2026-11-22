@@ -408,6 +408,11 @@ impl Pixels {
         frame
     }
 
+    /// The display rows, `first..end` from the top, that may have changed since the last call, as their hull.
+    pub fn take_damage(&self) -> Option<(usize, usize)> {
+        self.store.cpu().take_damage()
+    }
+
     /// The frame written as a PNG.
     fn shot(&self, path: &str) -> Result<(usize, usize), String> {
         let (w, h) = (self.store.cpu().width() as usize, self.store.cpu().height() as usize);

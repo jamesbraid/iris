@@ -205,6 +205,12 @@ struct Meta {
     bulk: Layout,
 }
 
+/// The managed rows `first..end` a head whose window is `h` rows from row `y` shows, as its own rows.
+pub fn head_rows((first, end): (usize, usize), y: u32, h: u32) -> Option<(u32, u32)> {
+    let (lo, hi) = (first.max(y as usize), end.min((y + h) as usize));
+    (lo < hi).then(|| ((lo - y as usize) as u32, (hi - y as usize) as u32))
+}
+
 pub struct KonaEngine<M: HostMem> {
     host: Arc<Host>,
     core: Core,
@@ -214,6 +220,8 @@ pub struct KonaEngine<M: HostMem> {
     events: Arc<Events>,
     credits: Credits,
     pixels: super::back::display::Pixels,
+    /// Per head, the managed rows that changed since the shell last asked, as a hull.
+    damage: Vec<Option<(usize, usize)>>,
     source: Source,
     parked: bool,
     fault: Arc<Mutex<Option<String>>>,
@@ -249,6 +257,7 @@ impl<M: HostMem> KonaEngine<M> {
             events,
             credits: Credits::default(),
             pixels,
+            damage: vec![None; super::back::display::channels::CHANNELS],
             source: Source::default(),
             parked: false,
             fault: Arc::new(Mutex::new(None)),
@@ -674,6 +683,19 @@ impl<M: HostMem> KonaEngine<M> {
         self.host.front.lock().link_reset();
         self.activity += 1;
         self.report_widget();
+    }
+
+    /// The rows `first..end` of head `head`'s picture that may have changed since the last call for it: the rows
+    /// the tiles drew, or all of them for anything else that can change the picture.
+    pub fn take_damage(&mut self, head: u32) -> Option<(u32, u32)> {
+        if let Some((lo, hi)) = self.pixels.take_damage() {
+            for d in &mut self.damage {
+                *d = Some(d.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+            }
+        }
+        let (_, y, _, h) = self.head_window(head)?;
+        let hull = self.damage.get_mut(head as usize)?.take()?;
+        head_rows(hull, y, h)
     }
 
     /// The sections of the last completed firmware load.

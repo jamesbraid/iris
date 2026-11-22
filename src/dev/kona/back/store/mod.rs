@@ -45,7 +45,7 @@ pub use seam::{Drained, Store, StoreOp};
 
 use std::alloc::{alloc_zeroed, dealloc, Layout as MemLayout};
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering::{AcqRel, Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering::{AcqRel, Acquire, Relaxed, Release}};
 
 /// Words in a pixel's record: the largest class.
 pub const MAX_WORDS: usize = 64;
@@ -128,6 +128,10 @@ pub struct PixelStore {
     /// raw word arrays, so it cannot tell a write from a read: whoever finishes
     /// a piece of drawing says so with `touch`.
     touched: AtomicBool,
+    /// What may have changed since `take_damage` (everything, or the display rows, from the top, whose bit is up):
+    /// the shell's scan-out reads it, `touched` is the display thread's.
+    damage_all: AtomicBool,
+    damage_rows: Box<[AtomicU64]>,
 }
 
 impl PixelStore {
@@ -140,7 +144,7 @@ impl PixelStore {
 
     /// A store whose texture memory is `tex`: a product's own size.
     pub fn with_texture(width: u32, height: u32, tex: texture::TextureStore) -> PixelStore {
-        PixelStore { width: width as usize, height: height as usize, slots: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())), tex, touched: AtomicBool::new(true) }
+        PixelStore { width: width as usize, height: height as usize, slots: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())), tex, touched: AtomicBool::new(true), damage_all: AtomicBool::new(true), damage_rows: (0..height.div_ceil(64)).map(|_| AtomicU64::new(0)).collect() }
     }
 
     /// Say the pixels changed, after the writes: a frame started from now on
@@ -149,7 +153,40 @@ impl PixelStore {
     /// otherwise lose them.
     #[inline]
     pub fn touch(&self) {
+        self.damage_all.store(true, Release);
         self.touched.store(true, Release);
+    }
+
+    /// As `touch` for a write that reached the store rows `y0..y1` alone (rows count up from the bottom).
+    #[inline]
+    pub fn touch_rows(&self, y0: i32, y1: i32) {
+        let (y0, y1) = ((y0.max(0) as usize).min(self.height), (y1.max(0) as usize).min(self.height));
+        let (first, end) = (self.height - y1.max(y0), self.height - y0);
+        // One fetch_or a word of 64 rows: workers share these words.
+        for word in first / 64..end.div_ceil(64) {
+            let (lo, hi) = (first.max(word * 64) - word * 64, end.min(word * 64 + 64) - word * 64);
+            let bits = if hi - lo == 64 { !0 } else { ((1u64 << (hi - lo)) - 1) << lo };
+            self.damage_rows[word].fetch_or(bits, Release);
+        }
+        self.touched.store(true, Release);
+    }
+
+    /// The hull of the display rows, `first..end` from the top, marked since the last call, which clears them.
+    pub fn take_damage(&self) -> Option<(usize, usize)> {
+        let all = self.damage_all.swap(false, AcqRel);
+        let (mut lo, mut hi) = (usize::MAX, 0);
+        for (i, word) in self.damage_rows.iter().enumerate() {
+            let bits = word.swap(0, AcqRel);
+            if bits != 0 {
+                lo = lo.min(i * 64 + bits.trailing_zeros() as usize);
+                hi = hi.max(i * 64 + 64 - bits.leading_zeros() as usize);
+            }
+        }
+        if all {
+            Some((0, self.height))
+        } else {
+            (lo < hi).then_some((lo, hi))
+        }
     }
 
     /// Whether anything was touched since the last call, clearing the flag. The

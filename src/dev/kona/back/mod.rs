@@ -750,11 +750,22 @@ impl KonaBackend {
         // the job's own writes (the tiles raise it for theirs), so a frame the
         // display started meanwhile is followed by another.
         let retrace = matches!(job, Job::Retrace { .. });
+        // A geometry command's pixels all come through the tiles, which mark the rows they draw.
+        let by_tiles = !self.store.is_gpu() && self.draws_by_tiles(&job);
         let reply = self.handle_job(port, job);
-        if !retrace {
+        if !retrace && !by_tiles {
             self.store.cpu().touch();
         }
         reply
+    }
+
+    /// Whether `job` changes the picture by tile jobs alone: a geometry command, which leaves the tables and the
+    /// channels alone (a clear of the accumulation planes, which are not shown, is left out to be safe).
+    fn draws_by_tiles(&self, job: &Job<'_>) -> bool {
+        match job {
+            Job::Command { grammar: Grammar::Gl, selector, args, .. } => gl::class(*selector) == gl::Class::Geometry && !(*selector == CLEAR_SELECTED_BUFFERS && args.first().is_some_and(|m| m & crate::dev::kona::defs::gl::ACCUM_BUFFER_BIT != 0)),
+            _ => false,
+        }
     }
 
     /// The board is starting: spawn the display thread, which completes retrace
@@ -966,11 +977,12 @@ impl KonaBackend {
         if !self.swap_held {
             for (id, bank) in std::mem::take(&mut self.swaps) {
                 self.tables.lock().load_bank(id, bank);
+                self.store.cpu().touch();
             }
         }
-        if let (Some(h), Some(c)) = (&self.handle, &mut self.manual) {
+        // No refresh thread composes a manual back end's frame: the caller takes it (`lend_frame`).
+        if let (Some(h), Some(_)) = (&self.handle, &self.manual) {
             self.clock.frame(h);
-            c.frame();
         }
     }
 
