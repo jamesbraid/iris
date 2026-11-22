@@ -30,16 +30,29 @@ fn engine() -> Engine {
     Engine::new(config(), Ram, Options::default(), None).unwrap()
 }
 
+fn threaded_engine(notify: Option<Box<dyn Fn() + Send + Sync>>) -> Engine {
+    Engine::new(config(), Ram, Options { threaded: true, ..Options::default() }, notify).unwrap()
+}
+
 const A: Source = Source { id: 1, charged: true };
 const REGION: Region = Region { word: 1, rect: Rect { x0: 0, y0: 0, x1: 3, y1: 3 } };
 
-struct Kona;
+/// The pipe with its stream run by the caller (`false`) or on its worker (`true`).
+struct Kona(bool);
 
 impl Subject for Kona {
     type Engine = Engine;
 
     fn engine(&self, notify: Option<Box<dyn Fn() + Send + Sync>>) -> Engine {
-        Engine::new(config(), Ram, Options::default(), notify).unwrap()
+        if self.0 {
+            threaded_engine(notify)
+        } else {
+            Engine::new(config(), Ram, Options::default(), notify).unwrap()
+        }
+    }
+
+    fn worker_panics(&self) -> bool {
+        self.0
     }
 
     fn probe(&self) -> u32 {
@@ -87,9 +100,9 @@ impl Subject for Kona {
         Some(1)
     }
 
-    /// KONA's command stream runs only under `run` and `wait_idle`; `observe` drains the drawing.
+    /// The inline stream runs only under `run` and `wait_idle`; `observe` drains the drawing. A worker's `observe` waits for it.
     fn observe_waits_for_stores(&self) -> bool {
-        false
+        self.0
     }
 
     /// Every packet of the storm sets the pending bit; none clears it.
@@ -98,7 +111,14 @@ impl Subject for Kona {
     }
 }
 
-sgi_engine::conformance_tests!(Kona);
+sgi_engine::conformance_tests!(Kona(false));
+
+/// The same clauses with the stream on its worker.
+mod threaded {
+    use super::*;
+
+    sgi_engine::conformance_tests!(Kona(true));
+}
 
 fn events(e: &mut Engine, max: usize) -> Vec<Event> {
     let mut v = Vec::new();

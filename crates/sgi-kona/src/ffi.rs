@@ -219,7 +219,7 @@ unsafe fn new_with(cfg: *const IrisKonaConfig, host: *const IrisEngineHost, give
                 (gpu, loss)
             }
         };
-        let mut opts = Options { gpu, ..Options::default() };
+        let mut opts = Options { gpu, threaded: c.common.threaded(), ..Options::default() };
         let user = User(c.user);
         if !c.flash_image.is_null() && c.flash_len as usize != FLASH_SIZE {
             log::error!("sgi_kona_new: the flash image is {} bytes, not {FLASH_SIZE}", c.flash_len);
