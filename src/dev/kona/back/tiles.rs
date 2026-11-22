@@ -199,7 +199,9 @@ impl Tiles {
                 if catch_unwind(AssertUnwindSafe(|| pixel::run(s.store.cpu(), job, ds, clip))).is_err() {
                     s.poisoned.store(true, SeqCst);
                 }
-                s.store.cpu().touch();
+                // A job writes only inside its rectangle: that is how tiles are assigned.
+                let hit = job.rect().intersect(&clip);
+                s.store.cpu().touch_rows(hit.y0, hit.y1);
                 s.busy_ns.fetch_add(began.elapsed().as_nanos() as u64, Relaxed);
                 s.tile_runs.fetch_add(1, Relaxed);
             });
@@ -286,7 +288,7 @@ impl Tiles {
                 // SAFETY: the entry is the producer's and nothing else reads it.
                 let ds = unsafe { &*self.shared.states[job.state() as usize].0.get() };
                 pixel::run(self.shared.store.cpu(), &self.scratch, ds, self.screen);
-                self.shared.store.cpu().touch();
+                self.shared.store.cpu().touch_rows(r.y0, r.y1);
             }
             self.tail = self.stats.submitted;
             return Ok(());

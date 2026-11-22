@@ -94,6 +94,11 @@ impl Rig {
         self.back.pixels().word(x, y, w)
     }
 
+    /// A reader of the store, as the monitor and the shell's scan-out have one.
+    pub fn pixels(&self) -> super::back::display::Pixels {
+        self.back.pixels()
+    }
+
     pub fn put(&self, addr: u64, bytes: &[u8]) {
         self.ram.0.lock()[addr as usize..addr as usize + bytes.len()].copy_from_slice(bytes);
     }

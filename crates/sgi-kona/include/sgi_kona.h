@@ -98,6 +98,13 @@ int sgi_kona_scanout(IrisEngine *h, uint32_t *buf, size_t cap, uint32_t *w,
                      uint32_t *hgt);
 
 /*
+ * The rows of head's picture that may have changed since the last call for that head, *first up to *end (both 0
+ * for none): the rows the pipe's drawing wrote, or all of them for anything else that can change what the head
+ * shows. Drawing in flight marks its rows when it finishes, so ask again at each retrace.
+ */
+int sgi_kona_take_damage(IrisEngine *h, uint32_t head, uint32_t *first, uint32_t *end);
+
+/*
  * Channel 0's DAC cursor as the display bus's registers hold it, without waiting for queued stores: the
  * origin of its 64 by 64 image in screen pixels from the top left (signed) in *x and *y, and in *on whether it is
  * enabled in X11 mode, for a shell that publishes the pointer. ERROR for a NULL output.

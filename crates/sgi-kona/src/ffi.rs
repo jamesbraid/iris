@@ -5,7 +5,7 @@
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::Arc;
 
-use sgi_engine::ffi::{build, call, host_parts, read_config, CMem, IrisEngine, IrisEngineConfig, IrisEngineHost, IRIS_ENGINE_FAULT, IRIS_ENGINE_OK};
+use sgi_engine::ffi::{build, call, host_parts, read_config, CMem, IrisEngine, IrisEngineConfig, IrisEngineHost, IRIS_ENGINE_ERROR, IRIS_ENGINE_FAULT, IRIS_ENGINE_OK};
 use sgi_engine::inject::Point;
 use sgi_engine::{BoardEngine, GpuLoss, Rect};
 
@@ -310,6 +310,24 @@ pub unsafe extern "C" fn sgi_kona_scanout(h: *mut IrisEngine, buf: *mut u32, cap
             for (i, p) in pixels.iter().enumerate() {
                 *buf.add(i) = (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff);
             }
+            IRIS_ENGINE_OK
+        })
+    }
+}
+
+/// The rows of head `head`'s picture that may have changed since the last call for it: `*first` up to `*end`
+/// (both 0 for none). OK; ERROR for a NULL output; FAULT on a faulted engine.
+///
+/// # Safety
+/// `h` is a live KONA handle; `first` and `end` point to `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_take_damage(h: *mut IrisEngine, head: u32, first: *mut u32, end: *mut u32) -> c_int {
+    unsafe {
+        call::<KonaEngine<CMem>, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| {
+            if first.is_null() || end.is_null() {
+                return IRIS_ENGINE_ERROR;
+            }
+            (*first, *end) = e.take_damage(head).unwrap_or((0, 0));
             IRIS_ENGINE_OK
         })
     }
