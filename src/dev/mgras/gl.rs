@@ -2149,11 +2149,14 @@ impl Gl {
         let wpr_out = (w * bpp).div_ceil(4);
         let mut out = Vec::with_capacity(wpr_out * h);
         let mut rb = Vec::with_capacity(wpr_out * 4);
+        let pack = |v: f64, rb: &mut Vec<u8>| {
+            let v = if index { (v.round() as i64 & wrap) as f64 } else { v };
+            super::rss::pack_comp(ty, v, rb);
+        };
         for r in 0..h {
             rb.clear();
             for v in self.pix.run_row(lut, &bytes[r * stride..r * stride + row_in], w, out_comps) {
-                let v = if index { (v.round() as i64 & wrap) as f64 } else { v };
-                super::rss::pack_comp(ty, v, &mut rb);
+                pack(v, &mut rb);
             }
             rb.resize(wpr_out * 4, 0);
             out.extend(rb.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])));
