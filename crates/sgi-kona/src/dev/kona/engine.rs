@@ -220,6 +220,8 @@ pub struct KonaEngine<M: HostMem> {
     events: Arc<Events>,
     credits: Credits,
     pixels: super::back::display::Pixels,
+    /// Scratch frame rows, kept between scan-outs.
+    band: Arc<Mutex<Vec<u32>>>,
     /// Per head, the managed rows that changed since the shell last asked, as a hull.
     damage: Vec<Option<(usize, usize)>>,
     source: Source,
@@ -257,6 +259,7 @@ impl<M: HostMem> KonaEngine<M> {
             events,
             credits: Credits::default(),
             pixels,
+            band: Arc::default(),
             damage: vec![None; super::back::display::channels::CHANNELS],
             source: Source::default(),
             parked: false,
@@ -632,13 +635,22 @@ impl<M: HostMem> KonaEngine<M> {
         self.back.running_channels().get(head as usize).is_some_and(|&c| self.back.channel_blanked(c))
     }
 
+    /// Whether `window` lies in the managed area the pixels are held for.
+    fn window_fits(&self, (x, y, w, h): (u32, u32, u32, u32)) -> bool {
+        let (fw, fh) = self.pixels.size();
+        x + w <= fw && y + h <= fh
+    }
+
     /// The pixels of `window` of the composed frame, `0x00RRGGBB` in rows from the top, with its size.
-    fn window_pixels(&mut self, (x, y, w, h): (u32, u32, u32, u32)) -> (u32, u32, Vec<u32>) {
-        let (fw, _, pixels) = self.compose();
-        // The compose is 0xAABBGGRR; the scan-out the shells share is 0x00RRGGBB.
-        let rows = (y..y + h).flat_map(|row| pixels.get((row * fw + x) as usize..(row * fw + x + w) as usize).unwrap_or(&[]).iter().map(|p| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff)));
-        let out: Vec<u32> = rows.collect();
-        if out.len() == (w * h) as usize { (w, h, out) } else { (0, 0, Vec::new()) }
+    fn window_pixels(&mut self, window: (u32, u32, u32, u32)) -> (u32, u32, Vec<u32>) {
+        if !self.window_fits(window) {
+            return (0, 0, Vec::new());
+        }
+        self.back.drain();
+        let (_, _, w, h) = window;
+        let mut out = vec![0; w as usize * h as usize];
+        self.pixels.window_rows(window, 0..h as usize, false, &mut out, &mut self.band.lock());
+        (w, h, out)
     }
 
     /// `channel_window` for a channel named as a request names it: a display channel's number, or the option
@@ -733,10 +745,11 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         if let Some(f) = self.fault_now() {
             return Err(Fault(f));
         }
-        let Some(window) = self.head_window(head) else { return Ok(None) };
-        let (w, h, pixels) = self.window_pixels(window);
-        let blanked = self.head_blanked(head);
-        out.extend(pixels.into_iter().map(|p| if blanked { 0 } else { p }));
+        let Some(window) = self.head_window(head).filter(|&w| self.window_fits(w)) else { return Ok(None) };
+        self.back.drain();
+        let (_, _, w, h) = window;
+        out.resize(w as usize * h as usize, 0);
+        self.pixels.window_rows(window, 0..h as usize, self.head_blanked(head), out, &mut self.band.lock());
         Ok((w != 0 && h != 0).then_some((w, h)))
     }
 

@@ -251,21 +251,27 @@ impl DacDraw {
     /// Draw the cursor into `out`, a frame `stride` pixels a row, top row first, `w` x `h` of it
     /// the screen. Value 3 is the foreground, 2 the background; 0 and 1 leave the frame.
     pub fn draw(&self, out: &mut [u32], stride: usize, w: usize, h: usize) {
-        self.draw_in(self.foreground, self.background, out, stride, w, h)
+        self.draw_rows(out, stride, w, 0..h)
+    }
+
+    /// As `draw` for the frame rows `rows`, which `out` holds from its first.
+    pub fn draw_rows(&self, out: &mut [u32], stride: usize, w: usize, rows: std::ops::Range<usize>) {
+        self.draw_in(self.foreground, self.background, out, stride, w, rows)
     }
 
     /// As `draw`, in the colours the DAC holds: ten bits a channel as `x2b10g10r10` (red low).
     pub fn draw_wide(&self, out: &mut [u32], stride: usize, w: usize, h: usize) {
         let wide = |c: [u16; 3]| (c[2] as u32 & 0x3ff) << 20 | (c[1] as u32 & 0x3ff) << 10 | (c[0] as u32 & 0x3ff);
-        self.draw_in(wide(self.cursor.foreground), wide(self.cursor.background), out, stride, w, h)
+        self.draw_in(wide(self.cursor.foreground), wide(self.cursor.background), out, stride, w, 0..h)
     }
 
-    fn draw_in(&self, foreground: u32, background: u32, out: &mut [u32], stride: usize, w: usize, h: usize) {
+    fn draw_in(&self, foreground: u32, background: u32, out: &mut [u32], stride: usize, w: usize, rows: std::ops::Range<usize>) {
         for r in 0..SIZE {
             let y = self.y0 + r as i32;
-            if y < 0 || y >= h as i32 {
+            if y < rows.start as i32 || y >= rows.end as i32 {
                 continue;
             }
+            let y = y - rows.start as i32;
             for c in 0..SIZE {
                 let x = self.x0 + c as i32;
                 if x < 0 || x >= w as i32 {

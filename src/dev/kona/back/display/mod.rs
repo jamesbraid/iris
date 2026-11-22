@@ -76,6 +76,7 @@ use tables::{Baked, Tables, Window};
 use parking_lot::Mutex;
 use screen::Display;
 use std::io::{self, Write};
+use std::ops::Range;
 use std::sync::Arc;
 
 /// Entries in the textport's colour map.
@@ -120,24 +121,34 @@ impl ColourMap {
     }
 }
 
+/// Words `rows` rows of `w` pixels take at `stride` a row.
+fn frame_len(rows: usize, stride: usize, w: usize) -> usize {
+    if rows == 0 { 0 } else { stride * (rows - 1) + w }
+}
+
 /// Compose the frame the default descriptor gives into `out`, `stride` pixels
 /// a row, top row first. The store's rows run up from the bottom, so row `y` of
 /// the frame is the store's row `height - 1 - y`. A word position with no array
 /// yet is a store of zeros: index 0.
 pub fn compose_default(store: &PixelStore, word: usize, map: &ColourMap, out: &mut [u32], stride: usize) {
+    compose_default_rows(store, word, map, 0..store.height() as usize, out, stride)
+}
+
+/// As `compose_default` for the frame rows `rows` alone, which `out` holds from its first.
+fn compose_default_rows(store: &PixelStore, word: usize, map: &ColourMap, rows: Range<usize>, out: &mut [u32], stride: usize) {
     let (w, h) = (store.width() as usize, store.height() as usize);
-    assert!(out.len() >= stride * h.saturating_sub(1) + w, "the frame buffer is too small");
+    assert!(rows.end <= h && out.len() >= frame_len(rows.len(), stride, w), "the frame buffer is too small");
     let Some(array) = store.array(word) else {
         let black = map.get(0);
-        for y in 0..h {
+        for y in 0..rows.len() {
             out[y * stride..y * stride + w].fill(black);
         }
         return;
     };
     let pitch = array.pitch();
-    for y in 0..h {
+    for (i, y) in rows.enumerate() {
         let src = (h - 1 - y) * pitch;
-        let row = &mut out[y * stride..y * stride + w];
+        let row = &mut out[i * stride..i * stride + w];
         for (x, px) in row.iter_mut().enumerate() {
             // SAFETY: `src + x` is inside the array: `x < w <= pitch` and the row is in range.
             *px = map.entries[(unsafe { array.load(src + x) } & 0xff) as usize];
@@ -153,40 +164,43 @@ pub fn compose_default(store: &PixelStore, word: usize, map: &ColourMap, out: &m
 /// cursor goes over the top; the DAC cursor goes over that, and a blanked frame
 /// is black. Each is chosen once for the frame, not per pixel.
 pub fn compose(store: &PixelStore, word: usize, map: &ColourMap, tables: &Baked, out: &mut [u32], stride: usize) {
+    compose_rows(store, word, map, tables, 0..store.height() as usize, out, stride)
+}
+
+/// As `compose` for the frame rows `rows` alone, which `out` holds from its first row: a row is composed
+/// from its own pixels and the tables, so the rows are the same as in the whole frame.
+pub fn compose_rows(store: &PixelStore, word: usize, map: &ColourMap, tables: &Baked, rows: Range<usize>, out: &mut [u32], stride: usize) {
+    let (w, h) = (store.width() as usize, store.height() as usize);
+    assert!(rows.end <= h && out.len() >= frame_len(rows.len(), stride, w), "the frame buffer is too small");
     if tables.is_blank() {
         // The scan-out shows black; the store is left as it is.
-        let (w, h) = (store.width() as usize, store.height() as usize);
-        assert!(out.len() >= stride * h.saturating_sub(1) + w, "the frame buffer is too small");
-        (0..h).for_each(|y| out[y * stride..y * stride + w].fill(tables.black()));
+        (0..rows.len()).for_each(|y| out[y * stride..y * stride + w].fill(tables.black()));
         return;
     }
     if tables.is_default() {
-        compose_default(store, word, map, out, stride);
+        compose_default_rows(store, word, map, rows.clone(), out, stride);
         if tables.is_wide() {
             // The textport's colour map holds eight bits a channel (`ColourMap::load`): widened by repeating the top bits.
             let widen = |c: u32| (c << 2) | (c >> 6);
-            let (w, h) = (store.width() as usize, store.height() as usize);
-            for y in 0..h {
+            for y in 0..rows.len() {
                 out[y * stride..y * stride + w].iter_mut().for_each(|p| *p = widen(*p >> 16 & 0xff) << 20 | widen(*p >> 8 & 0xff) << 10 | widen(*p & 0xff));
             }
         }
         return;
     }
-    let (w, h) = (store.width() as usize, store.height() as usize);
-    assert!(out.len() >= stride * h.saturating_sub(1) + w, "the frame buffer is too small");
     let (colour, back, did) = (store.array(word), store.array(word + 1), store.array(DID_PLANE));
     let pitch = store.width() as usize;
     let id_at = |at: usize| -> usize {
         // SAFETY: `at` is inside the managed area, which the array covers.
         did.as_ref().map_or(0, |d| ((unsafe { d.load(at) } >> 2) & 0x3f) as usize)
     };
-    for y in 0..h {
+    for (i, y) in rows.clone().enumerate() {
         let src = (h - 1 - y) * pitch;
         let word_at = |i: usize| -> u32 {
             // SAFETY: `i` is inside the managed area.
             colour.as_ref().map_or(0, |c| unsafe { c.load(src + i) })
         };
-        let row = &mut out[y * stride..y * stride + w];
+        let row = &mut out[i * stride..i * stride + w];
         let mut x = 0;
         while x < w {
             let id = id_at(src + x);
@@ -220,8 +234,8 @@ pub fn compose(store: &PixelStore, word: usize, map: &ColourMap, tables: &Baked,
             compose_layers(store, tables, &mut row[..w], src);
         }
     }
-    tables.draw_cursor(out, stride, w, h);
-    tables.draw_dac_cursor(out, stride, w, h);
+    tables.draw_cursor_rows(out, stride, w, rows.clone());
+    tables.draw_dac_cursor_rows(out, stride, w, rows);
 }
 
 /// The overlay and the popup over a composed row, `src` being the row's first
@@ -380,10 +394,14 @@ impl Compositor {
     }
 }
 
+/// Frame rows `Pixels::window_rows` composes at a time.
+const COMPOSE_BAND: usize = 16;
+
 /// The monitor's pixel reads, `hash`, `pix` and `shot`: they read the store and
 /// the colour map through the storage the back end shares with the display, so
 /// they run while the command stream does and never hold it up (a screenshot
 /// composes 1.3 million pixels, and the pipe's state is not taken out for that).
+#[derive(Clone)]
 pub struct Pixels {
     store: Arc<Store>,
     map: Arc<parking_lot::Mutex<ColourMap>>,
@@ -439,9 +457,43 @@ impl Pixels {
         frame
     }
 
+    /// The managed area's size.
+    pub fn size(&self) -> (u32, u32) {
+        (self.store.cpu().width(), self.store.cpu().height())
+    }
+
     /// The display rows, `first..end` from the top, that may have changed since the last call, as their hull.
     pub fn take_damage(&self) -> Option<(usize, usize)> {
         self.store.cpu().take_damage()
+    }
+
+    /// Rows `rows` of the window `(x, y, w, h)` of the shown frame, `0x00RRGGBB`, into `out` at `w` words a row, the
+    /// other words untouched; black if `blank`. `band` is scratch. The store is read as drawing leaves it.
+    pub fn window_rows(&self, (x, y, w, h): (u32, u32, u32, u32), rows: Range<usize>, blank: bool, out: &mut [u32], band: &mut Vec<u32>) {
+        let (fw, fh) = self.size();
+        let (x, y, w, h) = (x as usize, y as usize, w as usize, h as usize);
+        let rows = rows.start..rows.end.min(h);
+        assert!(out.len() >= w * h, "the frame buffer is too small");
+        if rows.is_empty() || x + w > fw as usize || y + h > fh as usize {
+            return;
+        }
+        if blank {
+            out[rows.start * w..rows.end * w].fill(0);
+            return;
+        }
+        self.store.observe_all();
+        let map = self.map.lock().clone();
+        let tables = self.tables.lock().snapshot();
+        band.resize(fw as usize * COMPOSE_BAND, 0);
+        for first in rows.clone().step_by(COMPOSE_BAND) {
+            let last = (first + COMPOSE_BAND).min(rows.end);
+            compose_rows(self.store.cpu(), super::textport::COLOUR_WORD, &map, &tables, y + first..y + last, band, fw as usize);
+            for (i, row) in (first..last).enumerate() {
+                let src = &band[i * fw as usize + x..i * fw as usize + x + w];
+                // The compose is 0xAABBGGRR; the scan-out the shells share is 0x00RRGGBB.
+                out[row * w..(row + 1) * w].iter_mut().zip(src).for_each(|(d, p)| *d = (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff));
+            }
+        }
     }
 
     /// The frame written as a PNG.

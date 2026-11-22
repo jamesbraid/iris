@@ -1,9 +1,14 @@
 //! The picture a head shows: which rows of it changed, and the rows composed for the shell.
 
 use parking_lot::Mutex;
+use std::sync::Arc;
 use sgi_engine::{BoardEngine, HostMem, MemFault, Source, Swap, Write};
 use sgi_kona::dev::kona::back::gl::{class, Class};
-use sgi_kona::dev::kona::back::store::Store;
+use sgi_kona::dev::kona::back::display::dac_cursor::{DacCursor, WORDS};
+use sgi_kona::dev::kona::back::display::tables::Tables;
+use sgi_kona::dev::kona::back::display::{ColourMap, Pixels};
+use sgi_kona::dev::kona::back::store::layout::MAIN_COLOUR_WORD;
+use sgi_kona::dev::kona::back::store::{Store, StoreOp, DID_PLANE};
 use sgi_kona::dev::kona::defs::*;
 use sgi_kona::dev::kona::engine::{head_rows, KonaEngine, Options};
 use sgi_kona::dev::kona::ident::KonaConfig;
@@ -284,4 +289,93 @@ fn the_engine_marks_the_retrace_that_shows_a_swap() {
     e.frame(0);
     assert_eq!(e.take_damage(0), Some((0, 1024)));
     assert_eq!(e.take_damage(0), None);
+}
+
+// ---- rows composed into the caller's buffer ----
+
+const W: u32 = 96;
+const H: u32 = 48;
+
+/// A 96 x 48 store with a pattern in the colour word and the display ID plane (every other 16 columns the
+/// cleared window 5, the rest the textport's), the glyph cursor and the DAC cursor both on and each over two of
+/// the 16-row bands the compose works in.
+fn patterned() -> Pixels {
+    let store = Arc::new(Store::with_texture(W, H, Default::default()));
+    for y in 0..H as i64 {
+        for x in 0..W as i64 {
+            store.apply(StoreOp::Plot { word: MAIN_COLOUR_WORD as usize, x, y, value: ((x * 3 + y * 5) & 0xff) as u32 });
+            store.apply(StoreOp::Plot { word: DID_PLANE, x, y, value: if x / 16 % 2 == 1 { 5 << 2 } else { 0 } });
+        }
+    }
+    let mut map = ColourMap::default();
+    for i in 0..256u32 {
+        map.load(&[i, (i * 4) & 0x3ff, (i * 8) & 0x3ff, (i * 12) & 0x3ff]);
+    }
+    let mut t = Tables::default();
+    t.load_did(5, 0);
+    let mut glyph = [0xaaaa_aaaau32; 260];
+    glyph[256..].copy_from_slice(&[0x3ff, 0x2aa, 0x155, 0]);
+    t.load_cursor(0, &glyph);
+    t.indirect(XMAP_CURSOR_IMAGE_BASE, 0);
+    t.indirect(XMAP_CURSOR_POSITION, 42 << 13 | 52);
+    t.indirect(XMAP_CURSOR_MODE, 2);
+    let mut request = vec![0xffff_ffffu32; WORDS];
+    request[..7].copy_from_slice(&[0, 0x3ff, 0, 0x155, 0x0aa, 0x0bb, 0x0cc]);
+    t.load_dac_cursor(DacCursor::from_request(&request).expect("a cursor"));
+    let dac = |t: &mut Tables, index: u32, values: &[u32]| {
+        for (i, v) in [index & 0xff, index >> 8].into_iter().enumerate() {
+            let _ = i;
+            t.indirect(0xb00, v);
+        }
+        values.iter().for_each(|&v| t.indirect(0xb02, v));
+    };
+    dac(&mut t, 0x204, &[5]);
+    dac(&mut t, 0x200, &[40, 0, 14, 0]);
+    Pixels::new(store, Arc::new(Mutex::new(map)), Arc::new(Mutex::new(t)))
+}
+
+/// Rows `rows` of the window of `frame`, as the shells see it.
+fn window_of(frame: &[u32], (x, y, w, h): (u32, u32, u32, u32)) -> Vec<u32> {
+    (y..y + h).flat_map(|row| frame[(row * W + x) as usize..(row * W + x + w) as usize].iter().map(|p| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff))).collect()
+}
+
+#[test]
+fn rows_of_a_window_are_the_rows_of_the_whole_frame() {
+    let pixels = patterned();
+    let frame = pixels.frame();
+    // The cursors are on the frame: without them the rows below would not test their placement.
+    let plain = Pixels::new(Arc::new(Store::with_texture(W, H, Default::default())), Default::default(), Default::default()).frame();
+    assert_ne!(frame, plain);
+    for window in [(0, 0, W, H), (8, 3, 60, 37), (0, 20, W, 28)] {
+        let whole = window_of(&frame, window);
+        let h = window.3 as usize;
+        for rows in [0..h, 0..1, 5..h - 2, 15..17, 16..33, 31..h, h - 1..h + 4] {
+            const KEEP: u32 = 0xdead_beef;
+            let mut out = vec![KEEP; whole.len()];
+            pixels.window_rows(window, rows.clone(), false, &mut out, &mut Vec::new());
+            let w = window.2 as usize;
+            for row in 0..h {
+                let want: &[u32] = if rows.contains(&row) { &whole[row * w..(row + 1) * w] } else { &[KEEP; 96][..w] };
+                assert_eq!(&out[row * w..(row + 1) * w], want, "window {window:?} rows {rows:?} row {row}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_blank_window_is_black_in_the_rows_asked_for() {
+    let pixels = patterned();
+    let mut out = vec![7; 60 * 37];
+    pixels.window_rows((8, 3, 60, 37), 4..9, true, &mut out, &mut Vec::new());
+    assert!(out[..4 * 60].iter().all(|&p| p == 7));
+    assert!(out[4 * 60..9 * 60].iter().all(|&p| p == 0));
+    assert!(out[9 * 60..].iter().all(|&p| p == 7));
+}
+
+/// The compose asks for a buffer that holds a window: a smaller one is the caller's mistake, not a write past it.
+#[test]
+#[should_panic(expected = "too small")]
+fn a_buffer_that_cannot_hold_the_window_is_refused() {
+    let pixels = patterned();
+    pixels.window_rows((0, 0, W, H), 0..H as usize, false, &mut vec![0; 10], &mut Vec::new());
 }
