@@ -291,6 +291,11 @@ pub trait BoardEngine {
     /// or says how it widens one (MGRAS takes 8 and 16 as 32: its shell sets
     /// `min_access_size` to 4).
     fn write(&mut self, off: u32, bits: u32, val: u64) -> Write;
+    /// A command-FIFO store that only joins the queue, for a shell without its big lock: `Done`, or `Busy` with
+    /// nothing taken when `write` must run instead (full queue, an interrupt or credit, no thread). Default: `Busy`.
+    fn try_store(&mut self, _off: u32, _bits: u32, _val: u64) -> Write {
+        Write::Busy
+    }
     /// FIFO words in a batch, in order (an 8-byte store is two words); the
     /// number taken (all, or what the queue had room for). A charged source
     /// earns one credit for each word the board retires, so a shell with

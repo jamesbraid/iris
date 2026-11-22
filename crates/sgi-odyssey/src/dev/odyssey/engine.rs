@@ -662,6 +662,17 @@ impl BoardEngine for VproEngine {
         Write::Done
     }
 
+    fn try_store(&mut self, off: u32, bits: u32, val: u64) -> Write {
+        let Some(size) = Self::size_of(bits) else { return Write::Busy };
+        let f = &self.locks.fifo;
+        // Only a plain push: the high-water store raises a flag, a charged one earns a credit, and with no board
+        // thread the store would run here.
+        if self.faulted() || self.source.charged || !fifo_port(off as u64) || !f.running.load(Ordering::SeqCst) || f.full_for(size) || f.would_cross_high_water(size) {
+            return Write::Busy;
+        }
+        self.write(off, bits, val)
+    }
+
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize {
         self.activity += 1;
         if !fifo_port(port as u64) {

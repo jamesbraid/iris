@@ -561,3 +561,10 @@ fn events_pending_follows_the_outbox() {
     assert_eq!(unsafe { iris_engine_events_pending(h) }, 0);
     assert_eq!(unsafe { iris_engine_events_pending(null_mut()) }, 1, "a NULL handle says events may wait");
 }
+
+#[test]
+fn try_store_leaves_every_store_to_write_on_a_board_that_offers_none() {
+    let f = Fixture::new(false);
+    assert_eq!(unsafe { iris_engine_try_store(f.h, reg::IRQ_SET, 32, 1) }, IRIS_ENGINE_BUSY);
+    assert_eq!(unsafe { iris_engine_try_store(null_mut(), reg::IRQ_SET, 32, 1) }, IRIS_ENGINE_FAULT);
+}

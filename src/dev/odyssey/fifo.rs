@@ -278,6 +278,13 @@ impl CommandFifo {
         mark != 0 && self.level() >= mark
     }
 
+    /// Whether a store of `size` bytes would take the level up to or past the high-water threshold.
+    pub fn would_cross_high_water(&self, size: u32) -> bool {
+        let mark = self.threshold_6b2.load(SeqCst);
+        let before = self.queued_words();
+        mark != 0 && before < mark && before + store_words(size) >= mark
+    }
+
     /// The stored `0x6b2`, applied as the high-water threshold in words. MODEL
     /// CHOICE (see `reg::FIFO_SETUP_FIRST`).
     pub fn set_threshold_6b2(&self, words: u32) {
