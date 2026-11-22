@@ -217,6 +217,20 @@ fn a_timing_with_pll_control_bit_2_set_posts_a_note() {
     assert_eq!(notes(&mut e), 1);
 }
 
+/// The kernel reads the line counter by a byte write of index 0x0b to 0x072008 and a read of 0x0720b0.
+#[test]
+fn the_kernels_line_counter_read_at_0x0720b0_gets_the_beam() {
+    let mut e = engine(|_| {});
+    load_stock_timing(&mut e);
+    e.advance(1_000);
+    vc3(&mut e, 0x1E, 4);
+    e.advance(1_000 + 16_682_517 / 2);
+    put(&mut e, VC3_INDEX, 8, 0xB);
+    let line = get(&mut e, 0x620B0, 16);
+    assert!((530..=535).contains(&line), "half a frame: {line}");
+    assert!((line..=line + 1).contains(&(get(&mut e, 0x620B0, 32) >> 16)), "a word read, the data in bits 31:16");
+}
+
 #[test]
 fn the_vc3_display_control_register_is_there_to_ask() {
     let mut e = engine(|_| {});
