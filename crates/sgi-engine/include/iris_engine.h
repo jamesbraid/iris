@@ -269,6 +269,14 @@ int iris_engine_write(IrisEngine *h, uint32_t off, uint32_t bits,
 int iris_engine_write_at(IrisEngine *h, uint64_t now_ns, uint32_t off,
                          uint32_t bits, uint64_t val);
 
+/*
+ * A command-FIFO store that only joins the queue. OK: taken. BUSY: nothing
+ * was taken and the shell must call iris_engine_write (the queue is full, the
+ * store raises an interrupt or earns a credit, or the board runs it inline).
+ */
+int iris_engine_try_store(IrisEngine *h, uint32_t off, uint32_t bits,
+                          uint64_t val);
+
 /* The number of scan-out heads iris_engine_scanout takes; 0 for a board with none. */
 uint32_t iris_engine_heads(IrisEngine *h);
 

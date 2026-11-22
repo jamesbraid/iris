@@ -208,6 +208,43 @@ fn credits_go_to_the_source_of_the_store_and_coalesce() {
     }
 }
 
+/// A store that only joins the queue is taken without a call to `write`; one that earns a credit, one
+/// for another register, and an inline board's store (which would run in the call) are left to `write`.
+#[test]
+fn try_store_takes_only_a_plain_push_on_a_board_with_a_thread() {
+    let (mut e, _) = engine(Mode::Threaded);
+    e.set_source(Source { id: 1, charged: false });
+    assert_eq!(e.try_store(CMD_FIFO, 32, 0), Write::Done);
+    assert_eq!(e.try_store(CMD_FIFO, 64, 0), Write::Done);
+    assert_eq!(e.try_store(INTR_CLEAR, 32, 0), Write::Busy, "not a FIFO port");
+    e.set_source(Source { id: 2, charged: true });
+    assert_eq!(e.try_store(CMD_FIFO, 32, 0), Write::Busy, "it earns a credit");
+    assert_eq!(e.wait_idle(0, u64::MAX), Idle::Yes);
+    e.advance(1);
+    assert_eq!(drain(&mut e), vec![], "an uncharged store returns no credit");
+    let (mut inline, _) = engine(Mode::Inline);
+    assert_eq!(inline.try_store(CMD_FIFO, 32, 0), Write::Busy, "an inline store runs in the call");
+}
+
+/// The store that takes the level up to the `0x6b2` threshold raises flag 25, which the lockless path must
+/// leave to `write`; the store counted as before the engine's view changes nothing.
+#[test]
+fn try_store_leaves_the_high_water_crossing_to_write() {
+    let (mut e, _) = engine(Mode::Threaded);
+    let flag = 0x0200_0000u64;
+    assert_eq!(e.write(CMD_FIFO, 64, 0x6b2u64 << 32 | 2), Write::Done);
+    assert_eq!(e.wait_idle(0, u64::MAX), Idle::Yes);
+    assert_eq!(get(&mut e, 0x1014) & flag, 0);
+    let seen = e.frame_generation(0);
+    assert_eq!(e.try_store(CMD_FIFO, 64, 0), Write::Busy, "two words reach the threshold of two");
+    assert_eq!(e.frame_generation(0), seen, "a refused store changes nothing");
+    assert_eq!(get(&mut e, 0x1014) & flag, 0);
+    assert_eq!(e.try_store(CMD_FIFO, 32, 0), Write::Done, "one word stays below it");
+    assert_eq!(e.wait_idle(0, u64::MAX), Idle::Yes);
+    assert_eq!(e.write(CMD_FIFO, 64, 0), Write::Done);
+    assert_ne!(get(&mut e, 0x1014) & flag, 0, "write raises the flag");
+}
+
 /// The fence's write-back lands before the interrupt that announces it: the
 /// raster thread is held inside the write, and no packet is out yet.
 #[test]

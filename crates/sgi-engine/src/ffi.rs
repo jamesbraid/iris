@@ -266,6 +266,7 @@ trait DynEngine: Send {
     fn any(&mut self) -> &mut dyn Any;
     fn write(&mut self, off: u32, bits: u32, val: u64) -> Write;
     fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write;
+    fn try_store(&mut self, off: u32, bits: u32, val: u64) -> Write;
     fn heads(&self) -> u32;
     fn head_timing(&self, head: u32) -> Option<HeadTiming>;
     fn head_bits(&self, head: u32) -> u32;
@@ -308,6 +309,9 @@ impl<E: BoardEngine + Send + 'static> DynEngine for E {
     }
     fn write_at(&mut self, now_ns: u64, off: u32, bits: u32, val: u64) -> Write {
         BoardEngine::write_at(self, now_ns, off, bits, val)
+    }
+    fn try_store(&mut self, off: u32, bits: u32, val: u64) -> Write {
+        BoardEngine::try_store(self, off, bits, val)
     }
     fn heads(&self) -> u32 {
         BoardEngine::heads(self)
@@ -637,6 +641,16 @@ pub unsafe extern "C" fn iris_engine_write(h: *mut IrisEngine, off: u32, bits: u
 #[no_mangle]
 pub unsafe extern "C" fn iris_engine_write_at(h: *mut IrisEngine, now_ns: u64, off: u32, bits: u32, val: u64) -> c_int {
     guard(h, Point::Write, IRIS_ENGINE_FAULT, |s| code_write(s.eng.write_at(now_ns, off, bits, val)))
+}
+
+/// A command-FIFO store that only joins the queue: OK, or BUSY with nothing taken, when the shell must call
+/// `iris_engine_write` instead (see `BoardEngine::try_store`), or FAULT.
+///
+/// # Safety
+/// `h` is a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn iris_engine_try_store(h: *mut IrisEngine, off: u32, bits: u32, val: u64) -> c_int {
+    guard(h, Point::Write, IRIS_ENGINE_FAULT, |s| code_write(s.eng.try_store(off, bits, val)))
 }
 
 /// The number of scan-out heads `iris_engine_scanout` takes; 0 for a board with none.
