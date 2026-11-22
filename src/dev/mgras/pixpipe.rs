@@ -226,6 +226,48 @@ impl PixMem {
         (0..n).map(|k| (prog[2 * k], if 2 * k + 3 < prog.len() { prog[2 * k + 3] } else { 0 })).collect()
     }
 
+    /// A LUT module's cycle in components. The table offsets run up to
+    /// the 2^23 word. [5] is the cycle on RGBA pipelines (12, six offsets)
+    /// but reads 14 on a 12-bit colour-index visual with six offsets all
+    /// the same, so the terminator decides.
+    fn lut_cycle(&self, st: u32) -> usize {
+        let n = (0..16).take_while(|&k| self.read(st + 7 + k) != F2_23).count();
+        if n > 0 && n < 16 { 2 * n } else { (self.read(st + 5) as usize).max(2) }
+    }
+
+    /// For 8-bit elements: after how many the pipeline's per-position parameters repeat, if every module
+    /// maps one element to one element (so only its value and place matter); else None.
+    pub fn byte_period(&self) -> Option<usize> {
+        let mut period = 1;
+        for (e, st) in self.modules() {
+            let p = match e {
+                entry::UNPACK | entry::EXPAND | entry::COMPRESS => return None,
+                entry::SCALEBIAS | entry::CLAMP => 12,
+                entry::LUT => self.lut_cycle(st),
+                _ => 1,
+            };
+            let gcd = (1..=p.min(period)).rev().find(|g| p % g == 0 && period % g == 0)?;
+            period = period / gcd * p;
+            if period > 96 {
+                return None;
+            }
+        }
+        Some(period)
+    }
+
+    /// `run_row`'s output for an 8-bit element by its place in the `byte_period` cycle and its value
+    /// (`[place][value]`), taken from `run_row` itself.
+    pub fn byte_columns(&self, lut: &[u32], comps: usize, out_comps: usize) -> Option<Vec<[f64; 256]>> {
+        let period = self.byte_period()?;
+        let pixels = (period * 256).div_ceil(comps);
+        let probe: Vec<u8> = (0..pixels * comps).map(|i| (i / period) as u8).collect();
+        let mut cols = vec![[0.0; 256]; period];
+        for (i, v) in self.run_row(lut, &probe, pixels, out_comps).into_iter().take(period * 256).enumerate() {
+            cols[i % period][i / period] = v;
+        }
+        Some(cols)
+    }
+
     /// The GE's x replication for a fractional zoom (`xzoom`, its state
     /// word 4: ceil(zx)), 1 without.
     pub fn xzoom_rep(&self) -> usize {
@@ -407,12 +449,7 @@ impl PixMem {
                     per_px = 4;
                 }
                 entry::LUT => {
-                    // The table offsets run up to the 2^23 word. [5] is the
-                    // cycle on RGBA pipelines (12, six offsets) but reads
-                    // 14 on a 12-bit colour-index visual with six offsets
-                    // all the same, so the terminator decides.
-                    let n = (0..16).take_while(|&k| self.read(st + 7 + k) != F2_23).count();
-                    let cycle = if n > 0 && n < 16 { 2 * n } else { (self.read(st + 5) as usize).max(2) };
+                    let cycle = self.lut_cycle(st);
                     let offs: Vec<usize> = (0..cycle / 2).map(|k| self.read(st + 7 + k as u32) as usize).collect();
                     for (i, x) in v.iter_mut().enumerate() {
                         let pos = i % cycle;
@@ -582,6 +619,33 @@ mod tests {
         let out = m.run_row(&lut.0[..], &[(-111i8) as u8, 63], 2, 4);
         let r: Vec<u32> = out.iter().map(|x| x.round() as u32).collect();
         assert_eq!(r, [0, 0, 0, 127, 63, 0, 0, 127]);
+    }
+
+    /// The byte tables are what `run_row` gives (RGB pixels, so a pixel does not fill the 12-element cycle);
+    /// an EXPAND pipeline has none.
+    #[test]
+    fn byte_columns_are_run_row() {
+        let lut = Lut::default();
+        let mut m = mem(&[entry::INTTOFLOAT, 0, entry::SCALEBIAS, 0xD05, entry::CLAMP, 0x1B4, entry::PIPECONTROL, 0xD67]);
+        put(&mut m, 0xD05, &[0x34, 0x4064, 0x50C, 2, 4, (1.0f32 / 255.0).to_bits()]);
+        let mut sb = vec![0x50C, 0, 0x50C, 0, 0xD];
+        for k in 0..12 {
+            sb.extend_from_slice(&[(k as f32 / 100.0).to_bits(), (1.0 + k as f32 / 7.0).to_bits()]);
+        }
+        put(&mut m, 0x1B4, &sb);
+        let mut clamp = vec![0x50C, 0x1A000, 0x50C, 2, 4];
+        clamp.extend((0..12).map(|k| (100.0 + 13.0 * k as f32).to_bits()));
+        put(&mut m, 0xD67, &clamp);
+        m.write(ELEMENT_TYPE, 1);
+        let cols = m.byte_columns(&lut.0[..], 3, 3).expect("a one-to-one pipeline");
+        assert_eq!(cols.len(), 12);
+        let row: Vec<u8> = (0..120u32).map(|i| (i * 37 % 256) as u8).collect();
+        let want = m.run_row(&lut.0[..], &row, 40, 3);
+        for (i, (&b, w)) in row.iter().zip(&want).enumerate() {
+            assert_eq!(cols[i % 12][b as usize], *w, "element {i}");
+        }
+        let m = mem(&[entry::EXPAND, 0, entry::PIPECONTROL, 0xC68]);
+        assert!(m.byte_columns(&lut.0[..], 1, 4).is_none());
     }
 
     /// GL_UNSIGNED_SHORT_4_4_4_4, traced: one element, four fields.
