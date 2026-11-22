@@ -1178,6 +1178,10 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         self.sh.out.swaps_dropped()
     }
 
+    fn events_waiting(&self) -> Option<Arc<AtomicBool>> {
+        Some(self.sh.out.waiting())
+    }
+
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize {
         // The command FIFO's port: 0 the user's, 1 the privileged one, or the window offset of
         // either (the shell may name the port as it does for `write`). Anything else is no FIFO.

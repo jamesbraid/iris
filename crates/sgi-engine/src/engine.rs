@@ -1,6 +1,7 @@
 //! The trait every board engine implements and the types that go with it.
 
 use std::fmt;
+use std::sync::atomic::AtomicBool;
 
 use crate::mem::DirtyRun;
 use crate::state::{StateSink, StateSource};
@@ -397,6 +398,11 @@ pub trait BoardEngine {
     /// Swap events (`Event::Swap`) dropped because the outbox held too many unread; 0 for a board that posts none.
     fn swaps_dropped(&self) -> u64 {
         0
+    }
+    /// The flag the board's outbox keeps for "events wait" (`Outbox::waiting`), so a shell can ask without a call
+    /// into the engine; `None` for a board that keeps none, which the shell must treat as events always waiting.
+    fn events_waiting(&self) -> Option<std::sync::Arc<AtomicBool>> {
+        None
     }
     /// The timing of `head`'s scan-out (`HeadTiming`), `None` while none is loaded or for no such head: the
     /// shell keeps its default. Cheap; waits for nothing.

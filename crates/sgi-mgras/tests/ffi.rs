@@ -383,3 +383,24 @@ fn a_c_shell_reads_the_cursor_position_and_whether_it_is_shown() {
     assert_eq!(unsafe { sgi_mgras_cursor_position(c.h, &mut x, &mut y) }, 1);
     assert_eq!(unsafe { sgi_mgras_cursor_position(c.h, null_mut(), &mut y) }, 0, "a NULL output");
 }
+
+#[test]
+fn events_pending_follows_a_drawn_recordings_events() {
+    let mut c = CEngine::new(0, 0);
+    assert_eq!(unsafe { iris_engine_events_pending(c.h) }, 0);
+    // A draw marks the picture, which is an event.
+    let rep = parse(REPLAYS.iter().find(|r| r.0 == "gl-swap-tmesh-sphere").unwrap().1);
+    let mut front = Front::new();
+    for cmd in &rep.cmds {
+        match cmd {
+            Cmd::Write { bits, off, val } => front.write(&mut c, *bits, *off, *val),
+            Cmd::Dma { addr, bytes } => c.mem.put(*addr, bytes),
+            Cmd::Read { .. } => {}
+        }
+    }
+    drive(&mut c);
+    assert_eq!(unsafe { iris_engine_events_pending(c.h) }, 1);
+    let mut buf: Vec<IrisEngineEvent> = Vec::with_capacity(64);
+    while unsafe { iris_engine_drain_events(c.h, buf.as_mut_ptr(), 64) } > 0 {}
+    assert_eq!(unsafe { iris_engine_events_pending(c.h) }, 0);
+}

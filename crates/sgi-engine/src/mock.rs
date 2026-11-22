@@ -11,6 +11,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 
@@ -351,6 +352,10 @@ impl<M: HostMem> BoardEngine for Mock<M> {
 
     fn swaps_dropped(&self) -> u64 {
         self.out.swaps_dropped()
+    }
+
+    fn events_waiting(&self) -> Option<Arc<AtomicBool>> {
+        Some(self.out.waiting())
     }
 
     fn head_bits(&self, head: u32) -> u32 {

@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 
@@ -29,6 +30,8 @@ pub struct Outbox {
     notify: Option<Box<dyn Fn() + Send + Sync>>,
     notified: AtomicBool,
     swaps_dropped: AtomicU64,
+    /// Whether `q.events` is non-empty, written under the lock and readable without it.
+    waiting: Arc<AtomicBool>,
 }
 
 impl Outbox {
@@ -36,7 +39,7 @@ impl Outbox {
     /// thread and possibly with engine locks held, and must only schedule the
     /// shell's pump. Once per batch: the next call follows a `drain` or `rearm`.
     pub fn new(notify: Option<Box<dyn Fn() + Send + Sync>>) -> Outbox {
-        Outbox { q: Mutex::new(Queue::default()), notify, notified: AtomicBool::new(false), swaps_dropped: AtomicU64::new(0) }
+        Outbox { q: Mutex::new(Queue::default()), notify, notified: AtomicBool::new(false), swaps_dropped: AtomicU64::new(0), waiting: Arc::new(AtomicBool::new(false)) }
     }
 
     pub fn wake(&self) {
@@ -98,6 +101,7 @@ impl Outbox {
                 return;
             }
             q.events.push(e);
+            self.waiting.store(true, Ordering::Release);
         }
         self.wake();
     }
@@ -121,6 +125,7 @@ impl Outbox {
                     q.events.push(Event::Damage(*m));
                 }
             }
+            self.waiting.store(true, Ordering::Release);
         }
         self.wake();
     }
@@ -140,6 +145,12 @@ impl Outbox {
         q.irq_pending = q.events.iter().any(|e| matches!(e, Event::Irq));
         // Cleared under the lock, so a post after this drain wakes again.
         self.notified.store(!q.events.is_empty(), Ordering::Release);
+        self.waiting.store(!q.events.is_empty(), Ordering::Release);
+    }
+
+    /// Whether events wait, as `pending` answers it, but readable from any thread without the queue lock.
+    pub fn waiting(&self) -> Arc<AtomicBool> {
+        self.waiting.clone()
     }
 
     /// Swap events dropped for want of room since the outbox was made.
@@ -152,8 +163,10 @@ impl Outbox {
     }
 
     pub fn clear(&self) {
-        *self.q.lock() = Queue::default();
+        let mut q = self.q.lock();
+        *q = Queue::default();
         self.notified.store(false, Ordering::Release);
+        self.waiting.store(false, Ordering::Release);
     }
 }
 
