@@ -146,8 +146,9 @@ fn load_stock_timing<E: BoardEngine>(e: &mut E) {
             put(e, VC3_SRAM, 16, w as u64);
         }
     };
-    let entry = |end: bool| 120 << 8 | 0x80 | if end { 0x8000 } else { 0 };
-    sram(e, 0x400, &[entry(false), entry(false), entry(false), entry(false), entry(false), entry(false), entry(true)]);
+    // Bit 5 of a run's first word puts its line in the picture, and the word after a line is the next line's address (`Vc3::totals`); a run is 120 VC3 clocks, two pixel clocks each.
+    let entry = |end: bool| 120 << 8 | 0x80 | 0x20 | if end { 0x8000 } else { 0 };
+    sram(e, 0x400, &[entry(false), entry(false), entry(false), entry(false), entry(false), entry(false), entry(true), 0x400]);
     sram(e, 0x380, &[0x400, 1065, 0, 0]);
     vc3(e, 0, 0x380);
     dac(e, 0x0C, 2);
@@ -163,8 +164,8 @@ fn the_head_timing_follows_the_vc3_tables_and_the_pll_when_the_display_is_enable
     assert_eq!(e.head_timing(0), None, "the tables are read when the display is enabled");
     vc3(&mut e, 0x1E, 4);
     let t = e.head_timing(0).expect("a frame");
-    // 894,600 VC3 clocks at 53.625 MHz, 59.943 Hz.
-    assert_eq!(t.frame_clocks * 53_625_000, 894_600 * t.clock_hz as u64);
+    // 1,789,200 pixel clocks (1680 by 1065) at 107.25 MHz, 59.943 Hz.
+    assert_eq!(t.frame_clocks * 107_250_000, 1_789_200 * t.clock_hz as u64);
     assert_eq!((t.fields, t.lines, t.epoch_ns), (1, 1065, -1));
     assert_eq!(e.head_timing(1), None, "one head");
 
@@ -174,7 +175,7 @@ fn the_head_timing_follows_the_vc3_tables_and_the_pll_when_the_display_is_enable
     vc3(&mut e, 0x1E, 4);
     let faster = e.head_timing(0).unwrap();
     assert_ne!(faster.generation, t.generation);
-    assert!(faster.frame_clocks * 53_625_000 != 894_600 * faster.clock_hz as u64, "a new PLL, a new period");
+    assert!(faster.frame_clocks * 107_250_000 != 1_789_200 * faster.clock_hz as u64, "a new PLL, a new period");
 
     // A frame table that ends at once gives no frame; neither does one the display is not enabled for.
     vc3(&mut e, 0, 0x3FE);
@@ -215,6 +216,20 @@ fn a_timing_with_pll_control_bit_2_set_posts_a_note() {
     dac(&mut e, 0x09, 0xC5);
     vc3(&mut e, 0x1E, 4);
     assert_eq!(notes(&mut e), 1);
+}
+
+/// The kernel reads the line counter by a byte write of index 0x0b to 0x072008 and a read of 0x0720b0.
+#[test]
+fn the_kernels_line_counter_read_at_0x0720b0_gets_the_beam() {
+    let mut e = engine(|_| {});
+    load_stock_timing(&mut e);
+    e.advance(1_000);
+    vc3(&mut e, 0x1E, 4);
+    e.advance(1_000 + 16_682_517 / 2);
+    put(&mut e, VC3_INDEX, 8, 0xB);
+    let line = get(&mut e, 0x620B0, 16);
+    assert!((530..=535).contains(&line), "half a frame: {line}");
+    assert!((line..=line + 1).contains(&(get(&mut e, 0x620B0, 32) >> 16)), "a word read, the data in bits 31:16");
 }
 
 #[test]
