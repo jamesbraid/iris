@@ -754,6 +754,10 @@ impl BoardEngine for VproEngine {
         0
     }
 
+    fn events_waiting(&self) -> Option<Arc<AtomicBool>> {
+        Some(self.out.waiting())
+    }
+
     fn drain_events(&mut self, out: &mut Vec<Event>, max: usize) {
         if let Some(f) = self.fault() {
             if !self.fault_sent.swap(true, Ordering::AcqRel) {

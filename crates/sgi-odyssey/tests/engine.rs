@@ -190,6 +190,21 @@ fn a_flag_that_rises_and_falls_before_the_drain_is_one_packet_and_retrace_comes_
     }
 }
 
+/// The flag a shell reads without a call into the engine follows the outbox: an interrupt packet
+/// raises it and the drain lowers it.
+#[test]
+fn events_waiting_follows_the_outbox() {
+    let (mut e, _) = engine(Mode::Threaded);
+    let waiting = e.events_waiting().expect("the board keeps a flag");
+    route_to_heart(&mut e);
+    drain(&mut e);
+    assert!(!waiting.load(Ordering::SeqCst));
+    put(&mut e, INTR_ENABLE_SET, LOW_WATER);
+    assert!(waiting.load(Ordering::SeqCst));
+    assert_eq!(drain(&mut e), vec![packet(FLAG_VECTOR, true)]);
+    assert!(!waiting.load(Ordering::SeqCst));
+}
+
 #[test]
 fn credits_go_to_the_source_of_the_store_and_coalesce() {
     for mode in [Mode::Inline, Mode::Threaded] {
