@@ -745,9 +745,6 @@ pub fn path_counts() -> String {
     if counts.is_empty() { "none".into() } else { counts.join(", ") }
 }
 
-/// Fewest pixels a draw needs for its pipeline table (about 30 us to build) to pay for itself.
-const TABLE_MIN_PIXELS: usize = 1024;
-
 /// `words` as big-endian bytes.
 fn be_bytes(words: &[u32]) -> Vec<u8> {
     let mut bytes = vec![0u8; words.len() * 4];
@@ -2232,12 +2229,10 @@ impl Gl {
             let v = if index { (v.round() as i64 & wrap) as f64 } else { v };
             super::rss::pack_comp(ty, v, rb);
         };
-        // 8-bit elements to 8-bit components through a one-to-one pipeline:
-        // each element's packed output by place in the cycle and value.
+        // 8-bit elements to 8-bit components through a pipeline of one-element modules (and EXPAND): tables
+        // taken from `run_row` itself (`PixMem::byte_map`).
         let refused = if !fast_paths() {
             Some(Path::PipeOff)
-        } else if w * h < TABLE_MIN_PIXELS {
-            Some(Path::PipeSmall)
         } else if esize != 1 {
             Some(Path::PipeElements)
         } else if matches!(ty, 1 | 3 | 5 | 7) {
@@ -2245,34 +2240,24 @@ impl Gl {
         } else {
             None
         };
-        let cols = if refused.is_none() { self.pix.byte_columns(lut, comps, out_comps) } else { None };
-        note(refused.unwrap_or(if cols.is_some() { Path::PipeTable } else { Path::PipeModule }));
-        let cols = cols.map(|cols| {
+        let map = match refused {
+            Some(path) => Err(path),
+            None => self.pix.byte_map(lut, comps, out_comps, w * h),
+        };
+        note(map.as_ref().err().copied().unwrap_or(Path::PipeTable));
+        let table = map.ok().map(|map| {
             let mut one = Vec::new();
-            cols.iter()
-                .map(|col| {
-                    col.map(|v| {
-                        one.clear();
-                        pack(v, &mut one);
-                        one[0]
-                    })
-                })
-                .collect::<Vec<[u8; 256]>>()
+            map.packed(|v| {
+                one.clear();
+                pack(v, &mut one);
+                one[0]
+            })
         });
-        // A pipeline that leaves every byte as it is (RGBA bytes through
-        // int-to-float and its clamp's scale back) copies.
-        let same = cols.iter().flatten().all(|col| col.iter().zip(0..=255u8).all(|(&a, b)| a == b));
         for r in 0..h {
             rb.clear();
             let row = &bytes[r * stride..r * stride + row_in];
-            if let Some(cols) = &cols {
-                if same {
-                    rb.extend_from_slice(row);
-                } else {
-                    for blk in row.chunks(cols.len()) {
-                        rb.extend(blk.iter().zip(cols).map(|(&b, col)| col[b as usize]));
-                    }
-                }
+            if let Some(table) = &table {
+                table.row(row, &mut rb);
             } else {
                 for v in self.pix.run_row(lut, row, w, out_comps) {
                     pack(v, &mut rb);

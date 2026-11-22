@@ -2364,40 +2364,46 @@ fn bench_draw_pixels() {
     }
 }
 
-/// Smoke 5.0's frame on an Octane: six DrawPixels of 486 rows, five 128 pixels wide and one 80, strips of a
-/// 720x486 image at raster position (280.375, 430.375) in a 1280x1024 window, transfer mode 0xC00080, bytes
-/// through int-to-float, EXPAND, the colour matrix and the clamp, scissor on, no zoom, rows by host DMA (the
-/// Discreet session's debug log). The EXPAND mode is not in that log: `BENCH_EXPAND` (default 6, RGB to RGBA)
-/// picks it. ms a frame over `BENCH_RUNS` runs of `BENCH_FRAMES` frames; run with `--ignored --nocapture`.
-#[test]
-#[ignore]
-fn bench_smoke_frame() {
-    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
-    let (runs, frames, mode) = (env("BENCH_RUNS", 5), env("BENCH_FRAMES", 4), env("BENCH_EXPAND", 6) as u32);
+/// Smoke 5.0's frame on an Octane, from the Discreet debug log: mode 0xC00080, bytes through EXPAND (`mode`, which
+/// the log lacks), scissor on, no zoom, rows by host DMA; `smoke_frame` draws its six strips.
+fn smoke_board(mode: u32) -> Arc<Mgras> {
     let m = live_board();
     draw_pixels_setup(&m, (0, 0, 1280, 1024), 0xC0_0080, 1, 1.0 / 255.0, [255.0f32.to_bits(); 12], Some(mode));
     fifo_token(&m, 0x39, &[280, 719, 430, 485]);
     fifo_token(&m, 0x6E, &[1]);
     draw_pixels_memory(&m, 128 * 4 * 486, 486, 0x1234_5678);
-    let frame = |m: &Mgras| {
-        for (x0, w) in [(0, 128), (128, 128), (256, 128), (384, 128), (512, 128), (640, 80)] {
-            draw_pixels_arm(m, w * 4, 486);
-            fifo_token(m, 0x38, &[f(280.375), f(430.375), f(0.0)]);
-            ge_state(m, 0xCD, 0xDA8, &[x0, 0, x0 + w as u32 - 1, 485, 486 << 16 | w as u32, 1]);
-            fifo_token(m, 0x9D, &[0, 0, 0, 0x49D0]);
-            fifo_dma(m, 0x0B, 1);
-        }
-    };
-    frame(&m);
+    m
+}
+
+fn smoke_frame(m: &Mgras) {
+    for (x0, w) in [(0, 128), (128, 128), (256, 128), (384, 128), (512, 128), (640, 80)] {
+        draw_pixels_arm(m, w * 4, 486);
+        fifo_token(m, 0x38, &[f(280.375), f(430.375), f(0.0)]);
+        ge_state(m, 0xCD, 0xDA8, &[x0, 0, x0 + w as u32 - 1, 485, 486 << 16 | w as u32, 1]);
+        fifo_token(m, 0x9D, &[0, 0, 0, 0x49D0]);
+        fifo_dma(m, 0x0B, 1);
+    }
+}
+
+/// ms a Smoke frame. `BENCH_EXPAND` picks EXPAND's mode (default 6, RGB to RGBA), `BENCH_RUNS` and `BENCH_FRAMES`
+/// the repeats. Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn bench_smoke_frame() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (runs, frames, mode) = (env("BENCH_RUNS", 5), env("BENCH_FRAMES", 4), env("BENCH_EXPAND", 6) as u32);
+    let m = smoke_board(mode);
+    smoke_frame(&m);
     m.wait_idle();
     let mut ms = Vec::new();
     for _ in 0..runs {
         let t = std::time::Instant::now();
-        (0..frames).for_each(|_| frame(&m));
+        (0..frames).for_each(|_| smoke_frame(&m));
         m.wait_idle();
         ms.push(t.elapsed().as_secs_f64() * 1e3 / frames as f64);
     }
     eprintln!("smoke expand {mode}: ms a frame {ms:.2?} hash {:02x?}", &m.state_hash()[..8]);
+    eprintln!("routes: {}", super::gl::path_counts());
     m.stop_engines();
 }
 
@@ -2448,10 +2454,11 @@ fn random_draw(kind: GraphicsBoard, seed: u64) -> [u8; 32] {
     let scissor = (r.below(2) == 0).then(|| [r.below(40) as u32, r.below(30) as u32, r.below(40) as u32, r.below(30) as u32]);
     let zoom = [1.0f32, 1.0, 1.0, 1.0, 1.0, 2.0, 0.5][r.below(7) as usize];
     let rect = [[0u32, 0, 0, 0], [3, 0, 0, 0], [0, 3, 0, 0], [3, 3, 0, 0]][r.below(4) as usize];
+    let expand = [None, None, Some(6), Some(4), Some(0), Some(5), Some(7)][r.below(7) as usize];
     let identity = r.below(2) == 0;
     let clamps = [(); 12].map(|_| if identity { clamp } else { [clamp, clamp * 0.5, clamp * 0.9, 100.0][r.below(4) as usize] }.to_bits());
     let m = live_board_of(kind);
-    draw_pixels_setup(&m, win, xfrmode, elem, scale, clamps, None);
+    draw_pixels_setup(&m, win, xfrmode, elem, scale, clamps, expand);
     if let Some(s) = scissor {
         fifo_token(&m, 0x39, &s);
         fifo_token(&m, 0x6E, &[1]);
@@ -2494,6 +2501,23 @@ fn draw_pixels_counts_its_routes() {
     let plain = [Path::PipeTable, Path::RowCopy, Path::PipeOff, Path::RowOff].map(path_count);
     assert!(fast[0] > before[0] && fast[1] > before[1], "fast paths counted");
     assert!(plain[2] > fast[2] && plain[3] > fast[3], "plain paths counted with their reasons");
+}
+
+/// Smoke's frame in each of EXPAND's modes: the pipeline table (with EXPAND), the row copy and the tile stores
+/// leave the board as the plain paths do.
+#[test]
+fn smoke_frame_fast_paths_match_plain_ones() {
+    for mode in [6, 4, 5, 7, 0, 3] {
+        let (fast, plain) = fast_and_plain(|| {
+            let m = smoke_board(mode);
+            smoke_frame(&m);
+            m.wait_idle();
+            let hash = m.state_hash();
+            m.stop_engines();
+            hash
+        });
+        assert_eq!(fast, plain, "EXPAND mode {mode}");
+    }
 }
 
 /// A one-word row of 8-byte pixels, which is no pixel wide: the row copy must leave it to the plain path, which

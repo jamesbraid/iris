@@ -55,6 +55,11 @@
 //! Not modelled: colour matrices (SGI_color_matrix), convolution,
 //! histogram / minmax, the zoom modules (the draw zooms geometrically).
 
+use super::gl::Path;
+
+/// Fewest pixels a draw needs for a table (about 30 us to build at the smallest) to pay for itself.
+const TABLE_MIN_PIXELS: usize = 1024;
+
 /// Microcode entry points (6.5.22 `mgras_ge.u`; the same in the revB and
 /// HQ4 builds).
 pub mod entry {
@@ -235,37 +240,56 @@ impl PixMem {
         if n > 0 && n < 16 { 2 * n } else { (self.read(st + 5) as usize).max(2) }
     }
 
-    /// For 8-bit elements: after how many the pipeline's per-position parameters repeat, if every module
-    /// maps one element to one element (so only its value and place matter); else None.
-    pub fn byte_period(&self) -> Option<usize> {
-        let mut period = 1;
+    /// An 8-bit pipeline of one-element modules (and one EXPAND) as tables taken from `run_row`, for draws of
+    /// `pixels` or more; `Err` says why not.
+    pub fn byte_map(&self, lut: &[u32], comps: usize, out_comps: usize, pixels: usize) -> Result<ByteMap, Path> {
+        // Cycles of the modules before and after EXPAND, in elements of the stream they see.
+        let (mut cycles, mut stage, mut expand) = ([1usize; 2], 0, None);
         for (e, st) in self.modules() {
             let p = match e {
-                entry::UNPACK | entry::EXPAND | entry::COMPRESS => return None,
+                entry::UNPACK | entry::COMPRESS => return Err(Path::PipeModule),
+                entry::EXPAND if expand.is_some() => return Err(Path::PipeModule),
+                entry::EXPAND => {
+                    expand = Some(expand_sources(self.read(st + 5)).ok_or(Path::PipeModule)?);
+                    stage = 1;
+                    continue;
+                }
                 entry::SCALEBIAS | entry::CLAMP => 12,
                 entry::LUT => self.lut_cycle(st),
                 _ => 1,
             };
-            let gcd = (1..=p.min(period)).rev().find(|g| p % g == 0 && period % g == 0)?;
-            period = period / gcd * p;
-            if period > 96 {
-                return None;
+            cycles[stage] = lcm(cycles[stage], p);
+            if cycles[stage] > 96 {
+                return Err(Path::PipeCycle);
             }
         }
-        Some(period)
-    }
-
-    /// `run_row`'s output for an 8-bit element by its place in the `byte_period` cycle and its value
-    /// (`[place][value]`), taken from `run_row` itself.
-    pub fn byte_columns(&self, lut: &[u32], comps: usize, out_comps: usize) -> Option<Vec<[f64; 256]>> {
-        let period = self.byte_period()?;
-        let pixels = (period * 256).div_ceil(comps);
-        let probe: Vec<u8> = (0..pixels * comps).map(|i| (i / period) as u8).collect();
-        let mut cols = vec![[0.0; 256]; period];
-        for (i, v) in self.run_row(lut, &probe, pixels, out_comps).into_iter().take(period * 256).enumerate() {
-            cols[i % period][i / period] = v;
+        let (in_px, out_px, from) = match expand {
+            Some((n, from)) => (n, 4, from),
+            None => (comps, comps, [Some(0), Some(1), Some(2), Some(3)]),
+        };
+        if in_px != comps || out_px != out_comps {
+            return Err(Path::PipeShape);
         }
-        Some(cols)
+        // Pixels after which both cycles are back at the start.
+        let places = lcm(cycles[0] / gcd(cycles[0], in_px), cycles[1] / gcd(cycles[1], out_px));
+        if pixels < (places * 256).max(TABLE_MIN_PIXELS) {
+            return Err(Path::PipeSmall);
+        }
+        // A row of `places` pixels for each value, every element of a pixel that value: what `run_row` gives
+        // an output component of a pixel at a place when its input element has the value.
+        let probe: Vec<u8> = (0..places * 256).flat_map(|p| std::iter::repeat_n((p / places) as u8, in_px)).collect();
+        let out = self.run_row(lut, &probe, places * 256, out_comps);
+        if out.len() != places * 256 * out_px {
+            return Err(Path::PipeShape);
+        }
+        let mut cols = vec![[0.0; 256]; places * out_px];
+        for (p, px) in out.chunks_exact(out_px).enumerate() {
+            for (k, &v) in px.iter().enumerate() {
+                cols[(p % places) * out_px + k][p / places] = v;
+            }
+        }
+        let src = (0..places * out_px).map(|i| from[i % out_px % 4].unwrap_or(0) as u8).collect();
+        Ok(ByteMap { in_px, out_px, places, src, cols })
     }
 
     /// The GE's x replication for a fractional zoom (`xzoom`, its state
@@ -501,6 +525,91 @@ impl PixMem {
     }
 }
 
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+fn lcm(a: usize, b: usize) -> usize {
+    a / gcd(a, b) * b
+}
+
+/// EXPAND's modes (`run_row`'s EXPAND arm) that make a pixel's components from its own elements: the elements
+/// a pixel has, and for each of its four output components the element it is made of, None for a fill.
+fn expand_sources(mode: u32) -> Option<(usize, [Option<usize>; 4])> {
+    Some(match mode {
+        m @ 0..=3 => {
+            let mut from = [None; 4];
+            from[[3, 2, 1, 0][m as usize]] = Some(0);
+            (1, from)
+        }
+        4 => (1, [Some(0), Some(0), Some(0), None]),
+        5 => (2, [Some(0), Some(0), Some(0), Some(1)]),
+        6 => (3, [Some(0), Some(1), Some(2), None]),
+        7 => (1, [Some(0); 4]),
+        _ => return None,
+    })
+}
+
+/// A pipeline of 8-bit elements to 8-bit components as tables (`PixMem::byte_map`): output component `k` of
+/// the pixel at place `x % places` is `cols[place * out_px + k][element src[place * out_px + k] of its pixel]`.
+pub struct ByteMap {
+    /// Elements a pixel has coming in, components going out.
+    pub in_px: usize,
+    pub out_px: usize,
+    pub places: usize,
+    pub src: Vec<u8>,
+    /// `run_row`'s output (unpacked) for each place and component, by element value.
+    pub cols: Vec<[f64; 256]>,
+}
+
+impl ByteMap {
+    /// The tables as the bytes a draw stores, `pack` turning one of `run_row`'s components into one.
+    pub fn packed(&self, mut pack: impl FnMut(f64) -> u8) -> BytePipe {
+        let cols: Vec<[u8; 256]> = self.cols.iter().map(|col| col.map(&mut pack)).collect();
+        let straight = self.in_px == self.out_px && self.src.iter().enumerate().all(|(i, &s)| s as usize == i % self.out_px);
+        let copy = straight && cols.iter().all(|col| col.iter().zip(0..=255u8).all(|(&a, b)| a == b));
+        BytePipe { in_px: self.in_px, out_px: self.out_px, places: self.places, src: self.src.clone(), cols, straight, copy }
+    }
+}
+
+/// `ByteMap` with its components packed to bytes.
+pub struct BytePipe {
+    in_px: usize,
+    out_px: usize,
+    places: usize,
+    src: Vec<u8>,
+    cols: Vec<[u8; 256]>,
+    /// Each output component is the same place's input element.
+    straight: bool,
+    /// ... and every byte maps to itself (RGBA bytes through int-to-float and its clamp's scale back).
+    copy: bool,
+}
+
+impl BytePipe {
+    /// A row of whole input pixels as output bytes.
+    pub fn row(&self, row: &[u8], out: &mut Vec<u8>) {
+        if self.copy {
+            out.extend_from_slice(row);
+        } else if self.straight {
+            for blk in row.chunks(self.cols.len()) {
+                out.extend(blk.iter().zip(&self.cols).map(|(&b, col)| col[b as usize]));
+            }
+        } else {
+            out.reserve(row.len() / self.in_px * self.out_px);
+            for blk in row.chunks(self.places * self.in_px) {
+                for (q, px) in blk.chunks_exact(self.in_px).enumerate() {
+                    let at = q * self.out_px;
+                    if let (4, Some([c0, c1, c2, c3]), Some([s0, s1, s2, s3])) = (self.out_px, self.cols[at..].first_chunk::<4>(), self.src[at..].first_chunk::<4>()) {
+                        out.extend_from_slice(&[c0[px[*s0 as usize] as usize], c1[px[*s1 as usize] as usize], c2[px[*s2 as usize] as usize], c3[px[*s3 as usize] as usize]]);
+                    } else {
+                        out.extend((at..at + self.out_px).map(|i| self.cols[i][px[self.src[i] as usize] as usize]));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A host element type.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Elem {
@@ -621,31 +730,182 @@ mod tests {
         assert_eq!(r, [0, 0, 0, 127, 63, 0, 0, 127]);
     }
 
-    /// The byte tables are what `run_row` gives (RGB pixels, so a pixel does not fill the 12-element cycle);
-    /// an EXPAND pipeline has none.
+    /// The byte map is what `run_row` gives, with and without EXPAND, in each of EXPAND's modes: a scale and bias
+    /// and a clamp that cycle over twelve elements and fills that differ, over pixels that do not fill a cycle.
     #[test]
-    fn byte_columns_are_run_row() {
+    fn byte_map_is_run_row() {
         let lut = Lut::default();
-        let mut m = mem(&[entry::INTTOFLOAT, 0, entry::SCALEBIAS, 0xD05, entry::CLAMP, 0x1B4, entry::PIPECONTROL, 0xD67]);
-        put(&mut m, 0xD05, &[0x34, 0x4064, 0x50C, 2, 4, (1.0f32 / 255.0).to_bits()]);
-        let mut sb = vec![0x50C, 0, 0x50C, 0, 0xD];
-        for k in 0..12 {
-            sb.extend_from_slice(&[(k as f32 / 100.0).to_bits(), (1.0 + k as f32 / 7.0).to_bits()]);
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 16) as u32
+        };
+        // (EXPAND's mode or None, host elements a pixel, output components)
+        for (mode, comps, out) in [(None, 3, 3), (None, 4, 4), (Some(0), 1, 4), (Some(1), 1, 4), (Some(2), 1, 4), (Some(3), 1, 4), (Some(4), 1, 4), (Some(5), 2, 4), (Some(6), 3, 4), (Some(7), 1, 4)] {
+            // INTTOFLOAT's state at 0xD05, SCALEBIAS's at 0x1B4, EXPAND's at 0x1D6, CLAMP's at 0xD67.
+            let prog: &[u32] = if mode.is_some() {
+                &[entry::INTTOFLOAT, 0, entry::SCALEBIAS, 0xD05, entry::EXPAND, 0x1B4, entry::CLAMP, 0x1D6, entry::PIPECONTROL, 0xD67]
+            } else {
+                &[entry::INTTOFLOAT, 0, entry::SCALEBIAS, 0xD05, entry::CLAMP, 0x1B4, entry::PIPECONTROL, 0xD67]
+            };
+            let mut m = mem(prog);
+            put(&mut m, 0xD05, &[0x34, 0x4064, 0x50C, 2, 4, (1.0f32 / 255.0).to_bits()]);
+            let mut sb = vec![0x50C, 0, 0x50C, 0, 0xD];
+            for k in 0..12 {
+                sb.extend_from_slice(&[(k as f32 / 100.0).to_bits(), (1.0 + k as f32 / 7.0).to_bits()]);
+            }
+            put(&mut m, 0x1B4, &sb);
+            if let Some(mode) = mode {
+                put(&mut m, 0x1D6, &[0x50C, 0, 0x50C, 2, 4, mode, 0, 0.25f32.to_bits(), 0.5f32.to_bits(), 1.0f32.to_bits()]);
+            }
+            let mut clamp = vec![0x50C, 0x1A000, 0x50C, 2, 4];
+            clamp.extend((0..12).map(|k| (100.0 + 13.0 * k as f32).to_bits()));
+            put(&mut m, 0xD67, &clamp);
+            m.write(ELEMENT_TYPE, 1);
+            let map = m.byte_map(&lut.0[..], comps, out, 100_000).unwrap_or_else(|e| panic!("mode {mode:?}: {}", e as usize));
+            assert_eq!((map.in_px, map.out_px), (comps, out), "mode {mode:?}");
+            let pixels = 61;
+            let row: Vec<u8> = (0..pixels * comps).map(|_| rnd() as u8).collect();
+            let want = m.run_row(&lut.0[..], &row, pixels, out);
+            assert_eq!(want.len(), pixels * out);
+            for x in 0..pixels {
+                for k in 0..out {
+                    let at = (x % map.places) * out + k;
+                    assert_eq!(map.cols[at][row[x * comps + map.src[at] as usize] as usize], want[x * out + k], "mode {mode:?} pixel {x} component {k}");
+                }
+            }
         }
-        put(&mut m, 0x1B4, &sb);
-        let mut clamp = vec![0x50C, 0x1A000, 0x50C, 2, 4];
-        clamp.extend((0..12).map(|k| (100.0 + 13.0 * k as f32).to_bits()));
-        put(&mut m, 0xD67, &clamp);
-        m.write(ELEMENT_TYPE, 1);
-        let cols = m.byte_columns(&lut.0[..], 3, 3).expect("a one-to-one pipeline");
-        assert_eq!(cols.len(), 12);
-        let row: Vec<u8> = (0..120u32).map(|i| (i * 37 % 256) as u8).collect();
-        let want = m.run_row(&lut.0[..], &row, 40, 3);
-        for (i, (&b, w)) in row.iter().zip(&want).enumerate() {
-            assert_eq!(cols[i % 12][b as usize], *w, "element {i}");
+        // Not for a pipeline that changes the element count another way, nor for an EXPAND mode that groups
+        // pixels, nor for a draw too small to pay for the table.
+        let m = mem(&[entry::UNPACK, 0, entry::PIPECONTROL, 0xC68]);
+        assert!(m.byte_map(&lut.0[..], 1, 4, 100_000).is_err());
+        let mut m = mem(&[entry::EXPAND, 0, entry::EXPAND, 0xC68, entry::PIPECONTROL, 0xC68]);
+        put(&mut m, 0xC68, &[0x50C, 0, 0x50C, 2, 4, 7]);
+        assert!(m.byte_map(&lut.0[..], 1, 4, 100_000).is_err(), "two EXPANDs");
+        let mut m = mem(&[entry::EXPAND, 0, entry::PIPECONTROL, 0xC68]);
+        put(&mut m, 0xC68, &[0x50C, 0, 0x50C, 2, 4, 9]);
+        assert!(m.byte_map(&lut.0[..], 1, 4, 100_000).is_err());
+        let mut m = mem(&[entry::EXPAND, 0, entry::PIPECONTROL, 0xC68]);
+        put(&mut m, 0xC68, &[0x50C, 0, 0x50C, 2, 4, 6]);
+        assert!(m.byte_map(&lut.0[..], 3, 4, 100).is_err());
+    }
+
+    /// Random pipelines of the one-element modules in any order, with up to two EXPANDs (any mode), sometimes an
+    /// UNPACK or COMPRESS, and an output count that sometimes does not fit: `byte_map` and `BytePipe::row` give
+    /// `run_row`'s bytes, and each refusal (a second EXPAND, UNPACK, COMPRESS, a mode that groups pixels, a
+    /// component count that does not fit) is made.
+    #[test]
+    fn byte_map_random_pipelines() {
+        let mut seed = 0xDEAD_BEEF_1234_5678u64;
+        let mut below = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) % n
+        };
+        let (mut made, mut refused) = (0, [0u32; 2]);
+        for trial in 0..600 {
+            let mut lut = Lut::default();
+            lut.0.iter_mut().for_each(|w| *w = below(1 << 32) as u32);
+            let mut pool = vec![entry::INTTOFLOAT, entry::SCALEBIAS, entry::LUT, entry::CLAMP, entry::SHIFTADD, entry::COLMATRIX];
+            let mut mods = Vec::new();
+            while !pool.is_empty() {
+                let e = pool.remove(below(pool.len() as u64) as usize);
+                if below(3) != 0 {
+                    mods.push(e);
+                }
+            }
+            let mode = if below(8) == 0 { 8 + below(3) as u32 } else { below(8) as u32 };
+            let mut expands = 0;
+            if below(4) != 0 {
+                expands = 1 + (below(12) == 0) as usize;
+                for _ in 0..expands {
+                    mods.insert(below(mods.len() as u64 + 1) as usize, entry::EXPAND);
+                }
+            }
+            let other = (below(20) == 0).then(|| [entry::UNPACK, entry::COMPRESS][below(2) as usize]);
+            if let Some(e) = other {
+                mods.insert(below(mods.len() as u64 + 1) as usize, e);
+            }
+            // Module k's state sits in the pair after it (the first pair's is 0).
+            let addrs: Vec<u32> = (0..mods.len()).map(|k| 0xC00 + 0x30 * k as u32).collect();
+            let mut prog = Vec::new();
+            for (k, &e) in mods.iter().enumerate() {
+                prog.extend([e, if k == 0 { 0 } else { addrs[k - 1] }]);
+            }
+            prog.extend([entry::PIPECONTROL, addrs.last().copied().unwrap_or(0)]);
+            let mut m = mem(&prog);
+            for (&e, &st) in mods.iter().zip(&addrs) {
+                let state: Vec<u32> = match e {
+                    entry::INTTOFLOAT => vec![0, 0, 0, 0, 0, ((1 + below(3)) as f32 / 255.0).to_bits()],
+                    entry::SHIFTADD => vec![0, 0, 0, 0, 0, below(5) as u32, below(3) as u32],
+                    entry::SCALEBIAS => [vec![0x50C, 0, 0x50C, 0, 0xD], (0..12).flat_map(|_| [(below(100) as f32 / 100.0).to_bits(), (0.5 + below(100) as f32 / 50.0).to_bits()]).collect()].concat(),
+                    entry::CLAMP => [vec![0x50C, 0x1A000, 0x50C, 2, 4], (0..12).map(|_| (1.0 + below(300) as f32).to_bits()).collect()].concat(),
+                    entry::LUT => {
+                        let n = 1 + below(7) as usize;
+                        [vec![0, 0, 0, 0, 0, 2 * n as u32, 0], (0..n).map(|_| below(0x400) as u32).collect(), vec![F2_23]].concat()
+                    }
+                    entry::EXPAND => vec![0, 0, 0, 0, 0, mode, 0, (below(100) as f32 / 50.0).to_bits(), (below(100) as f32 / 50.0).to_bits(), (below(100) as f32 / 50.0).to_bits()],
+                    _ => continue,
+                };
+                put(&mut m, st, &state);
+            }
+            m.write(ELEMENT_TYPE, below(2) as u32);
+            let out = if expands > 0 && below(10) != 0 { 4 } else { [1usize, 3, 4][below(3) as usize] };
+            let comps = m.input_shape(out).0;
+            let pixels = 1 + below(70) as usize;
+            let row: Vec<u8> = (0..pixels * comps).map(|_| below(256) as u8).collect();
+            let map = m.byte_map(&lut.0[..], comps, out, 1 << 30);
+            // What the pipeline allows: modules that keep the element count, one EXPAND of a mode below 8, and
+            // an output count that is EXPAND's four (or the input's, with none).
+            let module = other.is_some() || expands > 1 || (expands == 1 && mode >= 8);
+            let shape = expands == 1 && out != 4;
+            match (&map, module, shape) {
+                (Err(e), true, _) => {
+                    assert_eq!(*e as usize, Path::PipeModule as usize, "trial {trial} mods {mods:x?}");
+                    refused[0] += 1;
+                }
+                (Err(e), false, true) => {
+                    assert_eq!(*e as usize, Path::PipeShape as usize, "trial {trial} mods {mods:x?}");
+                    refused[1] += 1;
+                }
+                (Ok(_), false, false) => {}
+                (Err(e), ..) => panic!("trial {trial} mods {mods:x?} mode {mode}: refused as {}", *e as usize),
+                (Ok(_), ..) => panic!("trial {trial} mods {mods:x?} mode {mode}: not refused"),
+            }
+            let Ok(map) = map else { continue };
+            made += 1;
+            let ty = [0u32, 4][below(2) as usize];
+            let pack = |v: f64| {
+                let mut b = Vec::new();
+                super::super::rss::pack_comp(ty, v, &mut b);
+                b
+            };
+            let want: Vec<u8> = m.run_row(&lut.0[..], &row, pixels, out).into_iter().flat_map(pack).collect();
+            let mut got = Vec::new();
+            map.packed(|v| pack(v)[0]).row(&row, &mut got);
+            assert_eq!(got, want, "trial {trial} mods {mods:x?} mode {mode} comps {comps} out {out}");
         }
-        let m = mem(&[entry::EXPAND, 0, entry::PIPECONTROL, 0xC68]);
-        assert!(m.byte_columns(&lut.0[..], 1, 4).is_none());
+        assert!(made > 200 && refused[0] > 20 && refused[1] > 20, "reach: {made} made, refused {refused:?}");
+    }
+
+    /// A draw needs `places * 256` pixels (and 1024) to pay for the table: one pixel fewer is refused as small.
+    #[test]
+    fn byte_map_needs_a_draw_that_pays_for_it() {
+        let lut = Lut::default();
+        let mut m = mem(&[entry::INTTOFLOAT, 0, entry::SCALEBIAS, 0xD05, entry::EXPAND, 0x1B4, entry::CLAMP, 0x1D6, entry::PIPECONTROL, 0xD67]);
+        put(&mut m, 0x1D6, &[0x50C, 0, 0x50C, 2, 4, 6]);
+        let places = m.byte_map(&lut.0[..], 3, 4, 1 << 30).ok().map(|map| map.places).expect("a map");
+        assert_eq!(places, 12, "the 12-element cycles over 3 and 4 components");
+        let least = (places * 256).max(TABLE_MIN_PIXELS);
+        assert_eq!(m.byte_map(&lut.0[..], 3, 4, least - 1).err().map(|e| e as usize), Some(Path::PipeSmall as usize));
+        assert!(m.byte_map(&lut.0[..], 3, 4, least).is_ok());
+        // A one-place pipeline still needs the floor.
+        let m = mem(&[entry::INTTOFLOAT, 0, entry::PIPECONTROL, 0xD05]);
+        assert_eq!(m.byte_map(&lut.0[..], 4, 4, TABLE_MIN_PIXELS - 1).err().map(|e| e as usize), Some(Path::PipeSmall as usize));
+        assert!(m.byte_map(&lut.0[..], 4, 4, TABLE_MIN_PIXELS).is_ok());
     }
 
     /// GL_UNSIGNED_SHORT_4_4_4_4, traced: one element, four fields.
