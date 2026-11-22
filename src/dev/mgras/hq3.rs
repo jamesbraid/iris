@@ -981,8 +981,8 @@ impl Hq3Engine {
     /// monitor.
     pub fn summary(&self) -> String {
         let p = |f: &Cfifo| if f.need == 0 { "idle".to_string() } else { format!("cmd {:#x} needs {} more", f.cmd, f.need) };
-        format!("context words owed {}, user parser {}, privileged parser {}, DMA read pending {:?}",
-            self.context_words, p(&self.cfifo[0]), p(&self.cfifo[1]), self.dma_read_pending)
+        format!("context words owed {}, user parser {}, privileged parser {}, DMA read pending {:?}\n  draw routes (this process): {}",
+            self.context_words, p(&self.cfifo[0]), p(&self.cfifo[1]), self.dma_read_pending, super::gl::path_counts())
     }
 
     /// One 32-bit word from command FIFO `port` (0 user, 1 privileged).

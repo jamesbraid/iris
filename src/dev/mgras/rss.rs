@@ -23,6 +23,7 @@
 //! (by PIO through the character registers, or by DMA).
 
 use super::fixed;
+use super::gl::{note, Path};
 use super::pixmem::{Buffer, Kind, PixMem, PAGE_WORDS, TILE_W, WORD_MASK};
 use super::plain::{RegMap, Slot};
 use super::te1::{reg as te_reg, tex_env, Sampler, Te1, ITER_ONE, TEXMODE1_ENABLE};
@@ -3122,8 +3123,22 @@ impl Rss {
             return;
         }
         let bpp = x.bpp as usize;
-        if super::gl::fast_paths() && !frag && x.format != DEPTH_FORMAT && self.put_line_plain(x, line, bytes) {
-            return;
+        let blocked = if !super::gl::fast_paths() {
+            Some(Path::TilesOff)
+        } else if frag {
+            Some(Path::TilesFragments)
+        } else if x.format == DEPTH_FORMAT {
+            Some(Path::TilesDepth)
+        } else {
+            None
+        };
+        match blocked {
+            Some(path) => note(path),
+            None if self.put_line_plain(x, line, bytes) => {
+                note(Path::Tiles);
+                return;
+            }
+            None => {}
         }
         for k in 0..(bytes.len() / bpp.max(1)).min(x.width as usize) {
             let (fx, fy) = self.block_px(&x.block, k as i32, line as i32);
@@ -3197,12 +3212,17 @@ impl Rss {
     fn put_line_plain(&mut self, x: &Xfer, line: u32, bytes: &[u8]) -> bool {
         let mode = self.reg(reg::CLIP_MODE);
         if cid_match(self.reg(reg::MGRAS_PP1_WINDOW_MODE)) != 0 || (0..4).any(|n| mode & (1 << n) != 0 && mode & (0x10 << n) == 0) {
+            note(Path::TilesClipId);
             return false;
         }
-        let Some((bufs, n, keep)) = self.plain_stores() else { return false };
+        let Some((bufs, n, keep)) = self.plain_stores() else {
+            note(Path::TilesStores);
+            return false;
+        };
         let (bpp, dx) = (x.bpp as usize, x.block.dx());
         let (fx0, fy) = self.block_px(&x.block, 0, line as i32);
         if fx0.unsigned_abs() > 1 << 28 {
+            note(Path::TilesFar);
             return false;
         }
         let owns = self.owns_row(fy);
@@ -3226,6 +3246,7 @@ impl Rss {
             let pages = |b: &Buffer| (b.locate(lo, fy as u32).0 / PAGE_WORDS, b.locate(hi, fy as u32).0 / PAGE_WORDS);
             let ((a0, a1), (b0, b1)) = (pages(&bufs[0].0), pages(&bufs[1].0));
             if a0 > a1 || b0 > b1 || (a0 <= b1 && b0 <= a1) {
+                note(Path::TilesOverlap);
                 return false;
             }
         }

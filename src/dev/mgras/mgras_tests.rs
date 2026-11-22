@@ -2435,6 +2435,25 @@ fn draw_pixels_fast_paths_match_plain_ones() {
     }
 }
 
+/// A draw counts the route it took and the one it did not: the table and the row copy on the fast paths, their
+/// "off" reasons on the plain ones. Other tests count too, so this looks for increases.
+#[test]
+fn draw_pixels_counts_its_routes() {
+    use super::gl::{path_count, Path};
+    let draw = || fifo_draw(0xC0_0080, 1, 4, 1.0 / 255.0, 255.0, (32, 32), None);
+    let _held = super::gl::COMPARING.lock();
+    let before = [Path::PipeTable, Path::RowCopy, Path::PipeOff, Path::RowOff].map(path_count);
+    super::gl::PLAIN_ONLY.store(false, std::sync::atomic::Ordering::SeqCst);
+    draw();
+    let fast = [Path::PipeTable, Path::RowCopy, Path::PipeOff, Path::RowOff].map(path_count);
+    super::gl::PLAIN_ONLY.store(true, std::sync::atomic::Ordering::SeqCst);
+    draw();
+    super::gl::PLAIN_ONLY.store(false, std::sync::atomic::Ordering::SeqCst);
+    let plain = [Path::PipeTable, Path::RowCopy, Path::PipeOff, Path::RowOff].map(path_count);
+    assert!(fast[0] > before[0] && fast[1] > before[1], "fast paths counted");
+    assert!(plain[2] > fast[2] && plain[3] > fast[3], "plain paths counted with their reasons");
+}
+
 /// A one-word row of 8-byte pixels, which is no pixel wide: the row copy must leave it to the plain path, which
 /// takes the one pixel the draw has from the word and zeros (and must not subtract from the zero width: a debug
 /// build aborts on that).

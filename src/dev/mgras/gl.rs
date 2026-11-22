@@ -681,6 +681,64 @@ pub(crate) fn fast_paths() -> bool {
     true
 }
 
+macro_rules! paths {
+    ($($v:ident $name:literal),* $(,)?) => {
+        /// A route a glDrawPixels (or one of its DMA lines) took, or why it did not take the fast one.
+        #[derive(Clone, Copy)]
+        #[repr(usize)]
+        pub(crate) enum Path {
+            $($v),*
+        }
+        const PATH_NAMES: &[&str] = &[$($name),*];
+    };
+}
+
+paths! {
+    PipeTable "pipeline table",
+    PipeOff "pipeline table off",
+    PipeSmall "pipeline small draw",
+    PipeElements "pipeline not 8-bit elements",
+    PipeOutput "pipeline wide output",
+    PipeModule "pipeline module",
+    PipeCycle "pipeline cycle",
+    PipeShape "pipeline output shape",
+    RowCopy "row copy",
+    RowOff "row copy off",
+    RowZoom "row zoomed",
+    RowMirror "row mirrored",
+    RowNarrow "row narrower than a pixel",
+    RowShort "row short of words",
+    Zoomed "zoomed draw",
+    Tiles "tile lines",
+    TilesOff "tile lines off",
+    TilesFragments "lines through fragments",
+    TilesDepth "depth lines",
+    TilesClipId "lines clip-ID or keep-outside",
+    TilesStores "lines other stores",
+    TilesOverlap "lines overlapping buffers",
+    TilesFar "lines far off-screen",
+}
+
+static PATHS: [std::sync::atomic::AtomicU64; PATH_NAMES.len()] = [const { std::sync::atomic::AtomicU64::new(0) }; PATH_NAMES.len()];
+
+/// Count a draw or line on `path`: a draw or line, never a pixel, so it costs nothing a pixel.
+#[inline]
+pub(crate) fn note(path: Path) {
+    PATHS[path as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How often `path` has been counted in this process.
+#[cfg(test)]
+pub(crate) fn path_count(path: Path) -> u64 {
+    PATHS[path as usize].load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The routes counted so far in this process, for the monitor ("name count", nonzero only).
+pub fn path_counts() -> String {
+    let counts: Vec<String> = PATH_NAMES.iter().zip(&PATHS).map(|(n, c)| (n, c.load(std::sync::atomic::Ordering::Relaxed))).filter(|(_, c)| *c != 0).map(|(n, c)| format!("{n} {c}")).collect();
+    if counts.is_empty() { "none".into() } else { counts.join(", ") }
+}
+
 /// Fewest pixels a draw needs for its pipeline table (about 30 us to build) to pay for itself.
 const TABLE_MIN_PIXELS: usize = 1024;
 
@@ -2163,8 +2221,20 @@ impl Gl {
         };
         // 8-bit elements to 8-bit components through a one-to-one pipeline:
         // each element's packed output by place in the cycle and value.
-        let tabulate = fast_paths() && w * h >= TABLE_MIN_PIXELS && esize == 1 && !matches!(ty, 1 | 3 | 5 | 7);
-        let cols = if tabulate { self.pix.byte_columns(lut, comps, out_comps) } else { None }.map(|cols| {
+        let refused = if !fast_paths() {
+            Some(Path::PipeOff)
+        } else if w * h < TABLE_MIN_PIXELS {
+            Some(Path::PipeSmall)
+        } else if esize != 1 {
+            Some(Path::PipeElements)
+        } else if matches!(ty, 1 | 3 | 5 | 7) {
+            Some(Path::PipeOutput)
+        } else {
+            None
+        };
+        let cols = if refused.is_none() { self.pix.byte_columns(lut, comps, out_comps) } else { None };
+        note(refused.unwrap_or(if cols.is_some() { Path::PipeTable } else { Path::PipeModule }));
+        let cols = cols.map(|cols| {
             let mut one = Vec::new();
             cols.iter()
                 .map(|col| {
@@ -2312,6 +2382,7 @@ impl Gl {
         let ge_rep = self.pix.xzoom_rep();
         let re_zoom = self.xfrmode & (3 << 19);
         if xs != 0 && (re_zoom != 0 || ge_rep > 1 || (self.zoom_inv > 0.0 && self.zoom_inv != 1.0)) {
+            note(Path::Zoomed);
             return self.draw_pixels_zoomed(words, wpr, rows, bpp, ge_rep, re_zoom, sink);
         }
         let src_w = self.row_pixels(wpr, bpp);
@@ -2354,7 +2425,21 @@ impl Gl {
         sink.rss_write(re::BLOCK_XYSTARTI, xy(cx0, cy0), false);
         sink.rss_write(re::BLOCK_XYENDI, xy(cx1, cy1), true);
         // Unzoomed, not mirrored in x: each line is the image's row bytes.
-        if fast_paths() && zoom == 1.0 && !flip_x && src_w > 0 && words.len() >= rows * wpr {
+        let blocked = if !fast_paths() {
+            Some(Path::RowOff)
+        } else if zoom != 1.0 {
+            Some(Path::RowZoom)
+        } else if flip_x {
+            Some(Path::RowMirror)
+        } else if src_w == 0 {
+            Some(Path::RowNarrow)
+        } else if words.len() < rows * wpr {
+            Some(Path::RowShort)
+        } else {
+            None
+        };
+        note(blocked.unwrap_or(Path::RowCopy));
+        if blocked.is_none() {
             let (c0, n) = ((cx0 - x0) as usize * bpp, w as usize * bpp);
             let rev = bpp == 4 && self.xfrmode & 0xFF == 0x80 && self.xfrmode & 1 << 22 == 0;
             let mut row = vec![0u8; wpr * 4];
