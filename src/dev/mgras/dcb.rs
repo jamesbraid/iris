@@ -149,7 +149,8 @@ impl Dac {
                 self.gamma_comp += 1;
                 if self.gamma_comp == 3 {
                     self.gamma_comp = 0;
-                    self.addr = self.addr.wrapping_add(1);
+                    // After location 0xff the address returns to 0, not 0x100 (ADV7160/7162 data sheet, p. 24).
+                    self.addr = if self.addr == 0xFF { 0 } else { self.addr.wrapping_add(1) };
                 }
             }
             2 => self.regs.insert(self.addr, d & 0xFF),
