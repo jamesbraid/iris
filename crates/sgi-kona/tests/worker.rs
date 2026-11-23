@@ -354,6 +354,18 @@ fn quiesce_save_load_and_reset_drain_the_worker_first() {
     settle(&mut e);
 }
 
+/// The shell's quiesce loop, bounded by wall time, not by a count of tries a loaded host can spend before the worker runs.
+fn quiesce_within(e: &mut Engine, limit: Duration) {
+    let end = Instant::now() + limit;
+    let mut now = 0;
+    loop {
+        match shell::quiesce(e, &mut now, 1_000_000, 1) {
+            Err(Refused::Midway(m)) if Instant::now() < end => drop(m),
+            done => return done.expect("the loop gives the frame and the engine parks"),
+        }
+    }
+}
+
 /// A swap holds the worker at the frame boundary: what is behind it does not run until `frame`, which the shell's
 /// loop gives, and a quiesce says so rather than hang.
 #[test]
@@ -368,7 +380,7 @@ fn a_swap_holds_the_worker_until_the_frame() {
     assert_eq!(e.queued(), 7, "nothing behind the swap ran");
     assert_eq!(e.pixel(7, 8, COLOUR_WORD), 0);
     assert!(matches!(e.quiesce(u64::MAX), Err(Refused::Midway(_))));
-    shell::quiesce(&mut e, &mut 0, 1_000_000, 8).expect("the loop gives the frame");
+    quiesce_within(&mut e, Duration::from_secs(60));
     assert_eq!((e.queued(), e.pixel(7, 8, COLOUR_WORD)), (0, 9));
 }
 
@@ -426,7 +438,7 @@ fn two_threads_take_the_locks_in_one_order() {
         events(&mut e);
         if n % 16 == 0 {
             let mut chunks: Vec<Chunk> = Vec::new();
-            shell::quiesce(&mut e, &mut 0, 1_000_000, 100).unwrap();
+            quiesce_within(&mut e, Duration::from_secs(60));
             e.save(&mut chunks).unwrap();
             if n % 32 == 0 {
                 e.load(&mut VecSource::new(chunks)).unwrap();
