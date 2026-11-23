@@ -251,13 +251,17 @@ fn polls_and_questions_do_not_wait_for_the_stream() {
     }
     let t0 = Instant::now();
     for _ in 0..1000 {
-        for off in [CREDIT, INT_CAUSE, ACTIVITY, RETRACE_TAG, WIDGET_ID] {
+        for off in [INT_CAUSE, ACTIVITY, RETRACE_TAG, WIDGET_ID] {
             assert!(matches!(e.read(off, 32), Read::Value(_)), "{off:#x} answers at once");
         }
         let _ = (e.heads(), e.frame_size(0), e.head_timing(0), e.head_bits(0), e.frame_generation(0), e.channel_window(0), e.dac_cursor(), e.busy_ns(), e.swaps_dropped(), e.irq_levels());
     }
+    // A level read may run a batch of the stores, so it is one read, and it still answers while the worker draws.
+    let level = Instant::now();
+    assert!(matches!(e.read(CREDIT, 32), Read::Value(_)));
+    assert!(level.elapsed() < Duration::from_secs(1), "a level read took {:?}", level.elapsed());
     assert!(e.queued() > 0, "the worker was still drawing: the polls did not wait for it");
-    assert!(t0.elapsed() < Duration::from_secs(1), "50,000 answers took {:?}", t0.elapsed());
+    assert!(t0.elapsed() < Duration::from_secs(1), "the polls and questions took {:?}", t0.elapsed());
     e.quiesce(u64::MAX).unwrap();
 }
 
@@ -508,4 +512,26 @@ fn a_cause_read_posts_the_waiting_reason_when_the_worker_is_idle() {
     assert!(matches!(e.read(INT_CAUSE, 32), Read::Value(_)));
     assert_eq!(guest.word(REASON_PAGE as usize), 0x102, "the read posted it");
     e.quiesce(u64::MAX).unwrap();
+}
+
+/// With the worker parked (a quiesce stops it) only reads can run stores: each command's level, and a full
+/// queue's, reaches zero inside the PROM's 5,000 reads.
+#[test]
+fn the_credit_level_reaches_zero_inside_the_proms_bound_with_the_worker_parked() {
+    let (mut e, _) = pipe(true);
+    e.quiesce(u64::MAX).unwrap();
+    for command in 0..50u32 {
+        for w in [1, 5, command & 7, command, 3, 30 + command & 63] {
+            store(&mut e, COMMAND_PAGE, w, A);
+        }
+        let polls = (1..=5000).find(|_| e.read(CREDIT, 32) == Read::Value(0));
+        assert!(polls.is_some(), "command {command}: the level was still up after 5000 reads with the worker parked");
+    }
+    // A full queue drains in a bounded number of reads.
+    for k in 0..60_000u32 {
+        store(&mut e, COMMAND_PAGE, 1, if k % 2 == 0 { A } else { B });
+    }
+    let polls = (1..=5000).find(|_| e.read(CREDIT, 32) == Read::Value(0));
+    assert!(polls.is_some(), "60,000 queued stores were still queued after 5000 reads");
+    assert_eq!(e.queued(), 0);
 }
