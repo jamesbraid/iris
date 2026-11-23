@@ -2262,7 +2262,10 @@ fn draw_pixels_memory(m: &Mgras, len: usize, h: usize, mut seed: u32) -> [u8; 4]
         *b = (seed >> 24) as u8;
     }
     let first = [mem[0x10000], mem[0x10001], mem[0x10002], mem[0x10003]];
-    m.set_phys(Arc::new(FlatMem(mem)));
+    // BENCH_MEM=zero leaves the DMA reading zeros, without FlatMem's byte-at-a-time reads in the profile.
+    if !std::env::var("BENCH_MEM").is_ok_and(|v| v == "zero") {
+        m.set_phys(Arc::new(FlatMem(mem)));
+    }
     fifo_dma(m, 0x21, 0x1000);
     draw_pixels_arm(m, len / h, h);
     first
