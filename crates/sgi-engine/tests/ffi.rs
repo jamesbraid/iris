@@ -8,15 +8,15 @@ use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use sgi_engine::ffi::*;
 use sgi_engine::inject::{arm, Point};
 use sgi_engine::mock::{reg, Mock, MockConfig, STATE_VERSION};
 use sgi_engine::{HostMem, Swap};
 use support::*;
 
-/// `arm` is global: one test at a time that uses it.
-static ONE: Mutex<()> = Mutex::new(());
+/// `arm` is global and any test's call can take the panic, so the arming tests run alone.
+static ONE: RwLock<()> = RwLock::new(());
 
 /// What the callbacks' `user` points to.
 struct User {
@@ -156,6 +156,7 @@ fn idle(h: *mut IrisEngine, now: u64) -> (c_int, IrisEngineIdle) {
 
 #[test]
 fn a_c_shell_drives_the_interface_end_to_end() {
+    let _g = ONE.read();
     let f = Fixture::new(true);
     let h = f.h;
     assert_eq!(iris_engine_contains_panics(), 1);
@@ -214,6 +215,7 @@ extern "C" fn put_none(_: *mut c_void, _: *const c_char, _: u64, _: *const u8, _
 
 #[test]
 fn lent_memory_through_the_c_entries() {
+    let _g = ONE.read();
     let mut f = Fixture::new(true);
     let h = f.h;
     let mut runs = [IrisEngineRun::default(); 4];
@@ -236,6 +238,7 @@ fn lent_memory_through_the_c_entries() {
 /// A cap smaller than the runs found must not lose the rest.
 #[test]
 fn drain_dirty_with_a_short_cap_keeps_the_rest_for_the_next_call() {
+    let _g = ONE.read();
     let mut f = Fixture::new(true);
     let h = f.h;
     f.lent[5] = 100;
@@ -251,6 +254,7 @@ fn drain_dirty_with_a_short_cap_keeps_the_rest_for_the_next_call() {
 
 #[test]
 fn state_streams_through_callbacks_and_refusals_carry_their_reason() {
+    let _g = ONE.read();
     let f = Fixture::new(true);
     let h = f.h;
     for w in [3u32, 600, 1100] {
@@ -323,6 +327,7 @@ fn state_streams_through_callbacks_and_refusals_carry_their_reason() {
 
 #[test]
 fn a_caller_older_than_the_library_reads_new_fields_as_zero() {
+    let _g = ONE.read();
     let user = User { ram: Ram::new(), h: AtomicPtr::new(null_mut()), reenter: AtomicU32::new(0), answers: Mutex::new(Vec::new()), notified: AtomicU32::new(0) };
     let mut cfg = config(true, None);
     // A caller that predates the board's `extra` field and the host's notify hook.
@@ -346,7 +351,7 @@ fn a_caller_older_than_the_library_reads_new_fields_as_zero() {
 /// Every entry, with what it answers when it panics.
 #[test]
 fn a_panic_at_each_entry_is_a_device_fault() {
-    let _g = ONE.lock();
+    let _g = ONE.write();
     let mut v = 0u64;
     let mut pump = IrisEnginePump::default();
     let mut i = IrisEngineIdle::default();
@@ -408,7 +413,7 @@ fn a_panic_at_each_entry_is_a_device_fault() {
 
 #[test]
 fn a_panic_inside_the_engine_is_caught_at_the_entry_and_reset_recovers() {
-    let _g = ONE.lock();
+    let _g = ONE.write();
     let f = Fixture::new(false);
     let h = f.h;
     wr(h, reg::BOOM, 0);
@@ -437,6 +442,7 @@ fn a_panic_inside_the_engine_is_caught_at_the_entry_and_reset_recovers() {
 
 #[test]
 fn a_call_that_comes_in_during_a_call_is_refused_and_leaves_the_engine_alone() {
+    let _g = ONE.read();
     let f = Fixture::new(false);
     let h = f.h;
     static LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -460,6 +466,7 @@ fn a_call_that_comes_in_during_a_call_is_refused_and_leaves_the_engine_alone() {
 
 #[test]
 fn a_handle_moves_between_threads_one_call_at_a_time() {
+    let _g = ONE.read();
     struct H(*mut IrisEngine);
     // SAFETY: calls come one at a time; that is the contract being tested.
     unsafe impl Send for H {}
@@ -476,6 +483,7 @@ fn a_handle_moves_between_threads_one_call_at_a_time() {
 
 #[test]
 fn bad_arguments_answer_without_touching_the_engine() {
+    let _g = ONE.read();
     let f = Fixture::new(false);
     let h = f.h;
     assert_eq!(unsafe { iris_engine_write(null_mut(), 0, 32, 0) }, IRIS_ENGINE_FAULT);
@@ -488,6 +496,7 @@ fn bad_arguments_answer_without_touching_the_engine() {
 
 #[test]
 fn a_c_shell_takes_a_timed_write_a_head_s_picture_and_a_stopped_stream() {
+    let _g = ONE.read();
     let f = Fixture::new(false);
     let h = f.h;
     assert_eq!(unsafe { iris_engine_write_at(h, 77, reg::DATA, 32, 3) }, IRIS_ENGINE_OK);
@@ -509,6 +518,7 @@ fn a_c_shell_takes_a_timed_write_a_head_s_picture_and_a_stopped_stream() {
 
 #[test]
 fn a_c_shell_reads_the_workers_busy_time() {
+    let _g = ONE.read();
     let f = Fixture::new(false);
     assert_eq!(unsafe { iris_engine_busy_ns(f.h) }, 12_345);
     assert_eq!(unsafe { iris_engine_busy_ns(std::ptr::null_mut()) }, 0);
@@ -516,6 +526,7 @@ fn a_c_shell_reads_the_workers_busy_time() {
 
 #[test]
 fn a_c_shell_reads_a_heads_timing_and_its_ten_bit_picture() {
+    let _g = ONE.read();
     let f = Fixture::new(false);
     let h = f.h;
     let mut t = IrisEngineHeadTiming::default();
@@ -536,6 +547,7 @@ fn a_c_shell_reads_a_heads_timing_and_its_ten_bit_picture() {
 /// A C shell reads each swap as its own SWAP event with a running count and the time, and the drop counter (0 here) is there.
 #[test]
 fn a_c_shell_reads_each_swap_as_an_event_and_the_drop_counter() {
+    let _g = ONE.read();
     let f = Fixture::new(false);
     let h = f.h;
     wr(h, reg::SWAP, 0);
@@ -552,6 +564,7 @@ fn a_c_shell_reads_each_swap_as_an_event_and_the_drop_counter() {
 
 #[test]
 fn events_pending_follows_the_outbox() {
+    let _g = ONE.read();
     let f = Fixture::new(false);
     let h = f.h;
     assert_eq!(unsafe { iris_engine_events_pending(h) }, 0);
@@ -564,6 +577,7 @@ fn events_pending_follows_the_outbox() {
 
 #[test]
 fn try_store_leaves_every_store_to_write_on_a_board_that_offers_none() {
+    let _g = ONE.read();
     let f = Fixture::new(false);
     assert_eq!(unsafe { iris_engine_try_store(f.h, reg::IRQ_SET, 32, 1) }, IRIS_ENGINE_BUSY);
     assert_eq!(unsafe { iris_engine_try_store(null_mut(), reg::IRQ_SET, 32, 1) }, IRIS_ENGINE_FAULT);
