@@ -931,8 +931,9 @@ fn host_pixels(f: (u32, u32), bytes: &[u8], bpp: usize, out: &mut Vec<u32>) {
     let one = |c: &[u8]| if generic_format(f) { fb_pixel(f, c) } else { from_host(f, c.iter().fold(0u64, |a, &b| (a << 8) | b as u64)) };
     let mut whole = bytes.chunks_exact(bpp);
     match f {
-        (8, 0x10) if bpp == 4 => out.extend(whole.by_ref().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))),
-        (8, 0) if bpp == 4 => out.extend(whole.by_ref().map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))),
+        // A fresh iterator: extending from `whole` by_ref does not vectorise.
+        (8, 0x10) if bpp == 4 => out.extend(bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))),
+        (8, 0) if bpp == 4 => out.extend(bytes.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))),
         _ => out.extend(whole.by_ref().map(one)),
     }
     if !whole.remainder().is_empty() {
@@ -3235,7 +3236,7 @@ impl Rss {
         }
         // The pixels drawn: k from `from` to `to`, a trailing part pixel too.
         let (width, whole) = (x.width as usize, (bytes.len() / bpp.max(1)).min(x.width as usize));
-        let count = bytes.chunks(bpp).take(width).count() as i32;
+        let count = bytes.len().div_ceil(bpp).min(width) as i32;
         let (first, last) = if dx > 0 { (cols.0 - fx0, cols.1 - fx0) } else { (fx0 - cols.1, fx0 - cols.0) };
         let (from, to) = if rows_ok { (first.max(0), (last + 1).min(count)) } else { (0, 0) };
         // `put` alternates the two buffers a pixel; this stores one then the other, the same unless a pixel of
