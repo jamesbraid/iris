@@ -4656,40 +4656,53 @@ mod tests {
         assert_eq!((300..304).map(|x| px(&r, x, 40)).collect::<Vec<_>>(), [0, 0xF, 0, 0xF]);
     }
 
-    /// ns a pixel of `dma_write_line` for 720-pixel lines in a GL window's state, `BENCH_RUNS` runs of a 720x486
-    /// image a format. Run with `--ignored --nocapture`.
+    /// ns a pixel of `dma_write_line` for `BENCH_W`-pixel lines (720) into a 486-row block in a GL window's state,
+    /// each line sent to `BENCH_ENGINES` raster engines (1; 2 is a Maximum Impact, each storing its own rows),
+    /// `BENCH_RUNS` runs of a 720x486 image a format (`BENCH_CASE` picks formats by name). Also prints a hash of
+    /// the planes. Run with `--ignored --nocapture`.
     #[test]
     #[ignore]
     fn bench_put_line() {
-        let runs = std::env::var("BENCH_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
-        let mut r = x_server();
-        r.write(reg::PP1FILLMODE, 0x0C00_6204, false);
-        r.write(reg::COLORMASKLSBSA, u32::MAX, false);
-        r.write(reg::XYWIN, 485 << 16, false);
-        r.write(reg::CLIP_MODE, 0x11, false);
-        r.write(reg::CLIP_X, 719, false);
-        r.write(reg::CLIP_Y, 485, false);
-        r.write(reg::FILLMODE, 5 << 22, false);
+        let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let (runs, w, engines) = (env("BENCH_RUNS", 7), env("BENCH_W", 720), env("BENCH_ENGINES", 1));
+        let mut rs: Vec<Box<Rss>> = (0..engines).map(|_| x_server()).collect();
+        for (n, r) in rs.iter_mut().enumerate() {
+            r.set_engine(n as u32, engines as u32 - 1);
+            r.write(reg::PP1FILLMODE, 0x0C00_6204, false);
+            r.write(reg::COLORMASKLSBSA, u32::MAX, false);
+            r.write(reg::XYWIN, 485 << 16, false);
+            r.write(reg::CLIP_MODE, 0x11, false);
+            r.write(reg::CLIP_X, w as u32 - 1, false);
+            r.write(reg::CLIP_Y, 485, false);
+            r.write(reg::FILLMODE, 5 << 22, false);
+        }
         let mut seed = 0x1234_5678u32;
-        let bytes: Vec<u8> = (0..720 * 8)
+        let bytes: Vec<u8> = (0..w * 8)
             .map(|_| {
                 seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 (seed >> 24) as u8
             })
             .collect();
-        for (name, xfrmode) in [("rgba8 rgb_order", 0xC0_0080u32), ("rgba8 abgr", 0x80), ("rgb8", 0x70), ("rgba16 rgb_order", 0xC0_0081)] {
-            r.write(reg::XFRMODE, xfrmode, false);
-            r.write(reg::XFRSIZE, 486 << 16 | 720, false);
-            let line = &bytes[..720 * bytes_per_pixel(xfrmode) as usize];
+        let only = std::env::var("BENCH_CASE").unwrap_or_default();
+        let cases = [("rgba8 rgb_order", 0xC0_0080u32), ("rgba8 abgr", 0x80), ("rgb8", 0x70), ("rgba16 rgb_order", 0xC0_0081)];
+        for (name, xfrmode) in cases.into_iter().filter(|c| c.0.contains(&only)) {
+            let line = &bytes[..w * bytes_per_pixel(xfrmode) as usize];
             let ns: Vec<f64> = (0..runs)
                 .map(|_| {
-                    block(&mut r, 0, 0, 719, 485);
+                    for r in rs.iter_mut() {
+                        r.write(reg::XFRMODE, xfrmode, false);
+                        r.write(reg::XFRSIZE, 486 << 16 | w as u32, false);
+                        block(r, 0, 0, w as u32 - 1, 485);
+                    }
                     let t = std::time::Instant::now();
-                    (0..486).for_each(|l| r.dma_write_line(l, line));
-                    t.elapsed().as_secs_f64() * 1e9 / (486 * 720) as f64
+                    for l in 0..486 {
+                        rs.iter_mut().for_each(|r| r.dma_write_line(l, line));
+                    }
+                    t.elapsed().as_secs_f64() * 1e9 / (486 * w) as f64
                 })
                 .collect();
-            eprintln!("{name:18} ns/px {ns:.2?} px0 {:#x}", r.mem.get(&main_buffer(), 0, 485));
+            let hash = rs.iter().flat_map(|r| r.mem.words.iter()).fold(0xcbf2_9ce4_8422_2325u64, |h, &v| (h ^ v).wrapping_mul(0x0100_0000_01b3));
+            eprintln!("{name:18} ns/px {ns:.2?} px0 {:#x} planes {hash:016x}", rs[0].mem.get(&main_buffer(), 0, 485));
         }
     }
 
