@@ -23,7 +23,7 @@
 //! - Lock order, everywhere: `Shared::inner` (the pipe's state and its back end), then
 //!   `Shared::credits`, then the register file (`Host::front`). The queue, the widget callback, the
 //!   fault text and the outbox are leaves, never held while taking another. The worker holds `inner`
-//!   for a run of stores and `bump`s it between them, so a caller that needs it waits for one store.
+//!   for a run of stores and `bump`s it between batches of 16, so a caller that needs it waits for one batch.
 //! - A store to the map RAM with nothing ahead of it runs on the caller's thread (`store`), and the display option
 //!   board's bus callbacks (`set_display_bus`) run on the worker.
 //! - A panic in the worker or in `run` is a device fault: the engine stops, the stores still queued
@@ -68,7 +68,8 @@ const SLICE: usize = 1 << 12;
 /// Stores a caller stages before it hands them to the queue.
 const STAGE_MAX: usize = 256;
 /// Stores a runner takes from the queue at a time.
-const BATCH_MAX: usize = 64;
+/// A credit-level read runs one batch: the default queue of 65,536 stores is down in 4,096 reads.
+const BATCH_MAX: usize = 16;
 /// A run that does not drain publishes its view and generation every this many batches.
 const PUBLISH_BATCHES: usize = 16;
 
@@ -571,8 +572,13 @@ impl Shared {
     /// Run the stream, in order, until it is empty, waits at a swap, or `max` stores have run. The worker's
     /// loop, and the caller's with none. A panic is a device fault.
     fn run(&self, max: usize) -> usize {
+        self.run_on(&mut self.inner.lock(), max)
+    }
+
+    /// `run` on a pipe the caller already holds.
+    fn run_on(&self, inner: &mut MutexGuard<'_, Inner>, max: usize) -> usize {
         let mut ran = 0;
-        if let Err(p) = catch_unwind(AssertUnwindSafe(|| self.run_stores(max, &mut ran))) {
+        if let Err(p) = catch_unwind(AssertUnwindSafe(|| self.run_stores(inner, max, &mut ran))) {
             self.fail(&format!("the engine panicked: {}", panic_text(&*p)));
         }
         if self.dead() {
@@ -585,8 +591,7 @@ impl Shared {
         ran
     }
 
-    fn run_stores(&self, max: usize, ran: &mut usize) {
-        let mut inner = self.inner.lock();
+    fn run_stores(&self, inner: &mut MutexGuard<'_, Inner>, max: usize, ran: &mut usize) {
         let mut batch: VecDeque<Stored> = VecDeque::with_capacity(BATCH_MAX);
         let mut since = 0usize;
         while *ran < max && !self.dead() && !inner.back.swaps_waiting() {
@@ -608,22 +613,26 @@ impl Shared {
                     }
                     break;
                 }
-                self.exec(&mut inner, s);
+                self.exec(inner, s);
                 *ran += 1;
                 self.done.fetch_add(1, Release);
-                MutexGuard::bump(&mut inner);
+                // Only between batches: a runner that let go holding stores it had popped would let another runner
+                // (the worker, or a credit read) run the stores behind them first.
+                if batch.is_empty() && *ran < max {
+                    MutexGuard::bump(inner);
+                }
             }
             // A run that never drains still shows the shell what it has changed.
             since += 1;
             if since >= PUBLISH_BATCHES {
-                self.publish_view(&inner);
+                self.publish_view(inner);
                 self.ran.fetch_add(1, Relaxed);
                 since = 0;
             }
         }
         // Reasons a cause-register access found waiting are posted here too.
         self.poke.store(false, Release);
-        self.post_reasons(&mut inner);
+        self.post_reasons(inner);
         if *ran != 0 && self.q.lock().stream.is_empty() {
             // Credits the framers held while the stores were arriving go back once nothing holds them.
             let mut c = self.credits.lock();
@@ -634,10 +643,10 @@ impl Shared {
         }
         self.ran.fetch_add((*ran != 0) as u64, Relaxed);
         if *ran != 0 {
-            self.publish_view(&inner);
+            self.publish_view(inner);
         }
         self.tile_ns.store(inner.back.busy_ns(), Relaxed);
-        self.notice(&inner);
+        self.notice(inner);
         self.report_widget();
     }
 }
@@ -1374,6 +1383,13 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
             match self.sh.inner.try_lock() {
                 Some(g) => pipe = Some(g),
                 None => return Read::Busy,
+            }
+        }
+        // The PROM gives up on a level that stays up for 5,000 reads: a read that finds stores queued runs one
+        // batch here when the pipe is free, so the level does not wait for the worker to be scheduled.
+        if self.threaded && at.contains(&CREDIT) && self.pending() != 0 {
+            if let Some(mut i) = self.sh.inner.try_lock() {
+                self.sh.run_on(&mut i, BATCH_MAX);
             }
         }
         let pending = self.pending();
