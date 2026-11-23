@@ -161,6 +161,8 @@ pub(super) struct CommandFifo {
     exit: AtomicBool,
     /// Called each time the board's thread retires stores (`on_retire`).
     retired_hook: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// Called each time the board's thread ends a slice (`on_idle`).
+    idle_hook: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
     sleeper: Mutex<Option<std::thread::Thread>>,
     pub thread: Mutex<Option<JoinHandle<()>>>,
     /// Edge filter for the traced level; zero-sized without the feature.
@@ -210,6 +212,7 @@ impl Default for CommandFifo {
             busy_ns: AtomicU64::new(0),
             exit: AtomicBool::new(false),
             retired_hook: std::sync::OnceLock::new(),
+            idle_hook: std::sync::OnceLock::new(),
             sleeper: Mutex::new(None),
             thread: Mutex::new(None),
             pf_level: crate::PfValue::new(),
@@ -456,6 +459,18 @@ impl CommandFifo {
         if let Some(hook) = self.retired_hook.get() {
             hook();
         }
+    }
+
+    /// Call the idle hook, for a slice that has ended: the first moment the board can report idle.
+    pub fn slice_ended(&self) {
+        if let Some(hook) = self.idle_hook.get() {
+            hook();
+        }
+    }
+
+    /// Call `hook` each time the board's thread ends a slice (`slice_ended`).
+    pub fn on_idle(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        let _ = self.idle_hook.set(hook);
     }
 
     /// Call `hook` whenever the board has retired stores, so a caller owed
