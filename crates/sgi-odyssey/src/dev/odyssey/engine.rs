@@ -234,6 +234,9 @@ pub struct VproEngine {
     /// Moves with every store, push, CPU write, load and reset: what the picture may follow
     /// (`frame_generation`, with the retrace swaps).
     activity: u64,
+    /// A compose went ahead of a busy board: the next pump that finds it idle moves `activity`, and
+    /// the end of its slice wakes the shell.
+    behind: Arc<AtomicBool>,
     /// Swaps armed since the build or reset (`Event::Swap`), and the shell time last given.
     swaps: u64,
     clock_ns: u64,
@@ -289,6 +292,14 @@ impl VproEngine {
             hit(Point::Exec);
             wake.wake()
         }));
+        // The retire wake precedes the slice's closing tick, so a compose that went ahead of the board needs this one.
+        let behind = Arc::new(AtomicBool::new(false));
+        let (idle, owed) = (out.clone(), behind.clone());
+        b.fifo.on_idle(Box::new(move || {
+            if owed.load(Ordering::SeqCst) {
+                idle.wake_now();
+            }
+        }));
         // A fault found on any thread tells the shell then, not at its next pump.
         let fault_sent = Arc::new(AtomicBool::new(false));
         let (told, sent) = (out.clone(), fault_sent.clone());
@@ -321,6 +332,7 @@ impl VproEngine {
             failed: OnceLock::new(),
             fault_sent,
             activity: 0,
+            behind,
             swaps: 0,
             clock_ns: 0,
         };
@@ -487,10 +499,7 @@ impl VproEngine {
         if let Some((w, h)) = BoardEngine::frame_size(self, 0) {
             crate::wgpu::Scanout::check_into(w, h, dst, stride_words).map_err(|why| Fault(format!("compose_into: {why}")))?;
         }
-        {
-            let g = self.settle()?;
-            g.gpu_upload_tick(true);
-        }
+        self.tick_if_idle()?;
         let r = &mut self.reader;
         r.attach(&self.locks.shared);
         // A refused destination is an error of the call; a fault after it is the device's.
@@ -501,6 +510,21 @@ impl VproEngine {
             }
         }
         composed
+    }
+
+    /// Before a compose: submit the unit's open batch if the board is idle now, never waiting for it. The compose
+    /// shows the batches already submitted (flips latch only behind those, `covered`); `behind` asks `advance` for the rest.
+    fn tick_if_idle(&mut self) -> Result<(), Fault> {
+        if let Some(f) = self.fault() {
+            return Err(Fault(f));
+        }
+        // Set before the look, so a slice that closes after a refusal still finds it set and wakes the shell.
+        self.behind.store(true, Ordering::SeqCst);
+        let ticked = self.locks.quiesce(Duration::ZERO).map(|g| g.gpu_upload_tick(true)).is_some();
+        if ticked {
+            self.behind.store(false, Ordering::SeqCst);
+        }
+        Ok(())
     }
 
     /// What a scan-out waits for before it composes (see `scanout`); false while the engine has faulted.
@@ -605,10 +629,7 @@ impl BoardEngine for VproEngine {
         if head != 0 || !self.gpu {
             return Ok(None);
         }
-        {
-            let g = self.settle()?;
-            g.gpu_upload_tick(true);
-        }
+        self.tick_if_idle()?;
         let generation = self.frame_generation(0);
         let r = &mut self.reader;
         r.attach(&self.locks.shared);
@@ -719,6 +740,10 @@ impl BoardEngine for VproEngine {
 
     fn advance(&mut self, now_ns: u64) -> Pump {
         self.clock_ns = now_ns;
+        if self.behind.load(Ordering::SeqCst) && self.idle() == Idle::Yes {
+            self.behind.store(false, Ordering::SeqCst);
+            self.activity += 1;
+        }
         if !self.locks.fifo.running.load(Ordering::SeqCst) {
             // The GPU unit sends the mirror's changes up and submits its open
             // batch at the end of a run of stores; with no board thread to end

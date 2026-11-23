@@ -50,6 +50,14 @@ impl Outbox {
         }
     }
 
+    /// As `wake`, even while one is unanswered: that pump may already have run past what the caller made true.
+    pub fn wake_now(&self) {
+        self.notified.store(true, Ordering::Release);
+        if let Some(n) = &self.notify {
+            n();
+        }
+    }
+
     /// The pump ran: the next post or wake calls `notify` again.
     pub fn rearm(&self) {
         self.notified.store(false, Ordering::Release);

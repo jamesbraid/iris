@@ -132,6 +132,7 @@ impl BoardLocks {
             }
             self.fifo.busy_ns.fetch_add(began.elapsed().as_nanos() as u64, SeqCst);
             self.fifo.slice.store(false, SeqCst);
+            self.fifo.slice_ended();
         }
     }
 

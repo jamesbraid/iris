@@ -634,6 +634,25 @@ fn a_gpu_scanout_does_not_wait_for_a_held_slice() {
     assert!(took.as_secs_f64() < 7.0, "the scan-out waited {took:?} for a slice held 15 s");
 }
 
+/// What the X server programs: an RGB display mode for window id 0, the identity gamma ramp, and the scan-out's
+/// buffers (a 1280 by 1024 frame of 16-byte pixels at 0x2000).
+fn program_scanout(e: &mut VproEngine) {
+    let word = |e: &mut VproEngine, w: u32| assert_eq!(e.write(BACKEND_SELECT, 32, w as u64), Write::Done);
+    let entry = |e: &mut VproEngine, index: u32, v: u32| {
+        word(e, 0x3000_0000 | index << 14 | 1);
+        word(e, v);
+    };
+    entry(e, DISPMODE_BASE, 0x0096_55a6);
+    word(e, 0x3000_0000 | 0x1a00 << 14 | 0x600);
+    for i in 0..0x600u32 {
+        let v = if i < 0x200 { i >> 2 } else if i < 0x400 { ((i - 0x200) >> 1) + 0x80 } else { (i - 0x300) + 0x100 };
+        word(e, v << 20 | v << 10 | v);
+    }
+    for (i, v) in [(0, 0x14_2000), (1, 0x2000), (2, 1280), (3, 1024), (7, 80), (9, 3)] {
+        entry(e, 0x2800 + i, v);
+    }
+}
+
 /// A CPU store into lent memory, announced with `cpu_wrote`, is in the next scan-out of a GPU engine: the
 /// call submits it to the unit before it composes, as it did before it stopped settling the board (the
 /// regression: the frame stayed as the unit last drew it). Needs a GPU adapter; returns early without one.
@@ -645,22 +664,7 @@ fn a_cpu_store_announced_with_cpu_wrote_reaches_a_gpu_scanout() {
     let mut cfg = config("v12", Mode::Inline);
     cfg.gpu = Some("auto".into());
     let Ok(mut e) = VproEngine::new(cfg, Some(lent), Shared(Arc::new(Ram::default())), None) else { return };
-    let word = |e: &mut VproEngine, w: u32| assert_eq!(e.write(BACKEND_SELECT, 32, w as u64), Write::Done);
-    let entry = |e: &mut VproEngine, index: u32, v: u32| {
-        word(e, 0x3000_0000 | index << 14 | 1);
-        word(e, v);
-    };
-    // What the X server programs: an RGB display mode for window id 0, the identity gamma ramp, and
-    // the scan-out's buffers (a 1280 by 1024 frame of 16-byte pixels at 0x2000).
-    entry(&mut e, DISPMODE_BASE, 0x0096_55a6);
-    word(&mut e, 0x3000_0000 | 0x1a00 << 14 | 0x600);
-    for i in 0..0x600u32 {
-        let v = if i < 0x200 { i >> 2 } else if i < 0x400 { ((i - 0x200) >> 1) + 0x80 } else { (i - 0x300) + 0x100 };
-        word(&mut e, v << 20 | v << 10 | v);
-    }
-    for (i, v) in [(0, 0x14_2000), (1, 0x2000), (2, 1280), (3, 1024), (7, 80), (9, 3)] {
-        entry(&mut e, 0x2800 + i, v);
-    }
+    program_scanout(&mut e);
     e.quiesce(u64::MAX).unwrap();
     e.cpu_wrote(0, bytes as u64);
     assert!(e.lend_frame(0).unwrap().is_some(), "the GPU scan-out is the one composing");
@@ -677,6 +681,76 @@ fn a_cpu_store_announced_with_cpu_wrote_reaches_a_gpu_scanout() {
     e.cpu_wrote(from as u64, len as u64);
     let after = e.scanout().expect("a frame");
     assert_ne!(after.2[at], 0, "the CPU's store is in the frame");
+}
+
+/// Composes return at once while the board runs a held slice, showing the last submitted picture; the slice closing wakes
+/// the shell and moves the generation, and the next compose has the CPU's store. Needs a GPU adapter.
+#[test]
+fn a_gpu_compose_does_not_wait_for_a_held_slice() {
+    use sgi_odyssey::wgpu::{Gpu, GpuOptions};
+    let bytes = memory_bytes("v12").unwrap() as usize;
+    let mut buf = vec![0u64; bytes / 8];
+    let lent = unsafe { Lent::new(buf.as_mut_ptr().cast(), bytes) }.unwrap();
+    let loss = GpuLoss::new();
+    let Ok(gpu) = Gpu::new(&GpuOptions::default(), loss.callback()) else { return };
+    let woke = Arc::new(AtomicU64::new(0));
+    let count = woke.clone();
+    let notify: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        count.fetch_add(1, Ordering::SeqCst);
+    });
+    let mut e = VproEngine::with_gpu(config("v12", Mode::Threaded), Some(lent), Shared(Arc::new(Ram::default())), Some(notify), Some(gpu.clone()), loss).unwrap();
+    program_scanout(&mut e);
+    assert_eq!(e.wait_idle(0, 20_000_000_000), Idle::Yes);
+    e.cpu_wrote(0, bytes as u64);
+    let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;
+    let dst = gpu.buffer("held", 1280 * 1024 * 4, usage);
+    let at = 50 * 1280 + 100;
+    let pixel = |dst: &wgpu::Buffer| {
+        let mut px = vec![0u32; 1280 * 1024];
+        gpu.read(dst, &[(0, px.len() as u64 * 4)], bytemuck::cast_slice_mut(&mut px)).unwrap();
+        px[at]
+    };
+    assert_eq!(BoardEngine::compose_into(&mut e, 0, &dst, 1280), Ok(Some((1280, 1024))));
+    assert_eq!(pixel(&dst), 0, "nothing at (100, 50) yet");
+    // Pipelines are built on first use; keep that out of the timed calls.
+    assert!(e.lend_frame(0).unwrap().is_some());
+
+    assert!(e.hold_next_slice(15_000));
+    put(&mut e, CMD_FIFO, 0);
+    let start = std::time::Instant::now();
+    while !e.slice_open() {
+        assert!(start.elapsed().as_secs() < 10, "the held slice did not open");
+        std::thread::yield_now();
+    }
+    let (from, len) = (0x2_0000usize, 1280 * 1024 * 16);
+    buf[from / 8..(from + len) / 8].fill(u64::MAX);
+    e.cpu_wrote(from as u64, len as u64);
+    let asked = std::time::Instant::now();
+    let composed = BoardEngine::compose_into(&mut e, 0, &dst, 1280);
+    let lent = e.lend_frame(0);
+    let took = asked.elapsed();
+    let busy = e.wait_idle(0, 0);
+    // The pump answers every wake so far; the next two are the stores retiring and the slice closing.
+    e.advance(0);
+    let before = woke.load(Ordering::SeqCst);
+    e.release_hold();
+    while woke.load(Ordering::SeqCst) < before + 2 {
+        assert!(start.elapsed().as_secs() < 40, "no wake after the slice closed");
+        std::thread::yield_now();
+    }
+    assert!(!e.slice_open(), "the last wake came with the slice still open");
+    assert_eq!(composed, Ok(Some((1280, 1024))));
+    assert!(lent.is_ok_and(|l| l.is_some()));
+    assert!(took.as_secs_f64() < 11.0, "the composes waited {took:?} for a slice held 15 s");
+    assert_eq!(busy, Idle::Working, "the board was still in its slice");
+    assert_eq!(pixel(&dst), 0, "the held slice's picture is the one before the store");
+
+    let held = BoardEngine::frame_generation(&e, 0);
+    assert_eq!(e.wait_idle(0, 20_000_000_000), Idle::Yes);
+    e.advance(0);
+    assert_ne!(BoardEngine::frame_generation(&e, 0), held, "the idle board asks the shell to compose again");
+    assert_eq!(BoardEngine::compose_into(&mut e, 0, &dst, 1280), Ok(Some((1280, 1024))));
+    assert_ne!(pixel(&dst), 0, "and the idle board's compose has the store");
 }
 
 /// `scanout10` gives the colour maps' ten bits a channel in XB30 order (red low): its top eight bits are
