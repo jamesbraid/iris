@@ -689,7 +689,8 @@ macro_rules! paths {
         pub(crate) enum Path {
             $($v),*
         }
-        const PATH_NAMES: &[&str] = &[$($name),*];
+        /// The names, each NUL-terminated for the C ABI.
+        const PATH_NAMES: &[&str] = &[$(concat!($name, "\0")),*];
     };
 }
 
@@ -733,9 +734,14 @@ pub(crate) fn path_count(path: Path) -> u64 {
     PATHS[path as usize].load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Route `i`'s name, NUL-terminated, and its count in this process; `None` past the last route.
+pub fn route(i: usize) -> Option<(&'static str, u64)> {
+    Some((PATH_NAMES.get(i)?, PATHS[i].load(std::sync::atomic::Ordering::Relaxed)))
+}
+
 /// The routes counted so far in this process, for the monitor ("name count", nonzero only).
 pub fn path_counts() -> String {
-    let counts: Vec<String> = PATH_NAMES.iter().zip(&PATHS).map(|(n, c)| (n, c.load(std::sync::atomic::Ordering::Relaxed))).filter(|(_, c)| *c != 0).map(|(n, c)| format!("{n} {c}")).collect();
+    let counts: Vec<String> = (0..).map_while(route).filter(|(_, c)| *c != 0).map(|(n, c)| format!("{} {c}", n.trim_end_matches('\0'))).collect();
     if counts.is_empty() { "none".into() } else { counts.join(", ") }
 }
 

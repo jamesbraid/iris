@@ -3,7 +3,7 @@
 //! is the header, written by hand; `tools/check-header` compares it with
 //! cbindgen's.
 
-use std::ffi::{c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
@@ -12,6 +12,7 @@ use sgi_engine::inject::Point;
 use sgi_engine::{BoardEngine, GpuLoss};
 
 use crate::dev::mgras::engine::{Board, Config, MgrasEngine, Mode, Region, Scan, ScanSource};
+use crate::dev::mgras::gl;
 use crate::dev::mgras::pixmem::{Buffer, Kind};
 use crate::dev::mgras::rss;
 use crate::display::Rect;
@@ -272,6 +273,26 @@ pub unsafe extern "C" fn sgi_mgras_cursor_position(h: *mut IrisEngine, x: *mut i
             shown as c_int
         })
     }
+}
+
+/// How often each glDrawPixels route has run in this process, which is every engine in it. Fills the first `cap`
+/// entries of `names` (static, NUL-terminated) and `counts` and returns the number of routes, so `cap` 0 sizes them.
+///
+/// # Safety
+/// `names` and `counts` each have room for `cap` entries, or are NULL.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_mgras_route_counts(names: *mut *const c_char, counts: *mut u64, cap: usize) -> usize {
+    let mut n = 0;
+    while let Some((name, count)) = gl::route(n) {
+        if n < cap && !names.is_null() && !counts.is_null() {
+            unsafe {
+                *names.add(n) = name.as_ptr().cast();
+                *counts.add(n) = count;
+            }
+        }
+        n += 1;
+    }
+    n
 }
 
 /// The VC3's display control register (0x1e) as the guest last wrote it: bit 0 enables the retrace interrupt, bit 2

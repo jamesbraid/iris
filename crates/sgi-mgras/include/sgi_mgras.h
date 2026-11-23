@@ -97,6 +97,10 @@ int sgi_mgras_set_display_bus(IrisEngine *h, void *user,
  * it is shown (cursor control bits 0 and 1 both set), 0 when not or for a NULL output. */
 int sgi_mgras_cursor_position(IrisEngine *h, int32_t *x, int32_t *y);
 
+/* How often each glDrawPixels route has run in this process, which is every engine in it. Fills the first cap
+ * entries of names (static, NUL-terminated) and counts and returns the number of routes, so a cap of 0 sizes them. A NULL array is not written. */
+size_t sgi_mgras_route_counts(const char **names, uint64_t *counts, size_t cap);
+
 /* The VC3's display control register (0x1e) as the guest last wrote it: bit 0 enables the retrace
  * interrupt, bit 2 the display; 0 after a reset. */
 uint32_t sgi_mgras_vc3_control(IrisEngine *h);

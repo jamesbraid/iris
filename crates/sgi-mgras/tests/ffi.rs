@@ -404,3 +404,36 @@ fn events_pending_follows_a_drawn_recordings_events() {
     while unsafe { iris_engine_drain_events(c.h, buf.as_mut_ptr(), 64) } > 0 {}
     assert_eq!(unsafe { iris_engine_events_pending(c.h) }, 0);
 }
+
+/// A C shell reads each glDrawPixels route's name and count, and a drawn recording counts one. Other tests in this
+/// process draw too, so this looks for an increase.
+#[test]
+fn a_c_shell_reads_the_draw_route_counts() {
+    let routes = |cap: usize| {
+        let (mut names, mut counts) = (vec![std::ptr::null(); cap], vec![0u64; cap]);
+        let n = unsafe { sgi_mgras_route_counts(names.as_mut_ptr(), counts.as_mut_ptr(), cap) };
+        (n, names, counts)
+    };
+    let (n, _, _) = routes(0);
+    assert!(n > 2);
+    let (_, names, before) = routes(n);
+    let name = |i: usize| unsafe { std::ffi::CStr::from_ptr(names[i]) }.to_str().unwrap();
+    assert_eq!(name(0), "pipeline table");
+    let row_copy = (0..n).find(|&i| name(i) == "row copy").expect("a row copy route");
+
+    let rep = parse(REPLAYS.iter().find(|r| r.0 == "gl-pixels-rectwrite").unwrap().1);
+    let mut front = Front::new();
+    let mut c = CEngine::new(0, 0);
+    for cmd in &rep.cmds {
+        match cmd {
+            Cmd::Write { bits, off, val } => front.write(&mut c, *bits, *off, *val),
+            Cmd::Dma { addr, bytes } => c.mem.put(*addr, bytes),
+            Cmd::Read { .. } => {}
+        }
+    }
+    drive(&mut c);
+    let (_, _, after) = routes(n);
+    assert!(after[row_copy] > before[row_copy], "the draw counted no row copy");
+    assert_eq!(routes(1).0, n, "a short buffer still returns the route count");
+    assert_eq!(unsafe { sgi_mgras_route_counts(null_mut(), null_mut(), 4) }, n, "NULL outputs are not written");
+}
