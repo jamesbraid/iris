@@ -411,3 +411,45 @@ fn the_byte_cells_hold_and_are_saved_when_configured() {
     quiesce(&mut other.e, &mut now, 1_000_000, 100).unwrap();
     assert!(matches!(other.e.load(&mut VecSource::new(chunks)), Err(Refused::Mismatch(_))), "another window kind is another board");
 }
+
+/// Saved in the middle of a command, the interpreter's words so far go with the state: the loaded
+/// engine takes the rest of the command and draws the rectangle (a fresh interpreter would drop the
+/// words as strays).
+#[test]
+fn a_state_saved_mid_command_resumes_the_command() {
+    let mut a = Rig::new(Gr2Variant::Xz);
+    a.tp_init();
+    a.idle();
+    a.cmd(hq2::PUC_COLOR, 7);
+    a.cmd(hq2::PUC_RECTI2D, 10);
+    a.data(20);
+    a.data(12);
+    a.idle();
+    let pixel = |r: &Rig, x: usize, y: usize| r.e.board().vram()[y * 1280 + x] & 0xff_ffff;
+    assert_eq!(pixel(&a, 11, 21), 0, "one word short: nothing drawn yet");
+    let mut now = 0;
+    quiesce(&mut a.e, &mut now, 1_000_000, 100).unwrap();
+    let mut chunks: Vec<Chunk> = Vec::new();
+    a.e.save(&mut chunks).unwrap();
+    assert!(chunks.iter().any(|c| c.name == "interp"));
+
+    let mut b = Rig::new(Gr2Variant::Xz);
+    quiesce(&mut b.e, &mut now, 1_000_000, 100).unwrap();
+    b.e.load(&mut VecSource::new(chunks.clone())).unwrap();
+    let mut again = Vec::new();
+    b.e.save(&mut again).unwrap();
+    assert_eq!(again, chunks, "a loaded state saves as it was, interpreter included");
+    b.e.resume();
+    b.data(21);
+    b.idle();
+    for (x, y) in [(10, 20), (12, 21), (11, 20)] {
+        assert_eq!(pixel(&b, x, y), 7, "({x},{y})");
+    }
+    assert_eq!(pixel(&b, 13, 20), 0);
+    // An interpreter chunk cut short is refused.
+    let mut torn = chunks;
+    let i = torn.iter().position(|c| c.name == "interp").unwrap();
+    torn[i].bytes.truncate(100);
+    quiesce(&mut b.e, &mut now, 1_000_000, 100).unwrap();
+    assert!(matches!(b.e.load(&mut VecSource::new(torn)), Err(Refused::Mismatch(_))));
+}

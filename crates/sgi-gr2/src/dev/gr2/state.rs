@@ -1,6 +1,6 @@
 //! The GR2 engine's saved state as named chunks (`sgi_engine::Chunk`): a `meta` chunk first, one `board`
 //! chunk of everything small, and the large stores a piece at a time with the all-zero pieces left out.
-//! Everything is little-endian. The HQ2 interpreter's own state is not in it (see `engine.rs`).
+//! Everything is little-endian. The HQ2 interpreter's state is the `interp` chunk.
 
 use std::sync::atomic::Ordering;
 
@@ -257,6 +257,9 @@ pub fn save(gr: &Gr2, sink: &mut dyn StateSink) -> Result<(), Fault> {
     put(sink, "meta", 0, meta(gr))?;
     put(sink, "board", 0, board(gr))?;
     let r = gr.regs();
+    // SAFETY: the board is parked, so the HQ2 thread is not running.
+    let interp = unsafe { &*gr.hq_engine.get() }.snapshot();
+    put(sink, "interp", 0, interp.iter().flat_map(|w| w.to_le_bytes()).collect())?;
     put_words(sink, "shram", 0, &r.shram)?;
     put_words(sink, "hqucode", 0, &r.hq.ucode)?;
     put_words(sink, "geucode", 0, &ge_words(gr))?;
@@ -274,6 +277,7 @@ pub fn load(gr: &Gr2, src: &mut dyn StateSource) -> Result<(), Refused> {
     let bad = |m: String| Refused::Mismatch(m);
     let mut seen_meta = false;
     let mut seen_board = false;
+    let mut seen_interp = false;
     let mut ge = vec![0u32; GE_UCODE_WORDS * 5];
     while let Some(c) = src.next().map_err(|e| bad(e.0))? {
         if !seen_meta {
@@ -291,6 +295,15 @@ pub fn load(gr: &Gr2, src: &mut dyn StateSource) -> Result<(), Refused> {
                 load_board(gr, &c.bytes).map_err(bad)?;
                 seen_board = true;
             }
+            "interp" if !seen_interp => {
+                if c.bytes.len() % 4 != 0 {
+                    return Err(bad("the interpreter chunk is not whole words".into()));
+                }
+                let words: Vec<u32> = c.bytes.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect();
+                // SAFETY: the board has not started, so the HQ2 thread is not running.
+                unsafe { &mut *gr.hq_engine.get() }.restore(&words).map_err(bad)?;
+                seen_interp = true;
+            }
             "shram" => piece_words(&mut r.shram, &c).map_err(bad)?,
             "hqucode" => piece_words(&mut r.hq.ucode, &c).map_err(bad)?,
             "geucode" => piece_words(&mut ge, &c).map_err(bad)?,
@@ -306,8 +319,8 @@ pub fn load(gr: &Gr2, src: &mut dyn StateSource) -> Result<(), Refused> {
             other => return Err(bad(format!("unexpected state chunk {other}"))),
         }
     }
-    if !seen_meta || !seen_board {
-        return Err(bad("the state has no board chunk".into()));
+    if !seen_meta || !seen_board || !seen_interp {
+        return Err(bad("the state lacks its board or interpreter chunk".into()));
     }
     for (m, w) in gr.regs().ge.ucode.iter_mut().zip(ge.chunks_exact(5)) {
         *m = GeMicroword { stage: [w[0], w[1], w[2], w[3]], hq: w[4] };

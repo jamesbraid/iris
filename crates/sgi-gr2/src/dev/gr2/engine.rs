@@ -11,7 +11,6 @@
 //! - HQ2_GEDMA is a data port (`push_words`) and a read port (`pull_words`).
 //! - No interrupt is raised yet (`irq_levels` is 0), and the retrace is the shell's: `frame` is told of it.
 //! - `scanout` composes on the CPU and waits a bounded time for queued work (`OBSERVE_WAIT`).
-//! - Saved state leaves out the HQ2 interpreter's own state (GL and 2D context, a half-received command).
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -26,7 +25,7 @@ use super::re3::{FB_H, FB_W};
 use crate::traits::{BUS_BUSY, BUS_OK};
 
 /// The version of the state `save` writes.
-pub const GR2_STATE_VERSION: u32 = 1;
+pub const GR2_STATE_VERSION: u32 = 2;
 
 /// The board offset of the HQ2_GEDMA port: the data port the kernel's pixel DMA writes, and the read port
 /// its context saves and pixel reads come back on.
