@@ -17,9 +17,9 @@
 //!   goes through `HostMem::bus_*`; the worker's goes through the lock-free `ram_*`.
 //! - A register the stream does not own (`classify`) is served on the caller's thread from the
 //!   register file and atomics, whatever the worker is doing. Completion reasons a cause-register
-//!   access finds waiting are posted by that access when the pipe is free, else by the worker
-//!   (`Shared::poke`). Any other read answers `Busy` until the stream has run, and takes the pipe
-//!   with `try_lock`.
+//!   access finds waiting are posted by that access once the worker has run every store, waiting for
+//!   the end of its run if needed, else by the worker (`Shared::poke`). Any other read answers `Busy`
+//!   until the stream has run, and takes the pipe with `try_lock`.
 //! - Lock order, everywhere: `Shared::inner` (the pipe's state and its back end), then
 //!   `Shared::credits`, then the register file (`Host::front`). The queue, the widget callback, the
 //!   fault text and the outbox are leaves, never held while taking another. The worker holds `inner`
@@ -496,15 +496,16 @@ impl Shared {
             }
         }
         if off == INT_CAUSE {
-            self.drain_reasons();
+            self.drain_reasons(None);
         }
         self.report_widget();
     }
 
-    /// A read of a register the stream does not own, with `pending` stores not yet run.
-    fn read_now(&self, off: u32, pending: usize) -> u32 {
+    /// A read of a register the stream does not own, with `pending` stores not yet run; `held` is the pipe if the
+    /// caller holds it.
+    fn read_now(&self, off: u32, pending: usize, held: Option<&mut Inner>) -> u32 {
         match off {
-            INT_CAUSE => self.drain_reasons(),
+            INT_CAUSE => self.drain_reasons(held),
             ACTIVITY => return if self.host.activity.load(Relaxed) || pending != 0 { ACTIVITY_BUS } else { 0 },
             _ => {}
         }
@@ -513,13 +514,20 @@ impl Shared {
         self.host.front.lock().read(off, credit).unwrap_or(0)
     }
 
-    /// Completion reasons waiting behind an unread one are posted here when the pipe is free, else by the worker.
-    fn drain_reasons(&self) {
+    /// Completion reasons waiting behind an unread one are posted here when the worker has run every store, else
+    /// by the worker.
+    fn drain_reasons(&self, held: Option<&mut Inner>) {
         if !self.host.reasons_waiting.load(Acquire) {
             return;
         }
-        // A worker between runs leaves the pipe free: post here, as an inline engine does. A busy one posts them.
-        if let Some(mut i) = self.inner.try_lock() {
+        if let Some(i) = held {
+            self.post_reasons(i);
+            return;
+        }
+        // A worker that has run every store may still hold the pipe to end its run: wait for that, so a cause
+        // access on an idle pipe posts here, as an inline engine does.
+        let idle = self.sent.load(Acquire) == self.done.load(Acquire);
+        if let Some(mut i) = if idle { Some(self.inner.lock()) } else { self.inner.try_lock() } {
             self.post_reasons(&mut i);
         } else if self.worker_live.load(Acquire) {
             self.poke.store(true, Release);
@@ -1403,9 +1411,9 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         let pending = self.pending();
         let mut value = 0u64;
         for &o in at {
-            let word = match pipe.as_mut() {
+            let word = match pipe.as_deref_mut() {
                 Some(i) if classify(o, false) != Access::Now => i.core.read_wait(&self.sh.host.front, o),
-                _ => self.sh.read_now(o, pending),
+                held => self.sh.read_now(o, pending, held),
             };
             value = value << 32 | word as u64;
         }
