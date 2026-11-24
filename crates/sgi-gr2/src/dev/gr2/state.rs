@@ -105,6 +105,7 @@ fn meta(gr: &Gr2) -> Vec<u8> {
     w.u32(p.ges);
     p.ports.iter().for_each(|&v| w.u32(v));
     w.u32(p.hq_rev);
+    w.u32(p.aux_window as u32); // None 0, Legacy 1, Bytes 2
     w.u32(FB_W as u32);
     w.u32(FB_H as u32);
     w.0
@@ -125,6 +126,8 @@ fn board(gr: &Gr2) -> Vec<u8> {
         w.words(win);
     }
     w.words(&r.bdvers_w);
+    w.u32(r.ab1);
+    r.aux.iter().for_each(|&b| w.u8(b));
     w.u64(r.pll_bits);
     w.u32(r.pll_count);
     r.pll_last.iter().for_each(|&b| w.u8(b));
@@ -189,6 +192,8 @@ fn load_board(gr: &Gr2, bytes: &[u8]) -> Result<(), String> {
         s.words(win)?;
     }
     s.words(&mut r.bdvers_w)?;
+    r.ab1 = s.u32()?;
+    s.bytes(&mut r.aux)?;
     r.pll_bits = s.u64()?;
     r.pll_count = s.u32()?;
     s.bytes(&mut r.pll_last)?;

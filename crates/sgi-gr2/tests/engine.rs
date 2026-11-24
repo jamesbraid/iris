@@ -5,7 +5,7 @@ mod support;
 
 use sgi_engine::shell::{drain_stalls, quiesce};
 use sgi_engine::{BoardEngine, Chunk, Event, Idle, Read, Refused, StallOn, VecSource, Write};
-use sgi_gr2::dev::gr2::{hq2, re3, Gr2Probe, Gr2Variant};
+use sgi_gr2::dev::gr2::{hq2, re3, AuxWindow, Gr2Probe, Gr2Variant};
 use support::*;
 
 /// The text-port scene iris pins its composed frame to (`gr2_composed_frame_is_pinned`), through the
@@ -115,7 +115,7 @@ fn damage_and_the_frame_generation_follow_drawing() {
 #[test]
 fn the_probe_answers_what_the_shell_configured() {
     // An Indigo-style board: one geometry engine, other port bytes, another HQ2 revision.
-    let probe = Gr2Probe { ges: 1, ports: [0xdd, 0x3e, 0xf3, 0x15], hq_rev: 0 };
+    let probe = Gr2Probe { ges: 1, ports: [0xdd, 0x3e, 0xf3, 0x15], hq_rev: 0, aux_window: AuxWindow::None };
     let mut rig = Rig::with_probe(probe);
     for (i, want) in probe.ports.iter().enumerate() {
         assert_eq!(rig.e.read(0x6c000 + 4 * i as u32, 8), Read::Value(*want as u64), "port {i} as a byte");
@@ -127,10 +127,17 @@ fn the_probe_answers_what_the_shell_configured() {
     assert_eq!(rig.r32(0x68000 + 0x400 + 4), 0);
     rig.w32(0x68000 + 4, 0x5555);
     assert_eq!(rig.r32(0x68000 + 4), 0x5555);
+    // No byte window on this board: a store there is not kept.
+    rig.w32(0x6c1e0, 0x55);
+    assert_eq!(rig.r32(0x6c1e0), 0);
     // iris's own boards.
     let mut xz = Rig::new(Gr2Variant::Xz);
     assert_eq!(xz.r32(0x6c000) & 0xf, !4 & 0xf);
     assert_ne!(xz.r32(0x6a040) >> 23, 0);
+    xz.w32(0x6c1c0, 0x55);
+    assert_eq!(xz.r32(0x6c1c0), 0x55, "iris's own word at +0x6c1c0");
+    xz.w32(0x6c1e0, 0x55);
+    assert_eq!(xz.r32(0x6c1e0), 0, "and its +0x6c1e0 never echoes");
     assert_eq!(xz.r32(0x6a07c), 0xdead_beef, "the probe word");
 }
 
@@ -371,4 +378,36 @@ fn the_cursor_position_is_the_vc1s() {
     assert!(!rig.e.cursor_position().2);
     rig.w32(0x6c040 + 0x18, 0x30);
     assert!(rig.e.cursor_position().2, "cursor and cursor display bits");
+}
+
+/// A shell may configure the byte cells; they hold what was stored and travel in the saved state.
+#[test]
+fn the_byte_cells_hold_and_are_saved_when_configured() {
+    let probe = Gr2Probe { aux_window: AuxWindow::Bytes, ..Gr2Variant::Xz.probe() };
+    let mut a = Rig::with_probe(probe);
+    for (i, v) in [0u8, 0x55, 0xaa].into_iter().enumerate() {
+        a.w8(0x6c1e0 + 4 * i as u32, v);
+        assert_eq!(a.e.read(0x6c1e0 + 4 * i as u32, 8), Read::Value(v as u64));
+    }
+    let mut now = 0;
+    quiesce(&mut a.e, &mut now, 1_000_000, 100).unwrap();
+    let mut chunks: Vec<Chunk> = Vec::new();
+    a.e.save(&mut chunks).unwrap();
+    let mut b = Rig::with_probe(probe);
+    quiesce(&mut b.e, &mut now, 1_000_000, 100).unwrap();
+    b.e.load(&mut VecSource::new(chunks.clone())).unwrap();
+    assert_eq!(b.e.read(0x6c1e8, 8), Read::Value(0xaa));
+    // iris's own board saves its AB1 word too.
+    let mut x = Rig::new(Gr2Variant::Xz);
+    x.w32(0x6c1c0, 0xcafe_f00d);
+    quiesce(&mut x.e, &mut now, 1_000_000, 100).unwrap();
+    let mut xs: Vec<Chunk> = Vec::new();
+    x.e.save(&mut xs).unwrap();
+    let mut y = Rig::new(Gr2Variant::Xz);
+    quiesce(&mut y.e, &mut now, 1_000_000, 100).unwrap();
+    y.e.load(&mut VecSource::new(xs)).unwrap();
+    assert_eq!(y.e.read(0x6c1c0, 32), Read::Value(0xcafe_f00d));
+    let mut other = Rig::new(Gr2Variant::Xz);
+    quiesce(&mut other.e, &mut now, 1_000_000, 100).unwrap();
+    assert!(matches!(other.e.load(&mut VecSource::new(chunks)), Err(Refused::Mismatch(_))), "another window kind is another board");
 }

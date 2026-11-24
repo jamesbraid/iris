@@ -87,6 +87,21 @@ pub struct Gr2Probe {
     pub ports: [u32; 4],
     /// The HQ2 revision in the status word and `hq_gepc`.
     pub hq_rev: u32,
+    /// What decodes at +0x6c1c0 to +0x6c1fc.
+    pub aux_window: AuxWindow,
+}
+
+/// The window at +0x6c1c0 to +0x6c1fc, which the IP20 programs never touch and the IP22 kernel's
+/// flat-panel interface object does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuxWindow {
+    /// Not decoded: stores are logged, reads give 0 (an Indigo).
+    None,
+    /// What iris has always decoded: one word that reads back its store at +0x6c1c0, and zeros after.
+    Legacy,
+    /// Sixteen bytes, each holding the last byte stored to its word. Off for iris until an IP22 guest
+    /// run shows it is safe: a probe that stores and reads back sees a device that is not there.
+    Bytes,
 }
 
 /// CPU-side register and memory state. Plain data, zero-valid.
@@ -97,6 +112,8 @@ pub struct Gr2Regs {
     pub ge: Ge7,
     /// Last configuration writes to rd0/rd1 (debug only; reads return IDs).
     pub bdvers_w: [u32; 4],
+    /// The byte window (`Gr2Probe::aux_window`): each word holds the last byte stored to it.
+    pub aux: [u8; 16],
     pub vc1: Vc1,
     pub dac: [Bt457; 3],
     pub xmap: [Xmap5; 5],
@@ -675,7 +692,8 @@ impl Gr2 {
             0x6c0a0..0x6c100 => r.dac[((off - DAC) >> 5) as usize].read(off & 0x1c) as u32,
             0x6c100..0x6c1a0 => r.xmap[((off - XMAP) >> 5) as usize].read(off & 0x1c),
             0x6c1a0..0x6c1c0 => r.xmap[0].read(off & 0x1c),
-            0x6c1c0..0x6c1e0 => r.ab1,
+            0x6c1c0..0x6c200 if self.probe.aux_window == AuxWindow::Bytes => r.aux[((off - 0x6c1c0) >> 2) as usize] as u32,
+            0x6c1c0..0x6c1e0 if self.probe.aux_window == AuxWindow::Legacy => r.ab1,
             RE3_REGS..RE3_REGS_END => return self.re3_read(((off - RE3_REGS) >> 2) as usize),
             0x6c600..0x6c604 => return self.re3_read(re3::REG_RWDATA),
             _ => 0, // CLOCK, CC1 (must not echo the flat-panel probe), unused
@@ -776,13 +794,14 @@ impl Gr2 {
                 if off & 0x1c == xmap5::XMAP_CLUT { x.write_clut_packed(val) } else { x.write(off & 0x1c, val) }
                 self.dirty.store(true, Ordering::Relaxed);
             }
+            0x6c1c0..0x6c200 if self.probe.aux_window == AuxWindow::Bytes => r.aux[((off - 0x6c1c0) >> 2) as usize] = val as u8,
             0x6c1a0..0x6c1c0 => {
                 for x in r.xmap.iter_mut() {
                     if off & 0x1c == xmap5::XMAP_CLUT { x.write_clut_packed(val) } else { x.write(off & 0x1c, val) }
                 }
                 self.dirty.store(true, Ordering::Relaxed);
             }
-            0x6c1c0..0x6c1e0 => r.ab1 = val,
+            0x6c1c0..0x6c1e0 if self.probe.aux_window == AuxWindow::Legacy => r.ab1 = val,
             // Pixel-clock load, revision 4 and up: record the programmed bytes
             // (the dot clock itself isn't modelled).
             0x6c020..0x6c040 => {
@@ -803,7 +822,7 @@ impl Gr2 {
                 }
             }
             // CC1 flat-panel probe writes 0x00/0x55/0xAA; reads never echo.
-            0x6c1e0..0x6c200 => {}
+            0x6c1e0..0x6c200 if self.probe.aux_window == AuxWindow::Legacy => {}
             RE3_REGS..RE3_REGS_END => return self.re3_write(((off - RE3_REGS) >> 2) as usize, val),
             0x6c600..0x6c604 => return self.re3_write(re3::REG_RWDATA, val),
             _ => {

@@ -46,6 +46,7 @@ fn config(mode: u32, gpu: u32) -> IrisGr2Config {
         ges: 2,
         ports: [0xdd, 0x3e, 0xff, 0xff],
         hq_rev: 0,
+        aux_window: 0,
         jit: 0,
     }
 }
@@ -93,6 +94,9 @@ fn the_constructor_refuses_what_the_board_does_not_do() {
     let mut c = config(1, IRIS_ENGINE_GPU_NONE);
     c.ges = 3;
     assert!(unsafe { sgi_gr2_new(&c, &h) }.is_null(), "three geometry engines");
+    c = config(1, IRIS_ENGINE_GPU_NONE);
+    c.aux_window = 3;
+    assert!(unsafe { sgi_gr2_new(&c, &h) }.is_null(), "an unknown window kind");
     let mut mem = [0u64; 4];
     c = config(1, IRIS_ENGINE_GPU_NONE);
     c.common.lent_ptr = mem.as_mut_ptr().cast();

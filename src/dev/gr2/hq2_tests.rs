@@ -3375,3 +3375,31 @@ fn operands_at_the_ends_of_their_range_are_bounded() {
     g.wait_idle();
     assert_eq!(pixel(g, 11, 20), 7);
 }
+
+/// The IP22 kernel's flat-panel probe stores 0, 0x55 and 0xaa at +0x6c1e0 + idx and reads each back.
+/// iris's boards keep what they always did (one word at +0x6c1c0, zeros after); a board configured with
+/// the byte window holds what it was given; an Indigo-style board has no window.
+#[test]
+fn the_window_at_6c1c0_follows_the_board_configuration() {
+    let built = |w| Gr2::build(Gr2Probe { aux_window: w, ..Gr2Variant::Xz.probe() }, crate::disp::StatusSource::detached(), None).unwrap();
+    let legacy = built(AuxWindow::Legacy);
+    assert_eq!(Gr2Variant::Xz.probe().aux_window, AuxWindow::Legacy, "iris's boards default to the old window");
+    assert_eq!(legacy.write32(GR2_BASE + 0x6c1c0, 0xdead_beef), BUS_OK);
+    assert_eq!(legacy.read32(GR2_BASE + 0x6c1c0).data, 0xdead_beef, "AB1 reads back its word");
+    assert_eq!(legacy.write8(GR2_BASE + 0x6c1e0, 0x55), BUS_OK);
+    assert_eq!(legacy.read8(GR2_BASE + 0x6c1e0).data, 0, "CC1 does not echo the probe");
+    let g = &built(AuxWindow::Bytes);
+    for idx in [0u32, 4, 8] {
+        for v in [0u8, 0x55, 0xaa] {
+            assert_eq!(g.write8(GR2_BASE + 0x6c1e0 + idx as u64, v), BUS_OK);
+            assert_eq!(g.read8(GR2_BASE + 0x6c1e0 + idx as u64).data, v, "idx {idx} after {v:#x}");
+        }
+    }
+    assert_eq!(g.write8(GR2_BASE + 0x6c1c0, 0x12), BUS_OK);
+    assert_eq!(r32(g, 0x6c1c0), 0x12);
+    let none = built(AuxWindow::None);
+    assert_eq!(none.write32(GR2_BASE + 0x6c1c0, 0x1234), BUS_OK);
+    assert_eq!(none.read32(GR2_BASE + 0x6c1c0).data, 0, "no window: nothing is kept");
+    assert_eq!(none.write8(GR2_BASE + 0x6c1e0, 0x55), BUS_OK);
+    assert_eq!(none.read8(GR2_BASE + 0x6c1e0).data, 0);
+}
