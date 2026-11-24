@@ -310,14 +310,14 @@ impl ReadImage {
         let off = self.s2d.buf_offset.min(per_word - 1) as i32;
         let wpr = self.words_per_row as usize;
         for r in 0..self.rows as usize {
-            let gy = if self.bottom_up { self.top - (self.rows as i32 - 1) + r as i32 } else { self.top - r as i32 };
+            let gy = if self.bottom_up { self.top.wrapping_sub(self.rows as i32 - 1).wrapping_add(r as i32) } else { self.top.wrapping_sub(r as i32) };
             for k in 0..wpr {
                 let Some(d) = dst.get_mut(r * wpr + k) else { return };
                 let mut word = 0;
                 for p in 0..per_word {
                     let i = (k as u32 * per_word + p) as i32 - off;
                     if i >= 0 && (i as u32) < self.w {
-                        let v = self.value(read(self.x + i, gy)) & mask;
+                        let v = self.value(read(self.x.wrapping_add(i), gy)) & mask;
                         word |= v << (32 - bits * (p + 1));
                     }
                 }
@@ -493,6 +493,10 @@ const OPEN: u32 = u32::MAX;
 /// arrive (e.g. 4 per box for SOLID_RECT) until the next command.
 const STREAM: u32 = u32::MAX - 1;
 const FIFO_WORDS: usize = 0x8000;
+/// The longest side a tile is kept at (its words are 0x1308 at most).
+const TILE_SIDE_MAX: u32 = 0x4000;
+/// The widest image row a draw follows.
+const IMAGE_ROW_MAX: u32 = 0x10000;
 /// The longest run of either coordinate a 2D line may span.
 const LINE_SPAN_MAX: i64 = 0xffff;
 
@@ -898,9 +902,9 @@ impl Hq2Engine {
                     HQ2_2D_POLY_SPAN => {
                         if a[1] < PAD_X && a[2] < PAD_Y {
                             let (x, y, w) = (a[1] as i32, a[2] as i32, a[3] as i32);
-                            let (x1, x2) = (x.max(0), (x + w).min(re3::FB_W as i32));
+                            let (x1, x2) = (x.max(0), x.saturating_add(w).min(re3::FB_W as i32));
                             if x1 < x2 {
-                                self.span(x1, SCREEN_H - 1 - y, (x2 - x1) as u32, None, out);
+                                self.span(x1, SCREEN_H.wrapping_sub(1).wrapping_sub(y), (x2 - x1) as u32, None, out);
                             }
                         }
                     }
@@ -998,7 +1002,7 @@ impl Hq2Engine {
         let fg = self.s2d.fg;
         self.setup2d(fg, out);
         for y in y1..y2 {
-            self.span(x1, SCREEN_H - 1 - y, (x2 - x1) as u32, None, out);
+            self.span(x1, SCREEN_H.wrapping_sub(1).wrapping_sub(y), (x2 - x1) as u32, None, out);
         }
     }
 
@@ -1059,7 +1063,7 @@ impl Hq2Engine {
         let on = self.s2d.color_on;
         self.setup2d(on, out);
         for r in 0..rows {
-            let gy = SCREEN_H - 1 - (y + r as i32);
+            let gy = SCREEN_H.wrapping_sub(1).wrapping_sub(y.wrapping_add(r as i32));
             let word = |i: usize| a.get(4 + i).copied().unwrap_or(0);
             // Up to two 32-pixel halves per row.
             let halves: [u32; 2] = if w <= 16 {
@@ -1077,7 +1081,7 @@ impl Hq2Engine {
                 }
                 let pat = if hw < 32 { bits & !(u32::MAX >> hw) } else { bits };
                 if pat != 0 {
-                    self.span(x + 32 * h as i32, gy, hw, Some(pat), out);
+                    self.span(x.wrapping_add(32 * h as i32), gy, hw, Some(pat), out);
                 }
             }
         }
@@ -1095,7 +1099,7 @@ impl Hq2Engine {
                     // DMA header is y, width, height, words/row, flag, 0:
                     // derive the pixel format from pixels per word.
                     let (w, wpr) = (self.img_hdr[2], self.img_hdr[4].max(1));
-                    let per_word = (w + wpr - 1) / wpr;
+                    let per_word = w.div_ceil(wpr);
                     self.img_hdr[5] = match per_word { 4 => 2, 2 => 1, _ => 0 };
                     self.img_hdr[6] = 0;
                 }
@@ -1122,7 +1126,7 @@ impl Hq2Engine {
                 let zoom = if self.cmd == HQ2_GL_DMA_WRITE_ZOOM { gl::PixZoom::Both } else { gl::PixZoom::None };
                 self.gl_pixel_row(x as i32, y as i32, row, w, rows, fmt, &words[..wpr.min(IMG_ROW_WORDS)], zoom, out);
             } else {
-                self.image_row(x as i32, y as i32 + row as i32, w, fmt, skip, wpr.min(IMG_ROW_WORDS), out);
+                self.image_row(x as i32, (y as i32).wrapping_add(row as i32), w, fmt, skip, wpr.min(IMG_ROW_WORDS), out);
             }
             self.img_rows_done += 1;
             if self.img_rows_done == rows {
@@ -1154,7 +1158,9 @@ impl Hq2Engine {
             let sh = 32 - bits * (1 + (n % per_word) as u32);
             if bits == 32 { row[wi] } else { (row[wi] >> sh) & ((1 << bits) - 1) }
         };
-        let gy = SCREEN_H - 1 - y;
+        let gy = SCREEN_H.wrapping_sub(1).wrapping_sub(y);
+        // A row is as wide as 16-bit coordinates reach: more would only walk what the clip rejects.
+        let w = w.min(IMAGE_ROW_MAX);
         let (start, end) = (skip as usize, skip as usize + w as usize);
         let mut n = start;
         while n < end {
@@ -1163,8 +1169,8 @@ impl Hq2Engine {
             while e < end && px(e) == c {
                 e += 1;
             }
-            let sx = x + (n - start) as i32;
-            if sx < re3::FB_W as i32 && sx + (e - n) as i32 > 0 {
+            let sx = x.wrapping_add((n - start) as i32);
+            if sx < re3::FB_W as i32 && sx.wrapping_add((e - n) as i32) > 0 {
                 self.image2d(c, out);
                 self.span(sx, gy, (e - n) as u32, None, out);
             }
@@ -1199,7 +1205,7 @@ impl Hq2Engine {
                 run = match run {
                     Some((ry, a, b)) if ry == y && (x == b + 1 || x == a - 1) => Some((ry, a.min(x), b.max(x))),
                     Some((ry, a, b)) => {
-                        self.span(a, SCREEN_H - 1 - ry, (b - a + 1) as u32, None, out);
+                        self.span(a, SCREEN_H.wrapping_sub(1).wrapping_sub(ry), (b - a + 1) as u32, None, out);
                         Some((y, x, x))
                     }
                     None => Some((y, x, x)),
@@ -1219,7 +1225,7 @@ impl Hq2Engine {
             }
         }
         if let Some((ry, a, b)) = run {
-            self.span(a, SCREEN_H - 1 - ry, (b - a + 1) as u32, None, out);
+            self.span(a, SCREEN_H.wrapping_sub(1).wrapping_sub(ry), (b - a + 1) as u32, None, out);
         }
     }
 
@@ -1232,7 +1238,8 @@ impl Hq2Engine {
         if y < 0 || y >= SCREEN_H || w <= 0 || x >= re3::FB_W as i32 {
             return;
         }
-        let gy = SCREEN_H - 1 - y;
+        let w = w.min(IMAGE_ROW_MAX as i32);
+        let gy = SCREEN_H.wrapping_sub(1).wrapping_sub(y);
         let (on, off, opaque) = (self.s2d.color_on, self.s2d.color_off, self.stipple_opaque != 0);
         if opaque {
             // Background first, then the set bits on top.
@@ -1245,7 +1252,7 @@ impl Hq2Engine {
             let n = (w - i).min(32);
             let p = if n < 32 { pat & !(u32::MAX >> n) } else { pat };
             if p != 0 {
-                self.span(x + i, gy, n as u32, Some(p), out);
+                self.span(x.wrapping_add(i), gy, n as u32, Some(p), out);
             }
             i += 32;
         }
@@ -1269,13 +1276,13 @@ impl Hq2Engine {
         self.setup2d(fg, out);
         let mut cur = fg;
         for y in y1..y2 {
-            let ty = (y - oy).rem_euclid(th);
-            let gy = SCREEN_H - 1 - y;
+            let ty = y.wrapping_sub(oy).rem_euclid(th);
+            let gy = SCREEN_H.wrapping_sub(1).wrapping_sub(y);
             let mut x = x1;
             while x < x2 {
-                let on = bit((x - ox).rem_euclid(tw), ty);
+                let on = bit(x.wrapping_sub(ox).rem_euclid(tw), ty);
                 let mut e = x + 1;
-                while e < x2 && bit((e - ox).rem_euclid(tw), ty) == on {
+                while e < x2 && bit(e.wrapping_sub(ox).rem_euclid(tw), ty) == on {
                     e += 1;
                 }
                 if on || opaque {
@@ -1316,14 +1323,14 @@ impl Hq2Engine {
         let fg = self.s2d.fg;
         self.setup2d(fg, out);
         for y in y1..y2 {
-            let ty = (y - oy).rem_euclid(th);
-            let gy = SCREEN_H - 1 - y;
+            let ty = y.wrapping_sub(oy).rem_euclid(th);
+            let gy = SCREEN_H.wrapping_sub(1).wrapping_sub(y);
             // Emit runs of equal colour.
             let mut x = x1;
             while x < x2 {
-                let c = tile_px((x - ox).rem_euclid(tw), ty);
+                let c = tile_px(x.wrapping_sub(ox).rem_euclid(tw), ty);
                 let mut e = x + 1;
-                while e < x2 && tile_px((e - ox).rem_euclid(tw), ty) == c {
+                while e < x2 && tile_px(e.wrapping_sub(ox).rem_euclid(tw), ty) == c {
                     e += 1;
                 }
                 self.image2d(c, out);
@@ -1528,7 +1535,7 @@ impl Hq2Engine {
             HQ2_2D_READ_IMAGE => {
                 let req = ReadImage {
                     x: a[1] as i32,
-                    top: SCREEN_H - 1 - a[2] as i32,
+                    top: SCREEN_H.wrapping_sub(1).wrapping_sub(a[2] as i32),
                     w: a[3],
                     rows: a[4],
                     words_per_row: a[0],
@@ -1541,7 +1548,7 @@ impl Hq2Engine {
             HQ2_2D_DMA_READ_PIXELS => {
                 let req = ReadImage {
                     x: a[0] as i32,
-                    top: SCREEN_H - 1 - a[1] as i32,
+                    top: SCREEN_H.wrapping_sub(1).wrapping_sub(a[1] as i32),
                     w: a[2],
                     rows: a[3],
                     words_per_row: a[4],
@@ -1553,8 +1560,9 @@ impl Hq2Engine {
             }
             HQ2_GL_DMA_READ => self.gl_dma_read(&a, out),
             HQ2_2D_TILE_SETUP => {
-                self.tile_w = a[1];
-                self.tile_h = a[2];
+                // A tile that is not in the tile store reads zeros; its sides are bounded so index sums are.
+                self.tile_w = a[1].min(TILE_SIDE_MAX);
+                self.tile_h = a[2].min(TILE_SIDE_MAX);
                 self.tile_fmt = a[3];
                 self.tile_len = 0;
             }
@@ -1584,7 +1592,7 @@ impl Hq2Engine {
                 let (sx, sy, w, h, dx, dy) = (a[2] as i32, a[3] as i32, a[4] as i32, a[5] as i32, a[6] as i32, a[7] as i32);
                 let fg = self.s2d.fg;
                 self.setup2d(fg, out);
-                out.copy(sx, SCREEN_H - sy - h, w, h, dx, SCREEN_H - dy - h, 0);
+                out.copy(sx, SCREEN_H.wrapping_sub(sy).wrapping_sub(h), w, h, dx, SCREEN_H.wrapping_sub(dy).wrapping_sub(h), 0);
             }
             HQ2_2D_ROP => {
                 self.s2d.fg = a[0];
@@ -1602,8 +1610,10 @@ impl Hq2Engine {
             PUC_RECTI2D => {
                 let (x1, y1, x2, y2) = (a[0] as i32, a[1] as i32, a[2] as i32, a[3] as i32);
                 let (xl, xr) = (x1.min(x2), x1.max(x2));
-                for y in y1.min(y2)..=y1.max(y2) {
-                    self.span(xl, y, (xr - xl + 1) as u32, None, out);
+                // Rows off the screen draw nothing, so walk only the ones on it.
+                let width = (xr as i64 - xl as i64 + 1).min(i32::MAX as i64) as u32;
+                for y in y1.min(y2).max(0)..=y1.max(y2).min(SCREEN_H - 1) {
+                    self.span(xl, y, width, None, out);
                 }
             }
             PUC_CMOV2I => {
@@ -1615,7 +1625,7 @@ impl Hq2Engine {
                 let (sx, sy, w, h, dx, dy) =
                     (a[2] as i32, a[3] as i32, a[4] as i32, a[5] as i32, a[6] as i32, a[7] as i32);
                 // RECTCOPY takes X-style y (top edge, top-down); VRAM is bottom-up.
-                out.copy(sx, SCREEN_H - sy - h, w, h, dx, SCREEN_H - dy - h, 0);
+                out.copy(sx, SCREEN_H.wrapping_sub(sy).wrapping_sub(h), w, h, dx, SCREEN_H.wrapping_sub(dy).wrapping_sub(h), 0);
             }
             _ if self.gl_execute(cmd, out) => {}
             _ => {
@@ -1670,9 +1680,9 @@ impl Hq2Engine {
         let (mut x, mut n, mut pat) = (x, n as i32, pattern.unwrap_or(0));
         if x < 0 {
             // Bank-coded X can't express negative columns: trim the span.
-            n += x;
+            n = n.saturating_add(x);
             if pattern.is_some() {
-                pat = if -x >= 32 { 0 } else { pat << -x };
+                pat = if x <= -32 { 0 } else { pat << -x };
             }
             x = 0;
         }
@@ -1703,8 +1713,8 @@ impl Hq2Engine {
         let mode = a[2];
         let (xorig, yorig) = (a[3] as i32, a[4] as i32);
         let (xmove, ymove) = (a[5] as i32, a[6] as i32);
-        let left = self.cx - xorig;
-        let bottom = self.cy - yorig;
+        let left = self.cx.wrapping_sub(xorig);
+        let bottom = self.cy.wrapping_sub(yorig);
         for k in 0..ysize as usize {
             let row = a[7 + k];
             let mut pat = if mode == 2 { row } else { (row & 0xffff) << 16 };
@@ -1715,7 +1725,7 @@ impl Hq2Engine {
                 self.span(left, bottom + k as i32, xsize, Some(pat), out);
             }
         }
-        self.cx += xmove;
-        self.cy += ymove;
+        self.cx = self.cx.wrapping_add(xmove);
+        self.cy = self.cy.wrapping_add(ymove);
     }
 }

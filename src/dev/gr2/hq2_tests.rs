@@ -3324,3 +3324,54 @@ fn a_pixel_read_of_many_empty_rows_is_refused_too() {
     assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
     assert_eq!(g.panic_message(), None);
 }
+
+/// Operands at the ends of their range, sent as a guest could: each used to overflow in a debug build
+/// (a fault on the HQ2 thread) or keep the thread walking rows off the screen.
+#[test]
+fn operands_at_the_ends_of_their_range_are_bounded() {
+    use super::hq2::*;
+    let g = &live_gr2(Gr2Variant::Xz);
+    let t = std::time::Instant::now();
+    tp_init(g);
+    cmd(g, HQ2_2D_BEGIN, 0);
+    cmd(g, HQ2_2D_MODE, 0x1009);
+    cmd(g, HQ2_2D_ROP, 0);
+    for v in [0xff, 3, 0] { data(g, v); }
+    cmd(g, HQ2_2D_BUF_SELECT, 2);
+    data(g, 0);
+    // A screen-to-host read, a text-port copy and fills at the ends of the i32 range.
+    cmd(g, HQ2_2D_READ_IMAGE, 2);
+    for v in [0x7fff_fff0, 0x8000_0000, 40, 3] { data(g, v); }
+    cmd(g, hq2::PUC_RECTCOPY, 0);
+    for v in [0, 0, 0x8000_0000, 10, 10, 0, 0] { data(g, v); }
+    cmd(g, hq2::PUC_COLOR, 1);
+    cmd(g, hq2::PUC_RECTI2D, 0x8000_0000);
+    for v in [0, 0x7fff_ffff, 5] { data(g, v); }
+    cmd(g, hq2::PUC_RECTI2D, 0);
+    for v in [0, 10, 0x7fff_ffff] { data(g, v); }
+    // A copy of the largest rectangle, a tile of the largest sides and a stipple of the widest span.
+    cmd(g, HQ2_2D_COPY_RECT, 0);
+    for v in [0, 0, 32767, 32767, 0, 0, 0] { data(g, v); }
+    cmd(g, HQ2_2D_TILE_SETUP, 0x40);
+    for v in [u32::MAX, u32::MAX, 3, 0xd022] { data(g, v); }
+    cmd(g, HQ2_2D_TILE_RECT, 0);
+    for v in [0x8000_0000, 0, 0x7fff_ffff, 0, 0x7fff_ffff, 0x7fff_ffff] { data(g, v); }
+    // A GL window and scissor of the largest words, then a box.
+    gl_setup_window(g);
+    cmd(g, 0x1e5, 0x7fff_ffff);
+    for v in [0x7fff_ffff, 0x7fff_ffff, 0x7fff_ffff, 0x10, 0, 0] { data(g, v); }
+    for v in 0..8 { data(g, v & 1); }
+    cmd(g, 0x4052, 10);
+    for v in [10, 20, 20] { cmd(g, 0x41df, v); }
+    g.wait_idle();
+    assert_eq!(g.panic_message(), None);
+    assert!(t.elapsed() < std::time::Duration::from_secs(10), "took {:?}", t.elapsed());
+    // And the board draws after them.
+    cmd(g, hq2::PUC_COLOR, 7);
+    cmd(g, hq2::PUC_RECTI2D, 10);
+    data(g, 20);
+    data(g, 12);
+    data(g, 21);
+    g.wait_idle();
+    assert_eq!(pixel(g, 11, 20), 7);
+}

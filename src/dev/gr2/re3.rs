@@ -792,25 +792,34 @@ impl Re3 {
             let c = (v >> (bits * bank)) & m;
             (v & 0xff00_0000) | c | (c << bits)
         };
-        let mut src = vec![0u32; (w * h) as usize];
-        for j in 0..h {
-            for i in 0..w {
-                let (x, y) = (sx + i, sy + j);
+        // Only the destination pixels on the screen are written, so only the source pixels they repeat
+        // are read: a rectangle far larger than the screen costs what the screen does.
+        let (i0, i1) = (dx.saturating_neg().max(0), w.saturating_mul(zx).min((FB_W as i32).saturating_sub(dx)));
+        let (j0, j1) = (dy.saturating_neg().max(0), h.saturating_mul(zy).min((FB_H as i32).saturating_sub(dy)));
+        if i0 >= i1 || j0 >= j1 {
+            return;
+        }
+        let (ci0, ci1, cj0, cj1) = (i0 / zx, (i1 - 1) / zx + 1, j0 / zy, (j1 - 1) / zy + 1);
+        let sw = (ci1 - ci0) as usize;
+        let mut src = vec![0u32; sw * (cj1 - cj0) as usize];
+        for j in cj0..cj1 {
+            for i in ci0..ci1 {
+                let (x, y) = (sx.wrapping_add(i), sy.wrapping_add(j));
                 if x >= 0 && y >= 0 && (x as usize) < FB_W && (y as usize) < FB_H {
-                    src[(j * w + i) as usize] = pix(self.vram[y as usize * FB_W + x as usize]);
+                    src[(j - cj0) as usize * sw + (i - ci0) as usize] = pix(self.vram[y as usize * FB_W + x as usize]);
                 }
             }
         }
         let mask = ((self.ctx.reg[REG_AUXMASK] & 0xff) << 24) | self.ctx.reg[REG_PIXMASK];
-        for j in 0..h * zy {
-            for i in 0..w * zx {
+        for j in j0..j1 {
+            for i in i0..i1 {
                 let (x, y) = (dx + i, dy + j);
                 if !self.clip(x, y) {
                     continue;
                 }
                 let off = y as usize * FB_W + x as usize;
                 if self.wid_ok(IR_WRITEBUF, off) {
-                    self.store(off, src[((j / zy) * w + i / zx) as usize], mask);
+                    self.store(off, src[(j / zy - cj0) as usize * sw + (i / zx - ci0) as usize], mask);
                 }
             }
         }
@@ -824,17 +833,17 @@ impl Re3 {
         }
         let mask = ((self.ctx.reg[REG_AUXMASK] & 0xff) << 24) | self.ctx.reg[REG_PIXMASK];
         // Walk away from the overlap: bottom-up rows when moving down in
-        // memory, right-to-left columns when moving right.
-        for jj in 0..h {
-            let j = if dy > sy { h - 1 - jj } else { jj };
+        // memory, right-to-left columns when moving right. Only rows and columns whose source and
+        // destination are both on the screen can move anything, so only those are walked.
+        let (j0, j1) = ((-sy).max(-dy).max(0), h.min(FB_H as i32 - sy.max(dy)));
+        let (i0, i1) = ((-sx).max(-dx).max(0), w.min(FB_W as i32 - sx.max(dx)));
+        for jj in 0..(j1 - j0).max(0) {
+            let j = if dy > sy { j1 - 1 - jj } else { j0 + jj };
             let (ys, yd) = (sy + j, dy + j);
-            if ys < 0 || yd < 0 || ys as usize >= FB_H || yd as usize >= FB_H {
-                continue;
-            }
-            for ii in 0..w {
-                let i = if dx > sx { w - 1 - ii } else { ii };
+            for ii in 0..(i1 - i0).max(0) {
+                let i = if dx > sx { i1 - 1 - ii } else { i0 + ii };
                 let (xs, xd) = (sx + i, dx + i);
-                if xs < 0 || xs as usize >= FB_W || !self.clip(xd, yd) {
+                if !self.clip(xd, yd) {
                     continue;
                 }
                 let src = self.vram[ys as usize * FB_W + xs as usize];
