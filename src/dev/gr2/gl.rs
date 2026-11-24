@@ -34,6 +34,10 @@ pub type Wv = vertex::Wv<0, 0>;
 mod light;
 
 // Tokens (FIFO index bits 8:0).
+/// The largest pixel zoom and pixel row a draw follows (see `gl_pixel_row`).
+const PIXEL_ZOOM_MAX: i32 = 2048;
+const PIXEL_ROW_MAX: u32 = 0x10000;
+
 pub const T_VERTEX: u32 = 0x063;
 pub const T_COLOR: u32 = 0x182;
 pub const T_NORMAL: u32 = 0x10d;
@@ -769,11 +773,13 @@ impl GlState {
     /// Drawable rectangle in screen pixels: window ∩ scissor ∩ screen,
     /// as x0, y0, x1, y1 (exclusive).
     fn clip_rect(&self) -> [i32; 4] {
+        // The window and scissor are a guest's words: saturate, since anything past the screen is clipped.
         let [wx, wy, ww, wh] = self.win;
-        let mut r = [wx, wy, wx + ww, wy + wh];
+        let mut r = [wx, wy, wx.saturating_add(ww), wy.saturating_add(wh)];
         let s = self.scissor;
         if !(s[0] == 0 && s[1] == 0 && s[2] >= 0x7ff && s[3] >= 0x7ff) {
-            r = [r[0].max(wx + s[0]), r[1].max(wy + s[1]), r[2].min(wx + s[2] + 1), r[3].min(wy + s[3] + 1)];
+            let at = |o: i32, d: i32| o.saturating_add(d);
+            r = [r[0].max(at(wx, s[0])), r[1].max(at(wy, s[1])), r[2].min(at(at(wx, s[2]), 1)), r[3].min(at(at(wy, s[3]), 1))];
         }
         [r[0].max(0), r[1].max(0), r[2].min(re3::FB_W as i32), r[3].min(SCREEN_H)]
     }
@@ -922,8 +928,8 @@ impl Hq2Engine {
         s2d.buf_select = self.gl.pix_pack;
         s2d.buf_offset = 0;
         let req = ReadImage {
-            x: self.gl.win[0] + a[0] as i32,
-            top: self.gl.win[1] + a[1] as i32 + rows as i32 - 1,
+            x: self.gl.win[0].wrapping_add(a[0] as i32),
+            top: self.gl.win[1].wrapping_add(a[1] as i32).wrapping_add(rows as i32).wrapping_sub(1),
             w,
             rows,
             words_per_row: wpr,
@@ -952,8 +958,8 @@ impl Hq2Engine {
         };
         s2d.buf_offset = 0;
         let req = ReadImage {
-            x: self.gl.win[0] + a[0] as i32,
-            top: self.gl.win[1] + a[1] as i32 + rows as i32 - 1,
+            x: self.gl.win[0].wrapping_add(a[0] as i32),
+            top: self.gl.win[1].wrapping_add(a[1] as i32).wrapping_add(rows as i32).wrapping_sub(1),
             w,
             rows,
             words_per_row: wpr,
@@ -1475,8 +1481,8 @@ impl Hq2Engine {
             T_READ_RECT => self.gl_mailbox_read(&a, out),
             T_IRIS_SETCPOS => {
                 // Screen coordinates (getcpos x + count).
-                g.cpos[0] = a[0] as i32 - g.win[0];
-                g.cpos[1] = a[1] as i32 - g.win[1];
+                g.cpos[0] = (a[0] as i32).wrapping_sub(g.win[0]);
+                g.cpos[1] = (a[1] as i32).wrapping_sub(g.win[1]);
                 g.rpos = [g.cpos[0] as f32, g.cpos[1] as f32];
             }
             T_GET_ORIGIN => {
@@ -1521,8 +1527,8 @@ impl Hq2Engine {
             T_IRIS_GETCPOS => {
                 // Screen coordinates (IRIS GL getcpos; writepixels subtracts
                 // getorigin to place its row).
-                out.shram(READBACK_SHRAM, (g.win[0] + g.cpos[0]) as u32);
-                out.shram(READBACK_SHRAM + 1, (g.win[1] + g.cpos[1]) as u32);
+                out.shram(READBACK_SHRAM, g.win[0].wrapping_add(g.cpos[0]) as u32);
+                out.shram(READBACK_SHRAM + 1, g.win[1].wrapping_add(g.cpos[1]) as u32);
                 // Status: negative = invalid (gl_g_getcpos keeps its old
                 // values), zero = nothing to draw (gl_g_writepixels returns
                 // at once: mandel's window stayed grey), positive = valid.
@@ -1680,7 +1686,7 @@ impl Hq2Engine {
             T_PIX_DATA => format!("GL_PIXEL_DATA {} words (chunk {})", self.last_nargs, self.pix_n),
             T_PIX_RECT => format!("GL_PIXELS_PLACE ({}, {}) {} px {}", a[0] as i32, a[1] as i32, a[2], if a[4] != 0 { "right to left" } else { "" }),
             T_IRIS_SETCPOS => format!("IRISGL_SETCPOS ({}, {}) {:#x}", a[0] as i32, a[1] as i32, a[2]),
-            T_IRIS_GETCPOS => format!("IRISGL_GETCPOS -> screen ({}, {}){}", g.win[0] + g.cpos[0], g.win[1] + g.cpos[1],
+            T_IRIS_GETCPOS => format!("IRISGL_GETCPOS -> screen ({}, {}){}", g.win[0].wrapping_add(g.cpos[0]), g.win[1].wrapping_add(g.cpos[1]),
                 if g.cpos[2] != 0 { " invalid" } else { "" }),
             T_GET_COLOR | T_GET_NORMAL | T_GET_RASTERPOS => format!("{} -> shram[{:#x}]", super::index_label(cmd), READBACK_SHRAM),
             T_READ_DONE => "GL_READ_DONE".to_string(),
@@ -1927,7 +1933,7 @@ impl Hq2Engine {
     /// One software-pipeline fragment (window coordinates, GL y up) through
     /// the hardware per-pixel path: Z/stencil, blend, logic op, masks.
     fn gl_fragment(&mut self, x: i32, y: i32, z: u32, c: [f32; 4], out: &mut dyn Re3Sink) {
-        let (sx, sy) = (self.gl.win[0] + x, self.gl.win[1] + y);
+        let (sx, sy) = (self.gl.win[0].wrapping_add(x), self.gl.win[1].wrapping_add(y));
         if !self.gl.pixel_visible(sx, sy) {
             return;
         }
@@ -1996,8 +2002,8 @@ impl Hq2Engine {
             return;
         }
         let rows = &a[BITMAP_HDR..BITMAP_HDR + block as usize];
-        let x0 = g.win[0] + (rx - xorig).floor() as i32;
-        let bottom = g.win[1] + (ry - yorig).floor() as i32;
+        let x0 = g.win[0].wrapping_add((rx - xorig).floor() as i32);
+        let bottom = g.win[1].wrapping_add((ry - yorig).floor() as i32);
         let wmask = if w >= 32 { u32::MAX } else { !(u32::MAX >> w) };
         let c = g.to_fixed(g.cpos_color);
         self.gl_setup(out);
@@ -2007,10 +2013,10 @@ impl Hq2Engine {
             if bits == 0 {
                 continue;
             }
-            let y = bottom + h - 1 - r;
-            let (pieces, np) = self.gl.span_pieces(y, x0, x0 + w);
+            let y = bottom.wrapping_add(h).wrapping_sub(1).wrapping_sub(r);
+            let (pieces, np) = self.gl.span_pieces(y, x0, x0.wrapping_add(w));
             for &(s, e) in &pieces[..np] {
-                let sh = (s - x0) as u32;
+                let sh = s.wrapping_sub(x0) as u32;
                 self.span(s, y, (e - s) as u32, Some(if sh >= 32 { 0 } else { bits << sh }), out);
             }
         }
@@ -2036,7 +2042,7 @@ impl Hq2Engine {
             let skip = (b[3] & 1 == 0) as usize;
             data.iter().flat_map(|&v| [(v & 0xffff) << 16, v & 0xffff_0000]).skip(skip).collect()
         };
-        let (x0, top) = (g.win[0] + cx - xorig, g.win[1] + cy - yorig + h - 1);
+        let (x0, top) = (g.win[0].wrapping_add(cx).wrapping_sub(xorig), g.win[1].wrapping_add(cy).wrapping_sub(yorig).wrapping_add(h).wrapping_sub(1));
         let wmask = if w >= 32 { u32::MAX } else { !(u32::MAX >> w) };
         let c = g.to_fixed(g.color);
         self.gl_setup(out);
@@ -2093,14 +2099,17 @@ impl Hq2Engine {
                 [u(0), u(8), u(16), u(24)]
             }
         };
-        let z = |v: f32| if v >= 1.0 { v.round() as i32 } else { 1 };
+        // A zoom past the screen's size shows the same pixels as one at it, and the row is as wide as 16-bit
+        // coordinates reach: more would only walk what the clip rejects.
+        let z = |v: f32| if v >= 1.0 { (v.round() as i32).min(PIXEL_ZOOM_MAX) } else { 1 };
+        let w = w.min(PIXEL_ROW_MAX);
         let (zx, zy) = match zoom {
             PixZoom::None => (1, 1),
             PixZoom::X => (z(g.pzoom[0]), 1),
             PixZoom::Both => (z(g.pzoom[0]), z(g.pzoom[1])),
         };
         let from_bottom = if zoom == PixZoom::Both { row as i32 } else { h.saturating_sub(1 + row) as i32 };
-        let (wx, wy) = (g.win[0] + x, g.win[1] + y + from_bottom * zy);
+        let (wx, wy) = (g.win[0].wrapping_add(x), g.win[1].wrapping_add(y).wrapping_add(from_bottom.wrapping_mul(zy)));
         let cmax = g.cmax();
         self.gl_setup(out);
         let mut n = 0usize;
@@ -2111,11 +2120,11 @@ impl Hq2Engine {
                 e += 1;
             }
             self.gl_color_regs(self.gl.to_fixed(colour(v)), out);
-            let (x0, x1) = (wx + n as i32 * zx, wx + e as i32 * zx);
+            let (x0, x1) = (wx.wrapping_add((n as i32).wrapping_mul(zx)), wx.wrapping_add((e as i32).wrapping_mul(zx)));
             for dy in 0..zy {
-                let (pieces, np) = self.gl.span_pieces(wy + dy, x0, x1);
+                let (pieces, np) = self.gl.span_pieces(wy.wrapping_add(dy), x0, x1);
                 for &(a, b) in &pieces[..np] {
-                    self.span(a, wy + dy, (b - a) as u32, None, out);
+                    self.span(a, wy.wrapping_add(dy), (b - a) as u32, None, out);
                 }
             }
             n = e;
@@ -2145,7 +2154,7 @@ impl Hq2Engine {
             out.reg(re3::REG_XMAX, (r[2] - 1) as u32);
             out.reg(re3::REG_YMIN, r[1] as u32);
             out.reg(re3::REG_YMAX, (r[3] - 1) as u32);
-            out.copy(wx + sx, wy + sy, w, h, wx + dx, wy + dy, mode);
+            out.copy(wx.wrapping_add(sx), wy.wrapping_add(sy), w, h, wx.wrapping_add(dx), wy.wrapping_add(dy), mode);
         }
         out.reg(re3::REG_XMIN, 0);
         out.reg(re3::REG_XMAX, re3::FB_W as u32 - 1);
