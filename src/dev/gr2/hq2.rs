@@ -36,12 +36,13 @@ pub const HQ_REFRESH: u32 = 0x80;
 pub const HQ_FIN3: u32 = 0x100;
 
 pub const HQ2_MYSTERY: u32 = 0xdead_beef;
-/// HQ2 revision, reported in version[31:23] and hq_gepc[31:16].
+/// The HQ2 revision iris's boards report in version[31:23] and hq_gepc[31:16].
 pub const HQ2_REV: u32 = 2;
 pub const HQ_UCODE_WORDS: usize = 8192;
 
 /// FIFO low-watermark flag in `version`.
 const VERSION_LOWATER: u32 = 1 << 13;
+
 /// Finish flags in `version`: FIN1 = bit 2, FIN2 = bit 1, FIN3 = bit 0.
 pub const FIN1: usize = 0;
 pub const FIN2: usize = 1;
@@ -513,6 +514,8 @@ pub struct Hq2Regs {
     pub refresh: u32,
     /// Set by a write to `unstall`: the engine is running microcode.
     pub running: u32,
+    /// The revision `version` and `hq_gepc` report; the board's probe sets it.
+    pub rev: u32,
     pub ucode: [u32; HQ_UCODE_WORDS],
 }
 
@@ -522,7 +525,7 @@ impl Hq2Regs {
             o if o < HQ_VERSION => self.attrjmp[(o >> 2) as usize & 15],
             HQ_VERSION => {
                 let f = |i: usize| (self.fin[i].load(Ordering::Acquire) != 0) as u32;
-                (HQ2_REV << 23) | VERSION_LOWATER | (f(FIN1) << 2) | (f(FIN2) << 1) | f(FIN3)
+                (self.rev << 23) | VERSION_LOWATER | (f(FIN1) << 2) | (f(FIN2) << 1) | f(FIN3)
             }
             HQ_NUMGE => self.numge,
             HQ_FIN1 => self.fin[FIN1].load(Ordering::Acquire),
@@ -534,7 +537,7 @@ impl Hq2Regs {
             HQ_FIFO_EMPTY => self.fifo_empty,
             HQ_GE7LOADUCODE => self.loaducode & LOADUCODE_MASK,
             // The kernel reads the HQ2 revision from hq_gepc[31:16] (HQ2.h).
-            HQ_HQ_GEPC => (HQ2_REV << 16) | (self.gepc & 0xffff),
+            HQ_HQ_GEPC => (self.rev << 16) | (self.gepc & 0xffff),
             HQ_GEPC => self.gepc,
             HQ_INTR => self.intr,
             HQ_MYSTERY => HQ2_MYSTERY,
