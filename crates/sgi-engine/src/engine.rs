@@ -305,6 +305,14 @@ pub trait BoardEngine {
     /// through register apertures inside the window (a push mode) has no
     /// port, answers 0 and notes it, and takes those words through `write`.
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize;
+    /// FIFO words in a batch out of a read port, in order, the counterpart of `push_words`: up to
+    /// `out.len()` words the board has produced on `port`, the number given. Fewer means the port holds no
+    /// more now. `access_waits` at the port's offset says whether that is because queued work will
+    /// produce more (drive the engine and call again) or because the port is empty. A board with no read
+    /// port gives 0, and a guest's one-word reads of the port go through `read`. Default: 0.
+    fn pull_words(&mut self, _port: u32, _out: &mut [u32]) -> usize {
+        0
+    }
     fn read(&mut self, off: u32, bits: u32) -> Read;
     /// Name where the stores that follow come from, for flow control: the
     /// engine returns credits to that source as `Event::Credits`. Each
