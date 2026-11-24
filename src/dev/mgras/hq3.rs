@@ -1710,9 +1710,16 @@ impl Hq3Engine {
                 }
                 format_pixels(self.formatter, &mut bytes);
                 match &mut peer {
-                    DmaPeer::EramIn(buf) => buf.extend(bytes.chunks(4).map(|c| {
-                        c.iter().enumerate().fold(0u32, |w, (j, b)| w | (*b as u32) << (24 - 8 * j))
-                    })),
+                    DmaPeer::EramIn(buf) => {
+                        buf.extend(bytes.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])));
+                        // A short last word keeps its bytes high and the rest zero.
+                        let tail = &bytes[bytes.len() & !3..];
+                        if !tail.is_empty() {
+                            let mut last = [0u8; 4];
+                            last[..tail.len()].copy_from_slice(tail);
+                            buf.push(u32::from_be_bytes(last));
+                        }
+                    }
                     _ => sink.dma_write_line(i, &bytes),
                 }
             }

@@ -1681,6 +1681,29 @@ fn eram_write_by_pio_and_read_by_dma() {
     m.stop_engines();
 }
 
+/// An ERAM write by host DMA of six bytes: the second word keeps its two bytes high, the rest zero.
+#[test]
+fn eram_write_by_dma_with_a_short_last_word() {
+    let m = live_board();
+    x_server(&m);
+    let mem = eram_dma_setup(&m, 6);
+    mem.bytes.lock().extend([0x12u8, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0].into_iter().enumerate().map(|(i, b)| (0x2000 + i as u32, b)));
+    fifo_token(&m, 0xFD, &[2]);
+    fifo_dma(&m, 0x0B, 0x1);
+    fifo_token(&m, 0xFB, &[0x40, 2]);
+    fifo_token(&m, 0xFA, &[]);
+    m.state_hash();
+    let back = eram_dma_setup(&m, 8);
+    fifo_dma(&m, 0x0B, 0x9);
+    fifo_token(&m, 0xFC, &[0x40, 2]);
+    m.state_hash();
+    let b = back.bytes.lock();
+    let got: Vec<u8> = (0..8).map(|i| b.get(&(0x2000 + i)).copied().unwrap_or(0)).collect();
+    assert_eq!(got, [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0, 0]);
+    drop(b);
+    m.stop_engines();
+}
+
 /// Slot eviction as IRIX does it: the kernel copies a context's ERAM slot
 /// to host memory and later back into whatever slot is free. The context
 /// loaded from its new slot still has its GL state (here its clear colour
