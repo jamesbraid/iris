@@ -611,9 +611,9 @@ impl Re3 {
         let c = &self.ctx;
         if c.pixfmt == PIXFMT_RGB12 {
             let v = if c.reg[REG_ENABDITH] != 0 {
-                crate::dev::ng1::rex3_generic::rgb24_to_rgb12_dither(crate::dev::ng1::rex3_generic::bayer_pack(rgb, x, y))
+                crate::dev::bayer::rgb24_to_rgb12_dither(crate::dev::bayer::bayer_pack(rgb, x, y))
             } else {
-                crate::dev::ng1::rex3_generic::rgb24_to_rgb12(rgb)
+                crate::dev::bayer::rgb24_to_rgb12(rgb)
             };
             return v | (v << 12);
         }

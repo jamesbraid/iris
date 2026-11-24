@@ -468,22 +468,7 @@ pub(crate) fn rgb12_to_rgb24(val: u32) -> u32 {
     (b << 16) | (g << 8) | r
 }
 
-pub(crate) fn rgb24_to_rgb12(val: u32) -> u32 {
-    let r = (val >> 4) & 0xF;
-    let g = (val >> 12) & 0xF;
-    let b = (val >> 20) & 0xF;
-    (b << 8) | (g << 4) | r
-}
-
-pub(crate) use crate::dev::bayer::{bayer_threshold, BAYER_PACKED};
-
-/// Pack bayer index into bits 27:24 of color value (top byte unused by 24-bit BGR).
-/// Encoding: bits\[3:2\] = y&3, bits\[1:0\] = x&3 → index = (y&3)<<2|(x&3).
-/// Non-dither compress variants ignore these bits.
-#[inline(always)]
-pub(crate) fn bayer_pack(color: u32, x: i32, y: i32) -> u32 {
-    (color & 0x00FFFFFF) | (((y as u32 & 3) << 2 | (x as u32 & 3)) << 24)
-}
+pub(crate) use crate::dev::bayer::{bayer_pack, bayer_threshold, rgb24_to_rgb12, rgb24_to_rgb12_dither, BAYER_PACKED};
 
 pub(crate) fn rgb24_to_rgb4_dither(val: u32) -> u32 {
     let bayer = bayer_threshold(val >> 24);
@@ -520,25 +505,6 @@ pub(crate) fn rgb24_to_rgb8_dither(val: u32) -> u32 {
     if (sb & 0xf) as u32 > bayer { db = (db + 1).min(3); }
     ((db << 6) | (dg << 3) | dr) as u32
 }
-
-pub(crate) fn rgb24_to_rgb12_dither(val: u32) -> u32 {
-    let bayer = bayer_threshold(val >> 24);
-    let r = (val & 0xFF) as u32;
-    let g = ((val >> 8) & 0xFF) as u32;
-    let b = ((val >> 16) & 0xFF) as u32;
-    // 12bpp: 4-4-4 BGR.
-    let sr = r - (r >> 4);
-    let sg = g - (g >> 4);
-    let sb = b - (b >> 4);
-    let mut dr = (sr >> 4) & 15;
-    let mut dg = (sg >> 4) & 15;
-    let mut db = (sb >> 4) & 15;
-    if (sr & 0xf) > bayer { dr = (dr + 1).min(15); }
-    if (sg & 0xf) > bayer { dg = (dg + 1).min(15); }
-    if (sb & 0xf) > bayer { db = (db + 1).min(15); }
-    (db << 8) | (dg << 4) | dr
-}
-
 
 // ── Colour helpers ───────────────────────────────────────────────────────────
 
