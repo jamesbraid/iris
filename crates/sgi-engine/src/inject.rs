@@ -36,6 +36,7 @@ pub enum Point {
     Flags,
     /// Inside the engine, while it executes an operation (a worker panic).
     Exec,
+    PullWords,
 }
 
 #[cfg(feature = "fault-injection")]

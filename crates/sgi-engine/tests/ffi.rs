@@ -361,6 +361,7 @@ fn a_panic_at_each_entry_is_a_device_fault() {
     let entries: Vec<(Point, Box<dyn FnMut(*mut IrisEngine) -> i64 + '_>, i64)> = vec![
         (Point::Write, Box::new(|h| wr(h, reg::DATA, 1) as i64), IRIS_ENGINE_FAULT as i64),
         (Point::PushWords, Box::new(|h| unsafe { iris_engine_push_words(h, 0, [0u32].as_ptr(), 1) } as i64), 0),
+        (Point::PullWords, Box::new(|h| unsafe { iris_engine_pull_words(h, 0, [0u32; 1].as_mut_ptr(), 1) } as i64), 0),
         (Point::Read, Box::new(|h| unsafe { iris_engine_read(h, reg::IRQ, 32, &mut v) } as i64), IRIS_ENGINE_FAULT as i64),
         (Point::SetSource, Box::new(|h| unsafe { iris_engine_set_source(h, 1, 1) } as i64), IRIS_ENGINE_FAULT as i64),
         (Point::AccessWaits, Box::new(|h| unsafe { iris_engine_access_waits(h, reg::SUM, 32, 0) } as i64), 0),
@@ -488,6 +489,10 @@ fn bad_arguments_answer_without_touching_the_engine() {
     let h = f.h;
     assert_eq!(unsafe { iris_engine_write(null_mut(), 0, 32, 0) }, IRIS_ENGINE_FAULT);
     assert_eq!(unsafe { iris_engine_push_words(h, 0, null(), 4) }, 0);
+    assert_eq!(unsafe { iris_engine_pull_words(h, 0, null_mut(), 4) }, 0);
+    let mut out = [7u32; 2];
+    assert_eq!(unsafe { iris_engine_pull_words(h, 0, out.as_mut_ptr(), 2) }, 0, "a board with no read port gives none");
+    assert_eq!(out, [7, 7]);
     assert_eq!(unsafe { iris_engine_drain_events(h, null_mut(), 4) }, 0);
     assert_eq!(unsafe { iris_engine_save(h, None, null_mut()) }, IRIS_ENGINE_ERROR);
     assert_eq!(unsafe { iris_engine_read(h, reg::IRQ, 32, null_mut()) }, IRIS_ENGINE_OK);

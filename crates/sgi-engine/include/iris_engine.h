@@ -24,8 +24,8 @@
  *
  * FAULTS. After a device fault, write, read, observe_lent, observe_all,
  * save, load, advance and wait_idle answer IRIS_ENGINE_FAULT (advance and
- * wait_idle still fill their result: state FAULTED), push_words and run
- * return 0, access_waits returns 0, and quiesce answers FAULT but still
+ * wait_idle still fill their result: state FAULTED), push_words, pull_words
+ * and run return 0, access_waits returns 0, and quiesce answers FAULT but still
  * parks. drain_events, fault, last_error, irq_levels, state_version, resume,
  * reset and free keep working. A panic in the engine is a device fault too.
  * Containment needs a build that unwinds: iris_engine_contains_panics() says
@@ -337,6 +337,14 @@ int iris_engine_head_deadline(IrisEngine *h, uint32_t head, uint64_t *when);
 /* A batch of FIFO words into a port; returns the number taken. */
 size_t iris_engine_push_words(IrisEngine *h, uint32_t port,
                               const uint32_t *words, size_t n);
+
+/* A batch of words out of a read port, the counterpart of push_words: up to n
+ * words the board has produced on port, into words; returns the number given.
+ * Fewer than n means the port holds no more now: iris_engine_access_waits at
+ * the port's offset says whether queued work will produce more (drive the
+ * engine and call again) or the port is empty. 0 for a board with no read port. */
+size_t iris_engine_pull_words(IrisEngine *h, uint32_t port, uint32_t *words,
+                              size_t n);
 
 /* A register read. BUSY while queued work could change the answer. */
 int iris_engine_read(IrisEngine *h, uint32_t off, uint32_t bits,

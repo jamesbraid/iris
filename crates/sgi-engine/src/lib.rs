@@ -26,8 +26,8 @@
 //! stall is cleared by the loop itself.
 //!
 //! **Faults.** After a device fault every call that can answer `Fault` does
-//! (`write`, `read`, `Idle::Faulted`, `Refused::Faulted`, `observe`), `push_words`
-//! and `run` do nothing, `access_waits` answers false; `drain_events`,
+//! (`write`, `read`, `Idle::Faulted`, `Refused::Faulted`, `observe`), `push_words`,
+//! `pull_words` and `run` do nothing, `access_waits` answers false; `drain_events`,
 //! `fault`, `irq_levels`, `quiesce` (which still parks) and `reset` keep working.
 //! A panic in an engine thread or a call becomes a fault the same way.
 //!

@@ -276,6 +276,7 @@ trait DynEngine: Send {
     fn scanout(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault>;
     fn head_deadline(&self, head: u32) -> Option<u64>;
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize;
+    fn pull_words(&mut self, port: u32, out: &mut [u32]) -> usize;
     fn read(&mut self, off: u32, bits: u32) -> Read;
     fn set_source(&mut self, source: Source);
     fn access_waits(&self, off: u32, bits: u32, write: bool) -> bool;
@@ -339,6 +340,9 @@ impl<E: BoardEngine + Send + 'static> DynEngine for E {
     }
     fn push_words(&mut self, port: u32, words: &[u32]) -> usize {
         BoardEngine::push_words(self, port, words)
+    }
+    fn pull_words(&mut self, port: u32, out: &mut [u32]) -> usize {
+        BoardEngine::pull_words(self, port, out)
     }
     fn read(&mut self, off: u32, bits: u32) -> Read {
         BoardEngine::read(self, off, bits)
@@ -828,6 +832,20 @@ pub unsafe extern "C" fn iris_engine_push_words(h: *mut IrisEngine, port: u32, w
             return 0;
         }
         s.eng.push_words(port, unsafe { std::slice::from_raw_parts(words, n) })
+    })
+}
+
+/// Up to `n` words out of read port `port`, into `words`; returns how many were given.
+///
+/// # Safety
+/// `h` is a live handle and `words` has room for `n` words.
+#[no_mangle]
+pub unsafe extern "C" fn iris_engine_pull_words(h: *mut IrisEngine, port: u32, words: *mut u32, n: usize) -> usize {
+    guard(h, Point::PullWords, 0, |s| {
+        if words.is_null() {
+            return 0;
+        }
+        s.eng.pull_words(port, unsafe { std::slice::from_raw_parts_mut(words, n) })
     })
 }
 
