@@ -2044,8 +2044,12 @@ impl Hq2Engine {
         if p.ok == 0 || q.ok == 0 {
             return;
         }
-        let (x0, x1) = (p.x.min(q.x).floor() as i32, p.x.max(q.x).floor() as i32);
-        let (y0, y1) = (p.y.min(q.y).floor() as i32, p.y.max(q.y).floor() as i32);
+        // An edge outside the clip rectangle draws nothing, so one step past it is as good as the
+        // real place; that keeps `xb + 1` below and the row loop to the window.
+        let r = self.gl.clip_rect();
+        let edge = |v: f32, lo: i32, hi: i32| (v.floor() as i32).max(lo - 1).min(hi);
+        let (x0, x1) = (edge(p.x.min(q.x), r[0], r[2]), edge(p.x.max(q.x), r[0], r[2]));
+        let (y0, y1) = (edge(p.y.min(q.y), r[1], r[3]), edge(p.y.max(q.y), r[1], r[3]));
         self.gl_setup(out);
         let c = self.gl.color;
         self.gl_color_regs(to_fixed(c, self.gl.cmax()), out);
