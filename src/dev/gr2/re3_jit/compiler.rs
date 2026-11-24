@@ -26,7 +26,7 @@ use cranelift_module::{Linkage, Module};
 
 use super::{Fmt, Pat, Prim, ShaderFn, SpanKey, Wid};
 use crate::dev::gr2::re3::{self, Re3, FB_H, FB_W, ZBUF_STENCIL_SHIFT};
-use crate::dev::ng1::rex3_generic::BAYER_PACKED;
+use crate::dev::bayer::BAYER_PACKED;
 
 macro_rules! off {
     ($($f:tt)+) => {
