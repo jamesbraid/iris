@@ -1785,3 +1785,72 @@ impl Hq2Engine {
         self.cy = self.cy.wrapping_add(ymove);
     }
 }
+
+impl Hq2Engine {
+    /// The interpreter's state as words: the command being collected and its words so far, the 2D
+    /// and GL context, the images being built. The once-per-token warning bitmap is left out.
+    pub fn snapshot(&self) -> Vec<u32> {
+        let mut w = vec![self.cmd, self.need, self.nargs, self.last_nargs, self.last_total];
+        w.extend(self.args);
+        w.extend([self.cx as u32, self.cy as u32, self.pattern_on, self.restarted, self.stream_words, self.stream_items]);
+        let s = &self.s2d;
+        w.extend([s.mode, s.aux_mask, s.fg, s.color_on, s.color_off, s.planemask, s.alu, s.flag, s.cid_write, s.buf_select, s.buf_offset]);
+        w.extend([self.tile_w, self.tile_h, self.tile_len, self.tile_fmt]);
+        w.extend(self.tile);
+        w.push(self.stipple_opaque);
+        w.extend(self.line_clip.map(|v| v as u32));
+        w.extend(self.line_prev.map(|v| v as u32));
+        w.push(self.line_have_prev);
+        w.extend(self.img_hdr);
+        w.extend(self.img_row);
+        w.extend([self.img_rows_done, self.cx_ext_left]);
+        w.extend(self.pix);
+        w.push(self.pix_n);
+        self.gl_snapshot(&mut w);
+        w
+    }
+
+    /// The inverse of `snapshot`. On an error the engine is part loaded: reset it.
+    pub fn restore(&mut self, words: &[u32]) -> Result<(), String> {
+        let mut it = words.iter().copied();
+        let mut next = move || it.next().ok_or_else(|| "the interpreter state ends early".to_string());
+        macro_rules! fill {
+            ($dst:expr) => {
+                for v in $dst.iter_mut() {
+                    *v = next()?;
+                }
+            };
+        }
+        let mut head = [0u32; 5];
+        fill!(head);
+        (self.cmd, self.need, self.nargs, self.last_nargs, self.last_total) = (head[0], head[1], head[2], head[3], head[4]);
+        fill!(self.args);
+        let mut p = [0u32; 6];
+        fill!(p);
+        (self.cx, self.cy, self.pattern_on, self.restarted, self.stream_words, self.stream_items) = (p[0] as i32, p[1] as i32, p[2], p[3], p[4], p[5]);
+        let mut s = [0u32; 11];
+        fill!(s);
+        self.s2d = State2d { mode: s[0], aux_mask: s[1], fg: s[2], color_on: s[3], color_off: s[4], planemask: s[5], alu: s[6], flag: s[7], cid_write: s[8], buf_select: s[9], buf_offset: s[10] };
+        let mut t = [0u32; 4];
+        fill!(t);
+        (self.tile_w, self.tile_h, self.tile_len, self.tile_fmt) = (t[0], t[1], t[2], t[3]);
+        fill!(self.tile);
+        self.stipple_opaque = next()?;
+        for v in self.line_clip.iter_mut().chain(self.line_prev.iter_mut()) {
+            *v = next()? as i32;
+        }
+        self.line_have_prev = next()?;
+        fill!(self.img_hdr);
+        fill!(self.img_row);
+        self.img_rows_done = next()?;
+        self.cx_ext_left = next()?;
+        fill!(self.pix);
+        self.pix_n = next()?;
+        self.gl_restore(&mut next)?;
+        // Words past the end mean another build's layout.
+        match next() {
+            Ok(_) => Err("the interpreter state has words past its end".into()),
+            Err(_) => Ok(()),
+        }
+    }
+}

@@ -971,7 +971,7 @@ impl Hq2Engine {
     }
 
     /// The live GL state as a context image.
-    fn gl_cx_image(&self, out: &mut [u32; CX_WORDS]) {
+    pub(super) fn gl_cx_image(&self, out: &mut [u32; CX_WORDS]) {
         out[0] = CX_MAGIC;
         out[1] = std::mem::size_of::<GlState>() as u32;
         // SAFETY: GlState is plain data of size_of / 4 words (asserted above).
@@ -1023,6 +1023,43 @@ impl Hq2Engine {
         // the session or trace started after it was created).
         self.gl_ctx.cur = id;
         self.gl_ctx.have_cur = 1;
+    }
+
+    /// The GL state and the context-switch bookkeeping as words, for `Hq2Engine::snapshot`.
+    pub(super) fn gl_snapshot(&self, w: &mut Vec<u32>) {
+        let c = &self.gl_ctx;
+        w.extend([c.cur, c.have_cur, c.expect, c.got, c.prev_owner, c.restore_reject]);
+        w.extend(c.buf);
+        w.extend(c.save);
+        let mut img = [0u32; CX_WORDS];
+        self.gl_cx_image(&mut img);
+        w.extend(img);
+    }
+
+    /// The inverse of `gl_snapshot`; the live state's image must be one of this build's.
+    pub(super) fn gl_restore(&mut self, next: &mut dyn FnMut() -> Result<u32, String>) -> Result<(), String> {
+        let mut head = [0u32; 6];
+        for h in &mut head {
+            *h = next()?;
+        }
+        let c = &mut self.gl_ctx;
+        (c.cur, c.have_cur, c.expect, c.got, c.prev_owner, c.restore_reject) = (head[0], head[1], head[2], head[3], head[4], head[5]);
+        for v in c.buf.iter_mut().chain(c.save.iter_mut()) {
+            *v = next()?;
+        }
+        let mut img = [0u32; CX_WORDS];
+        for v in &mut img {
+            *v = next()?;
+        }
+        if img[0] != CX_MAGIC || img[1] != std::mem::size_of::<GlState>() as u32 {
+            return Err("the GL state image is another build's".into());
+        }
+        // SAFETY: same layout as gl_cx_image wrote; GlState is plain data for which every bit
+        // pattern of its number fields is valid.
+        unsafe {
+            std::ptr::copy_nonoverlapping(img[2..].as_ptr(), &mut self.gl as *mut GlState as *mut u32, CX_WORDS - 2);
+        }
+        Ok(())
     }
 
     /// 0x1E2 restore main: `words` GEDMA words follow.
