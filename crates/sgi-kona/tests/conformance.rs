@@ -93,7 +93,13 @@ impl Subject for Kona {
         for _ in 0..200 {
             for w in [1, 9, 0] {
                 e.set_source(A);
-                assert_eq!(e.write(COMMAND_PAGE, 32, w), Write::Done);
+                // A charged store waits while the worker holds its limit, as the shell's do.
+                let mut r = e.write(COMMAND_PAGE, 32, w);
+                while r == Write::Busy {
+                    std::thread::yield_now();
+                    r = e.write(COMMAND_PAGE, 32, w);
+                }
+                assert_eq!(r, Write::Done);
                 e.run(usize::MAX);
             }
         }
