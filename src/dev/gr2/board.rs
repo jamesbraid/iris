@@ -663,6 +663,13 @@ impl Gr2 {
         }
     }
 
+    /// Choose the RE3 span JIT's mode (`re3_jit::MODE_*`) before the threads start.
+    #[cfg(feature = "gr2-jit")]
+    pub fn set_jit_mode(&self, mode: u32) {
+        // SAFETY: the shell calls this with the engine threads not running.
+        unsafe { (*self.re3.get()).jit.mode = mode };
+    }
+
     // ── board ID registers ───────────────────────────────────────────────────
 
     pub(super) fn bdvers_read(&self, idx: u32) -> u32 {
