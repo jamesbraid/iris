@@ -159,6 +159,8 @@ pub struct Gr2 {
     pub(super) gedma_out: [AtomicU32; GEDMA_OUT_WORDS],
     pub(super) gedma_out_head: AtomicU32,
     pub(super) gedma_out_tail: AtomicU32,
+    /// Shell time `gedma_push` began to wait for a reader (0: not waiting); it gives up a limit later.
+    pub(super) gedma_stall_since: AtomicU64,
     pub(super) hq_fifo: GFifo<HQ_FIFO_DEPTH>,
     pub(super) re3_fifo: GFifo<RE3_FIFO_DEPTH>,
     /// Pending half of a two-entry COPY op (RE3 thread only).
@@ -366,16 +368,22 @@ impl Gr2 {
         let mut since = 0u64;
         while head.wrapping_sub(self.gedma_out_tail.load(Ordering::Acquire)) as usize >= GEDMA_OUT_WORDS {
             if !self.running.load(Ordering::Relaxed) {
+                self.gedma_stall_since.store(0, Ordering::Release);
                 return false;
             }
             let now = self.now_ns().max(1);
             if since == 0 {
                 since = now;
+                self.gedma_stall_since.store(since, Ordering::Release);
             } else if now - since > GEDMA_OUT_STALL_LIMIT_NS {
                 crate::dlog_dev!(crate::devlog::LogModule::Gr2, "GR2: GEDMA read port full, no reader: transfer dropped");
+                self.gedma_stall_since.store(0, Ordering::Release);
                 return false;
             }
             thread::yield_now();
+        }
+        if since != 0 {
+            self.gedma_stall_since.store(0, Ordering::Release);
         }
         self.gedma_out[head as usize & (GEDMA_OUT_WORDS - 1)].store(w, Ordering::Relaxed);
         self.gedma_out_head.store(head.wrapping_add(1), Ordering::Release);
@@ -517,6 +525,44 @@ impl Gr2 {
         self.gedma_out_tail.store(head, Ordering::Release);
     }
 
+    /// A number that moves whenever either engine consumes a queue entry or the read port moves a word:
+    /// a shell that sees it still can say the board makes no progress.
+    pub fn progress_position(&self) -> u64 {
+        let q = (self.hq_fifo.consumed() as u64) ^ ((self.re3_fifo.consumed() as u64) << 32);
+        q ^ ((self.gedma_out_tail.load(Ordering::Acquire) as u64) << 16) ^ self.gedma_out_head.load(Ordering::Acquire) as u64
+    }
+
+    /// The shell time at which a stall that only time ends gives up: a FIN2 poll held, or the HQ2
+    /// holding a transfer for a reader of the read port.
+    pub fn stall_deadline(&self) -> Option<u64> {
+        let gedma = self.gedma_stall_since.load(Ordering::Acquire);
+        let gedma = (gedma != 0).then(|| gedma.saturating_add(GEDMA_OUT_STALL_LIMIT_NS));
+        let fin2 = self.fin2_armed_ns.load(Ordering::Acquire);
+        let fin2 = (self.fin2_wait.load(Ordering::Acquire) != 0 && fin2 != 0).then(|| fin2.saturating_add(FIN2_STALL_LIMIT.as_nanos() as u64));
+        [gedma, fin2].into_iter().flatten().min()
+    }
+
+    /// Whether an access at slot offset `off` answers busy now, as `reg_read` and `reg_write` decide
+    /// it, without taking a read-port word or moving the FIN2 stall clock.
+    pub fn access_would_wait(&self, off: u32, write: bool) -> bool {
+        let off = off & (GR2_SLOT_SIZE - 4);
+        let hq_working = || !self.hq_fifo.is_empty() || self.hq_busy.load(Ordering::Acquire);
+        if write {
+            return match off {
+                FIFO..FIFO_END | 0x6a068 | 0x6a078 => !self.hq_fifo.has_space(),
+                RE3_REGS..RE3_REGS_END | RE3_32 => !self.re3_fifo.has_space(),
+                _ => false,
+            };
+        }
+        match off {
+            0x6a068 => self.gedma_out_head.load(Ordering::Acquire) == self.gedma_out_tail.load(Ordering::Acquire) && hq_working(),
+            o if o == HQREGS + hq2::HQ_VERSION => {
+                self.fin2_wait.load(Ordering::Acquire) != 0 && self.regs().hq.fin[hq2::FIN2].load(Ordering::Acquire) == 0 && hq_working()
+            }
+            RE3_REGS..RE3_REGS_END | RE3_32 => !self.idle(),
+            _ => false,
+        }
+    }
 
     // ── board ID registers ───────────────────────────────────────────────────
 
