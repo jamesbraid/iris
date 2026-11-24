@@ -3276,7 +3276,7 @@ fn gr2_composed_frame_is_pinned_on_the_gpu() {
 fn a_panic_on_an_engine_thread_is_reported() {
     let g = Gr2::new(Gr2Variant::Xz, crate::disp::StatusSource::detached());
     let (tx, rx) = std::sync::mpsc::channel();
-    let tx = Mutex::new(tx);
+    let tx = parking_lot::Mutex::new(tx);
     g.set_panic_hook(Box::new(move |m| {
         let _ = tx.lock().send(m.to_string());
     }));
