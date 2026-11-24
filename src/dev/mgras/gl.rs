@@ -702,6 +702,7 @@ macro_rules! paths {
 
 paths! {
     PipeTable "pipeline table",
+    PipePad "pipeline table pad",
     PipeOff "pipeline table off",
     PipeSmall "pipeline small draw",
     PipeElements "pipeline not 8-bit elements",
@@ -2259,6 +2260,9 @@ impl Gl {
                 one[0]
             })
         });
+        if table.as_ref().is_some_and(|t| t.is_pad()) {
+            note(Path::PipePad);
+        }
         for r in 0..h {
             rb.clear();
             let row = &bytes[r * stride..r * stride + row_in];
