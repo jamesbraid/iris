@@ -678,6 +678,21 @@ impl Gr2 {
         self.dirty.store(true, Ordering::Release);
     }
 
+    /// Words onto the HQ2_GEDMA data port in order: the number the queue had room for.
+    pub fn push_gedma(&self, words: &[u32]) -> usize {
+        let mut n = 0;
+        for &w in words {
+            if !self.hq_fifo.try_push(hq2::HQ_TOKEN_GEDMA, w as u64) {
+                break;
+            }
+            n += 1;
+        }
+        if n != 0 {
+            self.wake_hq();
+        }
+        n
+    }
+
     /// Choose the RE3 span JIT's mode (`re3_jit::MODE_*`) before the threads start.
     #[cfg(feature = "gr2-jit")]
     pub fn set_jit_mode(&self, mode: u32) {
