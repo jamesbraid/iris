@@ -3323,3 +3323,22 @@ fn what_would_wait_matches_what_does_and_a_stall_names_its_end() {
     }
     assert_eq!(g.reg_write(0x40000 + 4 * hq2::PUC_DATA, 0), BUS_BUSY);
 }
+
+/// An outline box (sbox) whose far corner is off any screen: the edge sat at i32::MAX, `xb + 1` overflowed and the
+/// row loop stepped two billion rows. Only the part inside the window draws.
+#[test]
+fn a_box_far_off_the_screen_is_clipped_not_walked() {
+    let g = &live_gr2(Gr2Variant::Xz);
+    gl_setup_window(g);
+    let fl = |v: f32| v.to_bits();
+    for v in [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.0f32] { cmd(g, 0x037, fl(v)); }
+    cmd(g, 0x6913, 0x00ff_ffff);
+    cmd(g, 0x052, fl(10.0));
+    for v in [20.0f32, 1e30, 1e30] { data(g, fl(v)); }
+    cmd(g, 0x052, fl(-1e30));
+    for v in [-1e30f32, 50.0, 30.0] { data(g, fl(v)); }
+    g.wait_idle();
+    assert_eq!(g.panic_message(), None);
+    assert_eq!(gl_px(g, 30, 20), 0xffffff, "the near corner's edges draw");
+    assert_eq!(gl_px(g, 30, 25), 0, "outline only");
+}
