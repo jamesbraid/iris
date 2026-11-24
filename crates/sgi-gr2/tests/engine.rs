@@ -453,3 +453,80 @@ fn a_state_saved_mid_command_resumes_the_command() {
     quiesce(&mut b.e, &mut now, 1_000_000, 100).unwrap();
     assert!(matches!(b.e.load(&mut VecSource::new(torn)), Err(Refused::Mismatch(_))));
 }
+
+/// Program the VC1 the way the kernel's and the PROM's init do for a mode: the width half-word at SRAM
+/// 0x9f2 (1025 for a 1024-wide mode), the interlace half-word at 0x9f0, and the display-ID line tables'
+/// bounds in registers 0x40 and 0x42.
+fn program_vc1(rig: &mut Rig, width: u32, lines: u32, interlace: u32, file_loaded: bool) {
+    let sram = |rig: &mut Rig, at: u32, v: u32| {
+        rig.w32(0x6c050, at & 0xff);
+        rig.w32(0x6c054, at >> 8);
+        rig.w32(0x6c048, v);
+    };
+    let reg = |rig: &mut Rig, at: u32, v: u32| {
+        rig.w32(0x6c050, at);
+        rig.w32(0x6c054, 0);
+        rig.w32(0x6c040, v);
+    };
+    sram(rig, 0x9f0, interlace);
+    sram(rig, 0x9f2, if width == 1024 { 1025 } else { width });
+    reg(rig, 0x40, 0xb00);
+    reg(rig, 0x42, 0xb00 + 2 * lines);
+    reg(rig, 0x14, if file_loaded { 8192 } else { 0 });
+}
+
+fn indigo(code: u32) -> Gr2Probe {
+    // Board revision 2: port 1 bit 0 and port 2 bits 1:0 carry the monitor code.
+    Gr2Probe { ges: 2, ports: [0xdd, 0x3c | (code & 1), 0xfc | (code >> 1 & 3), 0xff], hq_rev: 0, aux_window: AuxWindow::None }
+}
+
+#[test]
+fn the_size_and_timing_follow_the_vc1_and_the_monitor_code() {
+    // Before the VC1 is programmed: the monitor code's size, and no timing.
+    let mut rig = Rig::with_probe(indigo(0));
+    assert_eq!(rig.e.frame_size(0), Some((1280, 1024)));
+    assert_eq!(rig.e.head_timing(0), None);
+    let mut six = Rig::with_probe(indigo(6));
+    assert_eq!(six.e.frame_size(0), Some((1024, 768)), "code 6 is the 1024 by 768 monitor");
+    let mut px = Vec::new();
+    assert_eq!(six.e.scanout(0, &mut px).unwrap(), Some((1024, 768)));
+    assert_eq!(px.len(), 1024 * 768);
+
+    // 60 Hz at 1280 by 1024: the built-in set for any code but 1, 9, 6 and 14.
+    program_vc1(&mut rig, 1280, 1024, 0, false);
+    rig.idle();
+    assert_eq!(rig.e.frame_size(0), Some((1280, 1024)));
+    let t = rig.e.head_timing(0).expect("a timing");
+    assert_eq!((t.clock_hz as u64 / (t.frame_clocks), t.fields, t.lines, t.epoch_ns), (60, 1, 1024, -1));
+    // 72 Hz for code 1.
+    let mut r72 = Rig::with_probe(indigo(1));
+    program_vc1(&mut r72, 1280, 1024, 0, false);
+    r72.idle();
+    let t72 = r72.e.head_timing(0).unwrap();
+    assert_eq!(t72.clock_hz as u64 / t72.frame_clocks, 72);
+    // The timing's generation moves when the mode does, and not when it is asked again.
+    let g = rig.e.head_timing(0).unwrap().generation;
+    assert_eq!(rig.e.head_timing(0).unwrap().generation, g);
+    program_vc1(&mut rig, 1024, 768, 0, false);
+    rig.idle();
+    assert_eq!(rig.e.frame_size(0), Some((1024, 768)), "a 1024-wide mode is stored as 1025");
+    assert_eq!(rig.e.scanout(0, &mut px).unwrap(), Some((1024, 768)));
+    assert_eq!(px.len(), 1024 * 768);
+    let t = rig.e.head_timing(0).unwrap();
+    assert_eq!((t.lines, t.generation > g), (768, true));
+
+    // A loaded timing file, an interlaced one and the codes with no built-in set: the size, no rate.
+    program_vc1(&mut rig, 1280, 1024, 0, true);
+    rig.idle();
+    assert_eq!(rig.e.head_timing(0), None);
+    program_vc1(&mut rig, 640, 485, 16, false);
+    rig.idle();
+    assert_eq!((rig.e.frame_size(0), rig.e.head_timing(0)), (Some((640, 485)), None));
+    program_vc1(&mut six, 1024, 768, 0, false);
+    six.idle();
+    assert_eq!(six.e.head_timing(0), None, "code 6 loads no timing of its own");
+    // Nonsense in the VC1 leaves the monitor code's size.
+    program_vc1(&mut rig, 90000, 10, 0, false);
+    rig.idle();
+    assert_eq!(rig.e.frame_size(0), Some((1280, 1024)));
+}

@@ -44,7 +44,7 @@ fn config(mode: u32, gpu: u32) -> IrisGr2Config {
             reserved: [0; 4],
         },
         ges: 2,
-        ports: [0xdd, 0x3e, 0xff, 0xff],
+        ports: [0xdd, 0x3c, 0xfc, 0xff],
         hq_rev: 0,
         aux_window: 0,
         jit: 0,

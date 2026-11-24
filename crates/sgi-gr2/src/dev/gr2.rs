@@ -28,6 +28,7 @@ pub mod vc1;
 #[path = "../../../../src/dev/gr2/xmap5.rs"]
 pub mod xmap5;
 
+pub mod display;
 pub mod engine;
 mod state;
 
