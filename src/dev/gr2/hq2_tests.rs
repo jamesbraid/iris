@@ -3189,3 +3189,20 @@ fn gr2_composed_frame_is_pinned_on_the_gpu() {
     }
     assert_eq!(gr2_frame_hash(Gr2Variant::Xz, true), "8522d00003541205becd1900df477acb6fdd992aab70ac125f451e5c5dca0999");
 }
+
+/// An engine thread that panics is reported to the shell's hook and kept.
+#[test]
+fn a_panic_on_an_engine_thread_is_reported() {
+    let g = Gr2::new(Gr2Variant::Xz, crate::disp::StatusSource::detached());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tx = Mutex::new(tx);
+    g.set_panic_hook(Box::new(move |m| {
+        let _ = tx.lock().send(m.to_string());
+    }));
+    g.guarded("RE3", |_| panic!("boom"));
+    let said = rx.try_recv().expect("the hook ran");
+    assert!(said.contains("RE3 thread: boom"), "{said}");
+    assert_eq!(g.panic_message().as_deref(), Some(said.as_str()));
+    g.clear_panic();
+    assert_eq!(g.panic_message(), None);
+}

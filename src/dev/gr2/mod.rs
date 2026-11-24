@@ -234,6 +234,11 @@ pub struct Gr2 {
     /// Something visible changed since the last composed frame.
     dirty: AtomicBool,
     threads: Mutex<Vec<thread::JoinHandle<()>>>,
+    /// What an engine thread that panicked left: the shell's hook is told once.
+    panicked: Mutex<Option<String>>,
+    /// Bit 0: the HQ2 thread ended in a panic; bit 1: the RE3 thread did.
+    dead: AtomicU32,
+    on_panic: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
     hq_thread: Mutex<Option<thread::Thread>>,
     re3_thread: Mutex<Option<thread::Thread>>,
     /// The engine threads parked (`sleep`): producers unpark one only then,
@@ -301,6 +306,8 @@ impl Gr2 {
             addr_of_mut!((*p).re3_busy).write(AtomicBool::new(false));
             addr_of_mut!((*p).dirty).write(AtomicBool::new(true));
             addr_of_mut!((*p).threads).write(Mutex::new(Vec::new()));
+            addr_of_mut!((*p).panicked).write(Mutex::new(None));
+            addr_of_mut!((*p).on_panic).write(Mutex::new(None));
             addr_of_mut!((*p).hq_thread).write(Mutex::new(None));
             addr_of_mut!((*p).re3_thread).write(Mutex::new(None));
             addr_of_mut!((*p).screens).write([Arc::new(crate::gfx_display::Screen::default())]);
@@ -494,6 +501,77 @@ impl Gr2 {
 
     fn wake_re3(&self) {
         Self::wake(&self.re3_asleep, &self.re3_thread);
+    }
+
+    /// Start the HQ2 and RE3 threads. False if they already run.
+    fn start_engine(&self) -> bool {
+        if self.running.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        // SAFETY: Gr2 lives in the machine's Arc for the process lifetime; the
+        // threads are joined in stop_engine() before it could be dropped.
+        let me: &'static Gr2 = unsafe { std::mem::transmute::<&Gr2, &'static Gr2>(self) };
+        let mut threads = self.threads.lock();
+        threads.push(thread::Builder::new().name("GR2-HQ2".into()).spawn(move || me.guarded("HQ2", Gr2::hq_loop)).unwrap());
+        threads.push(thread::Builder::new().name("GR2-RE3".into()).spawn(move || me.guarded("RE3", Gr2::re3_loop)).unwrap());
+        true
+    }
+
+    /// Run an engine thread's body; a panic in it is kept and reported to
+    /// the shell's hook instead of silently ending the thread.
+    fn guarded(&self, name: &str, body: fn(&Gr2)) {
+        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(self))) {
+            let what = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown panic".into());
+            let msg = format!("panic on the {name} thread: {what}");
+            self.dead.fetch_or(if name == "HQ2" { 1 } else { 2 }, Ordering::AcqRel);
+            self.panicked.lock().get_or_insert_with(|| msg.clone());
+            if let Some(hook) = &*self.on_panic.lock() {
+                hook(&msg);
+            }
+        }
+    }
+
+    /// Tell `hook` (once for each panic) when an engine thread panicked.
+    pub fn set_panic_hook(&self, hook: Box<dyn Fn(&str) + Send + Sync>) {
+        *self.on_panic.lock() = Some(hook);
+    }
+
+    /// What the first engine thread that panicked said, if one did.
+    pub fn panic_message(&self) -> Option<String> {
+        self.panicked.lock().clone()
+    }
+
+    /// Forget a panic, once the threads are stopped and about to start again.
+    pub fn clear_panic(&self) {
+        *self.panicked.lock() = None;
+        self.dead.store(0, Ordering::Release);
+    }
+
+    /// Stop the HQ2 and RE3 threads and discard what is queued behind them.
+    fn stop_engine(&self) {
+        if !self.running.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        // A thread that panicked drains nothing: no sentinel for it, or a full queue would block here.
+        let dead = self.dead.load(Ordering::Acquire);
+        if dead & 1 == 0 {
+            self.hq_fifo.push(u32::MAX, 0);
+        }
+        if dead & 2 == 0 {
+            self.re3_fifo.push(re3::RE3_OP_EXIT, 0);
+        }
+        Self::unpark(&self.hq_thread);
+        Self::unpark(&self.re3_thread);
+        for t in self.threads.lock().drain(..) {
+            let _ = t.join();
+        }
+        // Discard the exit sentinels (and anything behind them).
+        self.hq_fifo.reset();
+        self.fin3_pending.store(0, Ordering::Release);
+        self.fin2_wait.store(0, Ordering::Release);
+        let head = self.gedma_out_head.load(Ordering::Acquire);
+        self.gedma_out_tail.store(head, Ordering::Release);
+        self.re3_fifo.reset();
     }
 
     // ── board ID registers ───────────────────────────────────────────────────
@@ -1147,37 +1225,17 @@ impl Device for Gr2 {
     fn step(&self, _cycles: u64) {}
 
     fn start(&self) {
-        if self.running.swap(true, Ordering::SeqCst) {
+        if !self.start_engine() {
             return;
         }
-        // SAFETY: Gr2 lives in the machine's Arc for the process lifetime; the
-        // threads are joined in stop() before it could be dropped.
+        // SAFETY: as in `start_engine`.
         let me: &'static Gr2 = unsafe { std::mem::transmute::<&Gr2, &'static Gr2>(self) };
-        let mut threads = self.threads.lock();
-        threads.push(thread::Builder::new().name("GR2-HQ2".into()).spawn(move || me.hq_loop()).unwrap());
-        threads.push(thread::Builder::new().name("GR2-RE3".into()).spawn(move || me.re3_loop()).unwrap());
-        threads.push(thread::Builder::new().name("GR2-Display".into()).spawn(move || me.display_loop()).unwrap());
+        self.threads.lock().push(thread::Builder::new().name("GR2-Display".into()).spawn(move || me.display_loop()).unwrap());
     }
 
     fn stop(&self) {
         self.display_stop.request();
-        if !self.running.swap(false, Ordering::SeqCst) {
-            return;
-        }
-        self.hq_fifo.push(u32::MAX, 0);
-        self.re3_fifo.push(re3::RE3_OP_EXIT, 0);
-        Self::unpark(&self.hq_thread);
-        Self::unpark(&self.re3_thread);
-        for t in self.threads.lock().drain(..) {
-            let _ = t.join();
-        }
-        // Discard the exit sentinels (and anything behind them).
-        self.hq_fifo.reset();
-        self.fin3_pending.store(0, Ordering::Release);
-        self.fin2_wait.store(0, Ordering::Release);
-        let head = self.gedma_out_head.load(Ordering::Acquire);
-        self.gedma_out_tail.store(head, Ordering::Release);
-        self.re3_fifo.reset();
+        self.stop_engine();
     }
 
     fn is_running(&self) -> bool {
