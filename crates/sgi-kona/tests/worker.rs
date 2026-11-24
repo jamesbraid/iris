@@ -63,6 +63,7 @@ type Engine = KonaEngine<Guest>;
 
 const A: Source = Source { id: 1, charged: true };
 const B: Source = Source { id: 2, charged: true };
+const U: Source = Source { id: 1, charged: false };
 
 fn config() -> KonaConfig {
     KonaConfig::ir2(2).unwrap().with_pool(0, 32)
@@ -388,6 +389,26 @@ fn a_swap_holds_the_worker_until_the_frame() {
     assert_eq!((e.queued(), e.pixel(7, 8, COLOUR_WORD)), (0, 9));
 }
 
+/// A worker held at a swap takes 32 charged stores and no more until the frame; uncharged ones still queue.
+#[test]
+fn charged_stores_wait_while_the_worker_holds_32() {
+    let (mut e, _) = pipe(true);
+    kernel(&mut e, DISPLAY_MODE_BYTE, &SWAP, A);
+    e.set_source(A);
+    // The stage reaches the worker only at the first busy, so none of these has run when it comes.
+    let taken = (0..200).take_while(|_| e.write(COMMAND_PAGE, 32, 1) == Write::Done).count();
+    assert_eq!(taken, 29, "the swap's 3 stores and 29 more");
+    assert_eq!(e.wait_idle(0, u64::MAX), Idle::Stalled(StallOn::Frame));
+    // The swap's 3 ran: `push_words` takes 3 more, then `access_waits` says the next charged store waits.
+    e.set_source(A);
+    assert_eq!(e.push_words(COMMAND_PAGE, &[1; 8]), 3);
+    assert!(e.access_waits(COMMAND_PAGE, 32, true));
+    store(&mut e, COMMAND_PAGE, 1, U);
+    e.frame(0);
+    store(&mut e, COMMAND_PAGE, 1, A);
+    settle(&mut e);
+}
+
 /// Kill the process if `progress`, which only the thread under test moves, stops: a wrong lock order hangs, and a hung test says nothing.
 fn watchdog(progress: Arc<AtomicU64>, done: Arc<AtomicBool>, what: &'static str) {
     std::thread::spawn(move || {
@@ -470,15 +491,16 @@ fn a_saturated_worker_publishes_the_heads_and_the_generation_as_it_goes() {
     let mut format = [0u32; 383];
     (format[1], format[19], format[20], format[21], format[22], format[23], format[24]) = (1, 60 << 16, 1, 1066, 1688, 1024, 1280);
     let sum = format.iter().fold(VIDEO_LOAD_FORMAT, |s, w| s.wrapping_add(*w));
-    kernel(&mut e, WINDOW_SYSTEM_GRAPHICS_CONTEXT_LOAD, &GC, A);
-    // The format load sits behind boxes the worker is still drawing, so no run ends before it.
+    kernel(&mut e, WINDOW_SYSTEM_GRAPHICS_CONTEXT_LOAD, &GC, U);
+    // Uncharged, so the queue may grow past the charged stores' limit. The format load sits behind boxes the worker
+    // is still drawing, so no run ends before it.
     for k in 0..1500 {
         if k == 200 {
             for w in [0x1a6, VIDEO_LOAD_FORMAT].into_iter().chain(format).chain([sum]) {
-                store(&mut e, COMMAND_PAGE, w, A);
+                store(&mut e, COMMAND_PAGE, w, U);
             }
         }
-        kernel(&mut e, FILL_BOXES_TWO_CORNERS, &[0, 1023 << 16 | 1279], A);
+        kernel(&mut e, FILL_BOXES_TWO_CORNERS, &[0, 1023 << 16 | 1279], U);
     }
     // The pump hands over the stores still staged: the worker has all of them in one queue.
     e.advance(0);

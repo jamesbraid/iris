@@ -70,6 +70,9 @@ const STAGE_MAX: usize = 256;
 /// Stores a runner takes from the queue at a time.
 /// A credit-level read runs one batch: the default queue of 65,536 stores is down in 4,096 reads.
 const BATCH_MAX: usize = 16;
+/// Stores the worker may hold unrun before a charged store waits, a model choice: their credits go back only once they
+/// run, and IRIX runs the Hub with 101 credits and a bias of 68, so more would run its count down past zero.
+const CHARGED_MAX: usize = 32;
 /// A run that does not drain publishes its view and generation every this many batches.
 const PUBLISH_BATCHES: usize = 16;
 
@@ -972,6 +975,11 @@ impl<M: HostMem> KonaEngine<M> {
         words.iter().filter(|&&(o, _)| classify(o, true) != Access::Now).count()
     }
 
+    /// Words a charged store may still queue: past `CHARGED_MAX` unrun on the worker, the Hub's count would run out.
+    fn credit_room(&self) -> usize {
+        if self.source.charged && self.worker.is_some() { CHARGED_MAX.saturating_sub(self.pending()) } else { usize::MAX }
+    }
+
     /// Whether a read of `off` waits for the stream.
     fn read_waits(&self, off: u32) -> bool {
         classify(off, false) != Access::Now && self.pending() != 0
@@ -1333,7 +1341,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         }
         let Some((words, n)) = Self::words(off, bits, val) else { return Write::Fault };
         let words = &words[..n];
-        if self.pending() + Self::queues(words) > self.cap {
+        if self.pending() + Self::queues(words) > self.cap || Self::queues(words) > self.credit_room() {
             self.flush();
             return Write::Busy;
         }
@@ -1351,7 +1359,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         if self.dead() {
             return 0;
         }
-        let take = if classify(port, true) == Access::Now { words.len() } else { words.len().min(self.cap.saturating_sub(self.pending())) };
+        let take = if classify(port, true) == Access::Now { words.len() } else { words.len().min(self.cap.saturating_sub(self.pending())).min(self.credit_room()) };
         for &w in &words[..take] {
             self.store(port, w, self.source.charged);
         }
@@ -1413,7 +1421,7 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
             return false;
         }
         if write {
-            Self::words(off, bits, 0).is_some_and(|(w, n)| self.pending() + Self::queues(&w[..n]) > self.cap)
+            Self::words(off, bits, 0).is_some_and(|(w, n)| self.pending() + Self::queues(&w[..n]) > self.cap || Self::queues(&w[..n]) > self.credit_room())
         } else {
             match bits {
                 32 => self.read_waits(off),

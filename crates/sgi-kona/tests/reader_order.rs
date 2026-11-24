@@ -65,7 +65,8 @@ impl DisplayBusSlave for Board {
     }
 }
 
-const A: Source = Source { id: 1, charged: true };
+// Uncharged, so the 200 stores queue at once behind a worker that has not started.
+const A: Source = Source { id: 1, charged: false };
 
 /// One display-bus word write: the video command 1, its address and data, and the checksum.
 fn bus_write(e: &mut KonaEngine<Ram>, data: u32) {
