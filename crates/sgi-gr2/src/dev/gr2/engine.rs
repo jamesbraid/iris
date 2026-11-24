@@ -10,16 +10,18 @@
 //!   got (and the time it then advanced to), and replay that, not the rule.
 //! - HQ2_GEDMA is a data port (`push_words`) and a read port (`pull_words`).
 //! - No interrupt is raised yet (`irq_levels` is 0), and the retrace is the shell's: `frame` is told of it.
-//! - `scanout` composes on the CPU and waits a bounded time for queued work (`OBSERVE_WAIT`).
+//! - `scanout` composes on the CPU and waits a bounded time for queued work (`OBSERVE_WAIT`). Its size and
+//!   `head_timing` come from the VC1 and the monitor code (`display.rs`).
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use sgi_engine::{BoardEngine, Event, Fault, HostMem, Idle, Mark, Outbox, Pump, Read, Rect, Refused, StallOn, StateSink, StateSource, Write};
+use sgi_engine::{BoardEngine, Event, Fault, HeadTiming, HostMem, Idle, Mark, Outbox, Pump, Read, Rect, Refused, StallOn, StateSink, StateSource, Write};
 
 use super::board::{Gr2, Gr2Probe, GR2_BASE, GR2_SLOT_SIZE};
+use super::display;
 use super::gr2comp;
 use super::re3::{FB_H, FB_W};
 use crate::traits::{BUS_BUSY, BUS_OK};
@@ -93,10 +95,12 @@ pub struct Gr2Engine<M: HostMem> {
     parked: bool,
     /// Moves when the picture may have changed; `frame_generation` adds the board's own pending flag.
     generation: u64,
-    /// The composed picture (`0x00RRGGBB`, `FB_W` by `FB_H`) and the generation it shows.
+    /// The composed picture (`0x00RRGGBB`, the size `size()` gave) and the generation it shows.
     picture: Option<(u64, Vec<u32>)>,
     /// The board's progress position and the host time it was last seen to move.
     progress: Mutex<(u64, Instant)>,
+    /// The timing last reported (its key) and how many times it changed.
+    timing: Mutex<(u64, u64)>,
     /// `compose`'s output, stride `OUT_STRIDE`.
     compose_buf: Vec<u32>,
     clock_ns: u64,
@@ -132,7 +136,7 @@ impl<M: HostMem> Gr2Engine<M> {
         let failure = Arc::new(Failure::default());
         let gr = new_board(&config, &out, &failure)?;
         gr.start_engine();
-        Ok(Gr2Engine { gr, config, out, failure, _mem: mem, parked: false, generation: 0, picture: None, progress: Mutex::new((0, Instant::now())), compose_buf: Vec::new(), clock_ns: 0 })
+        Ok(Gr2Engine { gr, config, out, failure, _mem: mem, parked: false, generation: 0, picture: None, progress: Mutex::new((0, Instant::now())), timing: Mutex::new((0, 0)), compose_buf: Vec::new(), clock_ns: 0 })
     }
 
     /// The board, for tests and for shells that read its registers directly.
@@ -231,7 +235,14 @@ impl<M: HostMem> Gr2Engine<M> {
         self.gr.set_time(now_ns);
     }
 
-    /// Compose the picture unless the one held still shows the board's state.
+    /// The picture's size: the VC1's, or the monitor code's before it is programmed.
+    fn size(&self) -> (u32, u32) {
+        display::size(&self.gr.regs().vc1, &self.config.probe)
+    }
+
+    /// Compose the picture unless the one held still shows the board's state. The part of the 1280 by
+    /// 1024 composition a smaller mode shows is its top left corner; where the hardware puts it is not
+    /// known.
     fn compose(&mut self) {
         let now = self.generation_now();
         if matches!(&self.picture, Some((g, _)) if *g == now) {
@@ -242,9 +253,10 @@ impl<M: HostMem> Gr2Engine<M> {
         gr2comp::compose(self.gr.vram(), &r.vc1, &r.xmap, &r.dac, &mut self.compose_buf);
         let mut px = self.picture.take().map_or_else(Vec::new, |(_, v)| v);
         px.clear();
-        for row in self.compose_buf.chunks(gr2comp::OUT_STRIDE).take(FB_H) {
+        let (w, h) = self.size();
+        for row in self.compose_buf.chunks(gr2comp::OUT_STRIDE).take(h as usize) {
             // compose gives 0xAABBGGRR; the interface wants 0x00RRGGBB.
-            px.extend(row[..FB_W].iter().map(|&w| ((w & 0xff) << 16) | (w & 0xff00) | ((w >> 16) & 0xff)));
+            px.extend(row[..w as usize].iter().map(|&w| ((w & 0xff) << 16) | (w & 0xff00) | ((w >> 16) & 0xff)));
         }
         self.picture = Some((now, px));
     }
@@ -367,11 +379,26 @@ impl<M: HostMem> BoardEngine for Gr2Engine<M> {
         if let Some((_, px)) = &self.picture {
             out.extend_from_slice(px);
         }
-        Ok(Some((FB_W as u32, FB_H as u32)))
+        Ok(Some(self.size()))
     }
 
     fn frame_size(&self, head: u32) -> Option<(u32, u32)> {
-        (head == 0).then_some((FB_W as u32, FB_H as u32))
+        (head == 0).then(|| self.size())
+    }
+
+    fn head_timing(&self, head: u32) -> Option<HeadTiming> {
+        if head != 0 {
+            return None;
+        }
+        let hz = display::refresh_hz(&self.gr.regs().vc1, &self.config.probe)?;
+        let (_, h) = self.size();
+        let frame_clocks = (display::TIMING_CLOCK_HZ / hz) as u64;
+        let key = (hz as u64) << 32 | h as u64;
+        let mut t = self.timing.lock();
+        if t.0 != key {
+            *t = (key, t.1 + 1);
+        }
+        Some(HeadTiming { frame_clocks, clock_hz: display::TIMING_CLOCK_HZ, fields: 1, lines: h, epoch_ns: -1, generation: t.1 })
     }
 
     fn frame_generation(&self, head: u32) -> u64 {

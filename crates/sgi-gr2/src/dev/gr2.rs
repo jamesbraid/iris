@@ -7,7 +7,7 @@
 mod board;
 pub use board::*;
 #[path = "../../../../src/dev/gr2/variant.rs"]
-mod variant;
+pub(crate) mod variant;
 pub use variant::Gr2Variant;
 #[path = "../../../../src/dev/gr2/bt457.rs"]
 pub mod bt457;
@@ -28,6 +28,7 @@ pub mod vc1;
 #[path = "../../../../src/dev/gr2/xmap5.rs"]
 pub mod xmap5;
 
+pub mod display;
 pub mod engine;
 mod state;
 
@@ -49,8 +50,8 @@ use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, Device
 
 impl Gr2 {
     /// A board of one of iris's two kinds, for the mounted tests.
-    pub fn new(variant: Gr2Variant, status: Arc<crate::disp::StatusSource>) -> Arc<Self> {
-        Self::build(variant.probe(), status, None).expect("the CPU scan-out")
+    pub fn new(variant: Gr2Variant, status: Arc<crate::status::MachineStatus>) -> Arc<Self> {
+        Self::build(variant, variant.probe(), status, None).expect("the CPU scan-out")
     }
 }
 
