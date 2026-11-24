@@ -481,10 +481,11 @@ impl Gr2 {
         self.dead.store(0, Ordering::Release);
     }
 
-    /// Stop the HQ2 and RE3 threads and discard what is queued behind them.
-    pub(super) fn stop_engine(&self) {
+    /// Stop the HQ2 and RE3 threads and keep the rest, for a shell that waited for idle: the read
+    /// port's words stay for their reader. False if they were not running.
+    pub(super) fn park_engine(&self) -> bool {
         if !self.running.swap(false, Ordering::SeqCst) {
-            return;
+            return false;
         }
         // A thread that panicked drains nothing: no sentinel for it, or a full queue would block here.
         let dead = self.dead.load(Ordering::Acquire);
@@ -501,12 +502,21 @@ impl Gr2 {
         }
         // Discard the exit sentinels (and anything behind them).
         self.hq_fifo.reset();
+        self.re3_fifo.reset();
+        true
+    }
+
+    /// Stop the HQ2 and RE3 threads and discard what is queued behind them.
+    pub(super) fn stop_engine(&self) {
+        if !self.park_engine() {
+            return;
+        }
         self.fin3_pending.store(0, Ordering::Release);
         self.fin2_wait.store(0, Ordering::Release);
         let head = self.gedma_out_head.load(Ordering::Acquire);
         self.gedma_out_tail.store(head, Ordering::Release);
-        self.re3_fifo.reset();
     }
+
 
     // ── board ID registers ───────────────────────────────────────────────────
 
