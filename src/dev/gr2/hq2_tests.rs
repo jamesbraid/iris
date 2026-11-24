@@ -331,7 +331,8 @@ fn xmap_mode_table_is_addressed_by_did_times_four() {
 fn xsgi_fin3_handshake_and_open_commands() {
     let g = &live_gr2(Gr2Variant::Xz);
     let path = std::env::temp_dir().join(format!("gr2_open_test_{}.log", std::process::id()));
-    let mut sink = Vec::new();
+    let mut sink: Vec<u8> = Vec::new();
+    #[cfg(not(feature = "engine-crate"))]
     g.cmd_gr2(&["trace", path.to_str().unwrap(), "hq"], &mut sink).unwrap();
 
     cmd(g, 0x14c, 0);
@@ -355,6 +356,7 @@ fn xsgi_fin3_handshake_and_open_commands() {
     assert_eq!(r32(g, 0x6a040) & 1, 1, "0x6b000 restores FIN3 (kernel context switch)");
 
     g.wait_idle();
+    #[cfg(not(feature = "engine-crate"))]
     g.cmd_gr2(&["trace", "off"], &mut sink).unwrap();
     // The decoded commands are checked through the trace, which needs it.
     #[cfg(feature = "gputrace")]
@@ -460,6 +462,7 @@ fn xmap_clut_word_and_byte_stores() {
     assert_eq!(clut(0x1021), 0x040506);
 }
 
+#[cfg(not(feature = "engine-crate"))]
 #[test]
 fn fbdump_writes_planes_and_screen() {
     let g = &live_gr2(Gr2Variant::Xz);
@@ -1732,6 +1735,7 @@ fn gl_fog_linear_from_trace() {
 /// `GR2_REPLAY=trace cargo test --release --lib gr2_replay_file -- --ignored`.
 #[test]
 #[ignore]
+#[cfg(not(feature = "engine-crate"))]
 fn gr2_replay_file() {
     let Ok(path) = std::env::var("GR2_REPLAY") else { return };
     let out = std::env::var("GR2_REPLAY_OUT").unwrap_or_else(|_| "gr2replay".into());
@@ -1766,6 +1770,7 @@ fn gr2_replay_file() {
 
 /// PLL bit-bang is decoded (PROM Gr2StartClock: LSB first, strobe on the
 /// last bit) so monitor changes (xsetmon) are visible.
+#[cfg(not(feature = "engine-crate"))]
 #[test]
 fn pll_programming_is_decoded() {
     let g = &live_gr2(Gr2Variant::Xz);

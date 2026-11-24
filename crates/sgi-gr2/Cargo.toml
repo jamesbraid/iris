@@ -1,0 +1,43 @@
+[package]
+name = "sgi-gr2"
+version = "0.1.0"
+edition = "2021"
+description = "Iris's GR2 (Express) engine: the HQ2 command engine, GL-level geometry, the RE3 raster and the display chips' arithmetic, without the board"
+publish = false
+
+[lib]
+# The unit tests inside the mounted files (iris's whole-board GR2 tests) run here too.
+test = true
+doctest = false
+
+[features]
+default = ["engine-crate"]
+# Marks the files as built in this crate, not iris: the mounted whole-board tests that need iris's monitor skip.
+engine-crate = []
+# The Cranelift JIT of the RE3 span pipelines (src/dev/gr2/re3_jit); the interpreter is always built and is the reference.
+gr2-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]
+# Panic injection points for the tests (`sgi_engine::inject`).
+fault-injection = ["sgi-engine/fault-injection"]
+# `tools/check-header`: cbindgen compares the C header with src/ffi.rs.
+header-check = ["dep:cbindgen"]
+
+[dependencies]
+sgi-engine = { path = "../sgi-engine" }
+sgi-gl-math = { path = "../sgi-gl-math" }
+parking_lot = "0.12"
+crossbeam-utils = "0.8"
+log = "0.4"
+cbindgen = { version = "0.29", optional = true, default-features = false }
+cranelift-codegen = { version = "0.134", optional = true }
+cranelift-frontend = { version = "0.134", optional = true }
+cranelift-jit = { version = "0.134", optional = true }
+cranelift-module = { version = "0.134", optional = true }
+cranelift-native = { version = "0.134", optional = true }
+
+[dev-dependencies]
+sgi-engine = { path = "../sgi-engine", features = ["conformance", "fault-injection"] }
+blake3 = "1"
+
+[[example]]
+name = "cbindgen_header"
+required-features = ["header-check"]

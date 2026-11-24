@@ -13,7 +13,9 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
+#[cfg(not(feature = "engine-crate"))]
 use crate::clock::Clock;
+#[cfg(not(feature = "engine-crate"))]
 use crate::hptimer::TimerManager;
 use crate::traits::Device;
 
@@ -45,12 +47,14 @@ impl<T: Device> Drop for TestBoard<T> {
 
 /// A timer manager on a stepped machine clock. Timers hold their manager
 /// weakly, so a test keeps this alive for as long as its devices run.
+#[cfg(not(feature = "engine-crate"))]
 #[derive(Clone)]
 pub(crate) struct Stepped {
     pub tm: Arc<TimerManager>,
     pub clock: Clock,
 }
 
+#[cfg(not(feature = "engine-crate"))]
 impl Stepped {
     pub(crate) fn new() -> Self {
         let clock = Clock::stepped();
@@ -66,6 +70,7 @@ impl Stepped {
     }
 }
 
+#[cfg(not(feature = "engine-crate"))]
 impl Deref for Stepped {
     type Target = Clock;
     fn deref(&self) -> &Clock {
