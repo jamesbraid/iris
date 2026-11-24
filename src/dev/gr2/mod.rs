@@ -182,7 +182,7 @@ pub struct Gr2 {
     /// kernel sees FIN2 as soon as the HQ2 gets there. See
     /// clanker/gr2/fin2-wait-must-stall.md.
     fin2_wait: AtomicU32,
-    /// Host time (fin2_clock ns) of the last progress seen by a stalled FIN2
+    /// Shell time (`now_ns`) of the last progress seen by a stalled FIN2
     /// poll since the wait was armed (0 = no stalled poll yet). The stall
     /// gives up after FIN2_STALL_LIMIT without progress, so a pipeline that
     /// can never finish (RE3 held by a CPU-driven readback) cannot hang the
@@ -193,6 +193,9 @@ pub struct Gr2 {
     /// may take long on a busy host (a 400-row pixel DMA on a GitHub CI
     /// runner did).
     fin2_armed_ns: AtomicU64,
+    /// The shell's clock in ns, which the two stall limits count in; the
+    /// board reads no host clock. `set_time` moves it forward.
+    now_ns: AtomicU64,
     /// HQ2 + RE3 FIFO consumer positions at the last stalled FIN2 poll.
     fin2_progress: AtomicU64,
     /// HQ2_GEDMA read port: HQ2 -> host words (context saves 0x1E1, pixel
@@ -354,7 +357,7 @@ impl Gr2 {
     /// A FIN2 poll may stall: true until the HQ2 and RE3 have made no
     /// progress for FIN2_STALL_LIMIT (Gr2::fin2_armed_ns).
     fn fin2_stall_ok(&self) -> bool {
-        let now = fin2_clock().max(1);
+        let now = self.now_ns().max(1);
         let pos = (self.hq_fifo.consumed() as u64) ^ ((self.re3_fifo.consumed() as u64) << 32);
         if self.fin2_progress.swap(pos, Ordering::AcqRel) != pos {
             self.fin2_armed_ns.store(now, Ordering::Release);
@@ -365,6 +368,17 @@ impl Gr2 {
             Err(t) => t,
         };
         now.saturating_sub(last) < FIN2_STALL_LIMIT.as_nanos() as u64
+    }
+
+    /// The shell's time, as `set_time` last had it.
+    #[inline]
+    fn now_ns(&self) -> u64 {
+        self.now_ns.load(Ordering::Relaxed)
+    }
+
+    /// Give the board the shell's time in ns; it never goes back.
+    pub fn set_time(&self, ns: u64) {
+        self.now_ns.fetch_max(ns, Ordering::Relaxed);
     }
 
     /// Spin until both engines are idle (tests and snapshots).
@@ -397,7 +411,7 @@ impl Gr2 {
             if !self.running.load(Ordering::Relaxed) {
                 return false;
             }
-            let now = fin2_clock();
+            let now = self.now_ns().max(1);
             if since == 0 {
                 since = now;
             } else if now - since > GEDMA_OUT_STALL_LIMIT_NS {
@@ -1029,6 +1043,9 @@ impl Resettable for Gr2 {
 
 impl BusDevice for Gr2 {
     fn read32(&self, addr: u64) -> BusRead32 {
+        if self.fin2_wait.load(Ordering::Relaxed) != 0 {
+            self.set_time(host_clock_ns());
+        }
         let r = self.reg_read(slot_off(addr) & (GR2_SLOT_SIZE - 4));
         crate::pf_level!(self.pf_wait, crate::perfetto::events::GR2_WAIT, r.status == BUS_BUSY);
         r
@@ -1237,8 +1254,8 @@ impl Saveable for Gr2 {
 /// Longest a version read stalls for an awaited FIN2 (see Gr2::fin2_wait).
 const FIN2_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Monotonic host nanoseconds for the FIN2 stall limit.
-fn fin2_clock() -> u64 {
+/// Monotonic host nanoseconds, the clock iris's own board gives `set_time`.
+fn host_clock_ns() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     START.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
 }

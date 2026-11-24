@@ -39,6 +39,7 @@ impl Gr2 {
             // blanking interval (~40 of 1066 lines at 60 Hz), long enough
             // for a polling CPU to see both edges.
             || {
+                self.set_time(super::host_clock_ns());
                 if let Some(cb) = self.retrace_cb.lock().clone() {
                     cb(true);
                     thread::sleep(VBLANK);
