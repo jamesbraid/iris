@@ -72,6 +72,8 @@ pub const HQ_FIFO_DEPTH: usize = 65536;
 pub const RE3_FIFO_DEPTH: usize = 65536;
 /// Words the HQ2_GEDMA read port holds ahead of its reader (power of two).
 pub const GEDMA_OUT_WORDS: usize = 16384;
+/// The most words one pixel read may ask for: twice a 1280 by 1024 frame at a word a pixel.
+pub(super) const READ_IMAGE_WORDS_MAX: u64 = 2 * (re3::FB_W * re3::FB_H) as u64;
 /// How long the HQ2 waits for a reader when the read port is full.
 pub(super) const GEDMA_OUT_STALL_LIMIT_NS: u64 = 2_000_000_000;
 
@@ -970,6 +972,12 @@ impl Gr2 {
                 self.push(op, val);
             }
             fn read_image(&mut self, req: &hq2::ReadImage, dest: hq2::ReadDest) {
+                // The size is the guest's: the image is built in memory before it goes out, and `pack`
+                // walks every row even when a row has no words.
+                if req.rows as u64 * req.words_per_row.max(1) as u64 > READ_IMAGE_WORDS_MAX {
+                    crate::dlog_dev!(crate::devlog::LogModule::Gr2, "GR2: pixel read of {} rows of {} words refused", req.rows, req.words_per_row);
+                    return;
+                }
                 if !self.drain_re3() {
                     return;
                 }

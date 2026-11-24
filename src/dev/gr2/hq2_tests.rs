@@ -3281,3 +3281,46 @@ fn a_line_longer_than_a_coordinate_can_span_is_dropped() {
     assert_eq!(px(5, 5), 0, "the long segment is not drawn");
     assert!((200..=209).all(|x| px(x, 300) == 2), "the next one is");
 }
+
+/// A pixel read asks for rows * words-per-row words, both a guest's: the engine built that many in memory
+/// before it sent them, so a huge one panicked or took the host's memory. One bigger than two frames is refused.
+#[test]
+fn a_pixel_read_of_an_absurd_size_is_refused() {
+    use super::hq2::*;
+    let g = &live_gr2(Gr2Variant::Xz);
+    cmd(g, hq2::HQ2_2D_BEGIN, 0);
+    cmd(g, HQ2_2D_MODE, 0x1009);
+    cmd(g, HQ2_2D_ROP, 0);
+    for v in [0xff, 3, 0] { data(g, v); }
+    cmd(g, HQ2_2D_BUF_SELECT, 2);
+    data(g, 0);
+    w32(g, 0x6a04c, 0);
+    cmd(g, HQ2_2D_DMA_READ_PIXELS, 100);
+    for v in [50, 6, 0x7fff_ffff, 0x7fff_ffff, 0, 0] { cmd(g, 0, v); }
+    g.wait_idle();
+    assert_eq!(g.panic_message(), None);
+    assert_eq!(r32(g, 0x6a040) & 2, 0, "no FIN2: the request was refused");
+    // The board still reads.
+    w32(g, 0x6a04c, 0);
+    cmd(g, HQ2_2D_DMA_READ_PIXELS, 100);
+    for v in [50, 6, 1, 2, 0, 0] { cmd(g, 0, v); }
+    let words: Vec<u32> = (0..2).map(|_| r32(g, 0x6a068)).collect();
+    assert_eq!(words.len(), 2);
+    assert_eq!(r32(g, 0x6a040) & 2, 2, "FIN2 after the one that is allowed");
+}
+
+/// Zero words a row passes a bound on the product, and the rows still counted four billion of them.
+#[test]
+fn a_pixel_read_of_many_empty_rows_is_refused_too() {
+    use super::hq2::*;
+    let g = &live_gr2(Gr2Variant::Xz);
+    cmd(g, hq2::HQ2_2D_BEGIN, 0);
+    cmd(g, HQ2_2D_BUF_SELECT, 2);
+    data(g, 0);
+    let t = std::time::Instant::now();
+    cmd(g, HQ2_2D_READ_IMAGE, 0);
+    for v in [50, 6, 40, u32::MAX] { data(g, v); }
+    g.wait_idle();
+    assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+    assert_eq!(g.panic_message(), None);
+}
