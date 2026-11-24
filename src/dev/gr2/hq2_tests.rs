@@ -3342,3 +3342,23 @@ fn a_box_far_off_the_screen_is_clipped_not_walked() {
     assert_eq!(gl_px(g, 30, 20), 0xffffff, "the near corner's edges draw");
     assert_eq!(gl_px(g, 30, 25), 0, "outline only");
 }
+
+/// A segment spanning more than any 16-bit coordinates can is dropped: walked, `2 * err` overflowed and
+/// the walk ran for billions of steps. A segment after it still draws.
+#[test]
+fn a_line_longer_than_a_coordinate_can_span_is_dropped() {
+    use super::hq2::*;
+    let g = &live_gr2(Gr2Variant::Xz);
+    cmd(g, hq2::HQ2_2D_BEGIN, 0);
+    cmd(g, HQ2_2D_MODE, 0x1009);
+    cmd(g, HQ2_2D_ROP, 2);
+    for v in [0xff, 3, 0] { data(g, v); }
+    cmd(g, HQ2_2D_LINE_SEG, 0);
+    for v in [0, 0, 0x7fff_ffff, 0x7fff_ffff, 200, 300, 210, 300, 0, 0, 0, 0] { data(g, v); }
+    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+    g.wait_idle();
+    assert_eq!(g.panic_message(), None);
+    let px = |x: i32, y: i32| g.vram()[(1023 - y) as usize * FB_W + x as usize] & 0xff;
+    assert_eq!(px(5, 5), 0, "the long segment is not drawn");
+    assert!((200..=209).all(|x| px(x, 300) == 2), "the next one is");
+}

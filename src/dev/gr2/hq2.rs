@@ -494,6 +494,8 @@ const OPEN: u32 = u32::MAX;
 /// arrive (e.g. 4 per box for SOLID_RECT) until the next command.
 const STREAM: u32 = u32::MAX - 1;
 const FIFO_WORDS: usize = 0x8000;
+/// The longest run of either coordinate a 2D line may span.
+const LINE_SPAN_MAX: i64 = 0xffff;
 
 /// CPU-visible HQ2 registers and microcode RAM. Plain data, zero-valid.
 #[repr(C)]
@@ -1231,7 +1233,13 @@ impl Hq2Engine {
         let (cx1, cx2) = (c[0].max(0), c[1].min(re3::FB_W as i32 - 1));
         let (cy1, cy2) = (c[2].max(0), c[3].min(SCREEN_H - 1));
         let (mut x, mut y) = (p0[0], p0[1]);
-        let (dx, dy) = ((p1[0] - x).abs(), -(p1[1] - y).abs());
+        // X coordinates are 16 bits, so no real segment spans more than 0xffff. A longer one is a
+        // guest's garbage: walking it overflows `2 * err` and takes billions of steps.
+        let (sdx, sdy) = ((p1[0] as i64 - x as i64).abs(), (p1[1] as i64 - y as i64).abs());
+        if sdx > LINE_SPAN_MAX || sdy > LINE_SPAN_MAX {
+            return;
+        }
+        let (dx, dy) = (sdx as i32, -(sdy as i32));
         let (sx, sy) = (if p1[0] >= x { 1 } else { -1 }, if p1[1] >= y { 1 } else { -1 });
         let mut err = dx + dy;
         let mut run: Option<(i32, i32, i32)> = None; // (y, xmin, xmax)
