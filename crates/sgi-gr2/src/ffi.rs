@@ -8,7 +8,7 @@ use sgi_engine::ffi::{build, call, host_parts, read_config, CMem, IrisEngine, Ir
 use sgi_engine::inject::Point;
 
 use crate::dev::gr2::engine::{Config, Gr2Engine};
-use crate::dev::gr2::Gr2Probe;
+use crate::dev::gr2::{AuxWindow, Gr2Probe};
 
 /// The GR2 configuration: the shared part, then the board's.
 #[repr(C)]
@@ -21,6 +21,8 @@ pub struct IrisGr2Config {
     pub ports: [u32; 4],
     /// The HQ2 revision in the status word and in `hq_gepc`.
     pub hq_rev: u32,
+    /// The window at +0x6c1c0: 0 not decoded (an Indigo), 1 iris's own word, 2 sixteen byte cells.
+    pub aux_window: u32,
     /// The RE3 span JIT: -1 the default, 0 off, 1 compile on first use, 2 compile in the background.
     pub jit: i32,
 }
@@ -47,7 +49,16 @@ pub unsafe extern "C" fn sgi_gr2_new(cfg: *const IrisGr2Config, host: *const Iri
             log::error!("sgi_gr2_new: GR2 composes on the CPU and has no GPU unit");
             return None;
         }
-        let mut config = Config::new(Gr2Probe { ges: c.ges, ports: c.ports, hq_rev: c.hq_rev });
+        let aux_window = match c.aux_window {
+            0 => AuxWindow::None,
+            1 => AuxWindow::Legacy,
+            2 => AuxWindow::Bytes,
+            n => {
+                log::error!("sgi_gr2_new: aux_window {n}");
+                return None;
+            }
+        };
+        let mut config = Config::new(Gr2Probe { ges: c.ges, ports: c.ports, hq_rev: c.hq_rev, aux_window });
         config.jit = c.jit;
         match Gr2Engine::new(config, mem, notify) {
             Ok(engine) => Some(engine),

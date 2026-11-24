@@ -27,6 +27,7 @@ typedef struct IrisGr2Config {
     uint32_t ges;           /* geometry engines fitted: 1, 2, 4 or 8 */
     uint32_t ports[4];      /* what the board configuration ports (+0x6c000 to +0x6c00c) read as */
     uint32_t hq_rev;        /* the HQ2 revision in the status word and in hq_gepc */
+    uint32_t aux_window;    /* the window at +0x6c1c0 to +0x6c1fc: 0 not decoded (an Indigo), 1 iris's own word, 2 sixteen byte cells */
     int32_t jit;            /* RE3 span JIT: -1 default, 0 off, 1 on first use, 2 background */
 } IrisGr2Config;
 

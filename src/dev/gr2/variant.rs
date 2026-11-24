@@ -1,7 +1,7 @@
 //! iris's two GR2 boards: which probe answers each gives.
 
 use super::hq2;
-use super::Gr2Probe;
+use super::{AuxWindow, Gr2Probe};
 
 /// Which of iris's two boards is installed. Same hardware family; only the
 /// probe answers differ.
@@ -32,6 +32,6 @@ impl Gr2Variant {
     pub fn probe(self) -> Gr2Probe {
         let port0 = !self.board_rev() & 0xf;
         let port1 = 0x3c | (!1 & 3);
-        Gr2Probe { ges: self.ges(), ports: [port0, port1, 0xff, 0xff], hq_rev: hq2::HQ2_REV }
+        Gr2Probe { ges: self.ges(), ports: [port0, port1, 0xff, 0xff], hq_rev: hq2::HQ2_REV, aux_window: AuxWindow::Legacy }
     }
 }
