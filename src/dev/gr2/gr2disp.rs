@@ -34,6 +34,7 @@ impl Head for Gr2 {
         if let Some(timing) = timing {
             self.head.set_timing(timing);
         }
+        self.set_time(super::host_clock_ns());
         if let Some(cb) = self.retrace_cb.lock().clone() {
             cb(true);
         }
