@@ -3292,3 +3292,34 @@ fn a_panic_on_an_engine_thread_is_reported() {
     g.clear_panic();
     assert_eq!(g.panic_message(), None);
 }
+
+/// A shell asks what would wait before it makes the access, and for the time a time-limited stall ends.
+/// The board is not started, so queued words stay queued and nothing moves behind the test.
+#[test]
+fn what_would_wait_matches_what_does_and_a_stall_names_its_end() {
+    let g = Gr2::new(Gr2Variant::Xz, crate::disp::StatusSource::detached());
+    let waits = |off: u32, write: bool| g.access_would_wait(off, write);
+    let busy_read = |off: u32| g.reg_read(off).status == BUS_BUSY;
+    for off in [0x6a040, 0x6a068, 0x6c200, 0x6c600, 0x40000] {
+        assert!(!waits(off, false) && !busy_read(off), "{off:#x}: nothing queued");
+    }
+    // Queued HQ2 words: the read port and an awaited FIN2 wait on them.
+    assert_eq!(g.reg_write(0x6a04c, 0), BUS_OK, "FIN2 awaited");
+    assert_eq!(g.reg_write(0x40000 + 4 * hq2::PUC_COLOR, 7), BUS_OK);
+    assert!(waits(0x6a068, false) && busy_read(0x6a068), "read port empty, HQ2 has work");
+    assert!(waits(0x6a040, false), "FIN2 awaited, HQ2 has work");
+    assert_eq!(g.stall_deadline(), None, "no poll has been held yet");
+    g.set_time(5);
+    assert!(busy_read(0x6a040));
+    assert_eq!(g.stall_deadline(), Some(5 + 2_000_000_000), "the poll gives up two seconds after its first stall");
+    // A queued RE3 write: its registers read busy until it runs.
+    assert_eq!(g.reg_write(0x6c200 + 4 * re3::REG_FUNC as u32, 3), BUS_OK);
+    assert!(waits(0x6c200, false) && busy_read(0x6c200));
+    // A full queue refuses a store, and says so before one is made.
+    let mut n = 0;
+    while !waits(0x40000, true) {
+        assert_eq!(g.reg_write(0x40000 + 4 * hq2::PUC_DATA, n), BUS_OK);
+        n += 1;
+    }
+    assert_eq!(g.reg_write(0x40000 + 4 * hq2::PUC_DATA, 0), BUS_BUSY);
+}
