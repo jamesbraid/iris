@@ -564,6 +564,21 @@ impl Gr2 {
         }
     }
 
+    /// Whether something visible changed since the last `take_dirty`.
+    pub fn dirty_pending(&self) -> bool {
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    /// Take the "something visible changed" flag: what the display thread does before each frame.
+    pub fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, Ordering::AcqRel)
+    }
+
+    /// Note that the picture may differ (a loaded state).
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Release);
+    }
+
     /// Choose the RE3 span JIT's mode (`re3_jit::MODE_*`) before the threads start.
     #[cfg(feature = "gr2-jit")]
     pub fn set_jit_mode(&self, mode: u32) {
