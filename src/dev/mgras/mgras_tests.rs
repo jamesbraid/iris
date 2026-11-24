@@ -2487,6 +2487,20 @@ fn draw_pixels_counts_its_routes() {
     assert!(plain[2] > fast[2] && plain[3] > fast[3], "plain paths counted with their reasons");
 }
 
+/// Smoke's frame through EXPAND's RGB mode counts the pad route (other tests count too, so it looks for an increase).
+#[test]
+fn smoke_frame_counts_the_rgb_pad_route() {
+    use super::gl::{path_count, Path};
+    let _held = super::gl::COMPARING.lock();
+    super::gl::PLAIN_ONLY.store(false, std::sync::atomic::Ordering::SeqCst);
+    let before = path_count(Path::PipePad);
+    let m = smoke_board(6);
+    smoke_frame(&m);
+    m.wait_idle();
+    m.stop_engines();
+    assert!(path_count(Path::PipePad) > before);
+}
+
 /// Smoke's frame in each of EXPAND's modes: the pipeline table (with EXPAND), the row copy and the tile stores
 /// leave the board as the plain paths do.
 #[test]

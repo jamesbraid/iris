@@ -567,8 +567,13 @@ impl ByteMap {
     pub fn packed(&self, mut pack: impl FnMut(f64) -> u8) -> BytePipe {
         let cols: Vec<[u8; 256]> = self.cols.iter().map(|col| col.map(&mut pack)).collect();
         let straight = self.in_px == self.out_px && self.src.iter().enumerate().all(|(i, &s)| s as usize == i % self.out_px);
-        let copy = straight && cols.iter().all(|col| col.iter().zip(0..=255u8).all(|(&a, b)| a == b));
-        BytePipe { in_px: self.in_px, out_px: self.out_px, places: self.places, src: self.src.clone(), cols, straight, copy }
+        let ident = |col: &[u8; 256]| col.iter().zip(0..=255u8).all(|(&a, b)| a == b);
+        let copy = straight && cols.iter().all(ident);
+        // RGB to RGBA at every place, the three bytes through unchanged and one alpha for all.
+        let alpha = cols.get(3).map_or(0, |col| col[0]);
+        let rgb_identity = |(c, s): (&[[u8; 256]], &[u8])| s[..3] == [0, 1, 2] && c[..3].iter().all(ident) && c[3] == [alpha; 256];
+        let pad = (self.in_px == 3 && self.out_px == 4 && cols.chunks_exact(4).zip(self.src.chunks_exact(4)).all(rgb_identity)).then_some(alpha);
+        BytePipe { in_px: self.in_px, out_px: self.out_px, places: self.places, src: self.src.clone(), cols, straight, copy, pad }
     }
 }
 
@@ -583,13 +588,27 @@ pub struct BytePipe {
     straight: bool,
     /// ... and every byte maps to itself (RGBA bytes through int-to-float and its clamp's scale back).
     copy: bool,
+    /// RGB to RGBA with the bytes unchanged and this alpha.
+    pad: Option<u8>,
 }
 
 impl BytePipe {
+    /// Whether rows take the RGB to RGBA copy.
+    pub fn is_pad(&self) -> bool {
+        self.pad.is_some()
+    }
+
     /// A row of whole input pixels as output bytes.
     pub fn row(&self, row: &[u8], out: &mut Vec<u8>) {
         if self.copy {
             out.extend_from_slice(row);
+        } else if let Some(alpha) = self.pad {
+            let start = out.len();
+            out.resize(start + row.len() / 3 * 4, 0);
+            for (px, o) in row.chunks_exact(3).zip(out[start..].chunks_exact_mut(4)) {
+                o[..3].copy_from_slice(px);
+                o[3] = alpha;
+            }
         } else if self.straight {
             for blk in row.chunks(self.cols.len()) {
                 out.extend(blk.iter().zip(&self.cols).map(|(&b, col)| col[b as usize]));
@@ -899,6 +918,48 @@ mod tests {
             assert_eq!(got, want, "trial {trial} mods {mods:x?} mode {mode} comps {comps} out {out}");
         }
         assert!(made > 200 && refused[0] > 20 && refused[1] > 20, "reach: {made} made, refused {refused:?}");
+    }
+
+    /// RGB bytes through an identity pipeline that fills alpha take the pad route, and any change to a colour or
+    /// to one place's alpha does not, with the bytes `run_row` gives either way.
+    #[test]
+    fn rgb_to_rgba_pad() {
+        let lut = Lut::default();
+        let row: Vec<u8> = (0..3 * 61).map(|k| (k * 37 + 11) as u8).collect();
+        for (clamp, pad) in [(vec![255.0f32; 12], Some(255)), (vec![254.0; 12], None), ((0..12).map(|k| if k == 7 { 200.0 } else { 255.0 }).collect(), None)] {
+            let mut m = mem(&[entry::INTTOFLOAT, 0, entry::EXPAND, 0xD05, entry::CLAMP, 0x1D6, entry::PIPECONTROL, 0xD67]);
+            put(&mut m, 0xD05, &[0x34, 0x4064, 0x50C, 2, 4, (1.0f32 / 255.0).to_bits()]);
+            put(&mut m, 0x1D6, &[0x50C, 0, 0x50C, 2, 4, 6, 0, 1.0f32.to_bits(), 1.0f32.to_bits(), 1.0f32.to_bits()]);
+            put(&mut m, 0xD67, &[0x50C, 0x1A000, 0x50C, 2, 4]);
+            put(&mut m, 0xD67 + 5, &clamp.iter().map(|c| c.to_bits()).collect::<Vec<_>>());
+            m.write(ELEMENT_TYPE, 1);
+            let pipe = m.byte_map(&lut.0[..], 3, 4, 1 << 30).ok().expect("a map").packed(|v| {
+                let mut b = Vec::new();
+                super::super::rss::pack_comp(0, v, &mut b);
+                b[0]
+            });
+            assert_eq!(pipe.pad, pad, "clamp {clamp:?}");
+            let mut got = Vec::new();
+            pipe.row(&row, &mut got);
+            let want: Vec<u8> = m.run_row(&lut.0[..], &row, 61, 4).into_iter().map(|v| v.round() as u8).collect();
+            assert_eq!(got, want, "clamp {clamp:?}");
+        }
+    }
+
+    /// The detector's guards for pipelines `byte_map` does not build for mode 6 today: swapped sources and an alpha
+    /// that is constant at input 0 only are not a pad.
+    #[test]
+    fn rgb_to_rgba_pad_guards() {
+        let identity = |src: [u8; 4], alpha: &dyn Fn(usize) -> f64| {
+            let mut cols = vec![[0.0; 256]; 4];
+            for (k, col) in cols.iter_mut().enumerate() {
+                *col = std::array::from_fn(|v| if k < 3 { v as f64 } else { alpha(v) });
+            }
+            ByteMap { in_px: 3, out_px: 4, places: 1, src: src.to_vec(), cols }.packed(|v| v as u8)
+        };
+        assert_eq!(identity([0, 1, 2, 0], &|_| 255.0).pad, Some(255));
+        assert_eq!(identity([1, 0, 2, 0], &|_| 255.0).pad, None, "sources swapped");
+        assert_eq!(identity([0, 1, 2, 0], &|v| if v == 5 { 7.0 } else { 255.0 }).pad, None, "alpha odd at one input");
     }
 
     /// A draw needs `places * 256` pixels (and 1024) to pay for the table: one pixel fewer is refused as small.
