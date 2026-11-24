@@ -441,8 +441,8 @@ impl Gr2 {
 
     pub(super) fn gr2_status(&self, w: &mut dyn Write) -> std::io::Result<()> {
         let r = self.regs();
-        let v = self.variant;
-        writeln!(w, "GR2 {} ({} GE7, board rev {})", v.name(), v.ges(), v.board_rev())?;
+        let p = self.probe;
+        writeln!(w, "GR2 ({} GE7, board rev {})", p.ges, !p.ports[0] & 0xf)?;
         writeln!(w, "  hq: running={} gepc={:#06x} numge={:#x}  shram[TP_PROBE_ID]={}",
             r.hq.running, r.hq.gepc, r.hq.numge, r.shram[TP_PROBE_ID])?;
         writeln!(w, "  fifo: hq {}  re3 {}  idle={}", self.hq_fifo.len(), self.re3_fifo.len(), self.idle())?;
@@ -508,7 +508,7 @@ impl Gr2 {
                 t.re3_seq = 0;
                 t.cpu_seq = 0;
                 t.run = None;
-                t.line(format_args!("GR2 {} trace started (mask {mask:#x})", self.variant.name()));
+                t.line(format_args!("GR2 trace started (mask {mask:#x})"));
                 drop(t);
                 self.trace_mask.store(mask, Ordering::SeqCst);
                 writeln!(w, "tracing to {path}")?;

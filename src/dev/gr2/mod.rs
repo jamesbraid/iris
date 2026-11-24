@@ -112,7 +112,20 @@ pub const GEDMA_OUT_WORDS: usize = 16384;
 /// How long the HQ2 waits for a reader when the read port is full.
 const GEDMA_OUT_STALL_LIMIT_NS: u64 = 2_000_000_000;
 
-/// Which board is installed. Same hardware family; only the probe answers differ.
+/// What the board answers a probe with. The shell sets it: it is the
+/// revision and wiring of the machine the board sits in, not the engine's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gr2Probe {
+    /// Geometry engines present: 1, 2, 4 or 8.
+    pub ges: u32,
+    /// What the four board configuration ports (+0x6c000 to +0x6c00c) read as.
+    pub ports: [u32; 4],
+    /// The HQ2 revision in the status word and `hq_gepc`.
+    pub hq_rev: u32,
+}
+
+/// Which of iris's two boards is installed. Same hardware family; only the
+/// probe answers differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gr2Variant {
     /// 2 GE7s. Indigo2 XZ.
@@ -128,18 +141,21 @@ impl Gr2Variant {
     pub fn ges(self) -> u32 {
         match self { Self::Xz => 2, Self::Elan => 4, Self::Extreme => 8 }
     }
-    /// Board revision in rd0 (GR2.h naming: 4 = GR3, 5..8 = GU1).
+    /// Board revision in port 0: 4 for the Xz, 6 for the Extreme.
     pub fn board_rev(self) -> u32 {
         match self { Self::Xz | Self::Elan => 4, Self::Extreme => 6 }
     }
     pub fn name(self) -> &'static str {
         match self { Self::Xz => "XZ", Self::Elan => "Elan", Self::Extreme => "Extreme" }
     }
+    /// iris's probe answers: monitor code 0 (a 60 Hz 1280 by 1024 CRT), Z
+    /// and 24-bit colour present, no other boards.
+    pub fn probe(self) -> Gr2Probe {
+        let port0 = !self.board_rev() & 0xf;
+        let port1 = 0x3c | (!1 & 3);
+        Gr2Probe { ges: self.ges(), ports: [port0, port1, 0xff, 0xff], hq_rev: hq2::HQ2_REV }
+    }
 }
-
-/// Monitor ID reported in rd0\[7:4\]: a plain 60 Hz 1280x1024 CRT. Chosen to
-/// avoid every ID with special handling (GR2.h "Monitor Types").
-const MONITOR_ID: u32 = 0;
 
 /// CPU-side register and memory state. Plain data, zero-valid.
 #[repr(C)]
@@ -163,7 +179,9 @@ pub struct Gr2Regs {
 }
 
 pub struct Gr2 {
+    /// The board iris built, for snapshots; the probe answers come from `probe`.
     variant: Gr2Variant,
+    probe: Gr2Probe,
     /// Perfetto edge trackers (zero-valid, so `new`'s zeroed allocation
     /// initialises them): a guest read stalled on the engines, a store
     /// stalled on a full FIFO.
@@ -337,6 +355,7 @@ impl Gr2 {
         // that is not valid when zeroed is initialised below, before assume_init.
         unsafe {
             addr_of_mut!((*p).variant).write(variant);
+            addr_of_mut!((*p).probe).write(variant.probe());
             addr_of_mut!((*p).copy_a).write(Cell::new(0));
             addr_of_mut!((*p).running).write(AtomicBool::new(false));
             addr_of_mut!((*p).hq_busy).write(AtomicBool::new(false));
@@ -360,6 +379,7 @@ impl Gr2 {
     }
 
     pub fn variant(&self) -> Gr2Variant { self.variant }
+    pub fn probe(&self) -> Gr2Probe { self.probe }
 
     pub fn telemetry_snapshot(&self) -> Gr2TelemetrySnapshot {
         Gr2TelemetrySnapshot {
@@ -562,14 +582,7 @@ impl Gr2 {
     // ── board ID registers ───────────────────────────────────────────────────
 
     fn bdvers_read(&self, idx: u32) -> u32 {
-        match idx {
-            // rd0: monitor ID in [7:4], ~rev in [3:0].
-            0 => (MONITOR_ID << 4) | (!self.variant.board_rev() & 0xf),
-            // rd1: Z (bit 5), 24bpp (bit 4), no corona (bits 3:2 = 11), VB rev 1.
-            1 => 0x3c | (!1 & 3),
-            // rd2/rd3 are only read on rev < 4 boards: report everything absent.
-            _ => 0xff,
-        }
+        self.probe.ports.get(idx as usize).copied().unwrap_or(0xff)
     }
 
     // ── CPU register access (32-bit; narrower widths share the same decode) ──
@@ -1141,7 +1154,8 @@ impl Resettable for Gr2 {
             std::ptr::write_bytes(self.regs.get(), 0, 1);
             std::ptr::write_bytes(self.re3.get(), 0, 1);
             std::ptr::write_bytes(self.hq_engine.get(), 0, 1);
-            (*self.regs.get()).ge.count = self.variant.ges();
+            (*self.regs.get()).ge.count = self.probe.ges;
+            (*self.regs.get()).hq.rev = self.probe.hq_rev;
             #[cfg(feature = "gr2-jit")]
             {
                 (*self.re3.get()).jit.mode = jit_mode;
