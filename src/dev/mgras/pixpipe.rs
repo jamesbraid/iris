@@ -595,16 +595,26 @@ impl BytePipe {
                 out.extend(blk.iter().zip(&self.cols).map(|(&b, col)| col[b as usize]));
             }
         } else {
-            out.reserve(row.len() / self.in_px * self.out_px);
-            for blk in row.chunks(self.places * self.in_px) {
-                for (q, px) in blk.chunks_exact(self.in_px).enumerate() {
-                    let at = q * self.out_px;
-                    if let (4, Some([c0, c1, c2, c3]), Some([s0, s1, s2, s3])) = (self.out_px, self.cols[at..].first_chunk::<4>(), self.src[at..].first_chunk::<4>()) {
-                        out.extend_from_slice(&[c0[px[*s0 as usize] as usize], c1[px[*s1 as usize] as usize], c2[px[*s2 as usize] as usize], c3[px[*s3 as usize] as usize]]);
-                    } else {
-                        out.extend((at..at + self.out_px).map(|i| self.cols[i][px[self.src[i] as usize] as usize]));
-                    }
-                }
+            // `n` is a literal for four, so the loop unrolls over a pixel's components.
+            let start = out.len();
+            out.resize(start + row.len() / self.in_px * self.out_px, 0);
+            let dst = &mut out[start..];
+            if self.out_px == 4 {
+                self.tables(4, row, dst);
+            } else {
+                self.tables(self.out_px, row, dst);
+            }
+        }
+    }
+
+    /// `row` through the tables a pixel at a time, `n` bytes out for each, into `dst`.
+    #[inline(always)]
+    fn tables(&self, n: usize, row: &[u8], dst: &mut [u8]) {
+        let mut plan = self.cols.chunks_exact(n).zip(self.src.chunks_exact(n)).cycle();
+        for (px, o) in row.chunks_exact(self.in_px).zip(dst.chunks_exact_mut(n)) {
+            let (cols, src) = plan.next().unwrap();
+            for ((d, col), &s) in o.iter_mut().zip(cols).zip(src) {
+                *d = col[px[s as usize] as usize];
             }
         }
     }
