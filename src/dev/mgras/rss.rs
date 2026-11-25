@@ -934,6 +934,19 @@ fn host_pixels(f: (u32, u32), bytes: &[u8], bpp: usize, out: &mut Vec<u32>) {
         // A fresh iterator: extending from `whole` by_ref does not vectorise.
         (8, 0x10) if bpp == 4 => out.extend(bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))),
         (8, 0) if bpp == 4 => out.extend(bytes.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))),
+        // RGB, red first, bytes or shorts (`from_host`): each component's first byte.
+        (7, 0) if bpp == 3 => out.extend(bytes.chunks_exact(3).map(|c| pack_rgb(c[0] as u32, c[1] as u32, c[2] as u32))),
+        (7, 1) if bpp == 6 => out.extend(bytes.chunks_exact(6).map(|c| pack_rgb(c[0] as u32, c[2] as u32, c[4] as u32))),
+        // Bytes and the 16- and 32-bit types keep each component's first byte (`fb_comp`).
+        _ if generic_format(f) && matches!(f.1 & 0xF, 0 | 1 | 3) && bpp >= format_comps(f).len() * type_size(f.1) => {
+            let (n, comps) = (type_size(f.1), format_comps(f));
+            let px = bytes.chunks_exact(bpp);
+            match *comps {
+                [a, b, c, d] => out.extend(px.map(|p| (p[0] as u32) << (8 * a) | (p[n] as u32) << (8 * b) | (p[2 * n] as u32) << (8 * c) | (p[3 * n] as u32) << (8 * d))),
+                [a, b, c] => out.extend(px.map(|p| (p[0] as u32) << (8 * a) | (p[n] as u32) << (8 * b) | (p[2 * n] as u32) << (8 * c))),
+                _ => out.extend(px.map(|p| (p[0] as u32) << (8 * comps[0]))),
+            }
+        }
         _ => out.extend(whole.by_ref().map(one)),
     }
     if !whole.remainder().is_empty() {
@@ -3676,6 +3689,33 @@ mod tests {
     /// A 12-bit pixel pair's buffer A (low half) as 8-8-8.
     fn px12(r: &Rss, x: usize, y_top: usize) -> u32 {
         from_rgb12(px(r, x, y_top) & 0xFFF)
+    }
+
+    /// `host_pixels` is `fb_pixel` or `from_host` a pixel (and a short last one as they take it) for every transfer
+    /// format, on random bytes, with rows that are not a whole number of pixels and pixels wider than their components.
+    #[test]
+    fn host_pixels_are_the_pixel_a_time_conversions() {
+        let mut seed = 0x2468_ace1u32;
+        let mut bytes = vec![0u8; 1024];
+        for b in bytes.iter_mut() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *b = (seed >> 24) as u8;
+        }
+        let one = |f: (u32, u32), c: &[u8]| if generic_format(f) { fb_pixel(f, c) } else { from_host(f, c.iter().fold(0u64, |a, &b| (a << 8) | b as u64)) };
+        let mut checked = 0;
+        for fmt in (0..=8).flat_map(|f| [0, 1, 3, 4, 5, 7, 8, 10, 0x10, 0x11, 0x13, 0x14, 0x15, 0x17].map(|t| (f, t))) {
+            let natural = if generic_format(fmt) { format_comps(fmt).len() * type_size(fmt.1) } else { [(7, 0), (7, 1)].iter().position(|&n| n == fmt).map_or(4, |i| 3 * (i + 1)) };
+            for bpp in [natural.saturating_sub(1).max(1), natural, natural + 1, natural + 3] {
+                for len in [0, bpp, 7 * bpp, 7 * bpp + 1, 7 * bpp + natural - 1, 33 * bpp + 2] {
+                    let mut got = Vec::new();
+                    host_pixels(fmt, &bytes[..len], bpp, &mut got);
+                    let want: Vec<u32> = bytes[..len].chunks(bpp).map(|c| one(fmt, c)).collect();
+                    assert_eq!(got, want, "format {fmt:x?}, {bpp} bytes a pixel, {len} bytes");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 500, "{checked} cases");
     }
 
     /// The X server's setup: window origin at the top row, Y-flip on, so
