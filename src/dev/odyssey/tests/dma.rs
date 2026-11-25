@@ -709,3 +709,67 @@ fn an_eight_byte_level_over_lanes_is_the_same_packing() {
 
     assert_eq!((s.diag.packing.checked, s.diag.packing.mismatch_count), (1, 0));
 }
+
+/// ms a frame of a `BENCH_W` x `BENCH_H` (720 x 486) image of 4-byte pixels (source code 0, the fallback) DMA'd to the
+/// screen, as many rows a table as its twelve entries take. `BENCH_FRAMES` a run (0: build only), `BENCH_RUNS` runs; the far corner is checked.
+#[test]
+#[ignore = "benchmark"]
+fn bench_image_dma() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (w, h, runs, frames) = (env("BENCH_W", 720), env("BENCH_H", 486), env("BENCH_RUNS", 5), env("BENCH_FRAMES", 4));
+    let (mut s, _, ram) = board_with_ram();
+    // `test_screen`'s 80 tiles, more only for a wider screen.
+    let pitch = (w as u32).div_ceil(16).max(80);
+    for w in [select(reg::DEST_SELECT), 0x2000, pitch, 0x0040_6d50, 0] {
+        s.mmio_write(ODSY_USER_CMD_FIFO, w as u64, 4);
+    }
+    s.win.clip_kept = 1;
+    s.win.clip_rect[0] = crate::dev::odyssey::clip::ClipRect { x0: 0, y0: 0, x1: w as i32 - 1, y1: h as i32 - 1 };
+    let rowbytes = w * 4;
+    let per_table = (12 * 0xffff / rowbytes).max(1);
+    let base = 0x40_0000u64;
+    let mut px = vec![0u8; rowbytes * h];
+    let mut seed = 0x1234_5678u32;
+    for p in px.chunks_mut(4) {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        p.copy_from_slice(&(seed | 0xff).to_be_bytes());
+    }
+    ram.put(base, &px);
+    let frame = |s: &mut Board| {
+        let mut y = 0;
+        while y < h {
+            let rows = per_table.min(h - y);
+            let (mut at, mut left) = (base + (y * rowbytes) as u64, rows * rowbytes);
+            let mut entries = Vec::new();
+            while left > 0 {
+                let n = left.min(0xffff);
+                entries.push(pte(at, n as u32));
+                at += n as u64;
+                left -= n;
+            }
+            let header = [0x2000, (y as u32) << 16, pitch, (rows as u32) << 16 | w as u32, 0x8263_305a, 0, rowbytes as u32, 0x3201_0000];
+            put_table(&ram, TABLE, header, &entries);
+            descriptor(s, TABLE);
+            y += rows;
+        }
+    };
+    if frames > 0 {
+        frame(&mut s);
+        let f = crate::dev::odyssey::vram::Format::decode(0x0040_6d50);
+        let l = crate::dev::odyssey::field::Layout::of(f);
+        let screen = Rows::new(s.vram_ptr(), View::colour(&Surface::new(0x2000, pitch, f.fb_log2), l.field(false), MAX_DIM));
+        s.gpu_sync();
+        assert_ne!(screen.load_word(w as i32 - 1, h as i32 - 1).unwrap_or(0), 0, "the far corner pixel was stored");
+    }
+    let mut ms = Vec::new();
+    for _ in 0..runs {
+        let t = std::time::Instant::now();
+        for _ in 0..frames {
+            frame(&mut s);
+        }
+        s.gpu_sync();
+        ms.push(t.elapsed().as_secs_f64() * 1e3 / frames.max(1) as f64);
+    }
+    let min = ms.iter().cloned().fold(f64::MAX, f64::min);
+    println!("vpro image dma {w}x{h} 4-byte ({per_table} rows a table): ms a frame {ms:.2?} ({:.2} ns a pixel at the min)", min * 1e6 / (w * h) as f64);
+}
