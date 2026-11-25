@@ -1255,6 +1255,8 @@ pub struct Rss {
     /// Maximum Impact's two alternate (mask 1), as their RE4s do.
     pub engine: u32,
     pub own_mask: u32,
+    /// The 32-row bands of the framebuffer colour stores reached since `drawn` last looked, one bit a band.
+    touched: u64,
     /// Planes this engine allocated itself (`new_boxed`), freed on drop.
     owned_planes: *mut Planes,
     /// The raster JIT's per-board state (mode, cached keys, counters), and
@@ -1928,17 +1930,46 @@ impl Rss {
         }
     }
 
+    #[inline]
+    fn touch_row(&mut self, y: i32) {
+        self.touched |= 1 << ((y as u32 >> 5) & 63);
+    }
+
+    /// The first and last framebuffer row of the bands a colour store reached since the last call, which clears
+    /// them: `Some(None)` for none, `None` when this engine cannot say (a GPU unit or the JIT stores without `touch_row`).
+    fn take_rows(&mut self) -> Option<Option<(i32, i32)>> {
+        let bands = std::mem::take(&mut self.touched);
+        #[cfg(feature = "wgpu")]
+        if self.gpu.get().is_some() {
+            return None;
+        }
+        #[cfg(feature = "gr4-jit")]
+        if self.jit.mode != super::rss_jit::MODE_OFF {
+            return None;
+        }
+        Some((bands != 0).then(|| (bands.trailing_zeros() as i32 * 32, (63 - bands.leading_zeros() as i32) * 32 + 31)))
+    }
+
     /// Where the primitive the registers describe stores colour: each
     /// buffer it reaches, the planes of a pixel it can change there, and
-    /// a box no store of it leaves. For the display, which composes a new
-    /// frame only when what it shows was drawn in (`disp.rs`). Nothing for
-    /// clip-ID drawing, which no frame shows.
-    pub(super) fn drawn(&self, mut f: impl FnMut(Buffer, u64, crate::display::Rect)) {
+    /// a box no store of it leaves: the bands it stored in when this engine
+    /// stores them itself, else the clip box. For the display, which
+    /// composes a new frame only when what it shows was drawn in.
+    /// Nothing for clip-ID drawing, which no frame shows.
+    pub(super) fn drawn(&mut self, mut f: impl FnMut(Buffer, u64, crate::display::Rect)) {
+        let rows = self.take_rows();
         let field = draw_buffer(self.reg(reg::PP1FILLMODE));
         if field == DRAW_CID {
             return;
         }
-        let rect = self.clip_box();
+        let mut rect = self.clip_box();
+        if let Some(rows) = rows {
+            let Some((y0, y1)) = rows else { return };
+            rect = rect.intersect(&crate::display::Rect::new(0, y0, WIDTH as i32 - 1, y1));
+            if rect.is_empty() {
+                return;
+            }
+        }
         let b = self.target();
         f(b, self.planes_drawn(b, draws_b(field)), rect);
         if draws_a_and_b(field) {
@@ -2005,6 +2036,7 @@ impl Rss {
     }
 
     fn put_in(&mut self, b: Buffer, x: i32, y: i32, v: u32, back: bool) {
+        self.touch_row(y);
         let pp1 = self.reg(reg::PP1FILLMODE);
         if b.kind == Kind::Wide && self.deep36() {
             self.put_in36(b, x, y, rgb36_from8(v), back);
@@ -2054,6 +2086,7 @@ impl Rss {
     /// ColorMaskLSBs for planes 31:0, ColorMaskMSBs for 35:32 (libGLcore
     /// writes the visual's 0xF there and all ones to the LSB masks).
     fn put_in36(&mut self, b: Buffer, x: i32, y: i32, v: u64, back: bool) {
+        self.touch_row(y);
         let pp1 = self.reg(reg::PP1FILLMODE);
         let lsb = self.reg(if back { reg::COLORMASKLSBSB } else { reg::COLORMASKLSBSA }) as u64;
         let mask = lsb | ((self.reg(reg::COLORMASKMSBS) & 0xF) as u64) << 32;
@@ -3259,6 +3292,7 @@ impl Rss {
         if from >= to {
             return true;
         }
+        self.touch_row(fy);
         let mut vals = Vec::with_capacity((to - from) as usize);
         host_pixels(x.format, &bytes[from as usize * bpp..(to as usize * bpp).min(bytes.len())], bpp, &mut vals);
         for (b, mask) in &bufs[..n] {
@@ -4634,6 +4668,24 @@ mod tests {
             let hash = rs.iter().flat_map(|r| r.mem.words.iter()).fold(0xcbf2_9ce4_8422_2325u64, |h, &v| (h ^ v).wrapping_mul(0x0100_0000_01b3));
             eprintln!("{name:18} ns/px {ns:.2?} px0 {:#x} planes {hash:016x}", rs[0].mem.get(&main_buffer(), 0, 485));
         }
+    }
+
+    /// A 720x486 DMA image, as Smoke plays it, marks the bands it stored in, with no screen mask to bound them.
+    #[test]
+    fn a_dma_image_marks_the_bands_it_stored_in() {
+        let mut r = x_server();
+        for (reg, val) in [(reg::PP1FILLMODE, 0x0C00_6204), (reg::COLORMASKLSBSA, u32::MAX), (reg::XYWIN, 485 << 16), (reg::FILLMODE, 5 << 22), (reg::XFRMODE, 0xC0_0080), (reg::XFRSIZE, 486 << 16 | 720)] {
+            r.write(reg, val, false);
+        }
+        block(&mut r, 0, 0, 719, 485);
+        for line in 0..486 {
+            r.dma_write_line(line, &[0x55; 720 * 4]);
+        }
+        let mut rows = Vec::new();
+        r.drawn(|_, _, rect| rows.push((rect.y0, rect.y1)));
+        assert_eq!(rows, [(0, 511)]);
+        r.drawn(|_, _, rect| rows.push((rect.y0, rect.y1)));
+        assert_eq!(rows.len(), 1, "a draw that stored nothing since marks nothing");
     }
 
     /// `put_line` as it was before `put_line_plain`: every pixel through `visible`, `put` and the fragment
