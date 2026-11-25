@@ -293,8 +293,8 @@ impl PixMem {
     }
 
     /// `run_row` and `pack_comp` for 8- and 16-bit elements, one to a component, through scales, scale and bias and
-    /// clamps to bytes or shorts, with the parameters read once for a draw; `Err` says why not.
-    pub(crate) fn elem_pipe(&self, comps: usize, out_comps: usize, ty: u32, row_bytes: usize, pixels: usize) -> Result<ElemPipe, Path> {
+    /// clamps to bytes or shorts, with the parameters read once for a draw of `draw_pixels`; `Err` says why not.
+    pub(crate) fn elem_pipe(&self, comps: usize, out_comps: usize, ty: u32, row_bytes: usize, pixels: usize, draw_pixels: usize) -> Result<ElemPipe, Path> {
         if !matches!(ty & 0xF, 0 | 1) {
             return Err(Path::PipeOutput);
         }
@@ -314,7 +314,15 @@ impl PixMem {
                 _ => {}
             }
         }
-        Ok(ElemPipe { elem, ops, short: ty & 0xF == 1 })
+        let mut pipe = ElemPipe { elem, ops, short: ty & 0xF == 1, table: None };
+        // A value costs about 30 instructions to compute and 5 to look up, and the table has one for each value.
+        if pipe.uniform() && draw_pixels * comps >= 4 << (8 * esize) {
+            let probe: Vec<u8> = if esize == 2 { (0..=u16::MAX).flat_map(u16::to_be_bytes).collect() } else { (0..=u8::MAX).collect() };
+            let mut out = Vec::new();
+            pipe.row(&probe, &mut out);
+            pipe.table = Some(if pipe.short { out.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect() } else { out.iter().map(|&b| b as u16).collect() });
+        }
+        Ok(pipe)
     }
 
     /// The GE's x replication for a fractional zoom (`xzoom`, its state
@@ -677,6 +685,9 @@ pub struct ElemPipe {
     ops: Vec<Op>,
     /// Components go out as big-endian shorts, else bytes.
     short: bool,
+    /// The component for each value of an element's bits, when every place of the cycle treats an element alike
+    /// and the draw has elements enough to pay for building it.
+    table: Option<Vec<u16>>,
 }
 
 /// `x.round().clamp(0.0, max as f64) as u32`, without the library call: half away from zero, NaN and below zero 0.
@@ -690,8 +701,44 @@ fn rounded(x: f64, max: u32) -> u32 {
 }
 
 impl ElemPipe {
+    /// Whether an element's component is the same at every place of the twelve-element cycle.
+    fn uniform(&self) -> bool {
+        let same = |a: &[f64; 12]| a.iter().all(|x| x.to_bits() == a[0].to_bits());
+        self.ops.iter().all(|op| match op {
+            Op::Scale(_) => true,
+            Op::ScaleBias(sc, b) => same(sc) && same(b),
+            Op::Clamp(cs) => same(cs),
+        })
+    }
+
     /// A row of whole pixels as the components `run_row` and `pack_comp` give.
     pub fn row(&self, row: &[u8], out: &mut Vec<u8>) {
+        if let Some(table) = &self.table {
+            let start = out.len();
+            let n = row.len() / self.elem.size();
+            out.resize(start + n * (1 + self.short as usize), 0);
+            let dst = &mut out[start..];
+            // Each case's table is as long as its index can reach, so no lookup is range-checked.
+            match (self.elem.size(), self.short) {
+                (2, true) => {
+                    let t: &[u16; 65536] = table.as_slice().try_into().unwrap();
+                    dst.chunks_exact_mut(2).zip(row.chunks_exact(2)).for_each(|(o, b)| o.copy_from_slice(&t[u16::from_be_bytes([b[0], b[1]]) as usize].to_be_bytes()));
+                }
+                (2, false) => {
+                    let t: &[u16; 65536] = table.as_slice().try_into().unwrap();
+                    dst.iter_mut().zip(row.chunks_exact(2)).for_each(|(o, b)| *o = t[u16::from_be_bytes([b[0], b[1]]) as usize] as u8);
+                }
+                (_, true) => {
+                    let t: &[u16; 256] = table.as_slice().try_into().unwrap();
+                    dst.chunks_exact_mut(2).zip(row).for_each(|(o, &b)| o.copy_from_slice(&t[b as usize].to_be_bytes()));
+                }
+                (_, false) => {
+                    let t: &[u16; 256] = table.as_slice().try_into().unwrap();
+                    dst.iter_mut().zip(row).for_each(|(o, &b)| *o = t[b as usize] as u8);
+                }
+            }
+            return;
+        }
         // A block is a whole number of the twelve-element cycles, so each starts at a place of its own.
         const BLOCK: usize = 12 * 64;
         // `f` on each element and its place in the cycle.
@@ -1045,7 +1092,7 @@ mod tests {
             seed ^= seed << 17;
             (seed >> 11) % n
         };
-        let (mut made, mut refused) = (0, 0);
+        let (mut made, mut refused, mut tables) = (0, 0, 0);
         for trial in 0..500 {
             let odd = |r: u64, x: f32| match r {
                 0 => f32::NAN,
@@ -1075,11 +1122,21 @@ mod tests {
             prog.extend([entry::PIPECONTROL, addrs.last().copied().unwrap_or(0)]);
             let mut m = mem(&prog);
             let mut mask_loaded = false;
+            // Every place of a cycle alike, which is a table for a draw big enough.
+            let uniform = below(2) == 0;
             for (&e, &st) in mods.iter().zip(&addrs) {
                 let state: Vec<u32> = match e {
                     entry::INTTOFLOAT => vec![0, 0, 0, 0, 0, odd(below(12), [1.0 / 255.0, 2.0 / 255.0, 1.0 / 65535.0, 1.0][below(4) as usize]).to_bits()],
-                    entry::SCALEBIAS => [vec![0x50C, 0, 0x50C, 0, 0xD], (0..12).flat_map(|_| [odd(below(12), below(100) as f32 / 100.0).to_bits(), odd(below(12), 0.5 + below(100) as f32 / 50.0).to_bits()]).collect()].concat(),
-                    entry::CLAMP => [vec![0x50C, 0x1A000, 0x50C, 2, 4], (0..12).map(|_| odd(below(12), [255.0, 65535.0, 127.0, 1.0 + below(300) as f32][below(4) as usize]).to_bits()).collect()].concat(),
+                    entry::SCALEBIAS => {
+                        let mut pair = || [odd(below(12), below(100) as f32 / 100.0).to_bits(), odd(below(12), 0.5 + below(100) as f32 / 50.0).to_bits()];
+                        let same = pair();
+                        [vec![0x50C, 0, 0x50C, 0, 0xD], (0..12).flat_map(|_| if uniform { same } else { pair() }).collect()].concat()
+                    }
+                    entry::CLAMP => {
+                        let mut scale = || odd(below(12), [255.0, 65535.0, 127.0, 1.0 + below(300) as f32][below(4) as usize]).to_bits();
+                        let same = scale();
+                        [vec![0x50C, 0x1A000, 0x50C, 2, 4], (0..12).map(|_| if uniform { same } else { scale() }).collect()].concat()
+                    }
                     entry::MASK => {
                         // Loaded by a state write, or as a fresh context has it.
                         if below(2) == 0 {
@@ -1102,7 +1159,7 @@ mod tests {
             let (comps, esize, _) = m.input_shape(out);
             let pixels = 1 + below(900) as usize;
             let row: Vec<u8> = (0..pixels * comps * esize).map(|_| if below(5) == 0 { [0u8, 255, 128][below(3) as usize] } else { below(256) as u8 }).collect();
-            let pipe = m.elem_pipe(comps, out, ty, row.len(), pixels);
+            let pipe = m.elem_pipe(comps, out, ty, row.len(), pixels, pixels);
             if other.is_some() || mask_loaded {
                 assert!(pipe.is_err(), "trial {trial} mods {mods:x?} was not refused");
                 refused += 1;
@@ -1117,20 +1174,78 @@ mod tests {
             pipe.row(&row, &mut got);
             assert!(got == want, "trial {trial} mods {mods:x?} element type {kind} comps {comps} short {ty} pixels {pixels}");
             made += 1;
+            tables += pipe.table.is_some() as usize;
         }
-        assert!(made > 250 && refused > 30, "reach: {made} made, {refused} refused");
+        assert!(made > 250 && refused > 30 && tables > 20, "reach: {made} made, {refused} refused, {tables} tables");
         // Not 32-bit or float elements, bits, other output types, a different component count, or a row that is not the pixels'.
         let mut m = mem(&[entry::INTTOFLOAT, 0, entry::PIPECONTROL, 0xD05]);
         put(&mut m, 0xD05, &[0, 0, 0, 0, 0, 1.0f32.to_bits()]);
         m.write(ELEMENT_TYPE, 1);
-        assert!(m.elem_pipe(4, 4, 0, 40, 10).is_ok());
+        assert!(m.elem_pipe(4, 4, 0, 40, 10, 10).is_ok());
         for ty in [3, 4, 5, 7] {
-            assert!(m.elem_pipe(4, 4, ty, 40, 10).is_err(), "output type {ty}: not bytes or shorts");
+            assert!(m.elem_pipe(4, 4, ty, 40, 10, 10).is_err(), "output type {ty}: not bytes or shorts");
         }
-        assert!(m.elem_pipe(4, 4, 0, 41, 10).is_err(), "a row that is not the pixels'");
-        assert!(m.elem_pipe(3, 4, 0, 40, 10).is_err(), "components that change");
+        assert!(m.elem_pipe(4, 4, 0, 41, 10, 10).is_err(), "a row that is not the pixels'");
+        assert!(m.elem_pipe(3, 4, 0, 40, 10, 10).is_err(), "components that change");
         m.write(ELEMENT_TYPE, 4);
-        assert!(m.elem_pipe(4, 4, 0, 160, 10).is_err(), "32-bit elements");
+        assert!(m.elem_pipe(4, 4, 0, 160, 10, 10).is_err(), "32-bit elements");
+    }
+
+    /// A big draw through a pipeline that treats every place alike gets a table whose row is the arithmetic's for
+    /// every element value; one place that differs, or a small draw, gets none.
+    #[test]
+    fn elem_pipe_table_is_the_row_of_arithmetic() {
+        let lut = Lut::default();
+        let mut seed = 0x0DDB_A11C_AFE5_1234u64;
+        let mut below = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) % n
+        };
+        let cases = [(1u32, 0u32, 0), (1, 1, 0), (0, 0, 0), (3, 0, 0), (3, 1, 0), (2, 0, 0), (2, 1, 0), (3, 0, 1), (1, 1, 2), (2, 1, 3), (0, 0, 3)];
+        // A pipeline with one odd place is tried with each of the twelve places odd.
+        for (kind, ty, apart, place) in cases.into_iter().flat_map(|(k, t, a)| (0..if a == 0 { 1 } else { 12 }).map(move |p| (k, t, a, p))) {
+            let esize = if kind >= 2 { 2 } else { 1 };
+            let mut m = mem(&[entry::INTTOFLOAT, 0, entry::SCALEBIAS, 0xD05, entry::CLAMP, 0x1B4, entry::PIPECONTROL, 0xD67]);
+            let top = if esize == 2 { 65535.0f32 } else { 255.0 };
+            put(&mut m, 0xD05, &[0x34, 0x4064, 0x50C, 2, 4, ((1.0 + below(3) as f32) / top).to_bits()]);
+            let (bias, scale) = ((below(40) as f32 - 10.0) / 100.0, 0.5 + below(100) as f32 / 100.0);
+            let mut sb = vec![0x50C, 0, 0x50C, 0, 0xD];
+            // `apart`: `place` of the scale (1), the bias (2) or the clamp (3) differs from the rest.
+            sb.extend((0..12).flat_map(|k| [(bias + if apart == 2 && k == place { 0.125 } else { 0.0 }).to_bits(), (scale + if apart == 1 && k == place { 0.25 } else { 0.0 }).to_bits()]));
+            put(&mut m, 0x1B4, &sb);
+            put(&mut m, 0xD67, &[0x50C, 0x1A000, 0x50C, 2, 4]);
+            let mut clamp = [(if ty == 1 { 65535.0f32 } else { 255.0 }).to_bits(); 12];
+            if apart == 3 {
+                clamp[place] = (if ty == 1 { 40000.0f32 } else { 200.0 }).to_bits();
+            }
+            put(&mut m, 0xD67 + 5, &clamp);
+            m.write(ELEMENT_TYPE, kind);
+            let comps = 4;
+            let (big, small) = ((4 << (8 * esize)) / comps, 30);
+            let pipe = m.elem_pipe(comps, comps, ty, 100 * comps * esize, 100, big).unwrap_or_else(|e| panic!("kind {kind}: {}", e as usize));
+            assert_eq!(pipe.table.is_some(), apart == 0, "kind {kind} short {ty} apart {apart} place {place}");
+            let direct = m.elem_pipe(comps, comps, ty, 100 * comps * esize, 100, small).ok().expect("a small draw's pipeline");
+            assert!(direct.table.is_none(), "a small draw is not tabulated");
+            // Every value an element can have, in order and then shuffled, a whole number of pixels.
+            let mut row: Vec<u8> = (0..1u32 << (8 * esize)).flat_map(|v| v.to_be_bytes()[4 - esize..].to_vec()).collect();
+            row.extend((0..8 * comps * esize).map(|_| below(256) as u8));
+            let (mut got, mut want) = (Vec::new(), Vec::new());
+            pipe.row(&row, &mut got);
+            direct.row(&row, &mut want);
+            assert!(got == want, "kind {kind} short {ty} apart {apart} place {place}: table and arithmetic differ");
+            let mut sample = row.clone();
+            sample.truncate(esize * comps * 3000);
+            let expect: Vec<u8> = {
+                let mut b = Vec::new();
+                m.run_row(&lut.0[..], &sample, sample.len() / esize / comps, comps).into_iter().for_each(|v| super::super::rss::pack_comp(ty, v, &mut b));
+                b
+            };
+            let mut got = Vec::new();
+            pipe.row(&sample, &mut got);
+            assert!(got == expect, "kind {kind} short {ty} apart {apart} place {place}: not run_row's");
+        }
     }
 
     /// RGB bytes through an identity pipeline that fills alpha take the pad route, and any change to a colour or

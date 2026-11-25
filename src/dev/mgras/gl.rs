@@ -2251,7 +2251,7 @@ impl Gl {
             note(Path::PipePad);
         }
         // Other one-element pipelines (16-bit elements, bytes to shorts) as a row of arithmetic, not `run_row`'s vectors.
-        let elems = if table.is_none() && fast_paths() && !index { self.pix.elem_pipe(comps, out_comps, ty, row_in, w).ok() } else { None };
+        let elems = if table.is_none() && fast_paths() && !index { self.pix.elem_pipe(comps, out_comps, ty, row_in, w, w * h).ok() } else { None };
         if elems.is_some() {
             note(Path::PipeElems);
         }
