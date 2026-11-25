@@ -33,6 +33,10 @@ pub fn set_display(display: winit::event_loop::OwnedDisplayHandle) {
     let _ = DISPLAY.set(display);
 }
 
+/// One device opens at a time: Vulkan loaders before SDK 1.4.350 walk every instance's driver list in
+/// vkGetDeviceProcAddr while another thread's vkEnumeratePhysicalDevices frees drivers from its own.
+static OPENING: Mutex<()> = Mutex::new(());
+
 /// How to open the GPU. All fields have defaults; `backend` is the only
 /// one users set.
 #[derive(Clone, Debug)]
@@ -348,6 +352,7 @@ impl Gpu {
     /// backend gave when none works. `fatal` runs once, on the first error
     /// the device reports (or `fail` is given), from whichever thread saw it.
     pub fn new(opts: &GpuOptions, fatal: Box<dyn Fn(&str) + Send + Sync>) -> Result<Arc<Gpu>, String> {
+        let _opening = OPENING.lock();
         let fatal: Arc<dyn Fn(&str) + Send + Sync> = Arc::from(fatal);
         // wgpu's own `WGPU_BACKEND` (a comma list: vulkan, metal, dx12, gl)
         // overrides `[graphics] gpu_backend`.

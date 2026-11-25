@@ -571,3 +571,10 @@ fn a_refused_readback_is_fatal_once_and_not_replaced() {
     // The boards' calls now report it rather than carry on.
     assert_eq!(a.wait(None).unwrap_err(), "readback refused");
 }
+
+/// Devices opened on several threads at once, as the engines' parallel tests open them.
+#[test]
+fn devices_open_on_several_threads_at_once() {
+    let opens: Vec<_> = (0..4).map(|_| std::thread::spawn(|| (0..4).for_each(|_| drop(gpu())))).collect();
+    opens.into_iter().for_each(|t| t.join().unwrap());
+}
