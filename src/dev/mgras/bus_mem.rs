@@ -20,13 +20,24 @@ impl HostMem for BusMem {
         let mem = &*self.0;
         let base = addr & !7;
         if mem.mem_ptr(base).is_some() {
-            let skip = (addr - base) as usize;
-            let mut buf = vec![0u64; (skip + out.len()).div_ceil(8)];
-            if mem.read_block(base, &mut buf) == BUS_OK {
-                for (i, b) in out.iter_mut().enumerate() {
-                    let at = skip + i;
-                    *b = (buf[at / 8] >> (56 - 8 * (at % 8))) as u8;
+            let (mut at, mut head, mut rest) = (base, (addr - base) as usize, &mut *out);
+            let (mut words, mut bytes) = ([0u64; 64], [0u8; 512]);
+            let mut ok = true;
+            while !rest.is_empty() {
+                let take = (bytes.len() - head).min(rest.len());
+                let n = (head + take).div_ceil(8);
+                ok = mem.read_block(at, &mut words[..n]) == BUS_OK;
+                if !ok {
+                    break;
                 }
+                for (b, w) in bytes.chunks_exact_mut(8).zip(&words[..n]) {
+                    b.copy_from_slice(&w.to_be_bytes());
+                }
+                let (now, later) = rest.split_at_mut(take);
+                now.copy_from_slice(&bytes[head..head + take]);
+                (rest, head, at) = (later, 0, at + bytes.len() as u64);
+            }
+            if ok {
                 return Ok(());
             }
         }
@@ -79,7 +90,7 @@ mod tests {
         let ram = Arc::new(Ram((0..0x2000u32).map(|i| (i * 7 + (i >> 8)) as u8).collect()));
         let mem = BusMem(ram.clone());
         for pa in [0x1000u64, 0x1001, 0x1003, 0x1007, 0x1008, 0x10F5] {
-            for len in [0usize, 1, 5, 7, 8, 9, 16, 23, 64, 0x100] {
+            for len in [0usize, 1, 5, 7, 8, 9, 16, 23, 64, 0x100, 0x1FF, 0x200, 0x207, 0xF00] {
                 let mut fast = vec![0u8; len];
                 mem.read(pa, &mut fast).unwrap();
                 let slow: Vec<u8> = (0..len as u64).map(|i| ram.read8(pa + i).data).collect();
