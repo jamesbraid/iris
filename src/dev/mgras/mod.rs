@@ -125,7 +125,7 @@ mod tag {
     /// The host read the high half of a PIO read doubleword: next one.
     pub const PIO_ADVANCE: u32 = 0x8000_0004;
     /// DMA pixel line into the armed transfer: value is line | bytes << 32,
-    /// the bytes follow as payload, eight to an entry, first byte highest.
+    /// the bytes follow as payload, eight to an entry in memory order.
     pub const DMA_LINE: u32 = 0x8000_0010;
     /// A GL batch starts / ends: the RSS stashes the raster registers it
     /// loads, and puts them back after (see `rss::Rss::gl_enter`).
@@ -466,14 +466,14 @@ impl Hq3Sink for HqSink<'_> {
         Some((rss.transfer_armed()?, rss.transfer_shape()?))
     }
     fn dma_write_line(&mut self, line: u32, bytes: &[u8]) {
-        // Eight bytes to a FIFO word, the first in the high byte.
+        // Eight bytes to a FIFO word, as they lie in memory.
         let mut vals: Vec<u64> = Vec::with_capacity(bytes.len().div_ceil(8));
         let mut words = bytes.chunks_exact(8);
-        vals.extend(words.by_ref().map(|c| u64::from_be_bytes(c.try_into().unwrap())));
+        vals.extend(words.by_ref().map(|c| u64::from_ne_bytes(c.try_into().unwrap())));
         if !words.remainder().is_empty() {
             let mut last = [0u8; 8];
             last[..words.remainder().len()].copy_from_slice(words.remainder());
-            vals.push(u64::from_be_bytes(last));
+            vals.push(u64::from_ne_bytes(last));
         }
         self.0.rss_fifo.push_batch(tag::DMA_LINE, line as u64 | (bytes.len() as u64) << 32, &vals);
         self.0.wake_rss();
@@ -1937,7 +1937,7 @@ impl Mgras {
                     self.rss_fifo.drain_payload_at(id, n, &mut payload[..]);
                     bytes.resize(8 * n, 0);
                     for (b, w) in bytes.chunks_exact_mut(8).zip(&payload) {
-                        b.copy_from_slice(&w.to_be_bytes());
+                        b.copy_from_slice(&w.to_ne_bytes());
                     }
                     rss.run_entry(Entry::DmaLine { line, bytes: &bytes[..len] })
                 }
