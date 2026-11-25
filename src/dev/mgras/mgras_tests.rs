@@ -2398,7 +2398,8 @@ fn bench_draw_pixels() {
             m.wait_idle();
             ns.push(t.elapsed().as_secs_f64() * 1e9 / (frames * w * h) as f64);
         }
-        eprintln!("{name:18} ns/px {ns:.1?} px0 {:#010x} (host {first:02x?}) hash {:02x?}", m.fb_pixel(0, 1023), &m.state_hash()[..8]);
+        let put = unsafe { &*m.rss.get() }.stats.dma_px_put;
+        eprintln!("{name:18} ns/px {ns:.1?} px0 {:#010x} (host {first:02x?}) hash {:02x?} stored {put} of {} px drawn", m.fb_pixel(0, 1023), &m.state_hash()[..8], (1 + runs * frames) * w * h);
         m.stop_engines();
     }
 }
@@ -2444,6 +2445,137 @@ fn bench_smoke_frame() {
     eprintln!("smoke expand {mode}: ms a frame {ms:.2?} hash {:02x?}", &m.state_hash()[..8]);
     eprintln!("routes: {}", super::gl::path_counts());
     m.stop_engines();
+}
+
+/// ms a frame of the shell's CPU compose (`ScanSource::rows`): the pixel pass at `BENCH_W` x `BENCH_H` (1280x1024), and
+/// the snapshot where the VC3 tables name the size. `BENCH_FRAMES` a run (0: build only), `BENCH_RUNS` runs.
+#[test]
+#[ignore]
+fn bench_compose() {
+    use super::dcb::Dcb;
+    use super::frame::{Frame, MainMode, OverlayMode, W};
+    use super::plain::boxed_zeroed;
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (w, h) = (env("BENCH_W", 1280), env("BENCH_H", 1024));
+    let (runs, frames) = (env("BENCH_RUNS", 5), env("BENCH_FRAMES", 8));
+    let mut seed = 0x5eed_0001u32;
+    let mut rnd = move || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        seed >> 8
+    };
+    let mut f = boxed_zeroed::<Frame>();
+    (f.width, f.height) = (w, h);
+    for (i, g) in f.gamma.iter_mut().enumerate() {
+        *g = [i as u8; 3];
+    }
+    f.cmap.iter_mut().for_each(|c| *c = rnd() & 0xFF_FFFF);
+    f.main_mode[1] = MainMode { rgb: false, cmap_base: 0x100, index_mask: 0xFFF, pair: None };
+    f.main_mode[2] = MainMode { rgb: true, cmap_base: 0, index_mask: 0xFFF, pair: None };
+    f.overlay_mode[2] = OverlayMode { on: true, cmap_base: 0x200 };
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * W + x;
+            f.did_main[i] = (1 + (x / 64 + 3 * (y / 48)) % 2) as u8;
+            f.main[i] = rnd() & 0xFF_FFFF;
+            f.did_overlay[i] = 2;
+            f.overlay[i] = if rnd() % 5 == 0 { rnd() as u8 } else { 0 };
+        }
+    }
+    (f.cursor_on, f.cursor_x, f.cursor_y, f.cursor_size) = (true, 100, 40, 32);
+    f.cursor.iter_mut().for_each(|c| *c = (rnd() & 3) as u8);
+    f.cursor_rgb = [0, 0xFF_FFFF, 0xFF_0000, 0x00_00FF];
+    let mut out = vec![0u32; w * h];
+    let mut ms = Vec::new();
+    for _ in 0..runs {
+        let t = std::time::Instant::now();
+        for _ in 0..frames {
+            for y in 0..h {
+                for (x, o) in out[y * w..(y + 1) * w].iter_mut().enumerate() {
+                    let p = f.pixel(x, y);
+                    *o = (p & 0xFF) << 16 | p & 0xFF00 | (p >> 16) & 0xFF;
+                }
+            }
+            std::hint::black_box(&out);
+        }
+        ms.push(t.elapsed().as_secs_f64() * 1e3 / frames.max(1) as f64);
+    }
+    eprintln!("compose {w}x{h}: pixel pass ms a frame {ms:.2?} ({:.2} ns a pixel at the min)", ms.iter().cloned().fold(f64::MAX, f64::min) * 1e6 / (w * h) as f64);
+
+    if ![(1280, 1024), (1600, 1200), (1920, 1035)].contains(&(w, h)) {
+        return;
+    }
+    // Draw a frame first so the planes hold pixels.
+    let m = live_board();
+    draw_pixels_setup(&m, (0, 0, w as u32, h as u32), 0xC0_0080, 1, 1.0 / 255.0, [255.0f32.to_bits(); 12], None);
+    draw_pixels_memory(&m, w * 4 * h, h, 0x1234_5678);
+    draw_pixels_dma(&m, [0.0, 0.0], [0; 4], w, h);
+    m.wait_idle();
+    let rss = unsafe { &*m.rss.get() };
+    let mut dcb = boxed_zeroed::<Dcb>();
+    dcb.xmap.set_modes(1, 0x4, 0);
+    dcb.xmap.set_modes(0, 0x4, 0);
+    dcb.xmap.set_scanout(0, 0x240, 0);
+    dcb.vc3.regs[4] = 0;
+    for y in 0..h {
+        dcb.vc3.sram[y] = 0x4000;
+    }
+    dcb.vc3.sram[h] = 0xFFFF;
+    dcb.vc3.sram[0x4000] = 1;
+    dcb.vc3.sram[0x4001] = 0x7FF << 5;
+    let mut snap = boxed_zeroed::<Frame>();
+    snap.snapshot(rss, &dcb);
+    assert_eq!((snap.width, snap.height), (w, h), "the VC3 tables name this size");
+    let mut ms = Vec::new();
+    for _ in 0..runs {
+        let t = std::time::Instant::now();
+        for _ in 0..frames {
+            snap.snapshot(rss, &dcb);
+            std::hint::black_box(&snap.main[0]);
+        }
+        ms.push(t.elapsed().as_secs_f64() * 1e3 / frames.max(1) as f64);
+    }
+    eprintln!("compose {w}x{h}: snapshot ms a frame {ms:.2?} ({:.2} ns a pixel at the min)", ms.iter().cloned().fold(f64::MAX, f64::min) * 1e6 / (w * h) as f64);
+    m.stop_engines();
+}
+
+/// ms a frame of a proxy for display-shm's `fill_slot` (a row `memcpy` per stale row) and the scan-out's
+/// compare-then-copy, `BENCH_ROWS` stale rows of `BENCH_W` x `BENCH_H` (all). Not the QEMU C code.
+#[test]
+#[ignore]
+fn bench_shm_slot_copy() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (w, h) = (env("BENCH_W", 1280), env("BENCH_H", 1024));
+    let (rows, runs, frames) = (env("BENCH_ROWS", h), env("BENCH_RUNS", 5), env("BENCH_FRAMES", 20));
+    let wbytes = w * 4;
+    let a: Vec<u8> = (0..wbytes * h).map(|i| (i * 31 >> 3) as u8).collect();
+    let mut b = a.clone();
+    (0..h).for_each(|y| b[y * wbytes + wbytes - 1] ^= 0xFF);
+    let mut slot = a.clone();
+    let mut scan = a.clone();
+    let (mut fill, mut cmp) = (Vec::new(), Vec::new());
+    for _ in 0..runs {
+        let t = std::time::Instant::now();
+        for _ in 0..frames {
+            for y in 0..rows {
+                slot[y * wbytes..][..wbytes].copy_from_slice(&a[y * wbytes..][..wbytes]);
+            }
+            std::hint::black_box(&slot);
+        }
+        fill.push(t.elapsed().as_secs_f64() * 1e3 / frames.max(1) as f64);
+        let t = std::time::Instant::now();
+        for f in 0..frames {
+            let new = if f & 1 == 0 { &b } else { &a };
+            for y in 0..rows {
+                let n = &new[y * wbytes..][..wbytes];
+                if scan[y * wbytes..][..wbytes] != *n {
+                    scan[y * wbytes..][..wbytes].copy_from_slice(n);
+                }
+            }
+            std::hint::black_box(&scan);
+        }
+        cmp.push(t.elapsed().as_secs_f64() * 1e3 / frames.max(1) as f64);
+    }
+    eprintln!("shm {w}x{h} {rows} rows: slot fill ms a frame {fill:.3?}; compare-then-copy {cmp:.3?}");
 }
 
 /// `draw` on the fast paths and again on the plain ones: what each returns.
