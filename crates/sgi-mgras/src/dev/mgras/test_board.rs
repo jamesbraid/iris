@@ -32,6 +32,23 @@ impl HostMem for Mem {
                 return Ok(());
             }
         }
+        // Whole doublewords by block, as RAM answers the DMA; the head and tail bytes one at a time.
+        let head = ((8 - addr % 8) % 8) as usize;
+        let body = if out.len() >= head { (out.len() - head) / 8 * 8 } else { 0 };
+        if body >= 64 {
+            let (first, rest) = out.split_at_mut(head);
+            let (mid, last) = rest.split_at_mut(body);
+            let mut words = vec![0u64; body / 8];
+            dev.read_block(addr + head as u64, &mut words);
+            mid.chunks_exact_mut(8).zip(&words).for_each(|(c, w)| c.copy_from_slice(&w.to_be_bytes()));
+            for (i, b) in first.iter_mut().enumerate() {
+                *b = dev.read8(addr + i as u64).data;
+            }
+            for (i, b) in last.iter_mut().enumerate() {
+                *b = dev.read8(addr + (head + body + i) as u64).data;
+            }
+            return Ok(());
+        }
         for (i, b) in out.iter_mut().enumerate() {
             *b = dev.read8(addr + i as u64).data;
         }

@@ -2242,7 +2242,6 @@ impl BusDevice for FlatMem {
     fn mem_ptr(&self, addr: u64) -> Option<*const u64> {
         self.0.get(addr as usize..).map(|b| b.as_ptr() as *const u64)
     }
-    #[cfg(not(feature = "engine-crate"))]
     fn read_block(&self, addr: u64, buf: &mut [u64]) -> u32 {
         for (i, w) in buf.iter_mut().enumerate() {
             let at = addr as usize + 8 * i;
