@@ -55,7 +55,7 @@
 use super::state::{f, Gl};
 use super::vertex::{colour13, depth32};
 use crate::dev::gl::math;
-use crate::dev::kona::back::raster::ops::ownership_plane;
+use crate::dev::kona::back::raster::ops::{ownership_plane, to8};
 use crate::dev::kona::back::raster::pixel::Planes;
 use crate::dev::kona::back::raster::DrawState;
 use crate::dev::kona::back::store::{Store, StoreOp, WordArray, DID_PLANE};
@@ -63,6 +63,7 @@ use crate::dev::kona::defs::pixel::*;
 use crate::dev::kona::defs::*;
 use crate::dev::kona::stream::Stream;
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 /// Most values a pixel map keeps. The pipe's and the client's table sizes are unknown (model cap).
 pub const MAP_LIMIT: u32 = 1 << 16;
@@ -680,6 +681,22 @@ struct Geometry {
     bit_skip: usize,
 }
 
+/// Where each of `ht` rows starts in the draw's bytes.
+fn row_offsets(g: &Geometry, row_mode: u32, ht: usize) -> Vec<usize> {
+    let mut row_at = Vec::with_capacity(ht);
+    let mut block = 0usize;
+    for j in 0..ht {
+        if row_mode == 0 {
+            row_at.push(g.start % 4 + j * g.stride);
+        } else {
+            let o = (g.start + j * g.stride) % 4;
+            row_at.push(block + o);
+            block += (o + g.row).div_ceil(4) * 4;
+        }
+    }
+    row_at
+}
+
 /// Decode a draw's image from its stream words.
 pub fn unpack(h: &Header, rec: &Record, bytes: &[u8]) -> Option<Image> {
     if matches!(h.format, FORMAT_CMYK | FORMAT_CMYKA) {
@@ -705,18 +722,7 @@ pub fn unpack(h: &Header, rec: &Record, bytes: &[u8]) -> Option<Image> {
     let packed = element_bytes(h.ty).is_some_and(|e| e.1);
     let esize = element_bytes(h.ty).map_or(0, |e| e.0);
     let n = components(h.format)?;
-    // Where row `j` starts in `bytes`.
-    let mut row_at = Vec::with_capacity(ht);
-    let mut block = 0usize;
-    for j in 0..ht {
-        if h.row_mode == 0 {
-            row_at.push(g.start % 4 + j * g.stride);
-        } else {
-            let o = (g.start + j * g.stride) % 4;
-            row_at.push(block + o);
-            block += (o + g.row).div_ceil(4) * 4;
-        }
-    }
+    let row_at = row_offsets(&g, h.row_mode, ht);
     let swap = rec.swap_bytes;
     let int_plane = matches!(h.format, FORMAT_COLOUR_INDEX | FORMAT_STENCIL);
     let mut colour = Vec::new();
@@ -1168,6 +1174,10 @@ fn emit(gl: &Gl, c: &mut Counts, canvas: &Canvas<'_>, img: &Image) {
         }
         c.fragments += frags.apply(canvas);
     }
+    note_unapplied_stages(p, c);
+}
+
+fn note_unapplied_stages(p: &Pixels, c: &mut Counts) {
     if p.post[..4] != [1.0; 4] || p.post[4..8] != [0.0; 4] || p.post[8..12] != [1.0; 4] || p.post[12..] != [0.0; 4] {
         c.post_stages_ignored += 1;
     }
@@ -1431,11 +1441,111 @@ pub fn plane_command(gl: &mut Gl, c: &mut Counts, env: &Env<'_>, selector: u32, 
     }
 }
 
+/// Each byte as the 8-bit colour the 13-bit fragment path stores for it, by the path's own arithmetic.
+fn byte_colours() -> &'static [u32; 256] {
+    static T: OnceLock<[u32; 256]> = OnceLock::new();
+    T.get_or_init(|| std::array::from_fn(|b| to8(colour13(b as f32 / 255.0) as u32)))
+}
+
+/// A byte RGBA or RGB draw checked to need nothing between the bytes and the colour words.
+struct Plain<'a> {
+    /// Bytes a pixel (4 or 3) and where each image row starts in the draw's bytes.
+    pixel: usize,
+    rows: Vec<usize>,
+    /// The raster position and the window pixels that land, as half-open ranges.
+    origin: (i64, i64),
+    x: (i64, i64),
+    y: (i64, i64),
+    colour: Vec<WordArray<'a>>,
+    pitch: usize,
+    window: [i32; 2],
+}
+
+/// The plan for a draw of unzoomed RGBA or RGB bytes through no fragment operation, or None for
+/// any other draw. Everything the general path would refuse or do differently returns None.
+fn plain_plan<'a>(gl: &Gl, env: &Env<'a>, h: &Header, rec: &Record, bytes: &[u8]) -> Option<Plain<'a>> {
+    let (p, ds) = (&gl.pix, &env.ds);
+    // The GPU arm keeps its planes on the device and takes the fragments through `StoreOp::Frags`.
+    if env.store.is_gpu() {
+        return None;
+    }
+    let pixel = match (h.format, h.ty) {
+        (FORMAT_RGBA, TYPE_UNSIGNED_BYTE) => 4,
+        (FORMAT_RGB, TYPE_UNSIGNED_BYTE) => 3,
+        _ => return None,
+    };
+    let fragment_ops = ds.ownership.is_some() || ds.samples.is_some() || ds.alpha.enabled || (ds.stencil.enabled && ds.stencil_bits != 0) || ds.depth_test || ds.blend.enabled || ds.logic.is_some() || ds.colour_mask != [true; 4];
+    let identity = p.suspended || (!p.map_colour && p.scale == [1.0; 4] && p.bias == [0.0; 4]);
+    if fragment_ops || !identity || p.zoom != [1.0; 2] || !p.pos.valid || h.w == 0 || h.h == 0 || h.w > 1 << 22 || h.h > 1 << 22 {
+        return None;
+    }
+    let (px, py) = (p.pos.x + h.column as f32 * p.zoom[0], p.pos.y);
+    // Within f32's exact integers, so the general path's span arithmetic agrees; false for NaN.
+    if !(px.abs() < 1048576.0 && py.abs() < 1048576.0) {
+        return None;
+    }
+    let (rx, ry) = (px.floor() as i64, py.floor() as i64);
+    let g = h.geometry(rec)?;
+    if h.image_words(rec)? as u64 * 4 > bytes.len() as u64 + 3 {
+        return None;
+    }
+    let (w, ht) = (h.w as usize, h.h as usize);
+    let rows = row_offsets(&g, h.row_mode, ht);
+    // Every byte the general path would read is there, else it refuses the draw.
+    if rows[ht - 1] + w * pixel > bytes.len() {
+        return None;
+    }
+    let cpu = env.store.cpu();
+    let (pitch, c, o) = (cpu.width() as usize, &ds.clip, ds.origin);
+    if c.x0 < 0 || c.y0 < 0 || c.x1 as i64 > pitch as i64 || c.y1 as i64 > cpu.height() as i64 {
+        return None;
+    }
+    let colour = ds.colour[..ds.colours as usize].iter().map(|&w| cpu.array(w as usize).filter(|a| a.len() >= pitch * cpu.height() as usize)).collect::<Option<Vec<_>>>()?;
+    let x = (rx.max(c.x0 as i64 - o[0] as i64), (rx + w as i64).min(c.x1 as i64 - o[0] as i64));
+    let y = (ry.max(c.y0 as i64 - o[1] as i64), (ry + ht as i64).min(c.y1 as i64 - o[1] as i64));
+    Some(Plain { pixel, rows, origin: (rx, ry), x, y, colour, pitch, window: o })
+}
+
+/// Store the rows of a plain draw; the pixels that landed.
+fn plain_store(plan: &Plain<'_>, bytes: &[u8]) -> u64 {
+    let (n, rows) = ((plan.x.1 - plan.x.0).max(0) as u64, (plan.y.1 - plan.y.0).max(0) as u64);
+    if n * rows == 0 {
+        return 0;
+    }
+    let lut = byte_colours();
+    for y in plan.y.0..plan.y.1 {
+        let from = plan.rows[(y - plan.origin.1) as usize] + (plan.x.0 - plan.origin.0) as usize * plan.pixel;
+        let src = &bytes[from..from + n as usize * plan.pixel];
+        let at = (plan.window[1] as i64 + y) as usize * plan.pitch + (plan.window[0] as i64 + plan.x.0) as usize;
+        for a in &plan.colour {
+            if plan.pixel == 4 {
+                src.chunks_exact(4).enumerate().for_each(|(k, q)| store_word(a, at + k, lut[q[3] as usize], q, lut));
+            } else {
+                src.chunks_exact(3).enumerate().for_each(|(k, q)| store_word(a, at + k, lut[255], q, lut));
+            }
+        }
+    }
+    n * rows
+}
+
+#[inline(always)]
+fn store_word(a: &WordArray<'_>, index: usize, alpha: u32, q: &[u8], lut: &[u32; 256]) {
+    let word = alpha << 24 | lut[q[0] as usize] << 16 | lut[q[1] as usize] << 8 | lut[q[2] as usize];
+    // SAFETY: the plan keeps the pixel inside the clip rectangle, inside the screen the array covers.
+    unsafe { a.store(index, word) };
+}
+
 /// A draw's header and its image words (or, for a DMA draw, the bytes the packet carried).
 pub fn draw(gl: &mut Gl, c: &mut Counts, env: &Env<'_>, hdr: &[u32; 8], bytes: &[u8]) {
     c.draws += 1;
     let Some(h) = Header::parse(hdr) else { return };
-    let Some(img) = unpack(&h, &gl.pix.unpack_in_force(), bytes) else {
+    let rec = gl.pix.unpack_in_force();
+    if let Some(plan) = plain_plan(gl, env, &h, &rec, bytes) {
+        c.fragments += plain_store(&plan, bytes);
+        note_unapplied_stages(&gl.pix, c);
+        return;
+    }
+    let Some(img) = unpack(&h, &rec, bytes) else {
         c.refused += 1;
         return;
     };
@@ -1805,5 +1915,103 @@ mod tests {
         q.visit(&mut r);
         assert!(r.finish().is_ok());
         assert_eq!(q, p);
+    }
+
+    /// A plain byte draw stores what the general path stores; an empty colour map switched on forces
+    /// the general path without changing the result.
+    #[test]
+    fn plain_byte_draws_store_what_the_general_path_stores() {
+        use crate::dev::kona::back::raster::multisample::Samples;
+        use crate::dev::kona::back::raster::ops::{BlendFactor, Compare, LogicOp, Ownership};
+        use crate::dev::kona::back::raster::Rect;
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut seed = 0x9e37_79b9u32;
+        let mut rnd = move |n: u32| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) % n
+        };
+        let (mut plain, mut other) = (0, 0);
+        for case in 0..600 {
+            let (w, ht) = (1 + rnd(40), 1 + rnd(24));
+            let format = if rnd(2) == 0 { FORMAT_RGBA } else { FORMAT_RGB };
+            let (x0, y0) = (rnd(40) as i32, rnd(30) as i32);
+            let mut ds = DrawState { origin: [rnd(12) as i32, rnd(12) as i32], colour: [2, 3], colours: rnd(3) as u8, ..DrawState::default() };
+            ds.clip = Rect { x0, y0, x1: (x0 + 1 + rnd(40) as i32).min(64), y1: (y0 + 1 + rnd(30) as i32).min(48) };
+            let ops = rnd(24);
+            match ops {
+                1 => ds.alpha = crate::dev::kona::back::raster::AlphaTest { enabled: true, func: Compare::Less, reference: 4000 },
+                2 => (ds.stencil_bits, ds.stencil_word, ds.stencil.enabled, ds.stencil.func, ds.stencil.reference) = (8, 5, true, Compare::Notequal, 7),
+                3 => (ds.depth_bits, ds.depth_word, ds.depth_test) = (24, 4, true),
+                4 => (ds.blend.enabled, ds.blend.src, ds.blend.dst) = (true, BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha),
+                5 => ds.logic = Some(LogicOp::Xor),
+                6 => ds.colour_mask = [true, false, true, true],
+                7 => ds.ownership = Some(Ownership { reference: 1, mask: 3 }),
+                // A stencil plane that is not enabled, and a depth plane that is not tested, change nothing.
+                8 => (ds.stencil_bits, ds.stencil_word, ds.depth_bits, ds.depth_word) = (8, 5, 24, 4),
+                9 => ds.samples = Some(Samples { count: 4, at: [[2, 2]; 8], cover: !0, alpha_to_mask: false, alpha_to_one: false, colour: (6, 3), depth: (0, 0), stencil: (0, 0) }),
+                _ => {}
+            }
+            let fragment_ops = matches!(ops, 1..=7 | 9);
+            let mut gl = Gl::default();
+            gl.pix.zoom = [[1.0, 1.0], [1.0, 1.0], [2.0, 1.0], [1.0, 0.5]][rnd(4) as usize];
+            gl.pix.pos.valid = rnd(8) != 0;
+            let susp = rnd(6) == 0;
+            gl.pix.pos.x = rnd(70) as f32 - 3.0 + [0.0, 0.5][rnd(2) as usize];
+            gl.pix.pos.y = rnd(50) as f32 - 3.0;
+            gl.pix.unpack = Record { swap_bytes: rnd(2) == 0, lsb_first: rnd(2) == 0, alignment: [1, 2, 4, 8][rnd(4) as usize], row_length: [0, 0, w + rnd(5)][rnd(3) as usize], skip_rows: rnd(2), skip_pixels: rnd(3), ..Record::default() };
+            let hdr = Header { w, h: ht, format, ty: TYPE_UNSIGNED_BYTE, offset: rnd(2) * 2, dma: false, row_mode: rnd(2), column: [0, 0, 5][rnd(3) as usize] };
+            let words = hdr.image_words(&gl.pix.unpack).unwrap() as usize;
+            let mut bytes: Vec<u8> = (0..words * 4).map(|_| rnd(256) as u8).collect();
+            // Now and then a draw too short for its header: refused by both paths alike.
+            let short = rnd(15) == 0;
+            if short {
+                bytes.truncate(bytes.len() / 2);
+            }
+            let ragged = rnd(6) == 0;
+            if ragged {
+                (0..1 + rnd(3)).for_each(|_| {
+                    bytes.pop();
+                });
+            }
+            let identity = rnd(4) != 0;
+            let did: Vec<u32> = (0..64 * 48).map(|_| rnd(8) << 2).collect();
+            let run = |general: bool| {
+                let store = Store::new(64, 48);
+                (2..=8).chain([DID_PLANE]).for_each(|w| store.cpu().ensure(w));
+                did.iter().enumerate().for_each(|(i, &v)| unsafe { store.cpu().array(DID_PLANE).unwrap().store(i, v) });
+                let mut gl = gl.clone();
+                if !identity {
+                    gl.pix.bias = [0.0, 0.125, 0.0, 0.0];
+                }
+                if susp {
+                    if general {
+                        gl.pix.bias = [0.0; 4];
+                    } else {
+                        gl.pix.suspended = true;
+                    }
+                }
+                gl.pix.map_colour = general;
+                let env = Env { store: &store, ds };
+                let mut c = Counts::default();
+                let h = [hdr.w, hdr.h, hdr.format, hdr.ty, hdr.offset, 0, hdr.row_mode, hdr.column];
+                let taken = plain_plan(&gl, &env, &hdr, &gl.pix.unpack_in_force(), &bytes).is_some();
+                draw(&mut gl, &mut c, &env, &h, &bytes);
+                let mut hash = DefaultHasher::new();
+                (2..=8).for_each(|w| (0..64 * 48).for_each(|i| unsafe { store.cpu().array(w).unwrap().load(i) }.hash(&mut hash)));
+                (hash.finish(), format!("{c:?}"), taken)
+            };
+            let (a, b) = (run(false), run(true));
+            assert_eq!((a.0, &a.1), (b.0, &b.1), "case {case}: {w}x{ht} format {format} ops {ops}");
+            assert!(!b.2, "case {case}: the general path is forced");
+            let plain_state = !fragment_ops && (identity || susp) && gl.pix.zoom == [1.0; 2] && gl.pix.pos.valid;
+            assert!(!a.2 || plain_state, "case {case}: taken under a fragment operation, a transfer scale, a zoom or no position");
+            assert!(a.2 || short || ragged || !plain_state, "case {case}: the plain path was not taken");
+            if a.2 {
+                plain += 1;
+            } else {
+                other += 1;
+            }
+        }
+        assert!(plain > 100 && other > 100, "plain {plain} other {other}");
     }
 }
