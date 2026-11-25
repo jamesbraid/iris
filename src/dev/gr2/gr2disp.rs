@@ -2,8 +2,8 @@
 //!
 //! The refresh thread (`crate::display`) runs the frame. The retrace line
 //! goes up for the blanking interval; the IOC latches the retrace until the
-//! host acknowledges: PORT_CONFIG on Indigo2, HPC3_GEN_CONTROL on Indy
-//! (GR2.h "INTERRUPTS"). The vertical status level (EXTIO SG_STAT_0) is
+//! host acknowledges: PORT_CONFIG on Indigo2, HPC3_GEN_CONTROL on Indy.
+//! The vertical status level (EXTIO SG_STAT_0) is
 //! held for the blank: the kernel's retrace handler polls it before it
 //! writes a pending swap's display mode, and a polling PROM sees both
 //! edges. After the blank, when something visible changed, the frame is

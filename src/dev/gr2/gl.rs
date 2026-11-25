@@ -52,7 +52,7 @@ pub const T_COLOR_WRITEMASK: u32 = 0x10b;
 pub const T_FRONT_FACE: u32 = 0x108;
 pub const T_CLEAR_COLOR: u32 = 0x104;
 pub const T_CLEAR_COLOR_DEPTH: u32 = 0x0a0;
-/// Colour-index clear (libglcore clear_ci, C1|0x104): index (f32); DATA
+/// Colour-index clear (libglcore, C1|0x104): index (f32); DATA
 /// 0, 0, 0. gr_osview clears its window with index 46 this way.
 pub const T_CLEAR_CI: u32 = 0x3104;
 /// Colour-index clear with depth (CZClear on a CI visual): index, f32 on
@@ -66,7 +66,7 @@ pub const T_WINDOW: u32 = 0x1e5;
 /// MakeCurrent: pixel mode from a kernel ioctl (4 = 24-bit RGB, 2 = 12-bit
 /// RGB double buffered; other values (unverified) keep the current format).
 pub const T_MAKECURRENT: u32 = 0x004;
-/// Cull flags (__glExpPassCullFace): 0x1B = cull front faces, 0x1C = back.
+/// Cull flags: 0x1B = cull front faces, 0x1C = back.
 pub const T_CULL_FRONT: u32 = 0x01b;
 pub const T_CULL_BACK: u32 = 0x01c;
 /// Polygon mode (front): 1 = fill, 2 = point, 3 = line.
@@ -74,7 +74,7 @@ pub const T_POLYGON_MODE: u32 = 0x0e2;
 /// SwapBuffers: the new swap state (0/1) selects which COLOR_WRITEMASK of
 /// the pair applies (the kernel flips the XMAP buffer select).
 pub const T_SWAP_BUFFERS: u32 = 0x1e7;
-/// glEnable/glDisable(GL_DITHER) (dither_enable, 0x2044); libglcore also
+/// glEnable/glDisable(GL_DITHER) (0x2044); libglcore also
 /// turns it off around clears with an integral colour.
 pub const T_DITHER: u32 = 0x011;
 /// Rasterization controls emitted as fixed-layout GE state. The captured
@@ -94,21 +94,21 @@ pub const T_EDGE_FLAG: u32 = 0x0f6;
 /// Ten-word libglcore setup packet seen before material/light uploads. Its
 /// hardware interpretation is not documented in the available headers.
 pub const T_STATE_106: u32 = 0x106;
-/// glPolygonStipple + enable (__glExpPassPolygonStipple, 0x207C): 1; DATA
-/// 32 words in the layout __glExpConvertStipple builds from the GL mask
+/// glPolygonStipple + enable (0x207C): 1; DATA
+/// 32 words in the layout libglcore builds from the GL mask
 /// (row 0 = bottom = window y mod 32, MSB = leftmost = window x mod 32):
 /// word i (0..15) = left 16 pixels of row 30-2i << 16 | left 16 pixels of
 /// row 31-2i; word 16+i = the same for the right 16 pixels.
 pub const T_STIPPLE_ON: u32 = 0x01f;
 /// glDisable(GL_POLYGON_STIPPLE) (0x2078): 0.
 pub const T_STIPPLE_OFF: u32 = 0x01e;
-/// Depth: test enable 0/1; func = testFunc & 7 (NEVER..ALWAYS);
+/// Depth: test enable 0/1; func = the GL depth function & 7 (NEVER..ALWAYS);
 /// write mask ((1 << zbits) - 1, or 0). Window z spans 0 .. 2^zbits - 1 via
 /// the viewport zscale/zcenter.
 pub const T_DEPTH_TEST: u32 = 0x014;
 pub const T_DEPTH_FUNC: u32 = 0x024;
 pub const T_DEPTH_MASK: u32 = 0x00a;
-/// Depth-only clear (HQ2_FIFO_CI.clear_depth: token 0xA0
+/// Depth-only clear (token 0xA0
 /// with ITOF|CP): 0; DATA depth, 0 (unverified: not yet seen in a trace).
 pub const T_DEPTH_CLEAR: u32 = 0x68a0;
 /// Stencil: mode = enable; DATA ref, func, mask, fail,
@@ -133,17 +133,17 @@ pub const T_IRIS_BGNPOLYGON: u32 = 0x1a4;
 pub const T_IRIS_ENDPOLYGON: u32 = 0x041;
 const VR_IRIS_POLYGON: u32 = 0x1ae;
 /// color(i) is 0x030 (ITOF|C1 for an integer index). pmv / pdr / pclos
-/// polygons (libgl.so gl_i_pmv2 / gl_i_pdr / gl_i_pclos; rectf, circf,
+/// polygons (libgl.so; rectf, circf,
 /// showmap): 0x044 then LOADV|0x1AE, points on 0x045 (V3 or ITOF|V3), 0x042
 /// then LOADV|0x065.
 pub const T_IRIS_INDEX: u32 = 0x030;
-/// IRIS GL writepixels / writeRGB (gl_g_writepixels): after the row is
+/// IRIS GL writepixels / writeRGB: after the row is
 /// written (rectwrite), the character position moves past it: x (window
 /// pixels, the getcpos x + count) on the token; DATA y, 0. Untransformed,
 /// unlike cmov (0x066).
 pub const T_IRIS_SETCPOS: u32 = 0x0d0;
 /// Window origin readback (IRIS GL getorigin, writepixels; libglcore
-/// get_origin 0x2334): token 0; Finish; the mailbox holds the window's
+/// block offset 0x2334): token 0; Finish; the mailbox holds the window's
 /// lower-left corner in screen coordinates (x, y; ints). getcpos and
 /// setcpos use the same screen space: writepixels places its row at
 /// getcpos - getorigin.
@@ -154,7 +154,7 @@ pub const T_GET_ORIGIN: u32 = 0x0cd;
 /// write mask, the colour index in CI mode).
 pub const T_IRIS_GET_COLOR: u32 = 0x0cf;
 /// FIFO pixel writes (IRIS GL writepixels / writeRGB via rectwrite; OpenGL
-/// glDrawPixels, __glExpDrawPixelsUnpack*), per chunk of <= 48 pixels:
+/// glDrawPixels), per chunk of <= 48 pixels:
 ///   0x0B1 = 0                    start (the chunk's data follows)
 ///   0x071 word, DATA ...         pixel words (IRIS GL: 16-word blocks, one
 ///                                pixel per word, the last block padded
@@ -166,7 +166,7 @@ pub const T_PIX_START: u32 = 0x0b1;
 pub const T_PIX_DATA: u32 = 0x071;
 pub const T_PIX_RECT: u32 = 0x0b2;
 pub const T_PIX_END: u32 = 0x0b3;
-/// OpenGL glIndex (libglcore HQ2_GL_INDEX): C1|0x0FE = 0x30FE
+/// OpenGL glIndex (libglcore): C1|0x0FE = 0x30FE
 /// with a float index, or ITOF|C1|0x0FE = 0x70FE (the CI aperture) with an
 /// integer. Colour-index windows (gr_osview on IRIX 6.5) set every colour
 /// this way.
@@ -176,12 +176,12 @@ pub const T_IRIS_PCLOS: u32 = 0x042;
 pub const T_IRIS_PDR: u32 = 0x045;
 /// libgl.so (IP12GR232) move / draw: move sends 0x05B = 0, then the point
 /// on 0x05D (V3, float or ITOF); draw sends only the point. A line from the
-/// previous point to each drawn one (gl_i_move2, gl_i_draw).
+/// previous point to each drawn one.
 pub const T_IRIS_MOVE: u32 = 0x05b;
 pub const T_IRIS_DRAW: u32 = 0x05d;
-/// cmov: current character position, V3 (gl_c_cmov). getcpos sends 0x068 =
+/// cmov: current character position, V3. getcpos sends 0x068 =
 /// 0, Finish, reads the mailbox: x, y (window pixels, stored as shorts) and
-/// a word whose sign bit means "invalid, leave the caller's values" (gl_g_getcpos).
+/// a word whose sign bit means "invalid, leave the caller's values".
 pub const T_IRIS_CMOV: u32 = 0x066;
 pub const T_IRIS_GETCPOS: u32 = 0x068;
 /// Character bitmaps drawn at the character position, which then advances
@@ -193,13 +193,13 @@ pub const T_IRIS_GETCPOS: u32 = 0x068;
 ///   0x069: 9 words, two 16-bit rows each, low half first (h <= 17);
 ///   0x06A: 17 words, the same (h <= 33);
 ///   0x06D: 17 words, one 32-bit row each (w <= 32, h <= 17).
-/// sboxf(x1, y1, x2, y2): screen-aligned filled box (gl_i_sboxf): x1 on
+/// sboxf(x1, y1, x2, y2): screen-aligned filled box: x1 on
 /// the token, y1, x2, y2 on DATA, f32; sboxfi is ITOF (0x4053 / 0x41DF).
 /// The corners are transformed, the box between them filled axis-aligned.
 /// twilight draws its stars with it.
-/// User clip planes (__glExpEnableClipPlanes / __glExpPassClipPlanes):
+/// User clip planes (libglcore):
 /// 0x02E = enabled, then 0x02E = plane (0..5); 0x02F = plane, DATA a, b,
-/// c, d in eye space (gc->state.transform.eyeClipPlanes).
+/// c, d in eye space.
 pub const T_CLIP_PLANE_ENABLE: u32 = 0x02e;
 pub const T_CLIP_PLANE: u32 = 0x02f;
 /// Pixel zoom for pixel writes: 0.0, zoom x, zoom y (f32; meaning of the
@@ -207,7 +207,7 @@ pub const T_CLIP_PLANE: u32 = 0x02f;
 /// sends all three to the token; IRIS GL rectzoom sends the first to the
 /// token and the zooms on DATA (snoop: 0, 6.0, 6.0).
 pub const T_PIXEL_ZOOM: u32 = 0x0bb;
-/// glCopyPixels of colour (__glExpFastCopyPixels, after 0x0A7 / 0x0A8 = 0
+/// glCopyPixels of colour (libglcore, after 0x0A7 / 0x0A8 = 0
 /// and 0x0BB = 0.0, |zoom x|, |zoom y| as whole numbers): token 0; DATA
 /// source y, destination y, height, source x, destination x, width (window
 /// coordinates, GL y up). libglcore takes its slow path (DrawPixels of a
@@ -225,33 +225,33 @@ pub enum PixZoom {
     Both,
 }
 /// Pixel read through the mailbox (IRIS GL readpixels / lrectread, OpenGL
-/// ReadColor, Fetch, Pack1): x on the token; DATA y, width, height, words
+/// glReadPixels): x on the token; DATA y, width, height, words
 /// a row, 0, 0 (IRIS GL sends 1 for the words, one pixel a word).
 /// Window-relative, GL y up, y = the bottom row. The microcode puts the
 /// pixels in shram from the mailbox word 0x4022 at 0x0A7's packing (as the
-/// 0x0AC DMA read decodes them), rows BOTTOM first (libglcore Pack1 of a
+/// 0x0AC DMA read decodes them), rows BOTTOM first (libglcore, a
 /// 13x5 colour-index image; IRIS GL lrectread walks its chunks upwards
 /// too), and raises FIN3 itself: libgl polls version bit 0 without sending
 /// a Finish, then copies the words, acks FIN3 at 0x6B000 and sends
 /// READ_DONE. Unimplemented, snoop spun on FIN3 for its whole time slice.
 pub const T_READ_RECT: u32 = 0x0ad;
 pub const T_IRIS_SBOXF: u32 = 0x053;
-/// sbox / sboxi / sboxs (gl_i_sbox*): a screen-aligned box outline, the
+/// sbox / sboxi / sboxs: a screen-aligned box outline, the
 /// corners as for 0x053 (f32; integers on ITOF|0x052). Blender draws its
 /// interface lines as degenerate ones.
 pub const T_IRIS_SBOX: u32 = 0x052;
 pub const T_IRIS_SBOXI: u32 = 0x4052;
-/// Aux (overlay / popup) plane write mask (__glExpSetPixWritemask; IRIS GL
+/// Aux (overlay / popup) plane write mask (libglcore; IRIS GL
 /// drawmode): the aux bits drawing may change, 0 in normal drawing.
 pub const T_AUX_WRITEMASK: u32 = 0x003;
-/// swaptmesh (gl_i_swaptmesh): swap the two vertices a tmesh (bgntmesh =
+/// swaptmesh: swap the two vertices a tmesh (bgntmesh =
 /// 0x046, LOADV|0x047) keeps; the next vertex makes a triangle with them.
 pub const T_IRIS_SWAPTMESH: u32 = 0x04b;
 pub const T_IRIS_SBOXFI: u32 = 0x4053;
 pub const T_IRIS_CHAR16: u32 = 0x069;
 pub const T_IRIS_CHAR16_TALL: u32 = 0x06a;
 pub const T_IRIS_CHAR32: u32 = 0x06d;
-/// readsource (gl_setreadsource): 0x008 = plane (0 colour, 1 overlay /
+/// readsource: 0x008 = plane (0 colour, 1 overlay /
 /// popup, 2 and up other planes), then the absolute bank (0/1). 0x005 is
 /// the colour write mask, also absolute (0x000FFF / 0xFFF000 for 12-bit
 /// double buffering).
@@ -263,24 +263,24 @@ pub const T_IRIS_ZCLEAR: u32 = 0x09f;
 /// IRIS GL lighting enable: 0; DATA on (same shape as OpenGL's 0x10E, and
 /// likewise followed by 0x0D4 two-sided).
 pub const T_IRIS_DB: u32 = 0x0db;
-/// Blending (__glExpPassBlendFunc): mode = 1 for the
+/// Blending: mode = 1 for the
 /// SRC_ALPHA / ONE_MINUS_SRC_ALPHA fast path; factor port = 3 words: enable
 /// (0 = ONE, ZERO), src code, dst code (re3::RE3_OP_BLEND codes).
 pub const T_BLEND_MODE: u32 = 0x026;
 pub const T_BLEND_FACTOR: u32 = 0x025;
-/// Logic op (__glExpPassLogicOp): GL logicOp & 0xF (3 = COPY; RE3 FUNC order).
+/// Logic op: the GL logic op & 0xF (3 = COPY; RE3 FUNC order).
 pub const T_LOGIC_OP: u32 = 0x01a;
-/// Software-pipeline fragment (the Store / Store_B routines, used e.g. with
+/// Software-pipeline fragment (the microcode's fragment store routines, used e.g. with
 /// GL_ALPHA_TEST, which GR2 lacks; the fragments have already passed it, so
 /// they are written unconditionally apart from Z/stencil/blend/masks):
 /// ITOF token = x; ITOF DATA y, z; DATA
 /// r, g, b, a (floats 0..1). x, y are window coordinates + 6144
-/// (constants.viewportX/YAdjust, __glExpCreateContext).
+/// (libglcore's viewport adjust).
 pub const T_FRAGMENT: u32 = 0x402b;
 const FRAGMENT_BIAS: i32 = 6144;
 /// Software spans (CPU-rasterized textures, IRIS GL software lines):
 /// setup = 6 floats x, dx, y, dy, z, dz (x, y window coordinates + 6144;
-/// libglcore __glExpTextureSpan sends dx = 1, dy = 0); then one colour per
+/// libglcore's texture spans send dx = 1, dy = 0); then one colour per
 /// pixel on 0x02A (float RGBA x4, or ITOF|CP packed 0xAABBGGRR as IRIS GL
 /// sends it) which writes the pixel and steps x, y and z; 0x02D steps
 /// without writing. 0x02C: same format as 0x02A, seen from IRIS GL (blast)
@@ -289,9 +289,9 @@ pub const T_SPAN_SETUP: u32 = 0x029;
 pub const T_SPAN_COLOR: u32 = 0x02a;
 pub const T_SPAN_COLOR_B: u32 = 0x02c;
 pub const T_SPAN_SKIP: u32 = 0x02d;
-/// State readbacks (__glExpGetColor ...): token = 0, then the
+/// State readbacks: token = 0, then the
 /// client waits for FIN3 (Finish), reads the mailbox and acks with
-/// read_done (0xBD). Mailbox: GL address 0x12088 = board 0x10088 = shram
+/// token 0xBD. Mailbox: GL address 0x12088 = board 0x10088 = shram
 /// word 0x4022, 4 words.
 pub const T_GET_COLOR: u32 = 0x0e9;
 pub const T_GET_NORMAL: u32 = 0x0ea;
@@ -302,7 +302,7 @@ pub const T_READ_DONE: u32 = 0x0bd;
 /// colour; libglcore keeps its own copy of the position and reads only the
 /// colour back (0x107 -> mailbox r, g, b, a; CI: index in r).
 pub const T_RASTER_POS: u32 = 0x105;
-/// glBitmap (libglcore __glExpRenderBitmap, draw_bitmap 0x2630): six
+/// glBitmap (libglcore, 0x2630): six
 /// words to the token: (width << 16) | height, xorig, yorig, xmove, ymove
 /// (f32), then a constant 1; then the rows on DATA, TOP row first
 /// (libglcore walks the GL array from its last row back), one word per row
@@ -315,8 +315,7 @@ pub const T_BITMAP: u32 = 0x18c;
 pub const T_BITMAP_TALL: u32 = 0x18d;
 pub const T_BITMAP_HUGE: u32 = 0x18e;
 const BITMAP_HDR: usize = 6;
-/// Pixel setup before pixel reads and draws (__glExpReadPixelsKDMA, Fetch,
-/// ReadColor, DrawPixels): 0x0A7 = the packing of the pixel words that
+/// Pixel setup before pixel reads and draws (libglcore): 0x0A7 = the packing of the pixel words that
 /// follow (0 = one 32-bit pixel a word, 1 = two 16-bit, 2 = four 8-bit,
 /// first pixel in the MSB; colour-index UNSIGNED_BYTE / SHORT images,
 /// pixtest), 0x0A8 = 0 (meaning unknown), read mode 0x0BC (1 before a pixel
@@ -324,7 +323,7 @@ const BITMAP_HDR: usize = 6;
 pub const T_READ_SETUP_A: u32 = 0x0a7;
 pub const T_READ_SETUP_B: u32 = 0x0a8;
 pub const T_READ_MODE: u32 = 0x0bc;
-/// Read source (__glExpSetReadBuffer): two words to the token, kind and
+/// Read source: two words to the token, kind and
 /// buffer: 0, 0 = front; 0, 1 = back; 1, n = with aux buffers; 2, 0 = the
 /// Z buffer (depth and stencil reads).
 pub const T_READ_BUFFER: u32 = 0x10a;
@@ -381,7 +380,7 @@ pub struct GlState {
     /// (asserted below) and its context image holds no uninitialised bytes.
     span: [f64; 6],
     inited: u32,
-    /// Window clip from the kernel (0x1E5, Gr2ValidateClip / Gr2PcxSwap):
+    /// Window clip from the kernel (0x1E5, sent by the kernel's clip update and context switch):
     /// WID, obscured flag, number of pieces (> 4: clip by the RE3 WID test),
     /// and up to 4 visible rectangles x0, y0, x1, y1 (screen, GL y up,
     /// exclusive).
@@ -404,7 +403,7 @@ pub struct GlState {
     /// Scissor (window relative, inclusive): x0, y0, x1, y1.
     scissor: [i32; 4],
     colormask: u32,
-    /// COLOR_WRITEMASK pair (__glExpPassDrawBuffer): plane mask for swap
+    /// COLOR_WRITEMASK pair: plane mask for swap
     /// state 0 and 1; `swap` is the current state.
     masks: [u32; 2],
     swap: u32,
@@ -653,7 +652,7 @@ impl GlState {
 
     /// Window clipping by the RE3 WID test: more visible pieces than the 4
     /// rectangles 0x1E5 can carry, or an obscured window sent with no piece
-    /// list (Gr2ValidateClip then sends only the bounding box; twilight
+    /// list (the kernel then sends only the bounding box; twilight
     /// drawing the root window under every desktop window, IRIX 6.5.22).
     fn wid_clip(&self) -> bool {
         self.clip_n > 4 || (self.clip_n == 0 && self.clip_obscured != 0)
@@ -716,7 +715,7 @@ impl GlState {
 
     /// The visible pieces of row `y` between x0 and x1 (exclusive), left to
     /// right. A pixel is visible when it lies in an odd number of the 0x1E5
-    /// pieces (XOR). Xsgi's expValidateClip sends either disjoint visible
+    /// pieces (XOR). Xsgi sends either disjoint visible
     /// rectangles (XOR = union) or, when the region is the window minus one
     /// rectangle, [whole window, hole] with wid = 0 (token 0x1E5): atlantis
     /// with ideas over the middle of its side. The union let atlantis draw
@@ -917,8 +916,7 @@ impl Hq2Engine {
         use super::{ReadDest, ReadImage};
         self.gl.ensure_init();
         // Room in shram above the mailbox.
-        // DATA y, width, height, words a row, 0, 0 (libglcore Pack1 and
-        // its span reads); packing from 0x0A7. IRIS GL sends 1 for the
+        // DATA y, width, height, words a row, 0, 0 (libglcore); packing from 0x0A7. IRIS GL sends 1 for the
         // words (2x2 readpixels) with a pixel a word: trust the count only
         // for packed pixels, where OpenGL is the only sender.
         let (w, rows) = (a[2].min(2048), a[3].min(4096));
@@ -988,8 +986,8 @@ impl Hq2Engine {
             // (mode change) saves it into that context's own buffer;
             // Gr2DestroyDDRN (context exit) discards it. Either way the GE has
             // no owner afterwards, so no later switch may name this context
-            // for a save: its RRM node may already be gone (kernel NULL
-            // dereference at ->unk4C->unk4 otherwise).
+            // for a save: its kernel-side node may already be gone (a kernel NULL
+            // dereference otherwise).
             if self.gl_ctx.have_cur != 0 && self.gl_ctx.cur == id {
                 let mut img = [0u32; CX_WORDS];
                 self.gl_cx_image(&mut img);
@@ -1157,8 +1155,7 @@ impl Hq2Engine {
     }
 
     /// A GE parameter pair (0x080) whose value goes to DATA|C1 instead of the
-    /// token: parameters 18..23, colour-index materials (__glExpValidateMaterial;
-    /// IRIS GL sends them in RGB mode too). Completes the pending pair.
+    /// token: parameters 18..23, colour-index materials (IRIS GL sends them in RGB mode too). Completes the pending pair.
     pub(super) fn gl_port_wants_data(&mut self, val: u32, out: &mut dyn Re3Sink,
                                      done: &mut Option<&mut dyn FnMut(String)>) -> bool {
         if self.gl.port == light::T_LIGHT_PARAM && self.gl.port_n == 1 {
@@ -1396,7 +1393,7 @@ impl Hq2Engine {
         let g = &mut self.gl;
         match cmd {
             T_WINDOW => {
-                // x and y are full signed words (Gr2ValidateClip: xorg, and
+                // x and y are full signed words (the kernel's clip update: xorg, and
                 // 0x400 - (yorg + ysize)): negative for a window pushed past
                 // the left or bottom edge of the screen. Masking them to 11
                 // bits put such windows far off to the right / top.
@@ -1445,7 +1442,7 @@ impl Hq2Engine {
             T_STIPPLE_OFF => g.stipple_on = 0,
             T_BLEND_MODE => g.blend_fast = a[0] & 1,
             T_IRIS_DB => g.lt.on = a[1] & 1,
-            // readsource (gl_setreadsource): plane, then the absolute bank
+            // readsource: plane, then the absolute bank
             // (libgl tracks swaps itself and sends no 0x1E7, so swap stays 0).
             T_IRIS_BUFFER => g.read_src = [a[0], a[1]],
             T_IRIS_BGNPOLYGON | T_IRIS_PMV => {}
@@ -1557,7 +1554,7 @@ impl Hq2Engine {
                     words[..w].reverse();
                 }
                 // libglcore repeats rows itself and sends the x zoom as a
-                // whole number (__glExpFastDrawPixels): replicate in x.
+                // whole number: replicate in x.
                 self.gl_pixel_row(a[0] as i32, a[1] as i32, 0, w as u32, 1, 0, &words[..w], PixZoom::X, out);
                 self.pix_n = 0;
             }
@@ -1566,13 +1563,13 @@ impl Hq2Engine {
                 // getorigin to place its row).
                 out.shram(READBACK_SHRAM, g.win[0].wrapping_add(g.cpos[0]) as u32);
                 out.shram(READBACK_SHRAM + 1, g.win[1].wrapping_add(g.cpos[1]) as u32);
-                // Status: negative = invalid (gl_g_getcpos keeps its old
-                // values), zero = nothing to draw (gl_g_writepixels returns
+                // Status: negative = invalid (IRIS GL's getcpos keeps its old
+                // values), zero = nothing to draw (writepixels returns
                 // at once: mandel's window stayed grey), positive = valid.
                 out.shram(READBACK_SHRAM + 2, if g.cpos[2] != 0 { 0x8000_0000 } else { 1 });
             }
             T_GET_RASTERPOS => {
-                // __glExpGetRasterPosData: the raster colour (the position
+                // The raster colour (the position
                 // is kept by libglcore).
                 let c = g.cpos_color;
                 for (k, v) in c.iter().enumerate() {
@@ -2102,7 +2099,7 @@ impl Hq2Engine {
     /// One row of a GL pixel DMA (0x0B5 / 0x0B8, lrectwrite): `row` counts
     /// DMA rows; (x, y) is the rectangle's bottom-left corner in window
     /// coordinates (GL y up) and `h` its height. Row order depends on the
-    /// kernel path (Gr2MCPixDma), which walks the client's array in
+    /// kernel path, which walks the client's array in
     /// opposite directions:
     ///   0x0B5 (zoom 1): from the end of the bottom-up lrectwrite array, so
     ///     rows arrive TOP first (OPART MRI: 4 bands of 128 rows, y = 0..384);

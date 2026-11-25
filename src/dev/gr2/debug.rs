@@ -653,8 +653,6 @@ fn region_detail(off: u32) -> String {
     }
 }
 
-/// Decode a recorded PLL programming (7 bytes + bit count in byte 7) and
-/// name the tables the PROM/kernel use (GR2.h "Clock").
 /// The pixel clock a recorded PLL programming (seven bytes, sent a bit at a
 /// time) makes: 11.375 MHz x (6 (b4 + 1) + b5) / (b6 + 1), doubled when
 /// byte 1 is 0x00 and halved when it is 0x20. Fitted to IRIX's fourteen GR2
@@ -676,12 +674,12 @@ pub(super) fn pll_hz(b: &[u8; 8]) -> Option<u64> {
 }
 
 /// Decode a recorded PLL programming (7 bytes + bit count in byte 7) and
-/// name the tables the PROM/kernel use (GR2.h "Clock").
+/// name the tables the PROM and kernel use.
 pub(super) fn pll_describe(b: &[u8; 8]) -> String {
     let bytes = &b[..7];
     let name = match bytes {
-        [0x00, 0x10, 0x00, 0x15, 0x18, 0x01, 0x0f] => " (PLLclk107, the 60 Hz table)",
-        [0x00, 0x00, 0x00, 0x04, 0x05, 0x04, 0x06] => " (PLLclk132, the 72 Hz table)",
+        [0x00, 0x10, 0x00, 0x15, 0x18, 0x01, 0x0f] => " (the 60 Hz table)",
+        [0x00, 0x00, 0x00, 0x04, 0x05, 0x04, 0x06] => " (the 72 Hz table)",
         _ => "",
     };
     let clock = match pll_hz(b) {

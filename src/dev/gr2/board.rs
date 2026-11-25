@@ -147,7 +147,7 @@ pub struct Gr2 {
     pub(super) fin3_pending: AtomicU32,
     /// Set when the kernel acks FIN2 (write to 0x6A04C), which it does right
     /// before issuing a FIN2 command (pixel DMA 0x147, context save/restore)
-    /// and polling version bit 1 in a counted loop (100,000 x us_delay(1) for
+    /// and polling version bit 1 in a counted loop (100,000 polls 1 us apart for
     /// pixel DMA). Our HQ2 may still be drawing a large pixel DMA when that
     /// budget runs out: IRIX 5.3 then logged "Gr2PixelDma: TIMEOUT", raised a
     /// graphics error and detached Xsgi. While set, a version read with FIN2

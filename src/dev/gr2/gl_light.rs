@@ -19,7 +19,7 @@
 //!   diffuse RGBA 0x07A/0x07B, specular 0x07C/0x07D;
 //! - 0x075: scene ambient = model ambient, plus the sum of the enabled
 //!   lights' ambient when there are no local lights, no local viewer and no
-//!   two-sided lighting (__glExpLoadAmbientSum);
+//!   two-sided lighting;
 //! - 0x081: colour material (param 1 emission 2 ambient 3 diffuse 4 specular
 //!   5 ambient+diffuse; face 0 front 1 back 2 both; enable);
 //! - 0x10E: 0.0; DATA lighting on; 0x0D4: 1.0; DATA two-sided;
@@ -32,7 +32,7 @@
 //! 1.1 lighting equation per vertex. On GR2 the specular and spot factors
 //! always come from the uploaded tables (the exponents are only known
 //! through them), and the scene ambient is folded the way
-//! __glExpLoadAmbientSum decides (`refold`).
+//! libglcore decides (`refold`).
 
 use super::f;
 use crate::dev::gl::light::{norm, Light, Lighting, MAX_LIGHTS, SPEC_N, SPOT_N};
@@ -60,7 +60,7 @@ pub const T_NORMALIZE: u32 = 0x0e3;
 pub const T_NORMALIZE_B: u32 = 0x082;
 pub const T_FOG_ON: u32 = 0x027;
 pub const T_FOG: u32 = 0x028;
-/// Scale libglcore applies to the EXP fog density (__glExpPassFog).
+/// Scale libglcore applies to the EXP fog density.
 const FOG_EXP_SCALE: f32 = 0.180_464_26;
 
 
@@ -81,7 +81,7 @@ fn light_mut(lt: &mut Lighting, i: i32) -> Option<&mut Light> {
 }
 
 /// libglcore folds the lights' ambient into 0x075 unless there are local
-/// lights, a local viewer or two-sided lighting (__glExpLoadAmbientSum).
+/// lights, a local viewer or two-sided lighting.
 /// Kept current after every load, since any of those can change.
 fn refold(lt: &mut Lighting) {
     let per_light = lt.local_viewer != 0 || lt.two_sided != 0 || lt.enabled().any(|l| l.pos[3] != 0.0);

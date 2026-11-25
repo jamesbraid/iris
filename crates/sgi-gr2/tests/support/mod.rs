@@ -78,7 +78,7 @@ impl Rig {
         assert_eq!(drain_stalls(&mut self.e, &mut self.now, 1_000_000, 10_000), Idle::Yes);
     }
 
-    /// PROM Gr2TpSetup prologue plus the kernel's initial clear.
+    /// The PROM's textport setup prologue plus the kernel's initial clear.
     pub fn tp_init(&mut self) {
         self.w32(0x6a070, 0);
         self.w32(0x6a078, 0);
