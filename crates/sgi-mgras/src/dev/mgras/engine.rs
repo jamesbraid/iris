@@ -211,8 +211,10 @@ impl<M: HostMem> Shared<M> {
     }
 
     /// Execute `ops` and count them done. A panic stops the engine; ops
-    /// after it are counted without running.
-    fn execute(&self, ops: &mut Vec<Op>) {
+    /// after it are counted without running. `began` is when the worker
+    /// started the batch; its time is added to `busy_ns` before the batch
+    /// counts as done, so a caller woken by that sees it.
+    fn execute(&self, ops: &mut Vec<Op>, began: Option<std::time::Instant>) {
         let n = ops.len() as u64;
         let words = ops.iter().filter(|o| matches!(o, Op::Word { .. })).count() as u64;
         if !self.dead.load(Ordering::Acquire) {
@@ -231,6 +233,9 @@ impl<M: HostMem> Shared<M> {
             }
         }
         ops.clear();
+        if let Some(t) = began {
+            self.busy_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
         let _q = self.q.lock();
         self.words_done.fetch_add(words, Ordering::Release);
         self.done.fetch_add(n, Ordering::Release);
@@ -260,9 +265,7 @@ fn worker<M: HostMem>(sh: Arc<Shared<M>>) {
             let n = q.ops.len().min(BATCH_MAX);
             batch.extend(q.ops.drain(..n));
         }
-        let began = std::time::Instant::now();
-        sh.execute(&mut batch);
-        sh.busy_ns.fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        sh.execute(&mut batch, Some(std::time::Instant::now()));
         // A shell access that found the engine busy waits for this notify.
         sh.out.wake();
     }
@@ -890,7 +893,7 @@ impl<M: HostMem> MgrasEngine<M> {
                 batch.extend(q.ops.drain(..n));
             }
             ran += batch.len();
-            self.sh.execute(&mut batch);
+            self.sh.execute(&mut batch, None);
         }
         ran
     }
