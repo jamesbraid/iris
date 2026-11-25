@@ -1,8 +1,7 @@
 //! GE7 geometry engines — storage only.
 //!
 //! GE microcode is stored and read back but never executed; HQ2 commands are
-//! emulated at a high level (`hq2.rs`). The load/verify protocol is described
-//! in `ignore/gr2/GE7.h`.
+//! emulated at a high level (`hq2.rs`).
 
 pub const GE_WINDOW_WORDS: usize = 256;
 pub const GE_MAX: usize = 8;

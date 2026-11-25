@@ -1,8 +1,7 @@
 //! Brooktree Bt457 RAMDAC — one per colour channel (red, green, blue).
 //!
 //! Storage only. The display compositor reads `readmask` and `palette` to
-//! apply the per-channel gamma ramp. See `ignore/gr2/GR2.h` (Bt457 section)
-//! for the register protocol and the PROM/kernel init values.
+//! apply the per-channel gamma ramp. The PROM and kernel set the init values.
 
 /// Internal control register addresses (selected by `addr`, accessed via `cmd2`).
 pub const DAC_READMASK: u8 = 0x04;

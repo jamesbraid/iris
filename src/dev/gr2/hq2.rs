@@ -2,7 +2,7 @@
 //! command interpreter that runs on the HQ2 thread.
 //!
 //! The HQ2 and GE7 microcode is stored and read back but never executed.
-//! Each FIFO word index is the HQ2 microcode entry address (GR2.h), so the
+//! Each FIFO word index is the HQ2 microcode entry address, so the
 //! interpreter dispatches on it directly and turns each command into RE3
 //! register writes. Only the textport commands are implemented so far.
 
@@ -86,7 +86,7 @@ pub const CX_WORDS: usize = gl::CX_WORDS;
 pub const HQ_PCX_1E0: u32 = 0x1e0;
 pub const HQ_PCX_1E6: u32 = 0x1e6;
 /// GL microcode request that completes by raising FIN3: Xsgi sends it and
-/// spins on version bit 0, then clears FIN3 via 0x6b000 (see HQ2.h).
+/// spins on version bit 0, then clears FIN3 via 0x6b000.
 pub const HQ_GL_FIN3: u32 = 0x155;
 /// OpenGL tokens (libglcore EXPRESS `gr2_hq2_fifo`: struct offset X is FIFO
 /// index (X - 0x2000) / 4).
@@ -98,14 +98,14 @@ pub const GL_FLUSH: u32 = 0x006;
 /// SwapBuffers: `swap_buffers` (0x279C) = swap interval, then ioctl 1005.
 pub const GL_SWAP_BUFFERS: u32 = 0x1e7;
 
-// ── 2D (Xsgi DDX) commands, GL microcode (HQ2.h section 8) ─────────────────
+// ── 2D (Xsgi DDX) commands, GL microcode ───────────────────────────────────
 pub const HQ2_2D_BEGIN: u32 = 0x12c; // 0x404b0, sent first by expInitHW (1 word)
 pub const HQ2_2D_SOLID_RECT: u32 = 304; // stream: 4 DATA words per box
 pub const HQ2_2D_COLOR_AUX: u32 = 309; // aux-plane write mask
 /// Colour for CLEAR bits of glyphs/mono images/stipples when drawn opaque
-/// (HQ2.h called it FG_COLOR; the DDX writes the GC background here).
+/// (its documented name is FG_COLOR; the DDX writes the GC background here).
 pub const HQ2_2D_COLOR_OFF: u32 = 311;
-/// Colour for SET bits of glyphs/mono images/stipples (HQ2.h called it
+/// Colour for SET bits of glyphs/mono images/stipples (its documented name is
 /// BG_COLOR; the DDX writes the text foreground here).
 pub const HQ2_2D_COLOR_ON: u32 = 312;
 pub const HQ2_2D_MODE: u32 = 331; // visual/plane select (| 0x1000)
@@ -152,7 +152,7 @@ pub const HQ2_DMA_WRITE_PIXELS: u32 = 327;
 /// 0x147, drawn in the current GL context (window-relative, GL y up).
 pub const HQ2_GL_DMA_WRITE: u32 = 0x0b5;
 pub const HQ2_GL_DMA_WRITE_ZOOM: u32 = 0x0b8;
-/// Pixel DMA reads (HQ2.h "PIXEL DMA DIRECTION"): the same kernel ioctl and
+/// Pixel DMA reads: the same kernel ioctl and
 /// header as the writes, but the VDMA reads height * words/row words from
 /// HQ2_GEDMA; FIN2 when done. 0x152 = Xsgi expReadImage* (screen, X-style
 /// y = top row, format from BUF_SELECT); 0x0AC = GL lrectread /
@@ -167,7 +167,7 @@ fn is_pixel_dma(cmd: u32) -> bool {
     matches!(cmd, HQ2_DMA_WRITE_PIXELS | HQ2_GL_DMA_WRITE | HQ2_GL_DMA_WRITE_ZOOM)
 }
 /// Screen-to-screen copy: pitch; DATA chunk, srcX, srcY, w, h, dstX, dstY
-/// (X-style y). Layout from HQ2.h section 8 (unverified against a trace).
+/// (X-style y). Layout unverified against a trace.
 pub const HQ2_2D_COPY_RECT: u32 = 340;
 /// Glyphs (TE/CW text): x; DATA y, width, rows; then 8/16/32/64 data words.
 pub const HQ2_2D_GLYPH_8: u32 = 323;
@@ -380,7 +380,7 @@ pub fn read_value(s: &State2d, vram: u32) -> u32 {
 }
 
 /// Name of a FIFO word index: textport (PUC_*), GL/X (GE_*) or context-switch
-/// tokens from HQ2.h. Indices are microcode entry points, so the meaning
+/// tokens. Indices are microcode entry points, so the meaning
 /// depends on the loaded microcode; these are the documented ones.
 pub fn token_name(index: u32) -> Option<&'static str> {
     Some(match index {
@@ -423,7 +423,7 @@ pub fn token_name(index: u32) -> Option<&'static str> {
 }
 
 /// OpenGL microcode tokens (FIFO index bits 8:0), named after their libglcore
-/// EXPRESS emitters (HQ2.h "OpenGL token addressing").
+/// EXPRESS emitters.
 pub fn gl_token_name(tok: u32) -> Option<&'static str> {
     Some(match tok {
         0x003 => "GL_PIXWRITEMASK", 0x004 => "GL_MAKECURRENT", 0x006 => "GL_FLUSH",
@@ -462,7 +462,7 @@ pub fn gl_token_name(tok: u32) -> Option<&'static str> {
 /// Trace label for any FIFO index: a documented name, or the GL token with
 /// its HQ2 modifier bits (ITOF, conversion, LOADV, USEV) decoded.
 pub fn index_label(index: u32) -> String {
-    // GL names first: the IrisGL-era GE_* names HQ2.h lists for low indices
+    // GL names first: the IrisGL-era GE_* names for low indices
     // do not apply to the OpenGL microcode and are only used above 0x12B
     // (2D, textport, kernel tokens) or for the data ports.
     if let Some(n) = gl_token_name(index) {
@@ -543,7 +543,7 @@ impl Hq2Regs {
             HQ_FIFO_FULL => self.fifo_full,
             HQ_FIFO_EMPTY => self.fifo_empty,
             HQ_GE7LOADUCODE => self.loaducode & LOADUCODE_MASK,
-            // The kernel reads the HQ2 revision from hq_gepc[31:16] (HQ2.h).
+            // The kernel reads the HQ2 revision from hq_gepc[31:16].
             HQ_HQ_GEPC => (self.rev << 16) | (self.gepc & 0xffff),
             HQ_GEPC => self.gepc,
             HQ_INTR => self.intr,
@@ -1418,7 +1418,7 @@ impl Hq2Engine {
                 }
                 // 12-bit RGB (MODE 2, 12-bit TrueColor windows): the RE3
                 // writes the value to both 12-bit buffers and the plane mask
-                // picks one (RE3.h). The buffers never move; ROP flag bit 3
+                // picks one. The buffers never move; ROP flag bit 3
                 // (the window's dbc buffer * 8) names buffer 1. A mask the
                 // DDX already moved or doubled (dbc -3 / -1, expTileRects)
                 // is used as it is.
@@ -1758,7 +1758,7 @@ impl Hq2Engine {
         out.reg(re3::REG_IR, re3::IR_FLAT);
     }
 
-    /// PUC_DRAWCHAR (GR2.h): xsize; ysize, mode, xorig, yorig, xmove, ymove,
+    /// PUC_DRAWCHAR: xsize; ysize, mode, xorig, yorig, xmove, ymove,
     /// then 18 rows, bottom row first, MSB = leftmost pixel.
     fn drawchar(&mut self, out: &mut dyn Re3Sink) {
         let a = self.args;

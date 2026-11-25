@@ -1,5 +1,4 @@
-//! GE7 lighting and fog (HLE), fed by libglcore EXPRESS (gr2_lighting.c,
-//! gr2_fog.c). See HQ2.h "OpenGL token addressing" for the token formats.
+//! GE7 lighting and fog (HLE), fed by libglcore EXPRESS.
 //!
 //! libglcore loads the GE's lighting state through:
 //! - key/value parameter pairs on 0x080 (GE parameter address, value; both

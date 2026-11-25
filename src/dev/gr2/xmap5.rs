@@ -2,7 +2,7 @@
 //!
 //! Storage only: mode table (per DID), misc registers and the 8192-entry CLUT.
 //! Writes to the broadcast port (`xmapall`) go to all five. The compositor
-//! reads channel `x % 5`. Protocol and init values: `ignore/gr2/XMAP5.h`.
+//! reads channel `x % 5`.
 
 pub const XMAP_MISC: u32 = 0x00;
 pub const XMAP_MODE: u32 = 0x04;
@@ -45,8 +45,8 @@ impl Xmap5 {
                 self.misc[(self.addr & 7) as usize] = val as u8;
                 self.addr = (self.addr + 1) & 0x1fff;
             }
-            // Mode table is byte-addressed: addrlo = DID * 4 (kernel
-            // gr2_retrace.c swap). A 32-bit mode access moves 4 bytes; the
+            // Mode table is byte-addressed: addrlo = DID * 4 (the kernel's
+            // buffer swap). A 32-bit mode access moves 4 bytes; the
             // +4 advance is inferred (the kernel always sets the address).
             XMAP_MODE => {
                 self.mode[((self.addr >> 2) & 31) as usize] = val;

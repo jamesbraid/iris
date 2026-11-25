@@ -6,10 +6,10 @@
 //! the screen's frame from it row by row. Internally the
 //! XMAP5 CLUT holds `0x00RRGGBB`; only this final pack swaps to screen order.
 //!
-//! Per pixel, highest priority first (VC1.h "screen composition"): cursor,
+//! Per pixel, highest priority first: cursor,
 //! popup (aux\[3:2\]), overlay (aux\[1:0\]), main visual chosen by the DID's
 //! XMAP5 mode word, blackout. The Bt457 read mask and gamma ramp apply last.
-//! Several details are unverified (see XMAP5.h/VC1.h). The textport path
+//! Several details are unverified. The textport path
 //! (8-bit CI, buffer 0, CLUT page 16) is the one the PROM and kernel set up.
 
 use super::bt457::Bt457;
@@ -18,7 +18,7 @@ use super::vc1::Vc1;
 use super::xmap5::Xmap5;
 
 pub const OUT_STRIDE: usize = 2048;
-/// Cursor colour n (1..3) is CLUT entry 0x1C00 + n (XMAP5.h).
+/// Cursor colour n (1..3) is CLUT entry 0x1C00 + n.
 const CURSOR_CLUT_BASE: usize = 0x1c00;
 
 // XMAP5 mode word fields.
