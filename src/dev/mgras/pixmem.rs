@@ -133,10 +133,15 @@ impl PixMem {
                 // Four 9-bit pixels a word (`Buffer::locate`).
                 for (tx, chunk) in out.chunks_mut(OVERLAY_TILE_W).enumerate() {
                     let (i, _, _) = b.locate((tx * OVERLAY_TILE_W) as u32, y);
-                    for (quad, w) in chunk.chunks_mut(4).zip(&self.words[i..]) {
-                        for (j, o) in quad.iter_mut().enumerate() {
-                            *o = (*w >> (9 * j)) as u32 & 0x1FF;
-                        }
+                    let whole = chunk.len() / 4;
+                    let mut quads = chunk.chunks_exact_mut(4);
+                    // Whole words a quad each, written out so the shifts are constants.
+                    for (quad, w) in (&mut quads).zip(&self.words[i..]) {
+                        quad.copy_from_slice(&[*w as u32 & 0x1FF, (*w >> 9) as u32 & 0x1FF, (*w >> 18) as u32 & 0x1FF, (*w >> 27) as u32 & 0x1FF]);
+                    }
+                    let last = quads.into_remainder();
+                    if let Some(w) = self.words.get(i + whole).filter(|_| !last.is_empty()) {
+                        last.iter_mut().enumerate().for_each(|(j, o)| *o = (*w >> (9 * j)) as u32 & 0x1FF);
                     }
                 }
             }
@@ -175,7 +180,7 @@ mod tests {
         assert_eq!((m.get(&b, 0, 5), m.get(&b, 1, 5), m.get(&b, 2, 5)), (0, 0x1AB, 0xFF));
         // A row read is the pixels one by one, across a tile boundary.
         for x in [0, 5, 766, 767, 768, 769, 1279] {
-            m.put(&b, x, 9, (x as u64 * 7 + 3) & 0x1FF);
+            m.put(&b, x, 9, ((x as u64 * 7 + 3) & 0x1FF) | 0x100);
         }
         let mut row = [0u32; 1280];
         m.read_row(&b, 9, &mut row);
