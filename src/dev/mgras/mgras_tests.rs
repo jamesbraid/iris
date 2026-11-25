@@ -2605,7 +2605,7 @@ impl Xorshift {
 fn random_draw(kind: GraphicsBoard, seed: u64) -> [u8; 32] {
     let mut r = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     // (XFRMODE, host element type word, host bytes a pixel, int-to-float scale, clamp scale)
-    let cases: [(u32, u32, usize, f32, f32); 9] = [
+    let cases: [(u32, u32, usize, f32, f32); 10] = [
         (0xC0_0080, 1, 4, 1.0 / 255.0, 255.0),
         (0x80, 1, 4, 1.0 / 255.0, 255.0),
         (0x70, 1, 3, 1.0 / 255.0, 255.0),
@@ -2615,8 +2615,10 @@ fn random_draw(kind: GraphicsBoard, seed: u64) -> [u8; 32] {
         (0xC0_0080, 3, 8, 1.0 / 65535.0, 255.0),
         (0xC0_0081, 1, 4, 1.0 / 255.0, 65535.0),
         (0x70, 3, 6, 1.0 / 65535.0, 255.0),
+        // Colour index bytes: the draw wraps an index above 255, where a pipeline of clamps would not.
+        (0x00, 1, 1, 1.0 / 255.0, 1000.0),
     ];
-    let (xfrmode, elem, bpp, scale, clamp) = cases[r.below(9) as usize];
+    let (xfrmode, elem, bpp, scale, clamp) = cases[r.below(10) as usize];
     // Half the images are big enough for the pipeline table.
     let (w, h) = if r.below(2) == 0 { (1 + r.below(40) as usize, 1 + r.below(8) as usize) } else { (32 + r.below(48) as usize, 32 + r.below(8) as usize) };
     let win = (r.below(30) as u32, r.below(30) as u32, 40 + r.below(80) as u32, 40 + r.below(80) as u32);
@@ -2652,6 +2654,17 @@ fn draw_pixels_fast_paths_match_plain_ones() {
         let bad: Vec<u64> = (1..=40).filter(|&t| { let (a, b) = fast_and_plain(|| random_draw(kind, t)); a != b }).collect();
         assert!(bad.is_empty(), "{kind:?}: seeds {bad:?} differ");
     }
+}
+
+/// 16-bit elements, and bytes to shorts, go through the element pipeline: the same random draws as above (a hundred
+/// more seeds, `HighImpact`) leave the board as `run_row` does, and a good share of them take that route.
+#[test]
+fn draw_pixels_elements_match_plain_ones() {
+    use super::gl::{path_count, Path};
+    let before = path_count(Path::PipeElems);
+    let bad: Vec<u64> = (41..=140).filter(|&t| { let (a, b) = fast_and_plain(|| random_draw(GraphicsBoard::HighImpact, t)); a != b }).collect();
+    assert!(bad.is_empty(), "seeds {bad:?} differ");
+    assert!(path_count(Path::PipeElems) >= before + 8, "only {} draws took the element pipeline", path_count(Path::PipeElems) - before);
 }
 
 /// A draw counts the route it took and the one it did not: the table and the row copy on the fast paths, their

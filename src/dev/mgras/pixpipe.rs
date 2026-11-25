@@ -292,6 +292,31 @@ impl PixMem {
         Ok(ByteMap { in_px, out_px, places, src, cols })
     }
 
+    /// `run_row` and `pack_comp` for 8- and 16-bit elements, one to a component, through scales, scale and bias and
+    /// clamps to bytes or shorts, with the parameters read once for a draw; `Err` says why not.
+    pub(crate) fn elem_pipe(&self, comps: usize, out_comps: usize, ty: u32, row_bytes: usize, pixels: usize) -> Result<ElemPipe, Path> {
+        if !matches!(ty & 0xF, 0 | 1) {
+            return Err(Path::PipeOutput);
+        }
+        let (c, esize, elem) = self.input_shape_fit(out_comps, Some((row_bytes, pixels)));
+        if c != comps || comps != out_comps || !(1..=2).contains(&esize) || elem.size() != esize || row_bytes != pixels * comps * esize {
+            return Err(Path::PipeShape);
+        }
+        let f = |w: u32| f32::from_bits(w) as f64;
+        let mut ops = Vec::new();
+        for (e, st) in self.modules() {
+            match e {
+                entry::SHIFTADD | entry::UNPACK | entry::EXPAND | entry::LUT | entry::COMPRESS => return Err(Path::PipeModule),
+                entry::MASK if self.loaded(st + 5) => return Err(Path::PipeModule),
+                entry::INTTOFLOAT => ops.push(Op::Scale(f(self.read(st + 5)))),
+                entry::SCALEBIAS => ops.push(Op::ScaleBias(std::array::from_fn(|k| f(self.read(st + 6 + 2 * k as u32))), std::array::from_fn(|k| f(self.read(st + 5 + 2 * k as u32))))),
+                entry::CLAMP => ops.push(Op::Clamp(std::array::from_fn(|k| f(self.read(st + 5 + k as u32))))),
+                _ => {}
+            }
+        }
+        Ok(ElemPipe { elem, ops, short: ty & 0xF == 1 })
+    }
+
     /// The GE's x replication for a fractional zoom (`xzoom`, its state
     /// word 4: ceil(zx)), 1 without.
     pub fn xzoom_rep(&self) -> usize {
@@ -639,6 +664,74 @@ impl BytePipe {
     }
 }
 
+/// One module of an `ElemPipe`, `run_row`'s arithmetic with its parameters as numbers, cycling over twelve elements.
+enum Op {
+    Scale(f64),
+    ScaleBias([f64; 12], [f64; 12]),
+    Clamp([f64; 12]),
+}
+
+/// `PixMem::elem_pipe`'s pipeline.
+pub struct ElemPipe {
+    elem: Elem,
+    ops: Vec<Op>,
+    /// Components go out as big-endian shorts, else bytes.
+    short: bool,
+}
+
+/// `x.round().clamp(0.0, max as f64) as u32`, without the library call: half away from zero, NaN and below zero 0.
+#[inline(always)]
+fn rounded(x: f64, max: u32) -> u32 {
+    // Anything past max + 1 rounds to max however far, and below that the cast and the difference are exact.
+    let x = if x > 0.0 { x.min(max as f64 + 1.0) } else { 0.0 };
+    // SAFETY: x is a number from 0 to 65536 here, so the conversion is exact and in range.
+    let t = unsafe { x.to_int_unchecked::<u32>() };
+    (t + (x - t as f64 >= 0.5) as u32).min(max)
+}
+
+impl ElemPipe {
+    /// A row of whole pixels as the components `run_row` and `pack_comp` give.
+    pub fn row(&self, row: &[u8], out: &mut Vec<u8>) {
+        // A block is a whole number of the twelve-element cycles, so each starts at a place of its own.
+        const BLOCK: usize = 12 * 64;
+        // `f` on each element and its place in the cycle.
+        fn cycle(v: &mut [f64], f: impl Fn(usize, &mut f64)) {
+            let mut cycles = v.chunks_exact_mut(12);
+            for c in &mut cycles {
+                let c: &mut [f64; 12] = c.try_into().unwrap();
+                c.iter_mut().enumerate().for_each(|(k, x)| f(k, x));
+            }
+            cycles.into_remainder().iter_mut().enumerate().for_each(|(k, x)| f(k, x));
+        }
+        let esize = self.elem.size();
+        let mut buf = [0.0f64; BLOCK];
+        for src in row.chunks(BLOCK * esize) {
+            let v = &mut buf[..src.len() / esize];
+            match self.elem {
+                Elem::U8 => v.iter_mut().zip(src).for_each(|(x, &b)| *x = b as f64),
+                Elem::S8 => v.iter_mut().zip(src).for_each(|(x, &b)| *x = b as i8 as f64),
+                Elem::U16 => v.iter_mut().zip(src.chunks_exact(2)).for_each(|(x, b)| *x = u16::from_be_bytes([b[0], b[1]]) as f64),
+                _ => v.iter_mut().zip(src.chunks_exact(2)).for_each(|(x, b)| *x = i16::from_be_bytes([b[0], b[1]]) as f64),
+            }
+            for op in &self.ops {
+                match op {
+                    Op::Scale(s) => v.iter_mut().for_each(|x| *x *= s),
+                    Op::ScaleBias(sc, b) => cycle(v, |k, x| *x = *x * sc[k] + b[k]),
+                    Op::Clamp(cs) => cycle(v, |k, x| *x = x.clamp(0.0, 1.0) * cs[k]),
+                }
+            }
+            let mut packed = [0u8; 2 * BLOCK];
+            let n = v.len() << self.short as usize;
+            if self.short {
+                packed.chunks_exact_mut(2).zip(v.iter()).for_each(|(o, &x)| o.copy_from_slice(&(rounded(x, 65535) as u16).to_be_bytes()));
+            } else {
+                packed.iter_mut().zip(v.iter()).for_each(|(o, &x)| *o = rounded(x, 255) as u8);
+            }
+            out.extend_from_slice(&packed[..n]);
+        }
+    }
+}
+
 /// A host element type.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Elem {
@@ -918,6 +1011,126 @@ mod tests {
             assert_eq!(got, want, "trial {trial} mods {mods:x?} mode {mode} comps {comps} out {out}");
         }
         assert!(made > 200 && refused[0] > 20 && refused[1] > 20, "reach: {made} made, refused {refused:?}");
+    }
+
+    /// `rounded` is `round` then `clamp` then the cast, at the edges rounding gets wrong (0.49999999999999994, halves,
+    /// the largest below 2^52), and for NaN, infinities and values far past the range.
+    #[test]
+    fn rounded_is_round_clamp_cast() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut vals = vec![0.0, -0.0, 0.5, 0.49999999999999994, 1.5, 254.5, 255.4999, 255.5, 256.0, 65534.5, 65535.5, 4503599627370495.5, 4503599627370496.0, 1e19, 1.9e19, 1e300, f64::MAX, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, -0.4999, -0.5, -1.5, -1e300, f64::MIN_POSITIVE, 5e-324];
+        for _ in 0..20000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            vals.push(f64::from_bits(seed));
+            vals.push((seed >> 40) as f64 / 64.0);
+            vals.push((seed >> 48) as f64 / 2.0 + 0.5);
+        }
+        for x in vals {
+            assert_eq!(rounded(x, 255), x.round().clamp(0.0, 255.0) as u32, "{x:e} to a byte");
+            assert_eq!(rounded(x, 65535), x.round().clamp(0.0, 65535.0) as u32, "{x:e} to a short");
+        }
+    }
+
+    /// `ElemPipe::row` is `run_row` then `pack_comp` over random pipelines, hostile parameters and rows longer than
+    /// a block; each module or element size it cannot do is refused.
+    #[test]
+    fn elem_pipe_is_run_row() {
+        let lut = Lut::default();
+        let mut seed = 0x1357_9BDF_2468_ACE1u64;
+        let mut below = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) % n
+        };
+        let (mut made, mut refused) = (0, 0);
+        for trial in 0..500 {
+            let odd = |r: u64, x: f32| match r {
+                0 => f32::NAN,
+                1 => f32::INFINITY,
+                2 => -x * 3.0,
+                3 => 3.0e38,
+                _ => x,
+            };
+            let mut pool = vec![entry::INTTOFLOAT, entry::SCALEBIAS, entry::CLAMP, entry::COLMATRIX, entry::MASK, entry::CLAMP, entry::SCALEBIAS];
+            let mut mods = Vec::new();
+            while !pool.is_empty() {
+                let e = pool.remove(below(pool.len() as u64) as usize);
+                if below(3) != 0 {
+                    mods.push(e);
+                }
+            }
+            // Every sixth pipeline has a module `run_row` does more with.
+            let other = (trial % 6 == 0).then(|| [entry::SHIFTADD, entry::UNPACK, entry::EXPAND, entry::LUT, entry::COMPRESS][below(5) as usize]);
+            if let Some(e) = other {
+                mods.insert(below(mods.len() as u64 + 1) as usize, e);
+            }
+            let addrs: Vec<u32> = (0..mods.len()).map(|k| 0xC00 + 0x30 * k as u32).collect();
+            let mut prog = Vec::new();
+            for (k, &e) in mods.iter().enumerate() {
+                prog.extend([e, if k == 0 { 0 } else { addrs[k - 1] }]);
+            }
+            prog.extend([entry::PIPECONTROL, addrs.last().copied().unwrap_or(0)]);
+            let mut m = mem(&prog);
+            let mut mask_loaded = false;
+            for (&e, &st) in mods.iter().zip(&addrs) {
+                let state: Vec<u32> = match e {
+                    entry::INTTOFLOAT => vec![0, 0, 0, 0, 0, odd(below(12), [1.0 / 255.0, 2.0 / 255.0, 1.0 / 65535.0, 1.0][below(4) as usize]).to_bits()],
+                    entry::SCALEBIAS => [vec![0x50C, 0, 0x50C, 0, 0xD], (0..12).flat_map(|_| [odd(below(12), below(100) as f32 / 100.0).to_bits(), odd(below(12), 0.5 + below(100) as f32 / 50.0).to_bits()]).collect()].concat(),
+                    entry::CLAMP => [vec![0x50C, 0x1A000, 0x50C, 2, 4], (0..12).map(|_| odd(below(12), [255.0, 65535.0, 127.0, 1.0 + below(300) as f32][below(4) as usize]).to_bits()).collect()].concat(),
+                    entry::MASK => {
+                        // Loaded by a state write, or as a fresh context has it.
+                        if below(2) == 0 {
+                            put(&mut m, st, &[0, 0, 0, 0, 0, 0x0F]);
+                        }
+                        mask_loaded = m.loaded(st + 5);
+                        continue;
+                    }
+                    entry::SHIFTADD => vec![0, 0, 0, 0, 0, below(3) as u32, 1],
+                    entry::EXPAND => vec![0, 0, 0, 0, 0, 6, 0, 1.0f32.to_bits(), 1.0f32.to_bits(), 1.0f32.to_bits()],
+                    entry::LUT => vec![0, 0, 0, 0, 0, 2, 0, 0, F2_23],
+                    _ => continue,
+                };
+                put(&mut m, st, &state);
+            }
+            let kind = below(4) as u32;
+            m.write(ELEMENT_TYPE, kind);
+            let ty = below(2) as u32;
+            let out = [1usize, 3, 4][below(3) as usize];
+            let (comps, esize, _) = m.input_shape(out);
+            let pixels = 1 + below(900) as usize;
+            let row: Vec<u8> = (0..pixels * comps * esize).map(|_| if below(5) == 0 { [0u8, 255, 128][below(3) as usize] } else { below(256) as u8 }).collect();
+            let pipe = m.elem_pipe(comps, out, ty, row.len(), pixels);
+            if other.is_some() || mask_loaded {
+                assert!(pipe.is_err(), "trial {trial} mods {mods:x?} was not refused");
+                refused += 1;
+                continue;
+            }
+            let pipe = pipe.unwrap_or_else(|e| panic!("trial {trial} mods {mods:x?}: refused as {}", e as usize));
+            let mut want = Vec::new();
+            for v in m.run_row(&lut.0[..], &row, pixels, out) {
+                super::super::rss::pack_comp(ty, v, &mut want);
+            }
+            let mut got = Vec::new();
+            pipe.row(&row, &mut got);
+            assert!(got == want, "trial {trial} mods {mods:x?} element type {kind} comps {comps} short {ty} pixels {pixels}");
+            made += 1;
+        }
+        assert!(made > 250 && refused > 30, "reach: {made} made, {refused} refused");
+        // Not 32-bit or float elements, bits, other output types, a different component count, or a row that is not the pixels'.
+        let mut m = mem(&[entry::INTTOFLOAT, 0, entry::PIPECONTROL, 0xD05]);
+        put(&mut m, 0xD05, &[0, 0, 0, 0, 0, 1.0f32.to_bits()]);
+        m.write(ELEMENT_TYPE, 1);
+        assert!(m.elem_pipe(4, 4, 0, 40, 10).is_ok());
+        for ty in [3, 4, 5, 7] {
+            assert!(m.elem_pipe(4, 4, ty, 40, 10).is_err(), "output type {ty}: not bytes or shorts");
+        }
+        assert!(m.elem_pipe(4, 4, 0, 41, 10).is_err(), "a row that is not the pixels'");
+        assert!(m.elem_pipe(3, 4, 0, 40, 10).is_err(), "components that change");
+        m.write(ELEMENT_TYPE, 4);
+        assert!(m.elem_pipe(4, 4, 0, 160, 10).is_err(), "32-bit elements");
     }
 
     /// RGB bytes through an identity pipeline that fills alpha take the pad route, and any change to a colour or

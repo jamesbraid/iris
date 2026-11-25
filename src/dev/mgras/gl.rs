@@ -707,6 +707,7 @@ paths! {
     PipeSmall "pipeline small draw",
     PipeElements "pipeline not 8-bit elements",
     PipeOutput "pipeline wide output",
+    PipeElems "pipeline elements",
     PipeModule "pipeline module",
     PipeCycle "pipeline cycle",
     PipeShape "pipeline output shape",
@@ -2262,11 +2263,18 @@ impl Gl {
         if table.as_ref().is_some_and(|t| t.is_pad()) {
             note(Path::PipePad);
         }
+        // Other one-element pipelines (16-bit elements, bytes to shorts) as a row of arithmetic, not `run_row`'s vectors.
+        let elems = if table.is_none() && fast_paths() && !index { self.pix.elem_pipe(comps, out_comps, ty, row_in, w).ok() } else { None };
+        if elems.is_some() {
+            note(Path::PipeElems);
+        }
         for r in 0..h {
             rb.clear();
             let row = &bytes[r * stride..r * stride + row_in];
             if let Some(table) = &table {
                 table.row(row, &mut rb);
+            } else if let Some(elems) = &elems {
+                elems.row(row, &mut rb);
             } else {
                 for v in self.pix.run_row(lut, row, w, out_comps) {
                     pack(v, &mut rb);
