@@ -155,6 +155,12 @@ impl Failure {
 /// reads the boards make fit at once. Larger reads go through in pieces.
 const READBACK_BYTES: u64 = 16 << 20;
 
+/// Test hook: `SGI_GPU_TEST_READ_DELAY_MS` holds every readback that long, as a GPU backlog would.
+fn read_delay() -> Option<Duration> {
+    static DELAY: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    *DELAY.get_or_init(|| std::env::var("SGI_GPU_TEST_READ_DELAY_MS").ok()?.parse().ok().map(Duration::from_millis))
+}
+
 /// The readback buffers of a device, lent to one `Gpu::read` at a time and
 /// kept for the next, so a board that never reads holds none and boards that
 /// read in turn share one.
@@ -635,6 +641,9 @@ impl Gpu {
         }
         if span == 0 {
             return Ok(());
+        }
+        if let Some(d) = read_delay() {
+            std::thread::sleep(d);
         }
         self.check()?;
         let staging = self.readback.free.lock().pop().unwrap_or_else(|| {
