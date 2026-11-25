@@ -398,7 +398,8 @@ impl<M: HostMem> BoardEngine for Gr2Engine<M> {
         if t.0 != key {
             *t = (key, t.1 + 1);
         }
-        Some(HeadTiming { frame_clocks, clock_hz: display::TIMING_CLOCK_HZ, fields: 1, lines: h, epoch_ns: -1, generation: t.1 })
+        // `lines` counts blanking, which is not known: 0 means no line total.
+        Some(HeadTiming { frame_clocks, clock_hz: display::TIMING_CLOCK_HZ, fields: 1, lines: 0, epoch_ns: -1, generation: t.1 })
     }
 
     fn frame_generation(&self, head: u32) -> u64 {

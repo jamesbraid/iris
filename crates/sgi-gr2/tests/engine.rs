@@ -492,12 +492,13 @@ fn the_size_and_timing_follow_the_vc1_and_the_monitor_code() {
     assert_eq!(six.e.scanout(0, &mut px).unwrap(), Some((1024, 768)));
     assert_eq!(px.len(), 1024 * 768);
 
+    // `lines` is the total with blanking, which is not known: 0.
     // 60 Hz at 1280 by 1024: the built-in set for any code but 1, 9, 6 and 14.
     program_vc1(&mut rig, 1280, 1024, 0, false);
     rig.idle();
     assert_eq!(rig.e.frame_size(0), Some((1280, 1024)));
     let t = rig.e.head_timing(0).expect("a timing");
-    assert_eq!((t.clock_hz as u64 / (t.frame_clocks), t.fields, t.lines, t.epoch_ns), (60, 1, 1024, -1));
+    assert_eq!((t.clock_hz as u64 / (t.frame_clocks), t.fields, t.lines, t.epoch_ns), (60, 1, 0, -1));
     // 72 Hz for code 1.
     let mut r72 = Rig::with_probe(indigo(1));
     program_vc1(&mut r72, 1280, 1024, 0, false);
@@ -513,7 +514,7 @@ fn the_size_and_timing_follow_the_vc1_and_the_monitor_code() {
     assert_eq!(rig.e.scanout(0, &mut px).unwrap(), Some((1024, 768)));
     assert_eq!(px.len(), 1024 * 768);
     let t = rig.e.head_timing(0).unwrap();
-    assert_eq!((t.lines, t.generation > g), (768, true));
+    assert_eq!((t.lines, t.generation > g), (0, true));
 
     // A loaded timing file, an interlaced one and the codes with no built-in set: the size, no rate.
     program_vc1(&mut rig, 1280, 1024, 0, true);
