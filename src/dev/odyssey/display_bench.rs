@@ -42,13 +42,31 @@ const SCENES: [(Scene, &str); 4] =
 /// 12-bit, colour index 8 and 12.
 const MODES: [u32; 7] = [0x0052_15a6, 0x0096_55a6, 0x004b_59a6, 0x004b_57a6, 0x0060_0da6, 0x004b_5f10, 0x0052_0e00];
 
+/// The screen's size: `BENCH_W` x `BENCH_H`, 1280 x 1024 as `test_screen` leaves it.
+fn screen_size() -> (u32, u32) {
+    let env = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    (env("BENCH_W", 1280), env("BENCH_H", 1024))
+}
+
+/// Where the window-id buffer starts and ends, in 16-byte units, behind a `w` x `h` frame buffer.
+fn wid_span(w: u32, h: u32) -> (u32, u32) {
+    let tiles = w.div_ceil(16) * h.div_ceil(16);
+    (0x2000 + tiles * 256, 0x2000 + tiles * 256 + tiles * 32)
+}
+
 fn scene_board(scene: Scene) -> Box<Board> {
     let mut s = Board::new("v12", 11).expect("board");
     let mut rng = Lcg(0x5eed_0001);
+    let (sw, sh) = screen_size();
+    let (wid_base, wid_end) = wid_span(sw, sh);
 
     s.test_screen();
+    s.regs().set_pbj(pbj::OVERLAY_BASE, wid_base);
+    s.regs().set_pbj(pbj::WIDTH, sw);
+    s.regs().set_pbj(pbj::HEIGHT, sh);
+    s.regs().set_pbj(pbj::STRIDE, sw.div_ceil(16));
     // The frame buffer and the window-id buffer, from the seed.
-    let fb_end = (0x14_2000 + 0x2_8000) * 16;
+    let fb_end = wid_end as u64 * 16;
     let mem = s.vram.ptr();
     for a in (0x2000 * 16..fb_end).step_by(4) {
         mem.store(a as u64, 4, rng.next_u32() as u64);
@@ -60,7 +78,7 @@ fn scene_board(scene: Scene) -> Box<Board> {
         let v = (i * 0x3ff / 0x5ff) & 0x3ff;
         s.regs().set_lut((ODSY_GAMMA_BASE + i) as usize, v << 20 | v << 10 | v);
     }
-    let wid = Surface::new(0x14_2000, 80, 1);
+    let wid = Surface::new(wid_base, sw.div_ceil(16), 1);
     let rgb = matches!(scene, Scene::Rgb);
     for id in 0..dispmode::COUNT as usize {
         s.regs().set_dispmode(id, if rgb { MODES[0] } else { MODES[id % MODES.len()] });
@@ -75,8 +93,8 @@ fn scene_board(scene: Scene) -> Box<Board> {
     }
     // Windows: 64-pixel blocks of one window id, each with an overlay id;
     // the overlay byte set on about one pixel in five.
-    for y in 0..1024u32 {
-        for x in 0..1280u32 {
+    for y in 0..sh {
+        for x in 0..sw {
             let block = x / 64 + 3 * (y / 48);
             let at = wid.offset(x, y);
             let mem = s.vram.ptr();
@@ -236,6 +254,35 @@ fn compose_and_present_timings() {
     display.out().requests.capture(true);
     let ms = bench(|| Odyssey::frame(&locks, &display));
     println!("frame: composed and presented in {ms:.3} ms");
+}
+
+/// ms a frame of snapshot and compose of `BENCH_SCENE` (mixed) at `BENCH_W` x `BENCH_H`, `BENCH_FRAMES` a run
+/// (0: build only), `BENCH_RUNS` runs, `BENCH_WIDE=1` for the ten-bit colour maps.
+#[test]
+#[ignore = "benchmark"]
+fn compose_frames() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (runs, frames, wide) = (env("BENCH_RUNS", 5), env("BENCH_FRAMES", 8), env("BENCH_WIDE", 0) != 0);
+    let name = std::env::var("BENCH_SCENE").unwrap_or_else(|_| "mixed".into());
+    let scene = SCENES.iter().find(|s| s.1 == name).expect("BENCH_SCENE").0;
+    let s = scene_board(scene);
+    let regs = s.regs().read();
+    let displayed = s.front.lock().displayed_buffer;
+    let mem = s.vram.ptr_shared();
+    let (w, h) = { let f = Frame::snapshot_in(&regs, displayed, wide).unwrap(); (f.width as usize, f.height as usize) };
+    let mut out = vec![0u32; w * h];
+    let mut ms = Vec::new();
+    for _ in 0..runs {
+        let t = Instant::now();
+        for _ in 0..frames {
+            let frame = Frame::snapshot_in(&regs, displayed, wide).unwrap();
+            frame.compose(mem, &regs, &mut out, w, h);
+            std::hint::black_box(&out);
+        }
+        ms.push(t.elapsed().as_secs_f64() * 1e3 / frames.max(1) as f64);
+    }
+    let min = ms.iter().cloned().fold(f64::MAX, f64::min);
+    println!("vpro compose {name} {w}x{h} wide={wide}: ms a frame {ms:.2?} ({:.2} ns a pixel at the min)", min * 1e6 / (w * h) as f64);
 }
 
 /// Captures of real screens (`vpro scanout save`), composed new and pixel
