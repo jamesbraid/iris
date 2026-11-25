@@ -10,6 +10,9 @@ use sgi_engine::inject::Point;
 use crate::dev::gr2::engine::{Config, Gr2Engine};
 use crate::dev::gr2::{AuxWindow, Gr2Probe};
 
+/// Bit 0 of the engine's `irq_levels`: the HQ2 FIFO level, GIO interrupt line 0. Not raised yet.
+pub const IRIS_GR2_IRQ_FIFO: u64 = 1;
+
 /// The GR2 configuration: the shared part, then the board's.
 #[repr(C)]
 #[derive(Clone, Copy)]
