@@ -2087,7 +2087,8 @@ fn a_state_command_answers_busy_when_the_state_stays_out() {
 /// has the display thread release it as its last act.
 #[test]
 fn a_stop_from_the_main_thread_leaves_the_renderer_alone() {
-    use crate::gfx_display::{Frame, Renderer};
+    use crate::display::Renderer;
+    use crate::gfx_display::GfxDisplay;
     use crate::traits::Device;
     use std::sync::atomic::AtomicU32;
     struct Spy(Arc<AtomicU32>);
@@ -2116,7 +2117,7 @@ fn a_stop_from_the_main_thread_leaves_the_renderer_alone() {
                 let cfg = test_cfg();
                 let host = TestHost::new();
                 let kona = Kona::new(cfg, host.clone(), host.clone(), crate::dev::kona::tests::test_status(), None).unwrap();
-                *kona.with_backend(|b| b.display()).out().window.renderer.lock() = Some(Box::new(Spy(spy)));
+                *kona.with_backend(|b| b.display()).renderer_slot().lock() = Some(Box::new(Spy(spy)));
                 kona.start();
                 kona.stop();
             })
@@ -2633,7 +2634,7 @@ fn the_sample_mask_and_alpha_to_mask_thin_the_coverage() {
     command(&mut b, Grammar::Gl, SET_MULTISAMPLE_PATTERN, &[0x80a3]);
 }
 
-/// ms a frame of glDrawPixels of a `BENCH_W` x `BENCH_H` (720 x 486) image, `BENCH_CASE` rgba8, rgba16 or rgb10a2
+/// ms a frame of glDrawPixels of a `BENCH_W` x `BENCH_H` (720 x 486) image, `BENCH_CASE` rgba8, rgb8, rgba16 or rgb10a2
 /// (all by default), `BENCH_FRAMES` a run (0: build only), `BENCH_RUNS` runs; the far corner is checked.
 #[test]
 #[ignore]
@@ -2642,7 +2643,7 @@ fn bench_draw_pixels() {
     let env = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let (w, h, runs, frames) = (env("BENCH_W", 720), env("BENCH_H", 486), env("BENCH_RUNS", 5), env("BENCH_FRAMES", 4));
     let only = std::env::var("BENCH_CASE").unwrap_or_default();
-    let cases: [(&str, u32, u32, usize); 3] = [("rgba8", FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 1), ("rgba16", FORMAT_RGBA, TYPE_UNSIGNED_SHORT, 2), ("rgb10a2", FORMAT_RGBA, TYPE_10_10_10_2, 1)];
+    let cases: [(&str, u32, u32, usize); 4] = [("rgba8", FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 1), ("rgb8", FORMAT_RGB, TYPE_UNSIGNED_BYTE, 0), ("rgba16", FORMAT_RGBA, TYPE_UNSIGNED_SHORT, 2), ("rgb10a2", FORMAT_RGBA, TYPE_10_10_10_2, 1)];
     for (name, format, ty, words) in cases.into_iter().filter(|c| c.0.contains(&only)) {
         let cfg = KonaConfig { managed: (w.max(1280), h.max(1024)), ..KonaConfig::default() };
         let mut b = KonaBackend::new(cfg);
@@ -2655,7 +2656,9 @@ fn bench_draw_pixels() {
         command(&mut b, Grammar::Gl, LOAD_MATRIX_16_FLOATS, &m.map(f32::to_bits));
         at(&mut b, 0, 0);
         let mut seed = 0x1234_5678u32;
-        let image: Vec<u32> = (0..w as usize * h as usize * words)
+        // RGB bytes (words 0) are rows of w * 3 bytes padded to a word; the others take `words` a pixel.
+        let len = if words == 0 { (w as usize * 3).div_ceil(4) * h as usize } else { w as usize * h as usize * words };
+        let image: Vec<u32> = (0..len)
             .map(|_| {
                 seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 seed | 0x0001_0001
