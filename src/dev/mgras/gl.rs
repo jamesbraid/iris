@@ -2123,8 +2123,8 @@ impl Gl {
         // libGLcore's draws come with their GE pixel pipeline: the host's
         // elements in, the raster engine's pixels out.
         if self.pix.has_program() {
-            if let Some((ws, wpr2, rows2)) = self.run_pixel_pipeline(lut, words, wpr, rows, bpp) {
-                self.draw_pixels_words(&ws, wpr2, rows2, bpp, sink);
+            if let Some((out, wpr2, rows2)) = self.run_pixel_pipeline(lut, words, wpr, rows, bpp) {
+                self.draw_pixel_rows(&out, wpr2, rows2, bpp, sink);
                 return;
             }
         }
@@ -2170,8 +2170,7 @@ impl Gl {
                 out.extend(line);
             }
             let wpr2 = out.len() / rows.max(1) / 4;
-            let ws: Vec<u32> = out.chunks(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect();
-            return self.draw_pixels_words(&ws, wpr2, rows, bpp, sink);
+            return self.draw_pixel_rows(&out, wpr2, rows, bpp, sink);
         } else {
             std::borrow::Cow::Borrowed(words)
         };
@@ -2184,7 +2183,7 @@ impl Gl {
     /// what came. The image is 0xDA8's transfer size; its rows come one a
     /// transport row, or packed together in fewer (libGLcore sends a
     /// short-row image as one).
-    fn run_pixel_pipeline(&self, lut: &[u32], words: &[u32], wpr: usize, rows: usize, bpp: usize) -> Option<(Vec<u32>, usize, usize)> {
+    fn run_pixel_pipeline(&self, lut: &[u32], words: &[u32], wpr: usize, rows: usize, bpp: usize) -> Option<(Vec<u8>, usize, usize)> {
         let xs = self.tl_rect[4];
         let (mut w, mut h) = ((xs & 0xFFFF) as usize, (xs >> 16) as usize);
         // Zoomed: 0xDA8's size is the GE's output (rows repeated, columns
@@ -2217,7 +2216,7 @@ impl Gl {
             _ => 0xFFFF_FFFF,
         };
         let wpr_out = (w * bpp).div_ceil(4);
-        let mut out = Vec::with_capacity(wpr_out * h);
+        let mut out = Vec::with_capacity(wpr_out * 4 * h);
         let mut rb = Vec::with_capacity(wpr_out * 4);
         let pack = |v: f64, rb: &mut Vec<u8>| {
             let v = if index { (v.round() as i64 & wrap) as f64 } else { v };
@@ -2261,7 +2260,7 @@ impl Gl {
                 }
             }
             rb.resize(wpr_out * 4, 0);
-            out.extend(rb.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])));
+            out.extend_from_slice(&rb);
         }
         Some((out, wpr_out, h))
     }
@@ -2270,7 +2269,7 @@ impl Gl {
     /// 0xDA8's first to last, each taking the source pixel the GE's and the
     /// raster engine's steps give it.
     #[allow(clippy::too_many_arguments)]
-    fn draw_pixels_zoomed(&mut self, words: &[u32], wpr: usize, rows: usize, bpp: usize, ge_rep: usize, re_zoom: u32, sink: &mut dyn Hq3Sink) {
+    fn draw_pixels_zoomed(&mut self, bytes: &[u8], wpr: usize, rows: usize, bpp: usize, ge_rep: usize, re_zoom: u32, sink: &mut dyn Hq3Sink) {
         let r = [0, 1, 2, 3].map(|k| self.tl_rect[k] as i32);
         let (nx, ny) = ((r[2] - r[0]).abs() + 1, (r[3] - r[1]).abs() + 1);
         let (dx, dy) = (if r[2] < r[0] { -1 } else { 1 }, if r[3] < r[1] { -1 } else { 1 });
@@ -2316,7 +2315,7 @@ impl Gl {
         sink.rss_write(re::IR_ALIAS, IR_BLOCK_SETUP, false);
         sink.rss_write(re::BLOCK_XYSTARTI, xy(cx0, cy0), false);
         sink.rss_write(re::BLOCK_XYENDI, xy(cx1, cy1), true);
-        let byte = |i: usize| words.get(i / 4).map_or(0, |w| (w >> (24 - 8 * (i % 4))) as u8);
+        let byte = |i: usize| bytes.get(i).copied().unwrap_or(0);
         let rev = bpp == 4 && self.xfrmode & 0xFF == 0x80 && self.xfrmode & 1 << 22 == 0;
         for (line, y) in (cy0..=cy1).enumerate() {
             let sr = src_row(((y - fy0) * dy) as usize);
@@ -2352,6 +2351,11 @@ impl Gl {
     }
 
     fn draw_pixels_words(&mut self, words: &[u32], wpr: usize, rows: usize, bpp: usize, sink: &mut dyn Hq3Sink) {
+        self.draw_pixel_rows(&be_bytes(words), wpr, rows, bpp, sink);
+    }
+
+    /// `draw_pixels_words` on the rows as big-endian bytes, `wpr * 4` to a row.
+    fn draw_pixel_rows(&mut self, bytes: &[u8], wpr: usize, rows: usize, bpp: usize, sink: &mut dyn Hq3Sink) {
         log::debug!(
             "mgras: draw_pixels {rows} rows x {wpr} words, {bpp} bytes a pixel, xfrmode {:#x} xfrfactor {:#x} zoom_inv {} rect {:x?} raster {:?} scissor {} pipeline {:x?} element {}",
             self.xfrmode, self.xfr_factor, self.zoom_inv, self.tl_rect, self.raster, self.scissor_test, self.pix.modules(), self.pix.read(super::pixpipe::ELEMENT_TYPE),
@@ -2378,7 +2382,7 @@ impl Gl {
         let re_zoom = self.xfrmode & (3 << 19);
         if xs != 0 && (re_zoom != 0 || ge_rep > 1 || (self.zoom_inv > 0.0 && self.zoom_inv != 1.0)) {
             note(Path::Zoomed);
-            return self.draw_pixels_zoomed(words, wpr, rows, bpp, ge_rep, re_zoom, sink);
+            return self.draw_pixels_zoomed(bytes, wpr, rows, bpp, ge_rep, re_zoom, sink);
         }
         let src_w = self.row_pixels(wpr, bpp);
         let rect = xs != 0 && (xs >> 16) as usize == rows && (xs & 0xFFFF) as usize == src_w;
@@ -2428,7 +2432,7 @@ impl Gl {
             Some(Path::RowMirror)
         } else if src_w == 0 {
             Some(Path::RowNarrow)
-        } else if words.len() < rows * wpr {
+        } else if bytes.len() < rows * wpr * 4 {
             Some(Path::RowShort)
         } else {
             None
@@ -2437,16 +2441,17 @@ impl Gl {
         if blocked.is_none() {
             let (c0, n) = ((cx0 - x0) as usize * bpp, w as usize * bpp);
             let rev = bpp == 4 && self.xfrmode & 0xFF == 0x80 && self.xfrmode & 1 << 22 == 0;
-            let mut row = vec![0u8; wpr * 4];
+            let mut flipped = Vec::new();
             for (line, y) in (cy0..=cy1).enumerate() {
                 let sr = (if flip_y { y0 - y } else { y - y0 }) as usize;
-                for (b, x) in row.chunks_exact_mut(4).zip(&words[sr * wpr..][..wpr]) {
-                    b.copy_from_slice(&x.to_be_bytes());
-                }
+                let mut row = &bytes[sr * wpr * 4..][c0..c0 + n];
                 if rev {
-                    row[c0..c0 + n].chunks_exact_mut(4).for_each(|px| px.reverse());
+                    flipped.clear();
+                    flipped.extend_from_slice(row);
+                    flipped.chunks_exact_mut(4).for_each(|px| px.reverse());
+                    row = &flipped;
                 }
-                sink.dma_write_line(line as u32, &row[c0..c0 + n]);
+                sink.dma_write_line(line as u32, row);
             }
             return self.end_raster(sink);
         }
@@ -2454,7 +2459,7 @@ impl Gl {
             let mut px = [0u8; 16];
             for (k, b) in px.iter_mut().enumerate().take(bpp) {
                 let i = r * wpr * 4 + c * bpp + k;
-                *b = words.get(i / 4).map_or(0, |w| (w >> (24 - 8 * (i % 4))) as u8);
+                *b = bytes.get(i).copied().unwrap_or(0);
             }
             // GE pixels are RGBA; byte RGBA with rgb_order clear goes to the
             // raster engine alpha first (`rss::xfer_format`).
