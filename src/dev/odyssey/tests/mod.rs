@@ -159,6 +159,18 @@ impl BusDevice for Ram {
             None => crate::traits::BUS_ERR,
         }
     }
+    // One lock for the block, as a guest RAM bank answers it, not two read32s a word.
+    fn read_block(&self, addr: u64, buf: &mut [u64]) -> u32 {
+        match self.0.lock().get(addr as usize..addr as usize + 8 * buf.len()) {
+            Some(b) => {
+                for (w, c) in buf.iter_mut().zip(b.chunks_exact(8)) {
+                    *w = u64::from_be_bytes(c.try_into().unwrap());
+                }
+                crate::traits::BUS_OK
+            }
+            None => crate::traits::BUS_ERR,
+        }
+    }
     fn read64(&self, addr: u64) -> crate::traits::BusRead64 {
         match self.0.lock().get(addr as usize..addr as usize + 8) {
             Some(b) => crate::traits::BusRead64 {
