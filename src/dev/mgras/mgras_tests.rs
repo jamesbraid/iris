@@ -2279,6 +2279,19 @@ impl BusDevice for FlatMem {
         let at = addr as usize;
         BusRead32::ok(self.0.get(at..at + 4).map_or(0, |b| u32::from_be_bytes(b.try_into().unwrap())))
     }
+    // Direct-mapped like RAM, so the DMA reads it a block at a time as it does guest memory.
+    #[cfg(not(feature = "engine-crate"))]
+    fn mem_ptr(&self, addr: u64) -> Option<*const u64> {
+        self.0.get(addr as usize..).map(|b| b.as_ptr() as *const u64)
+    }
+    #[cfg(not(feature = "engine-crate"))]
+    fn read_block(&self, addr: u64, buf: &mut [u64]) -> u32 {
+        for (i, w) in buf.iter_mut().enumerate() {
+            let at = addr as usize + 8 * i;
+            *w = self.0.get(at..at + 8).map_or(0, |b| u64::from_be_bytes(b.try_into().unwrap()));
+        }
+        BUS_OK
+    }
 }
 
 /// A GL window `ww` x `wh` at (`wx`, `wy`) with the transfer mode and the GE pixel pipeline libGLcore
