@@ -32,6 +32,12 @@ typedef struct IrisGr2Config {
 } IrisGr2Config;
 
 /*
+ * Bit 0 of iris_engine_irq_levels (and of Pump.irq_levels) is the HQ2 FIFO level, which the shell wires to the board's
+ * GIO interrupt line 0. The engine does not raise it yet: the FIFO depth and the compare that sets it are not known.
+ */
+#define IRIS_GR2_IRQ_FIFO 1       /* 1 << 0 */
+
+/*
  * Start an engine. Free it with iris_engine_free. NULL on bad arguments or failure (the reason goes to
  * the log). The HQ2 and RE3 run on threads, so common.mode must be 1; the board has its own memory
  * (lent_len 0) and composes on the CPU (gpu IRIS_ENGINE_GPU_NONE).
