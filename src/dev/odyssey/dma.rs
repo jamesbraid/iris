@@ -282,6 +282,14 @@ impl Board {
     }
 }
 
+/// A 4-byte screen source's bytes as the 0xRRGGBBff word dma_put() stores.
+#[derive(Clone, Copy)]
+enum ByteOrder {
+    Rgba,
+    Xrgb,
+    Abgr,
+}
+
 /// True when hdr is a backing-store page the model copies, bpp a texel.
 pub(super) fn dma_raw(hdr: &[u32], bpp: u32) -> bool {
     let fmt = hdr[dma::HDR_FORMAT];
@@ -402,6 +410,17 @@ impl Board {
         } else {
             self.dma_code(hdr, bpp)
         };
+        // A 4-byte source onto the screen, unscaled: each row's words from a byte order (dma_put()).
+        let plain = obj.is_none() && bpp == 4 && !self.gpu_unit() && self.scale_bias_is_identity();
+        #[cfg(test)]
+        let plain = plain && !self.slow_dma;
+        let order = match code {
+            _ if !plain => None,
+            image::CODE_ABGR => Some(ByteOrder::Abgr),
+            image::CODE_FALLBACK_XRGB => Some(ByteOrder::Xrgb),
+            image::CODE_RGBA | image::CODE_RGBA12 => Some(ByteOrder::Rgba),
+            _ => None,
+        };
         let Ok(n) = bus.entries(table, seq, &mut e) else {
             return;
         };
@@ -443,6 +462,18 @@ impl Board {
                 }
                 if left != 0 {
                     pos += skip as u64;
+                }
+                if let Some(o) = order {
+                    let v = row[..(w * 4) as usize].chunks_exact(4).map(|p| u32::from_be_bytes(p.try_into().unwrap()));
+                    let (ry, rx) = (y.wrapping_add(r) as i32, x as i32);
+                    let stored = match o {
+                        ByteOrder::Rgba => to.store_run(ry, rx, v.map(|v| v | 0xff)),
+                        ByteOrder::Xrgb => to.store_run(ry, rx, v.map(|v| v << 8 | 0xff)),
+                        ByteOrder::Abgr => to.store_run(ry, rx, v.map(|v| v.swap_bytes() | 0xff)),
+                    };
+                    if stored {
+                        continue;
+                    }
                 }
                 for c in 0..w {
                     let px = &row[(c * bpp) as usize..];

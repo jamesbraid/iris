@@ -69,12 +69,6 @@ impl View {
         }
     }
 
-    /// The same field read as `codec`, which covers the same bytes.
-    pub fn with_codec(mut self, codec: Codec) -> View {
-        self.kind = View::colour_kind(codec);
-        self
-    }
-
     /// The field's first byte inside the pixel.
     pub fn at(&self) -> u8 {
         self.at
@@ -309,6 +303,29 @@ impl Rows {
         if let Some(a) = self.v.offset(x, y) {
             self.mem.store(a, self.v.len(), v);
         }
+    }
+
+    /// Store `words` at pixels x0.. of row y as store_word() would, for an RGBA8 view holding the
+    /// whole run; false, with nothing stored, otherwise.
+    pub fn store_run(&self, y: i32, x0: i32, words: impl ExactSizeIterator<Item = u32>) -> bool {
+        let n = words.len() as u64;
+        if n == 0 {
+            return true;
+        }
+        // From 4-byte pixels at a 4-aligned field every address is 4-aligned: no word is straddled.
+        if self.v.kind != Kind::Rgba8 || self.v.log2 < 2 || self.v.at & 3 != 0 || x0 < 0 || y < 0 || y as u32 >= self.v.height || x0 as u64 + n > self.v.width as u64 {
+            return false;
+        }
+        let (mut x, step) = (x0, 1u64 << self.v.log2);
+        let mut a = self.v.addr(x, y);
+        for w in words {
+            self.mem.put(a, 4, w as u64);
+            x += 1;
+            // A tile row is 16 pixels, contiguous.
+            a = if x & 15 == 0 { self.v.addr(x, y) } else { a.wrapping_add(step) };
+        }
+        self.mem.mark_written();
+        true
     }
 
     /// Store the same word at pixels x0 to x1 of row y, those in the view.

@@ -467,6 +467,13 @@ impl VramPtr {
         if straddles(a, n) {
             return;
         }
+        self.put(a, n, v);
+    }
+
+    /// `store_quiet` for bytes the caller knows lie in one word.
+    #[inline(always)]
+    pub fn put(&self, a: u64, n: u32, v: u64) {
+        debug_assert!((a & 7) as u32 + n <= 8);
         let p = self.word(a);
         // SAFETY: as load().
         unsafe {

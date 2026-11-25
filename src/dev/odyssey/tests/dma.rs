@@ -710,6 +710,78 @@ fn an_eight_byte_level_over_lanes_is_the_same_packing() {
     assert_eq!((s.diag.packing.checked, s.diag.packing.mismatch_count), (1, 0));
 }
 
+/// A DMA image to the screen stores the same memory and written flag by rows as by pixels, across
+/// source forms, pixel sizes and field offsets, rectangles that leave the view, and a memory object.
+#[test]
+fn a_dma_image_to_the_screen_stores_the_same_by_rows_as_by_pixels() {
+    let mut seed = 0x9e37_79b9u32;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    let boards = || {
+        let (mut s, _, ram) = board_with_ram();
+        for i in 0..1200u32 {
+            pixel_write(&mut s, (i % 40) as i32, 1 + (i / 40) as i32, i.wrapping_mul(0x9e37_79b1) | 1);
+        }
+        (s, ram)
+    };
+    let ((mut fast, fast_ram), (mut slow, slow_ram)) = (boards(), boards());
+    slow.slow_dma = true;
+    let rects = [(200u32, 300u32, 3u32, 2u32), (0, 0, 1, 1), (15, 13, 17, 5), (5, 7, 300, 4), (1270, 10, 20, 3), (0, 4090, 5, 10)];
+    let controls = [0x3201_0000u32, 0x3201_004b, 0x3201_004c, 0x3201_006b, 0x3207_0000, 0x3205_0000];
+    // Word 4: 16-byte pixels (front, back), 4-byte, 8-byte, 8-byte with the field across its word, 2-byte
+    // pixels with a 4-byte field, and a 2-byte (coded) field.
+    let word4s = [0x8263_305au32, 0x0263_305a, 0x8001_305a, 0x8022_305a, 0x8032_305a, 0x8000_305a, 0x8263_005a];
+    const SCREEN: u32 = 0x2000;
+    let mut cases = Vec::new();
+    for (i, w4) in word4s.into_iter().enumerate() {
+        let used = if i == 0 { controls.to_vec() } else { vec![controls[0], controls[2]] };
+        for c in used {
+            cases.extend(rects.iter().map(|r| (SCREEN, w4, c, *r, false)));
+        }
+    }
+    for c in [controls[0], controls[1]] {
+        cases.extend(rects[..3].iter().map(|r| (OBJECT, word4s[0], c, *r, false)));
+    }
+    // Last: the scale and bias stay set on both boards.
+    cases.extend(rects.iter().map(|r| (SCREEN, word4s[0], controls[1], *r, true)));
+    let mut written = false;
+    for (case, (dest, word4, control, (x, y, w, h), scaled)) in cases.into_iter().enumerate() {
+        let bpp = match (control >> 16) & 7 { 1 => 4, 5 => 1, _ => 3 };
+        let rowbytes = w * bpp;
+        let src: Vec<u8> = (0..rowbytes * h).map(|_| next() as u8).collect();
+        let at = 0x40_0ff0u64;
+        let mut flags = [false; 2];
+        for (k, (s, ram)) in [(&mut *fast, &fast_ram), (&mut *slow, &slow_ram)].into_iter().enumerate() {
+            for v in [select(reg::DEST_SELECT), SCREEN, 0x50, 0x0040_6d50, 0] {
+                s.mmio_write(ODSY_USER_CMD_FIFO, v as u64, 4);
+            }
+            if scaled {
+                s.tex_mut().scale_bias[0] = 2048;
+            }
+            ram.put(at, &src);
+            let header = [dest, y << 16 | x, 0x50, h << 16 | w, word4, 0, rowbytes, control];
+            put_table(ram, TABLE, header, &[pte(at, rowbytes * h)]);
+            s.vram_ptr().take_written();
+            descriptor(s, TABLE);
+            s.gpu_sync();
+            flags[k] = s.vram_ptr().take_written();
+        }
+        let what = format!("case {case} (dest {dest:#x}, word 4 {word4:#x}, control {control:#x}, {w}x{h} at {x},{y}, scaled {scaled})");
+        assert_eq!(flags[0], flags[1], "{what}: written flag by rows, by pixels");
+        written |= flags[0];
+        let (a, b) = (fast.vram.ptr_shared(), slow.vram.ptr_shared());
+        let (a, b) = (a.words_at(0, a.size()), b.words_at(0, b.size()));
+        if a != b {
+            let i = a.iter().zip(b).position(|(p, q)| p != q).unwrap();
+            panic!("{what}: word {:#x} is {:#018x} by rows, {:#018x} by pixels", 8 * i, a[i], b[i]);
+        }
+    }
+    assert!(written, "some case stored pixels");
+}
 /// ms a frame of a `BENCH_W` x `BENCH_H` (720 x 486) image of 4-byte pixels (source code 0, the fallback) DMA'd to the
 /// screen, as many rows a table as its twelve entries take. `BENCH_FRAMES` a run (0: build only), `BENCH_RUNS` runs; the far corner is checked.
 #[test]
