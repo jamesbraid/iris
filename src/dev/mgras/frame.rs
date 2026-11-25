@@ -150,6 +150,7 @@ impl Frame {
         }
         let mut row = [0u32; W];
         let mut row_b = [0u32; W];
+        let select_pass = self.buffer_select_matters(select);
         for y in rows.clone() {
             let dst = y * W;
             let fb_y = (h - 1 - y) as u32;
@@ -157,19 +158,8 @@ impl Frame {
             if select != 0 {
                 rss.mem.read_row(&back, fb_y, &mut row_b[..w]);
             }
-            for x in 0..w {
-                let did = self.did_main[dst + x] & 31;
-                let b = select >> did & 1 != 0;
-                let mode = self.main_mode[did as usize];
-                if let Some(pair) = mode.pair {
-                    self.main[dst + x] = pair.unpack(self.main[dst + x], b) & 0xFF_FFFF;
-                } else if b && !mode.rgb {
-                    // Colour index: B is the word's high 12 bits
-                    // (`rss::ci_pixtype`).
-                    self.main[dst + x] = (self.main[dst + x] >> 12) & 0xFFF;
-                } else if b {
-                    self.main[dst + x] = row_b[x];
-                }
+            if select_pass {
+                self.select_buffers(dst, w, select, &row_b);
             }
             match overlay {
                 Some(o) => {
@@ -212,6 +202,29 @@ impl Frame {
             let base = dcb.xmap.cursor_cmap_base();
             for c in 1..4 {
                 self.cursor_rgb[c] = self.cmap.get(base + c).copied().unwrap_or(0xFF_FFFF);
+            }
+        }
+    }
+
+    /// Whether `select_buffers` can change a pixel: some window ID shows buffer B, or a mode takes pixel pairs.
+    fn buffer_select_matters(&self, select: u32) -> bool {
+        !super::gl::fast_paths() || select != 0 || self.main_mode.iter().any(|m| m.pair.is_some())
+    }
+
+    /// The pixels of the row at `dst` as their window IDs show them: a pair's half, or buffer B (`row_b`).
+    fn select_buffers(&mut self, dst: usize, w: usize, select: u32, row_b: &[u32]) {
+        for x in 0..w {
+            let did = self.did_main[dst + x] & 31;
+            let b = select >> did & 1 != 0;
+            let mode = self.main_mode[did as usize];
+            if let Some(pair) = mode.pair {
+                self.main[dst + x] = pair.unpack(self.main[dst + x], b) & 0xFF_FFFF;
+            } else if b && !mode.rgb {
+                // Colour index: B is the word's high 12 bits
+                // (`rss::ci_pixtype`).
+                self.main[dst + x] = (self.main[dst + x] >> 12) & 0xFFF;
+            } else if b {
+                self.main[dst + x] = row_b[x];
             }
         }
     }
@@ -357,5 +370,120 @@ fn fill_did_row(row: &mut [u8], runs: &mut Vec<(u16, u8)>) {
         if x1 > x0 {
             row[x0..x1].fill(did);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::plain::boxed_zeroed;
+    use super::*;
+
+    struct Rnd(u64);
+
+    impl Rnd {
+        fn below(&mut self, n: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 11) % n
+        }
+    }
+
+    /// Random state for a `w` x `h` picture: window-ID runs (some IDs past 31), colour index and RGB modes,
+    /// overlay rows that are empty or not, a cursor that may cover the rows, a blanked screen now and then.
+    fn random_frame(f: &mut Frame, r: &mut Rnd, w: usize, h: usize) {
+        (f.width, f.height) = (w, h);
+        f.gamma.iter_mut().for_each(|g| *g = [r.below(256) as u8, r.below(256) as u8, r.below(256) as u8]);
+        f.cmap.iter_mut().for_each(|c| *c = r.below(1 << 24) as u32);
+        for m in f.main_mode.iter_mut() {
+            *m = MainMode { rgb: r.below(2) == 0, cmap_base: r.below(0x2000) as u16, index_mask: [0xFF, 0xFFF][r.below(2) as usize], pair: None };
+        }
+        for o in f.overlay_mode.iter_mut() {
+            *o = OverlayMode { on: r.below(3) != 0, cmap_base: r.below(0x2000) as u16 };
+        }
+        for y in 0..h {
+            let (mut x, row) = (0, y * W);
+            while x < w {
+                let (run, did) = (1 + r.below(40) as usize, r.below(48) as u8);
+                (x..(x + run).min(w)).for_each(|i| f.did_main[row + i] = did);
+                x += run;
+            }
+            let overlaid = r.below(3) == 0;
+            for x in 0..w {
+                f.main[row + x] = r.below(1 << 32) as u32;
+                f.did_overlay[row + x] = r.below(40) as u8;
+                f.overlay[row + x] = if overlaid && r.below(6) == 0 { 1 + r.below(255) as u8 } else { 0 };
+            }
+        }
+        f.blank = r.below(8) == 0;
+        f.cursor_on = r.below(2) == 0;
+        (f.cursor_x, f.cursor_y, f.cursor_size) = (r.below(w as u64 + 20) as i32 - 10, r.below(h as u64 + 10) as i32 - 5, [32, 64][r.below(2) as usize]);
+        f.cursor.iter_mut().for_each(|c| *c = r.below(4) as u8);
+        f.cursor_rgb = [0, r.below(1 << 24) as u32, r.below(1 << 24) as u32, r.below(1 << 24) as u32];
+    }
+
+    /// The buffer-select pass is a no-op when it says it does not matter: with no window ID showing buffer B and
+    /// no pixel-pair mode, it leaves every pixel as it is; with either, it changes some.
+    #[test]
+    fn buffer_select_pass_is_skipped_only_when_it_does_nothing() {
+        let mut f = boxed_zeroed::<Frame>();
+        let mut r = Rnd(0x0F0F_1234_ABCD_9876);
+        let (mut skipped, mut changed) = (0, 0);
+        for trial in 0..200 {
+            let (w, h) = (1 + r.below(100) as usize, 1 + r.below(8) as usize);
+            random_frame(&mut f, &mut r, w, h);
+            let select = [0, 0, 0, r.below(1 << 32) as u32][r.below(4) as usize];
+            if r.below(3) == 0 {
+                let k = r.below(32) as usize;
+                f.main_mode[k].pair = Some(rss::Pair::P444);
+            }
+            let row_b: Vec<u32> = (0..w).map(|_| r.below(1 << 32) as u32).collect();
+            let before = f.main[..h * W].to_vec();
+            for y in 0..h {
+                f.select_buffers(y * W, w, select, &row_b);
+            }
+            let same = (0..h).all(|y| f.main[y * W..y * W + w] == before[y * W..y * W + w]);
+            if f.buffer_select_matters(select) {
+                changed += !same as usize;
+            } else {
+                assert!(same, "trial {trial}: skipped, yet it changes pixels");
+                skipped += 1;
+            }
+        }
+        assert!(skipped > 40 && changed > 40, "reach: {skipped} skipped, {changed} changed");
+    }
+
+    /// The snapshot as a window ID's BUF_SELECT bit or a pixel-pair mode shows the planes: buffer B for a selected
+    /// window ID, a pair's half for a pair mode, and the plain pixel of buffer A for neither.
+    #[test]
+    fn snapshot_applies_the_buffer_select_pass() {
+        use super::super::dcb::Dcb;
+        use super::super::pixmem::{Buffer, Kind};
+        let mut rss = Rss::new_boxed();
+        let drb = rss.reg(rss::reg::MGRAS_PP1_DRB_SIZE);
+        // Display row 3 is framebuffer row 1020 of the 1280x1024 screen the tables below name.
+        let (a, b) = (Buffer::new(0x240, Kind::Wide, drb), Buffer::new(0x241, Kind::Wide, drb));
+        rss.mem.put(&a, 5, 1020, 0x11_2233);
+        rss.mem.put(&b, 5, 1020, 0x44_5566);
+        let mut f = boxed_zeroed::<Frame>();
+        let mut shown = |did: u16, mode: u32, select: u32| {
+            let mut dcb = boxed_zeroed::<Dcb>();
+            dcb.xmap.set_modes(did as u32, mode, 0);
+            dcb.xmap.set_scanout(select, 0x240 | 0x241 << 10, 0);
+            dcb.vc3.regs[4] = 0;
+            (0..1024).for_each(|y| dcb.vc3.sram[y] = 0x4000);
+            (dcb.vc3.sram[1024], dcb.vc3.sram[0x4000], dcb.vc3.sram[0x4001]) = (0xFFFF, did, 0x7FF << 5);
+            f.snapshot(&rss, &dcb);
+            assert_eq!((f.width, f.height, f.did_main[3 * W + 5]), (1280, 1024, did as u8));
+            f.main[3 * W + 5]
+        };
+        assert_eq!(shown(1, 4, 0), 0x11_2233, "buffer A");
+        assert_eq!(shown(1, 4, 1 << 1), 0x44_5566, "buffer B for window ID 1");
+        assert_eq!(shown(1, 4, 1 << 2), 0x11_2233, "window ID 2 selected, not 1");
+        assert_eq!(shown(0, 4, 1), 0x44_5566, "buffer B for window ID 0");
+        assert_eq!(shown(17, 4, 1 << 17), 0x44_5566, "buffer B for window ID 17, past the low half of the bits");
+        assert_eq!(shown(17, 4, 1 << 1), 0x11_2233, "window ID 1 selected, not 17");
+        assert_eq!(shown(1, 5, 0), rss::Pair::P444.unpack(0x11_2233, false) & 0xFF_FFFF, "a 4:4:4 pair");
+        assert_ne!(rss::Pair::P444.unpack(0x11_2233, false) & 0xFF_FFFF, 0x11_2233);
     }
 }
