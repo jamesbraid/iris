@@ -63,5 +63,12 @@ pub mod traits {
         fn read8(&self, addr: u64) -> BusRead8;
         fn write8(&self, addr: u64, val: u8) -> u32;
         fn read32(&self, addr: u64) -> BusRead32;
+        /// Big-endian doublewords from `addr`, as iris's RAM answers a block read; bytes by default.
+        fn read_block(&self, addr: u64, buf: &mut [u64]) -> u32 {
+            for (i, w) in buf.iter_mut().enumerate() {
+                *w = (0..8).fold(0, |a, k| a << 8 | self.read8(addr + 8 * i as u64 + k).data as u64);
+            }
+            BUS_OK
+        }
     }
 }
