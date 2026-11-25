@@ -206,6 +206,9 @@ pub struct Gr2 {
     /// shadow (`hq_loop`'s Sink) no longer knows what RE3 holds then.
     pub(super) re3_cpu_writes: crossbeam_utils::CachePadded<AtomicU32>,
     pub(super) re3_asleep: crossbeam_utils::CachePadded<AtomicBool>,
+    /// Reads and stores at offsets nothing decodes, for `undecoded_accesses`.
+    pub(super) undecoded_reads: AtomicU32,
+    pub(super) undecoded_writes: AtomicU32,
 
     pub(super) screens: [Arc<crate::gfx_display::Screen>; 1],
     /// The scan-out on the GPU, when the machine opened one: the display
@@ -227,6 +230,12 @@ pub struct Gr2 {
 // thread only. `cycles` is set once during single-threaded setup.
 unsafe impl Sync for Gr2 {}
 unsafe impl Send for Gr2 {}
+
+/// Whether the n-th undecoded access is reported: the 1st, 2nd, 4th, 8th and so on, so a polling guest
+/// leaves a few lines, not a flood.
+pub(super) fn report_due(n: u32) -> bool {
+    n.is_power_of_two()
+}
 
 impl Gr2 {
     /// Build a GR2 in place on the heap. The multi-megabyte register/VRAM
@@ -620,6 +629,11 @@ impl Gr2 {
         unsafe { (*self.re3.get()).jit.mode = mode };
     }
 
+    /// How many reads and stores reached an offset nothing decodes (reads gave 0, stores were dropped).
+    pub fn undecoded_accesses(&self) -> (u32, u32) {
+        (self.undecoded_reads.load(Ordering::Relaxed), self.undecoded_writes.load(Ordering::Relaxed))
+    }
+
     // ── board ID registers ───────────────────────────────────────────────────
 
     pub(super) fn bdvers_read(&self, idx: u32) -> u32 {
@@ -696,7 +710,14 @@ impl Gr2 {
             0x6c1c0..0x6c1e0 if self.probe.aux_window == AuxWindow::Legacy => r.ab1,
             RE3_REGS..RE3_REGS_END => return self.re3_read(((off - RE3_REGS) >> 2) as usize),
             0x6c600..0x6c604 => return self.re3_read(re3::REG_RWDATA),
-            _ => 0, // CLOCK, CC1 (must not echo the flat-panel probe), unused
+            _ => {
+                // CLOCK, CC1 (must not echo the flat-panel probe), unused.
+                let n = self.undecoded_reads.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+                if report_due(n) {
+                    crate::dlog_guest!(crate::devlog::LogModule::Gr2, "GR2: read {off:#07x} is undecoded and gives 0 ({n} so far)");
+                }
+                0
+            }
         };
         BusRead32::ok(v)
     }
@@ -826,7 +847,10 @@ impl Gr2 {
             RE3_REGS..RE3_REGS_END => return self.re3_write(((off - RE3_REGS) >> 2) as usize, val),
             0x6c600..0x6c604 => return self.re3_write(re3::REG_RWDATA, val),
             _ => {
-                crate::dlog_dev!(crate::devlog::LogModule::Gr2, "GR2: write {:#07x} = {:#010x} (unmapped)", off, val);
+                let n = self.undecoded_writes.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+                if report_due(n) {
+                    crate::dlog_guest!(crate::devlog::LogModule::Gr2, "GR2: write {off:#07x} = {val:#010x} is undecoded and dropped ({n} so far)");
+                }
             }
         }
         BUS_OK
