@@ -3,11 +3,11 @@
 //! Register writes arrive through the RE3 FIFO, from the CPU (0x6c200..) or
 //! from the HQ2 thread. The RE3 thread applies them in order, and an `IR`
 //! write executes. Semantics follow MAME's RE2 model (`sgi_re2.cpp`), the RE3's
-//! predecessor; see `ignore/gr2/RE3.h` for what is and isn't verified.
+//! predecessor.
 //!
 //! VRAM is one u32 per pixel: `cid[31:28] | aux[27:24] | rgb/ci[23:0]`.
 //! Rows are stored bottom-up (y = 0 is the bottom scanline).
-//! X registers hold the linear pixel column (not bank-coded; see RE3.h).
+//! X registers hold the linear pixel column (not bank-coded).
 
 pub const FB_W: usize = 1280;
 pub const FB_H: usize = 1024;
@@ -155,7 +155,7 @@ pub fn describe_ir(reg: &[u32; 64], ir: u32) -> String {
 // X registers (X, XMIN, XMAX, the X half of YX) hold the linear pixel column.
 // Guest software never writes RE3 registers directly (only the HQ2/GE
 // microcode, which is HLE'd), so this is internal. The bank-coded form
-// (x / 5) * 8 + x % 5 from MAME's RE2 model is not used (RE3.h).
+// (x / 5) * 8 + x % 5 from MAME's RE2 model is not used.
 
 // ── Private FIFO operations (emulator-only; what the real HQ2/GE7 microcode
 //    did with longer register sequences) ────────────────────────────────────
@@ -176,7 +176,7 @@ pub fn copy_mode(zx: u32, zy: u32, bits: u32, bank: u32) -> u32 {
 pub const RE3_OP_READ_ADVANCE: u32 = 0xFFFF_1003;
 /// Emulator-private stand-in for RE3's (unidentified) packing-mode register:
 /// the GE sends neutral 8-bit-per-channel colour and RE3 packs each pixel
-/// into the window's frame-buffer format (RE3.h "Colour packing"). 0 = 24-bit / colour index as the iterators
+/// into the window's frame-buffer format. 0 = 24-bit / colour index as the iterators
 /// produce it; PIXFMT_RGB12 = 12-bit 4:4:4 RGB (R in bits 3:0) duplicated
 /// into both 12-bit buffers, the plane mask selecting the buffer.
 pub const RE3_OP_PIXFMT: u32 = 0xFFFF_1004;
@@ -217,7 +217,7 @@ pub const ZBUF_STENCIL_SHIFT: u32 = 24;
 /// alpha iterator: on GR2 the GE7 microcode does blending (reading the
 /// destination back through RE3 and writing the result). Doing it here, per
 /// pixel inside RE3, gives the same pixels without a span read-modify-write
-/// round trip (GR2.h "BLENDING AND ALPHA TEST"; verified against a real Indy
+/// round trip (verified against a real Indy
 /// XZ with glprim --scene blendsmooth). There is deliberately no alpha test:
 /// libglcore sends only the fragments that pass.
 ///
@@ -294,7 +294,7 @@ impl Re3 {
         self.ctx.reg[reg] = v;
         match reg {
             REG_RGB => {
-                // 27-bit packed 9:9:9 (RE3.h). Each 9-bit component lands in
+                // 27-bit packed 9:9:9. Each 9-bit component lands in
                 // the integer part of the 8.11 R/G/B iterators.
                 self.ctx.reg[REG_R] = ((v >> 18) & 0x1ff) << 11;
                 self.ctx.reg[REG_G] = (((v >> 9) & 0x1ff) << 11) & REGMASK[REG_G];
@@ -861,7 +861,7 @@ fn sext(v: u32, bits: u32) -> i64 {
     ((v as i64) << s) >> s
 }
 
-/// 16 raster ops, X11/GL numbering (RE3.h).
+/// 16 raster ops, X11/GL numbering.
 #[inline]
 pub fn rop(func: u32, s: u32, d: u32) -> u32 {
     match func & 0xf {

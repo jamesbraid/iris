@@ -226,7 +226,7 @@ fn trace_captures_annotated_hq_and_re3_traffic() {
 
 /// Kernel _Gr2UcodeReady polls hq.version bit 1 (FIN2) after clearing fin2
 /// and issuing a request. These are the exact sequences from Gr2Start and
-/// Gr2PcxSwap (gr2.c) as captured in an Xsgi start-up trace.
+/// Gr2PcxSwap as captured in an Xsgi start-up trace.
 #[test]
 fn fin2_handshakes_for_gr2start_and_context_switch() {
     let g = &live_gr2(Gr2Variant::Xz);
@@ -331,7 +331,7 @@ fn xsgi_fin3_handshake_and_open_commands() {
     }
 }
 
-/// Xsgi DDX expInitHW (exp_init.c) verbatim, then colour and overlay boxes
+/// Xsgi DDX expInitHW verbatim, then colour and overlay boxes
 /// the way expDrawSolidRects sends them.
 #[test]
 fn ddx_init_hw_and_solid_rects() {

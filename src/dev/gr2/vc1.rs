@@ -2,8 +2,7 @@
 //!
 //! The emulator does not run the VC1 timing program. Only the state the
 //! compositor needs is used: the DID tables, cursor glyph, cursor position
-//! and `sysctl`. The PROM/kernel programming sequence is documented in
-//! `ignore/gr2/VC1.h`.
+//! and `sysctl`.
 
 pub const VC1_CMD0: u32 = 0x00;
 pub const VC1_CMD1: u32 = 0x04;
@@ -105,7 +104,7 @@ impl Vc1 {
 
     /// Cursor top-left in display coordinates (0,0 = top-left), undoing the
     /// host's timing-table offsets. The offsets are inferred from the PROM and
-    /// kernel cursor code; see VC1.h.
+    /// kernel cursor code.
     pub fn cursor_pos(&self) -> (i32, i32) {
         const X_ADJ: i32 = 250;
         const Y_ADJ: i32 = 35;
@@ -133,7 +132,7 @@ impl Vc1 {
     /// DID transitions for display line `y` (0 = top), as (x, did) with x
     /// ascending; returns how many. The frame table at DID_EP holds one line
     /// table pointer per scanline; a line table is [count, entry * count]
-    /// with entry = (x << 5) | did (VC1.h, confirmed against Xsgi's tables:
+    /// with entry = (x << 5) | did (confirmed against Xsgi's tables:
     /// [3, 0x0003, 0x28c9, 0x7583] = DID 3, DID 9 from x 326, DID 3 from 940).
     pub fn line_did_runs(&self, y: usize, runs: &mut [(u16, u8); Self::MAX_DID_RUNS]) -> usize {
         let frame = self.reg16(DID_EP) as usize;

@@ -2,8 +2,8 @@
 //!
 //! libglcore (EXPRESS) writes GL state and vertices straight into the HQ2
 //! FIFO. The FIFO word index is a microcode token (bits 8:0) plus HQ2 input
-//! modifiers: USEV (9), LOADV (10), conversion (13:11) and ITOF (14); see
-//! HQ2.h "OpenGL token addressing". This module is the GE side: it keeps the
+//! modifiers: USEV (9), LOADV (10), conversion (13:11) and ITOF (14). This
+//! module is the GE side: it keeps the
 //! transform state, assembles primitives by the vertex routine selected with
 //! LOADV, transforms, maps through the viewport and window origin (0x1E5) and
 //! rasterizes into RE3 spans.
@@ -13,7 +13,7 @@
 //! an emulator-only RE3 extension (re3::RE3_OP_BLEND / RE3_OP_ALPHA).
 //! Alpha test: there is none in the hardware and none here on purpose.
 //! libglcore rasterizes alpha-tested primitives on the CPU and sends the
-//! surviving fragments (T_FRAGMENT). See GR2.h "BLENDING AND ALPHA TEST".
+//! surviving fragments (T_FRAGMENT).
 //!
 //! Transform, view-volume and user clipping, the viewport mapping, lighting
 //! and fog use the board-independent GL core (`crate::dev::gl`); this file
@@ -85,16 +85,16 @@ pub const T_DITHER: u32 = 0x011;
 pub const T_STIPPLE_ON: u32 = 0x01f;
 /// glDisable(GL_POLYGON_STIPPLE) (0x2078): 0.
 pub const T_STIPPLE_OFF: u32 = 0x01e;
-/// Depth (gr2_depth.c): test enable 0/1; func = testFunc & 7 (NEVER..ALWAYS);
+/// Depth: test enable 0/1; func = testFunc & 7 (NEVER..ALWAYS);
 /// write mask ((1 << zbits) - 1, or 0). Window z spans 0 .. 2^zbits - 1 via
 /// the viewport zscale/zcenter.
 pub const T_DEPTH_TEST: u32 = 0x014;
 pub const T_DEPTH_FUNC: u32 = 0x024;
 pub const T_DEPTH_MASK: u32 = 0x00a;
-/// Depth-only clear (gr2_depth.c Clear, HQ2_FIFO_CI.clear_depth: token 0xA0
+/// Depth-only clear (HQ2_FIFO_CI.clear_depth: token 0xA0
 /// with ITOF|CP): 0; DATA depth, 0 (unverified: not yet seen in a trace).
 pub const T_DEPTH_CLEAR: u32 = 0x68a0;
-/// Stencil (gr2_stencil.c): mode = enable; DATA ref, func, mask, fail,
+/// Stencil: mode = enable; DATA ref, func, mask, fail,
 /// zfail, zpass (ops 0 KEEP 1 INVERT 2 ZERO 3 REPLACE 4 INCR 5 DECR);
 /// write mask; config = stencil bits (MakeCurrent); clear = value; DATA mask.
 pub const T_STENCIL_MODE: u32 = 0x00f;
@@ -149,7 +149,7 @@ pub const T_PIX_START: u32 = 0x0b1;
 pub const T_PIX_DATA: u32 = 0x071;
 pub const T_PIX_RECT: u32 = 0x0b2;
 pub const T_PIX_END: u32 = 0x0b3;
-/// OpenGL glIndex (libglcore HQ2_GL_INDEX, gr2_vapi.c): C1|0x0FE = 0x30FE
+/// OpenGL glIndex (libglcore HQ2_GL_INDEX): C1|0x0FE = 0x30FE
 /// with a float index, or ITOF|C1|0x0FE = 0x70FE (the CI aperture) with an
 /// integer. Colour-index windows (gr_osview on IRIX 6.5) set every colour
 /// this way.
@@ -246,14 +246,14 @@ pub const T_IRIS_ZCLEAR: u32 = 0x09f;
 /// IRIS GL lighting enable: 0; DATA on (same shape as OpenGL's 0x10E, and
 /// likewise followed by 0x0D4 two-sided).
 pub const T_IRIS_DB: u32 = 0x0db;
-/// Blending (gr2_raster.c __glExpPassBlendFunc): mode = 1 for the
+/// Blending (__glExpPassBlendFunc): mode = 1 for the
 /// SRC_ALPHA / ONE_MINUS_SRC_ALPHA fast path; factor port = 3 words: enable
 /// (0 = ONE, ZERO), src code, dst code (re3::RE3_OP_BLEND codes).
 pub const T_BLEND_MODE: u32 = 0x026;
 pub const T_BLEND_FACTOR: u32 = 0x025;
 /// Logic op (__glExpPassLogicOp): GL logicOp & 0xF (3 = COPY; RE3 FUNC order).
 pub const T_LOGIC_OP: u32 = 0x01a;
-/// Software-pipeline fragment (gr2_rgb.c Store / Store_B, used e.g. with
+/// Software-pipeline fragment (the Store / Store_B routines, used e.g. with
 /// GL_ALPHA_TEST, which GR2 lacks; the fragments have already passed it, so
 /// they are written unconditionally apart from Z/stencil/blend/masks):
 /// ITOF token = x; ITOF DATA y, z; DATA
@@ -272,7 +272,7 @@ pub const T_SPAN_SETUP: u32 = 0x029;
 pub const T_SPAN_COLOR: u32 = 0x02a;
 pub const T_SPAN_COLOR_B: u32 = 0x02c;
 pub const T_SPAN_SKIP: u32 = 0x02d;
-/// State readbacks (gr2_get.c / __glExpGetColor ...): token = 0, then the
+/// State readbacks (__glExpGetColor ...): token = 0, then the
 /// client waits for FIN3 (Finish), reads the mailbox and acks with
 /// read_done (0xBD). Mailbox: GL address 0x12088 = board 0x10088 = shram
 /// word 0x4022, 4 words.
@@ -313,7 +313,7 @@ pub const T_READ_MODE: u32 = 0x0bc;
 pub const T_READ_BUFFER: u32 = 0x10a;
 const READBACK_SHRAM: usize = 0x4022;
 
-// Vertex routines (LOADV token) and Begin/End tokens (gr2_prim.c).
+// Vertex routines (LOADV token) and Begin/End tokens.
 const VR_OUTSIDE: u32 = 0x065;
 const VR_POINTS: u32 = 0x123;
 const VR_LINES: u32 = 0x0eb;
@@ -638,7 +638,7 @@ impl GlState {
     /// right. A pixel is visible when it lies in an odd number of the 0x1E5
     /// pieces (XOR). Xsgi's expValidateClip sends either disjoint visible
     /// rectangles (XOR = union) or, when the region is the window minus one
-    /// rectangle, [whole window, hole] with wid = 0 (HQ2.h 0x1E5): atlantis
+    /// rectangle, [whole window, hole] with wid = 0 (token 0x1E5): atlantis
     /// with ideas over the middle of its side. The union let atlantis draw
     /// over ideas.
     fn span_pieces(&self, y: i32, x0: i32, x1: i32) -> ([(i32, i32); 4], usize) {
@@ -737,14 +737,14 @@ fn port_words(index: u32) -> Option<u32> {
 
 /// R, G, B as RE3 8.11 iterator values. `max` is the channel range in GL
 /// units: 1.0 in RGB; in colour-index mode R carries the index (/255) and
-/// may reach 4095/255 (R is 12.11, RE3.h).
+/// may reach 4095/255 (R is 12.11).
 fn to_fixed(c: [f32; 4], max: f32) -> [u32; 3] {
     let q = |v: f32, m: f32| ((v.clamp(0.0, m) * 255.0 + 0.5) as u32) << 11;
     [q(c[0], max), q(c[1], 1.0), q(c[2], 1.0)]
 }
 
 /// GL context save / restore through kernel memory, as the kernel's
-/// Gr2PcxSwap drives it (HQ2.h "KERNEL TOKENS"):
+/// Gr2PcxSwap drives it:
 ///   GE_HQMSAV (0x1F0) id; DATA state, mode  -> the microcode reports in
 ///       shram word 0x302 (CX_SIZE_MAIN) how many words the outgoing
 ///       context's state takes and in word 0x303 whose it is (its id);
@@ -2165,8 +2165,8 @@ impl Hq2Engine {
             return;
         }
         // One RE3 SHADED primitive: SHADED is not a horizontal span but a
-        // stepper from (X, Y) by (DX, DY) per pixel for NUMPIX pixels (RE3.h;
-        // the GR1 RE1 spec: "interpolates pixels along random-angled or
+        // stepper from (X, Y) by (DX, DY) per pixel for NUMPIX pixels (the GR1 RE1
+        // spec: "interpolates pixels along random-angled or
         // horizontal scan lines"), so a line is a single primitive with its
         // colour, Z and alpha iterated along it. The major axis steps whole
         // pixels (+-1.0) through the pixel centres in [start, end) (GL
