@@ -633,12 +633,12 @@ fn region_detail(off: u32) -> String {
 }
 
 /// Decode a recorded PLL programming (7 bytes + bit count in byte 7) and
-/// name the tables the PROM/kernel use (GR2.h "Clock").
+/// name the tables the PROM and kernel use.
 pub(super) fn pll_describe(b: &[u8; 8]) -> String {
     let bytes = &b[..7];
     let name = match bytes {
-        [0x00, 0x10, 0x00, 0x15, 0x18, 0x01, 0x0f] => "60 Hz, 107.352 MHz (PLLclk107)",
-        [0x00, 0x00, 0x00, 0x04, 0x05, 0x04, 0x06] => "72 Hz, 132 MHz (PLLclk132)",
+        [0x00, 0x10, 0x00, 0x15, 0x18, 0x01, 0x0f] => "60 Hz, 107.352 MHz",
+        [0x00, 0x00, 0x00, 0x04, 0x05, 0x04, 0x06] => "72 Hz, 132 MHz",
         _ => "unknown table",
     };
     let hex: Vec<String> = bytes.iter().map(|v| format!("{v:02x}")).collect();

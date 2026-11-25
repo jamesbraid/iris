@@ -79,3 +79,25 @@ file, the state file or the C interface.
 Not covered: the HQ2 and GE7 instruction sets (the interpreter is a high-level model, and GE7 microcode is
 stored and read back, never run); the identity check of the loaded microcode against the survey's image
 hashes (survey request: microcode identity) is not built.
+
+## Vendor names in the mounted files
+
+Kernel, X server and GL library function and field names were looked up in the Library's public roots (NetBSD,
+OpenBSD, Linux/MIPS, gxemul, Mesa, published manuals, Usenet, the IRIX artifact and extract roots). A name stays
+only where a published document carries it; the rest were replaced with a description of what the code does.
+
+| Name | Where kept | Published source |
+|---|---|---|
+| `Gr2PixelDma` | `board.rs`, `hq2_tests.rs` | Usenet, message `37416097.182B86B3@northrock.bm` (comp.sys.sgi.hardware): the kernel's "Gr2PixelDma: TIMEOUT gfx DMA did not complete" line |
+| `Gr2PcxSwap` | `board.rs`, `gl.rs`, `hq2.rs`, `hq2_tests.rs` | Usenet, messages `3ls3ld$1p16@news.doit.wisc.edu` (comp.sys.sgi.admin) and `1993Nov21.202712.16224@bert.eecs.uic.edu` (comp.sys.sgi.bugs): "Gr2PcxSwap: TIMEOUT gfx context switch did not complete (Start)" |
+| `Gr2DestroyDDRN` | `gl.rs`, `hq2_tests.rs` | Usenet, message `1993Nov21.202712.16224@bert.eecs.uic.edu` (comp.sys.sgi.bugs): "Gr2DestroyDDRN: TIMEOUT gfx Context Switch did not complete (Kill)" |
+| `Xsgi` | `board.rs`, `gl.rs`, `gr2comp.rs`, `hq2.rs`, `hq2_tests.rs`, `re3.rs`, `vc1.rs`, `xmap5.rs` | the X server's process name, in the crash log of Usenet message `37416097.182B86B3@northrock.bm` |
+| `gr_osview` | `gl.rs`, `hq2_tests.rs` | a shipped program: `usr/sbin/gr_osview` in the IRIX 6.5 base media, row `KMM06382` of `library/graphics-missing-acquisition-20260813-metadata/kona-missing-acquisition-cache-manifest.tsv` in origami-docs |
+| `libgl.so` | `gl.rs`, `gl_light.rs` | shipped library file name; no symbol of it is named |
+| `libglcore` | `gl.rs`, `gl_light.rs`, `gr2comp.rs`, `hq2.rs`, `hq2_tests.rs`, `re3.rs` | shipped library file name; no symbol of it is named |
+
+Removed because no published source was found: about 60 kernel, X server and GL library function, field and
+routine names, two clock-table labels, and a vendor header's name and section titles. Where a comment gave a
+structure offset or a field path, it now says "block offset" or describes the state in plain words. The
+register, token and field constants in code (`HQ2_*`, `PUC_*`, `T_*` and so on) are kept as names; the table
+above ("Kept with only the headers behind them") says what each family rests on.

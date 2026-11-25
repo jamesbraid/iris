@@ -68,7 +68,7 @@ pub const HQ_TOKEN_GEDMA: u32 = 0x1_0000;
 pub const HQ_TOKEN_UNSTALL: u32 = 0x1_0001;
 /// Context switch (GE_HQMSAV, 0x1f0): context id, then 2 DATA words.
 pub const GE_HQMSAV: u32 = 496;
-/// Context save / restore through HQ2_GEDMA (kernel _Gr2CXSaveRestore).
+/// Context save / restore through HQ2_GEDMA (the kernel's context save and restore).
 pub const GE_CX_SAVE_MAIN: u32 = 0x1e1;
 pub const GE_CX_RESTORE_MAIN: u32 = 0x1e2;
 pub const GE_CX_SAVE_EXT: u32 = 0x1e3;
@@ -88,18 +88,18 @@ pub const HQ_PCX_1E6: u32 = 0x1e6;
 /// GL microcode request that completes by raising FIN3: Xsgi sends it and
 /// spins on version bit 0, then clears FIN3 via 0x6b000.
 pub const HQ_GL_FIN3: u32 = 0x155;
-/// OpenGL tokens (libglcore EXPRESS `gr2_hq2_fifo`: struct offset X is FIFO
+/// OpenGL tokens (libglcore's FIFO block: block offset X is FIFO
 /// index (X - 0x2000) / 4).
-/// glFinish / SwapBuffers: `readback_trigger` (0x228C); the client then spins
+/// glFinish / SwapBuffers: the readback trigger (0x228C); the client then spins
 /// on version bit 0 (FIN3) and acks at the FIN3 port.
 pub const GL_FINISH: u32 = 0xa3;
-/// glFlush / SwapBuffers: `swap_sync` (0x2018).
+/// glFlush / SwapBuffers: the swap sync (block offset 0x2018).
 pub const GL_FLUSH: u32 = 0x006;
-/// SwapBuffers: `swap_buffers` (0x279C) = swap interval, then ioctl 1005.
+/// SwapBuffers: block offset 0x279C = swap interval, then ioctl 1005.
 pub const GL_SWAP_BUFFERS: u32 = 0x1e7;
 
 // ── 2D (Xsgi DDX) commands, GL microcode ───────────────────────────────────
-pub const HQ2_2D_BEGIN: u32 = 0x12c; // 0x404b0, sent first by expInitHW (1 word)
+pub const HQ2_2D_BEGIN: u32 = 0x12c; // 0x404b0, sent first by Xsgi's init (1 word)
 pub const HQ2_2D_SOLID_RECT: u32 = 304; // stream: 4 DATA words per box
 pub const HQ2_2D_COLOR_AUX: u32 = 309; // aux-plane write mask
 /// Colour for CLEAR bits of glyphs/mono images/stipples when drawn opaque
@@ -113,54 +113,54 @@ pub const HQ2_2D_ROP: u32 = 332; // fg; DATA planemask, alu, flag
 pub const HQ2_2D_CID_WRITE: u32 = 336; // (cid << 8) | 0xF000, 0 = off
 /// Pixel format and alignment for the next image transfer: [format (2 =
 /// 8-bit, 1 = 16-bit, 0 = 32-bit per pixel, as TILE_SETUP), first pixel's
-/// slot in the first word of each row] (expReadImage*, expDrawImage*).
+/// slot in the first word of each row] (image reads and draws).
 pub const HQ2_2D_BUF_SELECT: u32 = 337;
 /// Screen-to-host readback: words per row; DATA x, y (X-style, top-down),
 /// width, rows. The microcode packs the rows into shram from word
 /// READ_IMAGE_SHRAM (format and alignment from BUF_SELECT, MSB = first
-/// pixel) and raises FIN3 (expReadImage).
+/// pixel) and raises FIN3 (image read).
 pub const HQ2_2D_READ_IMAGE: u32 = 344;
 /// First shram word of the READ_IMAGE result (Xsgi reads base + 0x1B000).
 pub const READ_IMAGE_SHRAM: usize = 0x6C00;
 pub const HQ2_2D_END_PRIMITIVE: u32 = 490;
-/// Tile setup: size; DATA width, height, format (2), 0xD022 (expTileRects).
+/// Tile setup: size; DATA width, height, format (2), 0xD022 (tile fill).
 pub const HQ2_2D_TILE_SETUP: u32 = 314;
 /// Tile data chunks (64/32/16/8-word loaders): words append to the tile.
 pub const HQ2_2D_TILE_DATA_FIRST: u32 = 315;
 pub const HQ2_2D_TILE_DATA_LAST: u32 = 318;
 /// Tiled fill: DATA origin x, origin y, then boxes (x1, y1, x2, y2).
 pub const HQ2_2D_TILE_RECT: u32 = 321;
-/// Same, used when the tile width is not a whole number of words (expTileRects).
+/// Same, used when the tile width is not a whole number of words (tile fill).
 pub const HQ2_2D_TILE_RECT_ODD: u32 = 322;
 /// 1-bpp images: x; DATA y, width, rows; then a fixed data block.
 pub const HQ2_2D_MONO_IMAGE_8: u32 = 349;
 pub const HQ2_2D_MONO_IMAGE_16: u32 = 350;
 pub const HQ2_2D_MONO_IMAGE_32: u32 = 351;
 pub const HQ2_2D_MONO_IMAGE_64: u32 = 352;
-/// Host-to-screen image (expDrawImage): x; DATA y, width, rows, words/row,
+/// Host-to-screen image (image draw): x; DATA y, width, rows, words/row,
 /// format, left skip; then rows*words/row pixel words, padded with
 /// 0xDEADBEEF to the chunk size. Streamed.
 pub const HQ2_2D_DRAW_IMAGE: u32 = 342;
 pub const HQ2_2D_DRAW_IMAGE_SMALL: u32 = 343;
-/// Host-to-screen pixel DMA (kernel _Gr2DMAtrigger / _Gr2MCDMAtrigger):
+/// Host-to-screen pixel DMA (the kernel's pixel DMA start):
 /// fifo[0x147] = x; then 6 words through FIFO index 0: y, width (pixels),
 /// height, words per row, flag, 0; then height * words_per_row pixel words
 /// through HQ2_GEDMA (VDMA). The kernel waits for FIN2 after the transfer.
 pub const HQ2_DMA_WRITE_PIXELS: u32 = 327;
-/// GL-microcode pixel DMA (IRIS GL lrectwrite, libgl gl_gr2dma_lrectwrite):
+/// GL-microcode pixel DMA (IRIS GL lrectwrite):
 /// 0x0B5 at pixel zoom 1, 0x0B8 zoomed. Same kernel protocol and header as
 /// 0x147, drawn in the current GL context (window-relative, GL y up).
 pub const HQ2_GL_DMA_WRITE: u32 = 0x0b5;
 pub const HQ2_GL_DMA_WRITE_ZOOM: u32 = 0x0b8;
 /// Pixel DMA reads: the same kernel ioctl and
 /// header as the writes, but the VDMA reads height * words/row words from
-/// HQ2_GEDMA; FIN2 when done. 0x152 = Xsgi expReadImage* (screen, X-style
+/// HQ2_GEDMA; FIN2 when done. 0x152 = Xsgi's image reads (screen, X-style
 /// y = top row, format from BUF_SELECT); 0x0AC = GL lrectread /
 /// glReadPixels (window-relative, y = bottom row, source from 0x10A).
 pub const HQ2_2D_DMA_READ_PIXELS: u32 = 0x152;
 pub const HQ2_GL_DMA_READ: u32 = 0x0ac;
 
-/// Pixel rectangles streamed by the kernel's pixel DMA (_Gr2DMAtrigger):
+/// Pixel rectangles streamed by the kernel's pixel DMA:
 /// x on the token; y, width, height, words/row, flag, 0 on GE_DATA; then
 /// the pixel words through HQ2_GEDMA; FIN2 when done.
 fn is_pixel_dma(cmd: u32) -> bool {
@@ -175,10 +175,10 @@ pub const HQ2_2D_GLYPH_64: u32 = 326;
 /// Fill spans: stream of (x, y, width) triples, padded with (1280, 1024, 1).
 pub const HQ2_2D_POLY_SPAN: u32 = 305;
 /// Line segments: 0; then a stream of (x1, y1, x2, y2) quads until the next
-/// command (END_PRIMITIVE); padding quads have x1 = x2 = 1280 (expLineSS,
-/// expPolySegment; 4Dwm's move/resize frame is 16 of them).
+/// command (END_PRIMITIVE); padding quads have x1 = x2 = 1280 (line and
+/// segment draws; 4Dwm's move/resize frame is 16 of them).
 pub const HQ2_2D_LINE_SEG: u32 = 301;
-/// Line mode word (expLineSS writes 0xA).
+/// Line mode word (line draws write 0xA).
 pub const HQ2_2D_LINE_MODE: u32 = 328;
 /// Line clip box: x1; DATA x2, y1, y2 (inclusive).
 pub const HQ2_2D_LINE_CLIP: u32 = 330;
@@ -187,19 +187,19 @@ pub const HQ2_2D_POLYLINE: u32 = 302;
 pub const HQ2_2D_POLYLINE_ALT: u32 = 357;
 /// Segments: stream of (x1, y1, x2, y2), padded with (1280, 1024) pairs.
 pub const HQ2_2D_SEGMENTS: u32 = 345;
-/// Points (expPolyPoint, XDrawPoints): 0; stream of (x, y), padded with
+/// Points (point draws, XDrawPoints): 0; stream of (x, y), padded with
 /// (1280, 1024) pairs, clipped to LINE_CLIP.
 pub const HQ2_2D_POLYPOINT: u32 = 353;
 /// Stipple opaque flag (1 = zero bits get bg).
 pub const HQ2_2D_STIPPLE_AUX: u32 = 313;
 /// Stippled box: 0; DATA origin x, x1, origin y, y1, x2, y2.
 pub const HQ2_2D_STIPPLE_RECT: u32 = 348;
-/// Stippled boxes from expStippledFillRects, same 7 words as STIPPLE_RECT,
+/// Stippled boxes from Xsgi's rectangle fill, same 7 words as STIPPLE_RECT,
 /// stipple loaded through TILE_SETUP (format 3) + TILE_DATA. 319 is used for
 /// power-of-two stipple widths, 320 for the rest.
 pub const HQ2_2D_STIPPLE_BOX_POW2: u32 = 319;
 pub const HQ2_2D_STIPPLE_BOX: u32 = 320;
-/// Stippled spans (expStippledFillSpans): 0; stream of (x, y, w, pattern)
+/// Stippled spans (span fill): 0; stream of (x, y, w, pattern)
 /// quads, y top-down. The pattern is pre-rotated so its MSB is pixel x and
 /// repeats every 32 pixels. 346 for stipples narrower than 32 / multi-word,
 /// 347 for 32-wide stipples. COLOR_ON = set bits, STIPPLE_AUX 1 = opaque
@@ -215,7 +215,7 @@ const IMG_ROW_WORDS: usize = 1280;
 /// IRIS GL pads its last 0x071 block to 16 words).
 pub(super) const PIX_WORDS: usize = 64;
 /// Max tile words kept (a 64x64 8-bit tile is 1024 words; larger is clipped).
-/// Tile/stipple store. expTileRects sends tiles of up to 0x1300 words
+/// Tile/stipple store. The tile fill sends tiles of up to 0x1300 words
 /// (words per row * rows <= 0x1300; 4Dwm's 85x67 8-bit icon images need
 /// 1474), padded to a multiple of 8 words.
 const TILE_WORDS: usize = 0x1308;
@@ -262,8 +262,8 @@ pub enum ReadDecode {
     /// GL depth: Z right-justified (libglcore shifts it up by 32 - bits),
     /// with `sbits` stencil bits above it in the 24-bit word (a z20 s4
     /// visual: Z 19:0, stencil 23:20). Inferred: every libglcore depth read
-    /// drops what is above Z (the DMA path shifts by 32 - 20, Fetch masks
-    /// 0xFFFFF), while its stencil Fetch masks the same word with 0xF.
+    /// drops what is above Z (the DMA path shifts by 32 - 20 and masks
+    /// 0xFFFFF), while its stencil read masks the same word with 0xF.
     Depth { sbits: u32 },
 }
 
@@ -365,11 +365,11 @@ pub fn read_value(s: &State2d, vram: u32) -> u32 {
     match s.mode & 0xff {
         8 => aux,
         0xb => if s.aux_mask & 0xc != 0 { (aux >> 2) & 3 } else { aux & 3 },
-        // 12-bit RGB (expReadImage12TC: MODE 0x1002, ROP flag = the
+        // 12-bit RGB (the 12-bit image read: MODE 0x1002, ROP flag = the
         // window's buffer * 8): the bank the flag selects, R 3:0, G 7:4,
         // B 11:8, as 8:8:8 with each nibble replicated. The DDX takes the
         // low nibble of each byte back ((w & 0xF) | (w & 0xF00) >> 4 |
-        // (w & 0xF0000) >> 8); expDrawImage12TC sends the high nibbles.
+        // (w & 0xF0000) >> 8); the 12-bit image draw sends the high nibbles.
         2 => {
             let v = (vram >> (12 * ((s.flag >> 3) & 1))) & 0xfff;
             let wide = |n: u32| (n & 0xf) * 17;
@@ -732,7 +732,7 @@ impl Hq2Engine {
             }
             if self.need == 0 {
                 if self.restarted != 0 && index == PUC_DATA {
-                    // Microcode reset path (kernel Gr2Start): one argument
+                    // Microcode reset path (the kernel's start): one argument
                     // (0/1/2 by board rev), then FIN2.
                     self.restarted = 0;
                     self.cmd = HQ_TOKEN_UNSTALL;
@@ -928,7 +928,7 @@ impl Hq2Engine {
                         if !pad {
                             // SEGMENTS draws both endpoints; LINE_SEG is the
                             // CapNotLast form and stops before (x2, y2)
-                            // (expSegmentSS picks it by cap style and swaps
+                            // (Xsgi's segment draw picks it by cap style and swaps
                             // reversed segments with +1 to keep the pixels).
                             let last = self.cmd == HQ2_2D_SEGMENTS;
                             self.line2d([a[1] as i32, a[2] as i32], [a[3] as i32, a[4] as i32], last, out);
@@ -945,7 +945,7 @@ impl Hq2Engine {
                         } else if self.line_have_prev != 0 {
                             // Each segment stops before its end point, so
                             // joints are drawn once and the final point is
-                            // not drawn: expLineSS sends an extra (x + 1, y)
+                            // not drawn: Xsgi's line draw sends an extra (x + 1, y)
                             // point when the cap style wants it.
                             self.line2d(self.line_prev, p, false, out);
                             self.line_prev = p;
@@ -1025,7 +1025,7 @@ impl Hq2Engine {
     /// Set the RE3 colour for a GC pixel (fg, COLOR_ON / OFF; colour planes:
     /// R in bits 7:0). In 12-bit mode (MODE 2) the pixel is the X visual's
     /// 12-bit value (R 3:0, G 7:4, B 11:8): the DDX passes GC pixels
-    /// unconverted (expDrawPoints), so widen it here (inferred).
+    /// unconverted (Xsgi's point draw), so widen it here (inferred).
     fn color2d(&self, pixel: u32, out: &mut dyn Re3Sink) {
         if self.s2d.mode & 0xff == 2 {
             let wide = |n: u32| (n & 0xf) * 17;
@@ -1035,7 +1035,7 @@ impl Hq2Engine {
     }
 
     /// Colour of an image / tile pixel word: in 12-bit mode the DDX has
-    /// already widened it to 8:8:8 (expDrawImage12TC, expTileRects: the
+    /// already widened it to 8:8:8 (the 12-bit image draw, tile fill: the
     /// nibbles in the high halves), which the RE3 12-bit packer takes as is.
     fn image2d(&self, pixel: u32, out: &mut dyn Re3Sink) {
         if self.s2d.mode & 0xff == 2 && self.s2d.cid_write & 0xf000 == 0 {
@@ -1308,7 +1308,7 @@ impl Hq2Engine {
         if x1 >= x2 || y1 >= y2 {
             return;
         }
-        // Pixel format (TILE_SETUP word 3, expTileRects): 2 = 8-bit (4 per
+        // Pixel format (TILE_SETUP word 3, tile fill): 2 = 8-bit (4 per
         // word), 1 = 16-bit (2 per word), 0 = 24/32-bit (1 per word); MSB
         // first; rows are ceil(width * bpp / 32) words.
         let per_word: i32 = match self.tile_fmt { 2 => 4, 1 => 2, _ => 1 };
@@ -1367,7 +1367,7 @@ impl Hq2Engine {
                 // writes the value to both 12-bit buffers and the plane mask
                 // picks one. The buffers never move; ROP flag bit 3
                 // (the window's dbc buffer * 8) names buffer 1. A mask the
-                // DDX already moved or doubled (dbc -3 / -1, expTileRects)
+                // DDX already moved or doubled (dbc -3 / -1, tile fill)
                 // is used as it is.
                 2 => {
                     let pm = s.planemask & 0x00ff_ffff;
@@ -1574,7 +1574,7 @@ impl Hq2Engine {
             HQ2_2D_LINE_CLIP => self.line_clip = [a[0] as i32, a[1] as i32, a[2] as i32, a[3] as i32],
             HQ2_2D_STIPPLE_AUX => self.stipple_opaque = a[0] & 1,
             // One box per command: 0; DATA origin x, x1, origin y, y1, x2, y2
-            // (same interleaved order as STIPPLE_RECT; expTileRects).
+            // (same interleaved order as STIPPLE_RECT; tile fill).
             HQ2_2D_TILE_RECT | HQ2_2D_TILE_RECT_ODD => {
                 let (ox, oy) = (a[1] as i32, a[3] as i32);
                 if self.tile_fmt == 3 {
@@ -1600,7 +1600,7 @@ impl Hq2Engine {
                 self.s2d.alu = a[2];
                 self.s2d.flag = a[3];
             }
-            // Microcode reset path after unstall (kernel Gr2Start): the start
+            // Microcode reset path after unstall (the kernel's start): the start
             // argument (0/1/2 by board rev) resets drawing state, then FIN2.
             HQ_TOKEN_UNSTALL => {
                 self.init(out);

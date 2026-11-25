@@ -17,7 +17,7 @@ fn pixel(g: &Gr2, x: usize, y_gl: usize) -> u32 {
     g.vram()[y_gl * FB_W + x] & 0x00ff_ffff
 }
 
-/// PROM Gr2TpSetup prologue plus the kernel's initial clear.
+/// The PROM's textport setup prologue plus the kernel's initial clear.
 fn tp_init(g: &Gr2) {
     w32(g, 0x6a070, 0); // gepc = 0
     w32(g, 0x6a078, 0); // unstall
@@ -51,7 +51,7 @@ fn hq_ucode_and_ge_staging_verify_like_the_prom() {
     }
     assert_eq!(r32(g, 0x6a064) & 0x03df_ffff, 0x02b6_0000 & 0x03df_ffff);
 
-    // Chip revisions as Gr2ProbeChipRev reads them.
+    // Chip revisions as the kernel's chip-revision probe reads them.
     assert_ne!(r32(g, 0x6a040) >> 23, 0, "HQ2 rev");
     w32(g, 0x68000 + 0xfd * 4, 0);
     assert_ne!((r32(g, 0x68000 + 0xfd * 4) & 0xff) >> 5, 0, "GE7 rev");
@@ -140,7 +140,7 @@ fn compose_textport_pixel_through_clut_and_dac() {
     use super::gr2comp;
     let g = &live_gr2(Gr2Variant::Extreme);
     tp_init(g);
-    // XMAP: DID 0 = 8-bit CI, CLUT page 16 (kernel _Gr2XMAPInit1).
+    // XMAP: DID 0 = 8-bit CI, CLUT page 16 (kernel XMAP init).
     w32(g, 0x6c1a0 + 0x10, 0);
     w32(g, 0x6c1a0 + 0x14, 0);
     w32(g, 0x6c1a0 + 0x04, 0x8200_0000);
@@ -224,8 +224,8 @@ fn trace_captures_annotated_hq_and_re3_traffic() {
     assert!(out.contains("NUMPIX"), "{out}");
 }
 
-/// Kernel _Gr2UcodeReady polls hq.version bit 1 (FIN2) after clearing fin2
-/// and issuing a request. These are the exact sequences from Gr2Start and
+/// The kernel's microcode-ready check polls hq.version bit 1 (FIN2) after clearing fin2
+/// and issuing a request. These are the exact sequences of the kernel's start and
 /// Gr2PcxSwap as captured in an Xsgi start-up trace.
 #[test]
 fn fin2_handshakes_for_gr2start_and_context_switch() {
@@ -238,7 +238,7 @@ fn fin2_handshakes_for_gr2start_and_context_switch() {
         }
     };
 
-    // Gr2Start: gepc=0, unstall, fin2=0, fifo[479]=start arg (1 for rev 4).
+    // Start: gepc=0, unstall, fin2=0, fifo[479]=start arg (1 for rev 4).
     w32(g, 0x6a070, 0);
     w32(g, 0x6a078, 0);
     w32(g, 0x6a04c, 0);
@@ -331,8 +331,8 @@ fn xsgi_fin3_handshake_and_open_commands() {
     }
 }
 
-/// Xsgi DDX expInitHW verbatim, then colour and overlay boxes
-/// the way expDrawSolidRects sends them.
+/// Xsgi's hardware init verbatim, then colour and overlay boxes
+/// the way its solid rectangle draws send them.
 #[test]
 fn ddx_init_hw_and_solid_rects() {
     use super::hq2::*;
@@ -350,7 +350,7 @@ fn ddx_init_hw_and_solid_rects() {
             data(g, v);
         }
     };
-    // expInitHW: overlay clear, colour clear, CID clear.
+    // Xsgi's init: overlay clear, colour clear, CID clear.
     cmd(g, HQ2_2D_BEGIN, 0);
     cmd(g, HQ2_2D_MODE, 8);
     cmd(g, HQ2_2D_COLOR_AUX, 0xf);
@@ -502,7 +502,7 @@ fn ddx_tile_root_and_mono_glyphs() {
     assert_eq!(px(640, 512), 0x10);
 
     // Glyph: MONO_IMAGE_16 at (0x217, 0x114), 16x16, fg 0x12 (from the trace;
-    // expDrawMonoImage writes ROP fg and 0x138 with the same pixel).
+    // Xsgi's mono image draw writes ROP fg and 0x138 with the same pixel).
     cmd(g, HQ2_2D_ROP, 0x12);
     for v in [0xff, 3, 0] { data(g, v); }
     cmd(g, HQ2_2D_COLOR_ON, 0x12);
@@ -522,7 +522,7 @@ fn ddx_tile_root_and_mono_glyphs() {
     assert_eq!(px(0x217, 0x114), 0x10);
 }
 
-/// DRAW_IMAGE as expDrawImage sends it (8-bit pixels, padding words), and
+/// DRAW_IMAGE as Xsgi's image draw sends it (8-bit pixels, padding words), and
 /// COPY_RECT in X coordinates.
 #[test]
 fn ddx_draw_image_and_copy_rect() {
@@ -606,7 +606,7 @@ fn ddx_glyphs_lines_spans_stipples() {
     assert_eq!((px(0x15, 0x300), px(0x1d, 0x300), px(0x1e, 0x300)), (7, 7, 0));
     assert_eq!(px(0x16, 0x301), 7);
     assert!((0x3e0..=0x3ee).all(|y| px(0x11, y) == 7), "vertical run");
-    // The final point is not drawn (expLineSS adds an (x + 1) point itself
+    // The final point is not drawn (Xsgi's line draw adds an (x + 1) point itself
     // when the cap style wants the end pixel).
     assert!((0x11..0x22).all(|x| px(x, 0x3e0) == 7), "horizontal run");
     assert_eq!(px(0x22, 0x3e0), 0, "polyline end point not drawn");
@@ -644,7 +644,7 @@ fn ddx_glyphs_lines_spans_stipples() {
     let _ = r;
 }
 
-/// xterm image text (expImageGlyphBltTE8, captured trace): the text box is
+/// xterm image text (captured trace): the text box is
 /// filled with the ROP fg (the GC background, 0x23), then 0x138 = 0x34 (text
 /// colour) and 0x137 = 0x23; glyph bits must come out in 0x34.
 #[test]
@@ -748,7 +748,7 @@ fn kernel_pixel_dma_write_sets_fin2() {
     assert_eq!(r1, vec![0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18]);
 }
 
-/// Screen-to-host readback as Xsgi's expReadImage drives it (6.5.22 xdm
+/// Screen-to-host readback as Xsgi's image read drives it (6.5.22 xdm
 /// hang): 0x6b000 = 0; BUF_SELECT [format, offset]; READ_IMAGE words/row;
 /// DATA x, y, w, rows; poll FIN3; read packed rows from shram 0x6C00.
 #[test]
@@ -844,7 +844,7 @@ fn ddx_line_seg_streams_whole_frame() {
     assert_eq!(aux(1279, 0), 0, "padding not drawn");
 }
 
-/// OpenGL glFinish (libglcore EXPRESS Finish): readback_trigger (FIFO 0xa3)
+/// OpenGL glFinish (libglcore EXPRESS Finish): the readback trigger (FIFO 0xa3)
 /// = 0, spin on version bit 0, ack at the FIN3 port. The 6.5.22 screen saver
 /// hung here.
 #[test]
@@ -1079,7 +1079,7 @@ fn gl_polygon_stipple_window_aligned() {
     let fl = |v: f32| v.to_bits();
     cmd(g, 0x104, fl(0.0));
     for v in [0.0f32, 0.0, 0.0] { data(g, fl(v)); }
-    // GL mask rows -> the hardware layout libglcore's __glExpConvertStipple
+    // GL mask rows -> the hardware layout libglcore's stipple conversion
     // sends: word i = left halves of rows 30-2i (high) and 31-2i (low),
     // word 16+i = right halves.
     let row = |r: usize| -> u32 { if r == 0 { 0xffff_ffff } else { 0x8000_0000 } };
@@ -1252,7 +1252,7 @@ fn gl_context_switch_through_kernel_memory() {
 
     // A exits (Gr2DestroyDDRN): (A, 3, mode) detaches its live state, then
     // the kernel switches to another context. No later switch may name A as
-    // the owner of state to save: its RRM node is freed (IRIX 6.5.22 kernel
+    // the owner of state to save: its kernel-side node is freed (IRIX 6.5.22 kernel
     // fault at address 4 after ideas exited while powerflip ran).
     switch(g, 0x74, 3);
     switch(g, 0xe8, 2);
@@ -1329,7 +1329,7 @@ fn gl_depth_signed_geequal() {
     assert_eq!(gl_px(g, 100, 150), blue, "band outside the triangle");
 }
 
-/// 0x1E5 as Gr2ValidateClip sends it for the test window (x 64, GL y 660,
+/// 0x1E5 as the kernel's clip update sends it for the test window (x 64, GL y 660,
 /// 400x300): wid, obscured, pieces, then up to 4 rectangles
 /// ((x1 << 11) | x0, (ytop << 10) | ybottom; inclusive, GL y up).
 fn gl_window_clip(g: &Gr2, wid: u32, obscured: u32, n: u32, rects: &[[u32; 4]]) {
@@ -1511,7 +1511,7 @@ fn gl_stencil_mask_quad() {
 }
 
 /// glprim --scene blend: red quad, then a blue triangle with alpha 0.5
-/// blended SRC_ALPHA / ONE_MINUS_SRC_ALPHA (blend_mode 1; factors 1, 4, 5).
+/// blended SRC_ALPHA / ONE_MINUS_SRC_ALPHA (blend mode 1; factors 1, 4, 5).
 #[test]
 fn gl_blend_src_alpha() {
     let g = &live_gr2(Gr2Variant::Xz);
@@ -1677,7 +1677,7 @@ fn gr2_replay_file() {
         w32(g, dac + 8, 0xff);
     }
     // Traces usually start mid-session: give 2D a full scissor (as
-    // expInitHW's 2D_BEGIN does) and drop 2D_SYNC, whose FIN3 would wait for
+    // Xsgi's init 2D_BEGIN does) and drop 2D_SYNC, whose FIN3 would wait for
     // a CPU acknowledge that the replay cannot give.
     cmd(g, hq2::HQ2_2D_BEGIN, 0);
     let text: String = std::fs::read_to_string(&path)
@@ -1691,7 +1691,7 @@ fn gr2_replay_file() {
     eprintln!("replayed {path} -> {out}/");
 }
 
-/// PLL bit-bang is decoded (PROM Gr2StartClock: LSB first, strobe on the
+/// PLL bit-bang is decoded (PROM clock start: LSB first, strobe on the
 /// last bit) so monitor changes (xsetmon) are visible.
 #[cfg(not(feature = "engine-crate"))]
 #[test]
@@ -1794,7 +1794,7 @@ fn iris_glyph16_at_cmov() {
 }
 
 /// xterm's hollow cursor (IRIX 6.5.22 trace): XDrawRectangle through
-/// expSegmentSS with CapNotLast = LINE_SEG, reversed edges swapped with +1,
+/// Xsgi's segment draw with CapNotLast = LINE_SEG, reversed edges swapped with +1,
 /// then a (0, 0)-(0, 0) segment. Every pixel once, nothing past the corners.
 #[test]
 fn ddx_line_seg_cap_not_last() {
@@ -2125,8 +2125,7 @@ fn kernel_pixel_dma_fin2_poll_waits_for_hq() {
     assert_eq!(r32(g, 0x6a040) & 2, 2);
 }
 
-/// IRIS GL lrectwrite by pixel DMA (IRIX 5.3 MRI software, libgl
-/// gl_gr2dma_lrectwrite): 0x0B5 = x; GE_DATA y, width, height, words/row,
+/// IRIS GL lrectwrite by pixel DMA (IRIX 5.3 MRI software, libgl): 0x0B5 = x; GE_DATA y, width, height, words/row,
 /// flag, 0; 16-bit colour indices through HQ2_GEDMA, first pixel in the
 /// high half; rows arrive top row first (the kernel's VDMA runs the
 /// bottom-up lrectwrite array from its end), y = bottom of the rectangle;
@@ -2327,7 +2326,7 @@ fn gl_line_steep_downwards() {
     assert_eq!(gl_px(g, 20, 10), 0, "last point not drawn");
 }
 
-/// Kernel pixel-DMA read as Xsgi's expReadImage drives it for large
+/// Kernel pixel-DMA read as Xsgi's image read drives it for large
 /// rectangles (XGetImage, readximage.log): BUF_SELECT; fin2 = 0; 0x152 x;
 /// GE_DATA y, width, rows, words/row, flag, 0; the VDMA then reads the
 /// packed rows (top first, X-style y) from HQ2_GEDMA and waits for FIN2.
@@ -2376,8 +2375,7 @@ fn gl_dma_read(g: &Gr2, x: u32, y: u32, w: u32, rows: u32) -> Vec<u32> {
     words
 }
 
-/// glReadPixels RGBA through the kernel pixel DMA (libglcore
-/// __glExpReadPixelsKDMARGBA, readback.log): 0x10A read source; 0x0AC x;
+/// glReadPixels RGBA through the kernel pixel DMA (libglcore, readback.log): 0x10A read source; 0x0AC x;
 /// GE_DATA y (window-relative, bottom row), width, rows, words/row, 0, 0.
 /// 24-bit RGB: one pixel per word as 0xAABBGGRR (the order 0x0B5 takes),
 /// alpha 0xFF; rows go out top first.
@@ -2413,7 +2411,7 @@ fn gl_dma_read_rgb12_back_and_front_banks() {
 }
 
 /// XGetImage of a 12-bit double-buffered window (cap.log, glprim --scene
-/// quadrants --db): expReadImage12TC sets MODE 0x1002 and ROP flag = the
+/// quadrants --db): Xsgi's 12-bit image read sets MODE 0x1002 and ROP flag = the
 /// window's buffer * 8, reads 32-bit words by 0x152 and keeps the low
 /// nibble of each byte. So the read returns the flagged bank as 8:8:8 with
 /// the nibbles replicated, not the raw 24 bits of both banks.
@@ -2482,7 +2480,7 @@ fn ddx_12bit_fill_goes_to_the_flagged_bank() {
     assert_eq!(pixel(g, 11, 20), 0x0f_00f0, "both buffers");
 }
 
-/// Image words in 12-bit mode come widened by the DDX (expDrawImage12TC:
+/// Image words in 12-bit mode come widened by the DDX (Xsgi's 12-bit image draw:
 /// (x & 0xF) << 4 | (x & 0xF0) << 8 | (x & 0xF00) << 12) and land as the
 /// 12-bit pixel.
 #[test]
@@ -2588,7 +2586,7 @@ fn gl_bitmap_draws_at_raster_and_advances() {
 /// 0x3104, index 46.0; DATA 0, 0, 0). Unimplemented, the window kept
 /// whatever was under it.
 #[test]
-fn gl_clear_ci_fills_window_with_index() {
+fn gl_index_clear_fills_window_with_index() {
     let g = &live_gr2(Gr2Variant::Xz);
     gl_setup_window(g);
     cmd(g, 0x3104, 46.0f32.to_bits());
@@ -2656,7 +2654,7 @@ fn gl_bitmap_huge_block() {
 }
 
 /// IRIS GL writepixels (mandel, IRIX 6.5.22): cmov, then getcpos; a zero
-/// status word made gl_g_writepixels return without drawing (grey window),
+/// status word made writepixels return without drawing (grey window),
 /// so a valid position must read back positive. After the row it moves the
 /// character position with 0x0D0 x; DATA y, 0 (window pixels).
 #[test]
@@ -2747,7 +2745,7 @@ fn iris_rectzoom_token_then_data() {
 
 /// IRIS GL readpixels / lrectread (snoop): 0x0AD x; DATA y, w, h, 1, 0, 0.
 /// The pixels land in shram from the mailbox (0x4022), one per word, rows
-/// bottom first (as libglcore's Pack1 takes them), and the microcode
+/// bottom first (as libglcore takes them), and the microcode
 /// raises FIN3 itself (libgl polls without a Finish).
 #[test]
 fn iris_read_rect_to_mailbox_and_fin3() {
@@ -2873,7 +2871,7 @@ fn iris_lmcolor_change_lost_on_material_bind() {
     assert!((p >> 8) & 0xff > 0x80, "green material ({p:06x})");
 }
 
-/// One OpenGL glDrawPixels row (__glExpFastDrawPixels): 0x0A7 = packing,
+/// One OpenGL glDrawPixels row: 0x0A7 = packing,
 /// 0x0BB = 0, zoom x, 1; 0x0B1; the words on 0x071 (+ DATA); 0x0B2 x;
 /// DATA y, pixels, words, flag; 0x0B3.
 fn gl_draw_row(g: &Gr2, pack: u32, zoom_x: f32, x: u32, y: u32, n: u32, words: &[u32]) {
@@ -2903,7 +2901,7 @@ fn gl_draw_pixels_packed_indices_and_x_zoom() {
     assert_eq!(row(21, 7), vec![1, 1, 2, 2, 3, 3, 0]);
 }
 
-/// glCopyPixels (__glExpFastCopyPixels): 0x0BB = 0, |zoom x|, |zoom y|;
+/// glCopyPixels: 0x0BB = 0, |zoom x|, |zoom y|;
 /// 0x0BA 0; DATA source y, destination y, height, source x, destination x,
 /// width (window coordinates). Each source pixel covers zoom x by zoom y.
 #[test]

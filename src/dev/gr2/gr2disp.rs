@@ -6,7 +6,7 @@
 //! installed renderer and repeats it for the status bar), and then pulses the
 //! retrace line, so a flip the guest makes in the blank shows from the next frame.
 //! The IOC latches the retrace until the host acknowledges: PORT_CONFIG on
-//! Indigo2, HPC3_GEN_CONTROL on Indy (GR2.h "INTERRUPTS").
+//! Indigo2, HPC3_GEN_CONTROL on Indy.
 
 use std::sync::atomic::Ordering;
 use std::thread;

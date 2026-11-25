@@ -204,7 +204,7 @@ pub const RE3_OP_ZCTL: u32 = 0xFFFF_1005;
 /// Emulator-private stencil control: val = enable (bit 0) | func << 1 |
 /// ref << 4 (8 bits) | mask << 12 (8) | write mask << 20 (8) | fail << 28 |
 /// zfail << 32 | zpass << 36 (ops 0 KEEP, 1 INVERT, 2 ZERO, 3 REPLACE,
-/// 4 INCR, 5 DECR; libglcore __glExpPassStencilMode codes).
+/// 4 INCR, 5 DECR; libglcore's codes).
 pub const RE3_OP_STENCIL: u32 = 0xFFFF_1006;
 /// Emulator-private Z/stencil rectangle fill: RE3_OP_ZFILL_A = x0 | y0 << 16
 /// | x1 << 32 | y1 << 48 (exclusive), RE3_OP_ZFILL_B = value (bits 31:0) |
@@ -222,7 +222,7 @@ pub const ZBUF_STENCIL_SHIFT: u32 = 24;
 /// libglcore sends only the fragments that pass.
 ///
 /// Emulator-private blend control: val = enable (bit 0) | src factor << 1 |
-/// dst factor << 4 (libglcore __glExpPassBlendFunc codes: 0 ZERO, 1 ONE,
+/// dst factor << 4 (libglcore's codes: 0 ZERO, 1 ONE,
 /// 2 DST_COLOR (src) / SRC_COLOR (dst), 3 ONE_MINUS of that, 4 SRC_ALPHA,
 /// 5 ONE_MINUS_SRC_ALPHA). Applied by SHADED spans; the destination is the
 /// frame-buffer colour expanded to 8 bits per channel (no alpha planes).
