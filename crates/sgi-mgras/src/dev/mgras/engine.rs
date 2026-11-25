@@ -654,7 +654,7 @@ pub enum Scan {
 
 /// The CPU picture without the engine's handle (`sgi_mgras.h` has the contract): any thread may call `rows`. It holds
 /// `Shared::inner` for `snapshot_rows` (plane reads and the window-ID and pixel decode) and the display lock for a
-/// byte copy of the bus; only the per-pixel colour map, gamma and cursor pass runs with neither held. Lock order:
+/// byte copy of the bus; only `compose_rows` (colour map, gamma, overlay, cursor) runs with neither held. Lock order:
 /// the scratch mutex, `inner`, then the display lock, as everywhere.
 pub struct ScanSource<M: HostMem> {
     sh: Arc<Shared<M>>,
@@ -684,11 +684,7 @@ impl<M: HostMem> ScanSource<M> {
         sc.frame.snapshot_rows(&inner.core.back.rss[0], &sc.dcb, first..end);
         drop(inner);
         let end = end.min(h);
-        for y in first.min(end)..end {
-            for (x, p) in out[y * w..(y + 1) * w].iter_mut().enumerate() {
-                *p = display::rgb(sc.frame.pixel(x, y));
-            }
-        }
+        sc.frame.compose_rows(first.min(end)..end, out);
         Ok(Scan::Done(w as u32, h as u32))
     }
 

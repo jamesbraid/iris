@@ -2448,12 +2448,7 @@ fn bench_compose() {
     for _ in 0..runs {
         let t = std::time::Instant::now();
         for _ in 0..frames {
-            for y in 0..h {
-                for (x, o) in out[y * w..(y + 1) * w].iter_mut().enumerate() {
-                    let p = f.pixel(x, y);
-                    *o = (p & 0xFF) << 16 | p & 0xFF00 | (p >> 16) & 0xFF;
-                }
-            }
+            f.compose_rows(0..h, &mut out);
             std::hint::black_box(&out);
         }
         ms.push(t.elapsed().as_secs_f64() * 1e3 / frames.max(1) as f64);

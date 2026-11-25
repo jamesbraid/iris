@@ -302,6 +302,91 @@ impl Frame {
         0xFF00_0000 | lvl(b, 2) << 16 | lvl(g, 1) << 8 | lvl(r, 0)
     }
 
+    /// Level `v` through the gamma table, in its place of `0x00RRGGBB` (`k` 0 red, 1 green, 2 blue).
+    #[inline(always)]
+    fn shade(&self, v: u32, k: usize) -> u32 {
+        (self.gamma[(v & 0xFF) as usize][k] as u32) << (8 * (2 - k))
+    }
+
+    /// `pixel` as `0x00RRGGBB`, the shell's words.
+    #[inline]
+    fn pixel_rgb(&self, x: usize, y: usize) -> u32 {
+        self.levels(x, y).map_or(0, |[r, g, b]| self.shade(r, 0) | self.shade(g, 1) | self.shade(b, 2))
+    }
+
+    /// Whether an overlay pixel of display row `y` (of `w` pixels) is set.
+    fn overlaid(&self, y: usize, w: usize) -> bool {
+        self.overlay[y * W..y * W + w].iter().fold(0, |a, &o| a | o) != 0
+    }
+
+    /// Whether the cursor covers part of display row `y`.
+    fn cursor_row(&self, y: usize) -> bool {
+        self.cursor_on && (self.cursor_y..self.cursor_y + self.cursor_size as i32).contains(&(y as i32))
+    }
+
+    /// Rows `rows` into `out` (`width` words a row) as `pixel` gives them in `0x00RRGGBB`: the main planes by run of
+    /// window ID, the overlay and cursor over them as `levels` orders them. Other rows are left alone.
+    pub fn compose_rows(&self, rows: std::ops::Range<usize>, out: &mut [u32]) {
+        let w = self.width;
+        if !super::gl::fast_paths() {
+            for y in rows {
+                out[y * w..(y + 1) * w].iter_mut().enumerate().for_each(|(x, o)| *o = self.pixel_rgb(x, y));
+            }
+            return;
+        }
+        let mut shades = [[0u32; 256]; 3];
+        for (k, table) in shades.iter_mut().enumerate() {
+            table.iter_mut().enumerate().for_each(|(v, s)| *s = self.shade(v as u32, k));
+        }
+        let level = |v: u32, k: usize| shades[k][(v & 0xFF) as usize];
+        let colour = |c: u32| level(c >> 16, 0) | level(c >> 8, 1) | level(c, 2);
+        for y in rows {
+            let row = &mut out[y * w..(y + 1) * w];
+            if self.blank {
+                row.fill(0);
+                continue;
+            }
+            let (did, main) = (&self.did_main[y * W..y * W + w], &self.main[y * W..y * W + w]);
+            let mut x = 0;
+            while x < w {
+                let d = did[x] & 31;
+                // The run's end, sixteen window IDs at a time while they are all `d`.
+                let mut end = x;
+                while end + 16 <= w && did[end..end + 16].iter().fold(true, |a, e| a & (e & 31 == d)) {
+                    end += 16;
+                }
+                while end < w && did[end] & 31 == d {
+                    end += 1;
+                }
+                let mode = self.main_mode[d as usize];
+                let (px, o) = (&main[x..end], &mut row[x..end]);
+                if mode.rgb {
+                    o.iter_mut().zip(px).for_each(|(o, &v)| *o = level(v, 0) | level(v >> 8, 1) | level(v >> 16, 2));
+                } else {
+                    let (base, mask) = (mode.cmap_base as usize, mode.index_mask as u32);
+                    o.iter_mut().zip(px).for_each(|(o, &v)| *o = colour(self.cmap[(base + (v & mask) as usize) & 0x1FFF]));
+                }
+                x = end;
+            }
+            if self.overlaid(y, w) {
+                for (x, o) in row.iter_mut().enumerate() {
+                    let v = self.overlay[y * W + x];
+                    let mode = self.overlay_mode[self.did_overlay[y * W + x] as usize & 31];
+                    if v != 0 && mode.on {
+                        *o = colour(self.cmap[(mode.cmap_base as usize + v as usize) & 0x1FFF]);
+                    }
+                }
+            }
+            if self.cursor_row(y) {
+                for (x, o) in row.iter_mut().enumerate() {
+                    if let Some(c) = self.cursor_value(x, y) {
+                        *o = colour(self.cursor_rgb[c as usize]);
+                    }
+                }
+            }
+        }
+    }
+
     /// The whole frame into `out` (stride `OUT_STRIDE`, `height` rows of
     /// `width` pixels).
     pub fn compose(&self, out: &mut [u32]) {
@@ -420,6 +505,43 @@ mod tests {
         (f.cursor_x, f.cursor_y, f.cursor_size) = (r.below(w as u64 + 20) as i32 - 10, r.below(h as u64 + 10) as i32 - 5, [32, 64][r.below(2) as usize]);
         f.cursor.iter_mut().for_each(|c| *c = r.below(4) as u8);
         f.cursor_rgb = [0, r.below(1 << 24) as u32, r.below(1 << 24) as u32, r.below(1 << 24) as u32];
+    }
+
+    /// Composed rows are each pixel as `pixel` and the shell's byte order give it, over random frames (blanked or
+    /// not, with overlay pixels and a cursor on some rows): the whole picture is compared.
+    #[test]
+    fn composed_rows_are_the_pixels_one_at_a_time() {
+        let mut f = boxed_zeroed::<Frame>();
+        let mut r = Rnd(0x1234_5678_9ABC_DEF1);
+        let (mut overlaid, mut cursored) = (0, 0);
+        for trial in 0..150 {
+            let (w, h) = (1 + r.below(150) as usize, 1 + r.below(70) as usize);
+            random_frame(&mut f, &mut r, w, h);
+            let mut shown = vec![0u32; w * h];
+            f.compose_rows(0..h, &mut shown);
+            for y in 0..h {
+                overlaid += f.overlaid(y, w) as usize;
+                cursored += f.cursor_row(y) as usize;
+            }
+            let want: Vec<u32> = (0..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| {
+                let p = f.pixel(x, y);
+                (p & 0xFF) << 16 | p & 0xFF00 | (p >> 16) & 0xFF
+            }).collect();
+            assert!(shown == want, "trial {trial}: {w}x{h} differs at {:?}", (0..w * h).find(|&i| shown[i] != want[i]).map(|i| (i % w, i / w)));
+        }
+        assert!(overlaid > 500 && cursored > 500, "reach: {overlaid} rows with overlay pixels, {cursored} with the cursor");
+    }
+
+    /// A range of rows writes those rows alone.
+    #[test]
+    fn composed_rows_leave_the_others_alone() {
+        let mut f = boxed_zeroed::<Frame>();
+        let mut r = Rnd(0x7777_1111_5555_3333);
+        random_frame(&mut f, &mut r, 90, 30);
+        let mut shown = vec![0xDEAD_BEEFu32; 90 * 30];
+        f.compose_rows(7..19, &mut shown);
+        assert!(shown[..7 * 90].iter().chain(&shown[19 * 90..]).all(|&p| p == 0xDEAD_BEEF));
+        assert!(shown[7 * 90..19 * 90].iter().all(|&p| p < 1 << 24), "composed words are 0x00RRGGBB");
     }
 
     /// The buffer-select pass is a no-op when it says it does not matter: with no window ID showing buffer B and
