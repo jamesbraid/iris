@@ -2635,3 +2635,49 @@ fn the_sample_mask_and_alpha_to_mask_thin_the_coverage() {
     assert_eq!(b.contexts.select(None).gl.error, 0x500);
     command(&mut b, Grammar::Gl, SET_MULTISAMPLE_PATTERN, &[0x80a3]);
 }
+
+/// ms a frame of glDrawPixels of a `BENCH_W` x `BENCH_H` (720 x 486) image, `BENCH_CASE` rgba8, rgba16 or rgb10a2
+/// (all by default), `BENCH_FRAMES` a run (0: build only), `BENCH_RUNS` runs; the far corner is checked.
+#[test]
+#[ignore]
+fn bench_draw_pixels() {
+    use crate::dev::kona::defs::pixel::*;
+    let env = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (w, h, runs, frames) = (env("BENCH_W", 720), env("BENCH_H", 486), env("BENCH_RUNS", 5), env("BENCH_FRAMES", 4));
+    let only = std::env::var("BENCH_CASE").unwrap_or_default();
+    let cases: [(&str, u32, u32, usize); 3] = [("rgba8", FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 1), ("rgba16", FORMAT_RGBA, TYPE_UNSIGNED_SHORT, 2), ("rgb10a2", FORMAT_RGBA, TYPE_10_10_10_2, 1)];
+    for (name, format, ty, words) in cases.into_iter().filter(|c| c.0.contains(&only)) {
+        let cfg = KonaConfig { managed: (w.max(1280), h.max(1024)), ..KonaConfig::default() };
+        let mut b = KonaBackend::new(cfg);
+        command(&mut b, Grammar::Kernel, WINDOW_CLIP_SETUP, &[0, 0, w, h, 0, 0, w, h, 0, 13, 0]);
+        command(&mut b, Grammar::Gl, CONFIGURE_FRAME_BUFFER_LAYOUT, &[0, 8, 0, 1, 0, 0, 24, 0, 0, 0]);
+        command(&mut b, Grammar::Gl, SET_VIEWPORT, &[0, 0, w, h]);
+        command(&mut b, Grammar::Gl, SET_CURRENT_COLOUR_4_COMPONENTS_SINGLE_FLOAT, &[1.0f32.to_bits(); 4]);
+        command(&mut b, Grammar::Gl, SELECT_CURRENT_MATRIX_STACK, &[crate::dev::kona::defs::gl::PROJECTION]);
+        let m = crate::dev::gl::math::ortho(0.0, w as f32, 0.0, h as f32, -1.0, 1.0);
+        command(&mut b, Grammar::Gl, LOAD_MATRIX_16_FLOATS, &m.map(f32::to_bits));
+        at(&mut b, 0, 0);
+        let mut seed = 0x1234_5678u32;
+        let image: Vec<u32> = (0..w as usize * h as usize * words)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                seed | 0x0001_0001
+            })
+            .collect();
+        if frames > 0 {
+            draw_pixels(&mut b, w, h, format, ty, &image);
+            assert_ne!(colour_at(&mut b, w - 1, h - 1), 0, "{name}: the far corner pixel was stored");
+        }
+        let mut ms = Vec::new();
+        for _ in 0..runs {
+            let t = std::time::Instant::now();
+            for _ in 0..frames {
+                draw_pixels(&mut b, w, h, format, ty, &image);
+                command(&mut b, Grammar::Kernel, WINDOW_SYSTEM_PIXEL_PATH_FINISH, &[0]);
+            }
+            ms.push(t.elapsed().as_secs_f64() * 1e3 / frames.max(1) as f64);
+        }
+        let min = ms.iter().cloned().fold(f64::MAX, f64::min);
+        println!("kona draw pixels {name} {w}x{h}: ms a frame {ms:.2?} ({:.2} ns a pixel at the min)", min * 1e6 / (w * h) as f64);
+    }
+}

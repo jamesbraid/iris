@@ -132,25 +132,22 @@ fn read_scene(name: &str) {
     println!("{name:<44} {mpix:>9.1} Mpix/s");
 }
 
-/// The frame composed from the store, in megapixels of the frame: the default
-/// (textport) composition, and with the X server's tables loaded and the
-/// screen in runs of 16 pixels of four windows (8-bit, 12-bit, direct, cleared).
-fn compose_scene(name: &str, tables: Option<&Tables>, run: u32) {
-    let store = Store::new(W, H);
+/// A store of `w` x `h` pixels as a desktop leaves it: the textport colour map loaded, and with `tables` the screen in
+/// runs of `run` pixels (0: 150 to 700) of four windows (8-bit, 12-bit, direct, cleared).
+fn compose_store(tables: Option<&Tables>, run: u32, w: u32, h: u32) -> (Store, ColourMap) {
+    let store = Store::new(w, h);
     let mut map = ColourMap::default();
     for i in 0..256u32 {
         map.load(&[i, i * 4, 1020 - i * 4, i * 2]);
     }
-    // Windows in runs: `run` pixels each, or, for 0, runs of 150 to 700 pixels
-    // as a desktop's windows are.
     let mut seed = 7u64;
     let mut next = |lo: u32, hi: u32| {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         lo + (seed >> 33) as u32 % (hi - lo)
     };
-    for y in 0..H {
+    for y in 0..h {
         let (mut left, mut id) = (0u32, 1u32);
-        for c in 0..W {
+        for c in 0..w {
             if left == 0 {
                 left = if run == 0 { next(150, 700) } else { run };
                 id = id % 4 + 1;
@@ -162,6 +159,14 @@ fn compose_scene(name: &str, tables: Option<&Tables>, run: u32) {
             }
         }
     }
+    (store, map)
+}
+
+/// The frame composed from the store, in megapixels of the frame: the default
+/// (textport) composition, and with the X server's tables loaded and the
+/// screen in runs of 16 pixels of four windows (8-bit, 12-bit, direct, cleared).
+fn compose_scene(name: &str, tables: Option<&Tables>, run: u32) {
+    let (store, map) = compose_store(tables, run, W, H);
     let mut out = vec![0u32; (W * H) as usize];
     let snap = tables.map(|t| t.snapshot());
     let mpix = rate((W * H) as u64, || match &snap {
@@ -170,6 +175,30 @@ fn compose_scene(name: &str, tables: Option<&Tables>, run: u32) {
     });
     assert!(out.iter().any(|&p| p != out[0]), "{name} composed one colour");
     println!("{name:<44} {mpix:>9.1} Mpix/s");
+}
+
+/// ms a frame of the desktop compose at `BENCH_W` x `BENCH_H` (1280 x 1024), `BENCH_FRAMES` a run (0: build only),
+/// `BENCH_RUNS` runs, `BENCH_WIDE=1` for the ten-bit colour maps.
+#[test]
+#[ignore]
+fn compose_frames() {
+    let env = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (w, h, runs, frames) = (env("BENCH_W", W), env("BENCH_H", H), env("BENCH_RUNS", 5), env("BENCH_FRAMES", 8));
+    let t = tables_for_compose();
+    let (store, map) = compose_store(Some(&t), 0, w, h);
+    let snap = if env("BENCH_WIDE", 0) != 0 { std::sync::Arc::new(t.baked_wide()) } else { t.snapshot() };
+    let mut out = vec![0u32; (w * h) as usize];
+    let mut ms = Vec::new();
+    for _ in 0..runs {
+        let start = Instant::now();
+        for _ in 0..frames {
+            compose(&store, 1, &map, &snap, &mut out, w as usize);
+            std::hint::black_box(&out);
+        }
+        ms.push(start.elapsed().as_secs_f64() * 1e3 / frames.max(1) as f64);
+    }
+    let min = ms.iter().cloned().fold(f64::MAX, f64::min);
+    println!("kona compose {w}x{h}: ms a frame {ms:.2?} ({:.2} ns a pixel at the min)", min * 1e6 / (w * h) as f64);
 }
 
 /// What the display thread takes of the tables each frame, per second, for a
