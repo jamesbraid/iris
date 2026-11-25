@@ -308,6 +308,8 @@ pub struct Player {
     drive: Drive,
     /// The DMA faults the engine reported, address and direction.
     pub bus_faults: Vec<(u64, bool)>,
+    /// The damage marks seen since the caller last cleared them.
+    pub fresh: Vec<sgi_engine::Mark>,
 }
 
 pub fn config(rep_head: &str, mode: Mode, jit: Option<u32>) -> Config {
@@ -332,7 +334,7 @@ impl Player {
     pub fn on(cfg: Config, drive: Drive, gpu: Option<&Arc<sgi_mgras::wgpu::Gpu>>) -> Player {
         let mem = Mem::default();
         let e = MgrasEngine::new(cfg, mem.clone(), gpu, None).expect("engine");
-        Player { e, mem, front: Front::new(), reads: Vec::new(), notes: Vec::new(), damage: BTreeMap::new(), drive, bus_faults: Vec::new() }
+        Player { e, mem, front: Front::new(), reads: Vec::new(), notes: Vec::new(), damage: BTreeMap::new(), drive, bus_faults: Vec::new(), fresh: Vec::new() }
     }
 
     /// A second player over a fresh engine, with this one's guest-side
@@ -340,7 +342,7 @@ impl Player {
     pub fn twin(&self, cfg: Config) -> Player {
         let mem = self.mem.copy_of();
         let e = MgrasEngine::new(cfg, mem.clone(), None, None).expect("engine");
-        Player { e, mem, front: self.front.clone(), reads: self.reads.clone(), notes: self.notes.clone(), damage: self.damage.clone(), drive: self.drive, bus_faults: Vec::new() }
+        Player { e, mem, front: self.front.clone(), reads: self.reads.clone(), notes: self.notes.clone(), damage: self.damage.clone(), drive: self.drive, bus_faults: Vec::new(), fresh: Vec::new() }
     }
 
     pub fn apply(&mut self, c: &Cmd) {
@@ -380,6 +382,7 @@ impl Player {
                 Event::Note(t) => self.notes.push(t),
                 Event::BusFault { addr, write } => self.bus_faults.push((addr, write)),
                 Event::Damage(m) => {
+                    self.fresh.push(m);
                     let r = &m.rect;
                     let d = self.damage.entry(m.store).or_insert((r.x0, r.y0, r.x1, r.y1));
                     *d = (d.0.min(r.x0), d.1.min(r.y0), d.2.max(r.x1), d.3.max(r.y1));

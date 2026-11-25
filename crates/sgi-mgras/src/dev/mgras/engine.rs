@@ -371,14 +371,20 @@ impl<M: HostMem> Inner<M> {
 
 impl<M: HostMem> Core<M> {
     fn rss_write(&mut self, r: u32, val: u32, exec: bool) {
+        let drb = r == rss::reg::MGRAS_PP1_DRB_SIZE;
+        let was = if drb { self.back.reg(r) } else { 0 };
         if self.back.run(Entry::Write { reg: r, val, exec }) {
             self.drawn();
+        }
+        // Scan-out lays the planes out by this register, so a new value moves every pixel.
+        if drb && self.back.reg(r) != was {
+            self.out.damage_all();
         }
     }
 
     fn drawn(&mut self) {
         let damage = &mut self.damage;
-        for rss in &self.back.rss {
+        for rss in &mut self.back.rss {
             rss.drawn(|b, planes, rect| {
                 let store = b.ptr as u64 | ((b.kind == Kind::Overlay) as u64) << 16;
                 if let Some(m) = damage.iter_mut().find(|m| m.store == store && m.planes == planes) {
@@ -451,7 +457,11 @@ impl<M: HostMem> Hq3Sink for Core<M> {
         self.back.rss[0].dma_read_line(line)
     }
     fn gl_bracket(&mut self, enter: bool) {
+        let was = self.back.reg(rss::reg::MGRAS_PP1_DRB_SIZE);
         self.back.run(if enter { Entry::GlEnter } else { Entry::GlLeave });
+        if self.back.reg(rss::reg::MGRAS_PP1_DRB_SIZE) != was {
+            self.out.damage_all();
+        }
     }
     fn finish_raster(&mut self) {
         self.back.rss[0].gpu_flush();
