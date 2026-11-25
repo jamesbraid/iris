@@ -398,6 +398,9 @@ pub(super) struct Board {
 
     /// Diagnostic bookkeeping, not guest state: what has been reported once.
     pub diag: Reports,
+    /// Tests: take the per-pixel DMA put, to compare it with the row path.
+    #[cfg(test)]
+    pub slow_dma: bool,
 
     // Buffer selection.
     pub draw_mask: u32,
@@ -604,6 +607,8 @@ impl Default for Board {
                 dma_code_reported: false,
                 dma_read_reported: 0,
             },
+            #[cfg(test)]
+            slow_dma: false,
             draw_mask: 0,
             draw_word: 0,
             read_word: 0,

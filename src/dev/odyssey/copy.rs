@@ -497,13 +497,18 @@ impl Board {
     /// on the way, as for a copy (the V10 passes the case). A colour index
     /// passes as it is.
     pub fn image_transfer(&self, word: u32, is_index: bool) -> u32 {
-        let sb = &self.tex_regs().scale_bias;
-        if is_index || (0..4).all(|c| sb[c * 2] == tex::SCALE_BIAS_ONE && sb[c * 2 + 1] == 0) {
+        if is_index || self.scale_bias_is_identity() {
             return word;
         }
         let mut w = [word];
         self.copy_post_filter(&mut w, false);
         w[0]
+    }
+
+    /// Whether every channel's scale is one and its bias zero, so a pixel passes unchanged.
+    pub fn scale_bias_is_identity(&self) -> bool {
+        let sb = &self.tex_regs().scale_bias;
+        (0..4).all(|c| sb[c * 2] == tex::SCALE_BIAS_ONE && sb[c * 2 + 1] == 0)
     }
 
     pub fn copy_post_filter(&self, words: &mut [u32], signed: bool) {
