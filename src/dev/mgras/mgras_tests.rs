@@ -2447,7 +2447,7 @@ fn bench_smoke_frame() {
 }
 
 /// ms a frame of the shell's CPU compose (`ScanSource::rows`): the pixel pass at `BENCH_W` x `BENCH_H` (1280x1024), and
-/// the snapshot where the VC3 tables name the size. `BENCH_FRAMES` a run (0: build only), `BENCH_RUNS` runs.
+/// the snapshot where the VC3 tables name the size. `BENCH_FRAMES` (0: build only), `BENCH_RUNS`, `BENCH_OVERLAY`.
 #[test]
 #[ignore]
 fn bench_compose() {
@@ -2457,6 +2457,8 @@ fn bench_compose() {
     let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let (w, h) = (env("BENCH_W", 1280), env("BENCH_H", 1024));
     let (runs, frames) = (env("BENCH_RUNS", 5), env("BENCH_FRAMES", 8));
+    // One overlay pixel in this many is set (5: a busy overlay), 0 for none, as a plain desktop has.
+    let overlay_one_in = env("BENCH_OVERLAY", 5) as u32;
     let mut seed = 0x5eed_0001u32;
     let mut rnd = move || {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -2477,7 +2479,7 @@ fn bench_compose() {
             f.did_main[i] = (1 + (x / 64 + 3 * (y / 48)) % 2) as u8;
             f.main[i] = rnd() & 0xFF_FFFF;
             f.did_overlay[i] = 2;
-            f.overlay[i] = if rnd() % 5 == 0 { rnd() as u8 } else { 0 };
+            f.overlay[i] = if overlay_one_in != 0 && rnd() % overlay_one_in == 0 { rnd() as u8 } else { 0 };
         }
     }
     (f.cursor_on, f.cursor_x, f.cursor_y, f.cursor_size) = (true, 100, 40, 32);
