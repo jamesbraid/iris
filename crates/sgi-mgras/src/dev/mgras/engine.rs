@@ -735,7 +735,8 @@ impl<M: HostMem> MgrasEngine<M> {
         if let Some(f) = self.fault() {
             return Err(Fault(f));
         }
-        self.settle(None);
+        // As `scanout`: the queue is not drained, the picture is what the batches so far submitted.
+        self.flush();
         let mut inner = self.sh.inner.lock();
         let display = self.display.lock();
         let back = &mut inner.core.back;
@@ -1406,7 +1407,7 @@ impl<M: HostMem> BoardEngine for MgrasEngine<M> {
         if let Some(f) = self.fault() {
             return Err(Fault(f));
         }
-        self.settle(None);
+        self.flush();
         let generation = self.frame_generation(0);
         let mut inner = self.sh.inner.lock();
         let display = self.display.lock();

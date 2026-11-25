@@ -277,6 +277,31 @@ fn scanout_does_not_wait_for_the_queued_work() {
     assert_eq!(idle(&mut e), 0, "and the scan-out left it queued");
 }
 
+/// The GPU frame, lent or composed into a buffer, is taken as `scanout` is: the queued work is not run or waited
+/// for (a refresh's compose under a shell's lock would stall every access behind the draw).
+#[test]
+fn a_gpu_compose_does_not_wait_for_the_queued_work() {
+    use sgi_engine::Read;
+    use sgi_mgras::dev::mgras::hq3::host;
+    let Some(gpu) = gpu() else { return };
+    let mut cfg = Config::new(Board::High, Mode::Inline);
+    cfg.queue_ops = 64;
+    let mut e = MgrasEngine::new(cfg, Mem::default(), Some(&gpu), None).unwrap();
+    for i in 0..8 {
+        assert_eq!(e.write(host::RASTER + 0x40, 32, i), Write::Done);
+    }
+    let idle = |e: &mut MgrasEngine<Mem>| match e.read(host::STATUS, 32) {
+        Read::Value(v) => v as u32 & (host::STATUS_HQ_IDLE | host::STATUS_BOARD_IDLE),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(idle(&mut e), 0, "work is queued");
+    let dst = Arc::new(gpu.buffer("test destination", 1280 * 1024 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC));
+    assert_eq!(e.compose_into(0, &dst, 1280), Ok(Some((1280, 1024))));
+    assert_eq!(idle(&mut e), 0, "compose_into left it queued");
+    assert!(e.lend_frame(0).unwrap().is_some());
+    assert_eq!(idle(&mut e), 0, "lend_frame left it queued");
+}
+
 /// The DAC gamma entry `index` is `rgb`, ten bits each, written as the ADV716x takes it: red, green, blue in turn,
 /// each a halfword with bits 9:2 in the first byte and 1:0 in the second.
 fn gamma<E: BoardEngine>(e: &mut E, index: u32, rgb: [u32; 3]) {
