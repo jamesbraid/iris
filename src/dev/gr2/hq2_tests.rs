@@ -3484,3 +3484,20 @@ fn the_window_at_6c1c0_follows_the_board_configuration() {
     assert_eq!(none.write8(GR2_BASE + 0x6c1e0, 0x55), BUS_OK);
     assert_eq!(none.read8(GR2_BASE + 0x6c1e0).data, 0);
 }
+
+/// An access past the decoded registers reads 0 or is dropped, is counted, and is reported on a power
+/// of two only.
+#[test]
+fn undecoded_accesses_read_zero_drop_and_are_counted() {
+    let g = &Gr2::new(Gr2Variant::Xz, crate::disp::StatusSource::detached());
+    assert_eq!(g.write32(GR2_BASE + 0x3f0000, 0x1234), BUS_OK);
+    assert_eq!(g.read32(GR2_BASE + 0x3f0000).data, 0);
+    assert_eq!(r32(g, 0), 0, "the store did not land on a decoded word");
+    assert_eq!(g.undecoded_accesses(), (1, 1));
+    for _ in 0..9 {
+        g.read32(GR2_BASE + 0x3f8000);
+    }
+    assert_eq!(g.undecoded_accesses(), (10, 1));
+    let due: Vec<u32> = (1..=20).filter(|&n| report_due(n)).collect();
+    assert_eq!(due, [1, 2, 4, 8, 16]);
+}
