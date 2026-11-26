@@ -49,6 +49,15 @@ impl Head for Gr2 {
 
     /// There is nothing smaller to take than the composed frame.
     fn capture(&self, screen: &mut Rex3Screen, _want: Want) -> bool {
+        // With a scan-out on the GPU the frame is composed there, in `compose`.
+        #[cfg(feature = "wgpu")]
+        // SAFETY: the scan-out is the refresh thread's alone, and this runs there.
+        if unsafe { &*self.scanout.get() }.is_some() {
+            screen.prebuilt = true;
+            screen.width = FB_W;
+            screen.height = FB_H;
+            return true;
+        }
         let r = self.regs();
         gr2comp::compose(self.vram(), &r.vc1, &r.xmap, &r.dac, &mut screen.fb_rgb);
         self.presentation_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -60,7 +69,31 @@ impl Head for Gr2 {
         true
     }
 
-    fn compose(&self, _screen: &mut Rex3Screen, _want: Want) -> Composed {
+    fn compose(&self, screen: &mut Rex3Screen, want: Want) -> Composed {
+        #[cfg(feature = "wgpu")]
+        {
+            // SAFETY: as in `capture`.
+            if let Some(sc) = unsafe { &mut *self.scanout.get() }.as_mut() {
+                let r = self.regs();
+                // A GPU that fails has stopped the machine: no frame comes from the CPU in its place.
+                if sc.compose(self.vram(), &r.vc1, &r.xmap, &r.dac).is_err() {
+                    return Composed::NotReady;
+                }
+                self.presentation_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if want.gpu {
+                    return Composed::Gpu { frame: sc.output().clone(), width: FB_W as u32, height: FB_H as u32 };
+                }
+                let mut words = vec![0u32; FB_W * FB_H];
+                if sc.read_into(&mut words).is_err() {
+                    return Composed::NotReady;
+                }
+                for (y, row) in words.chunks_exact(FB_W).enumerate() {
+                    screen.fb_rgb[y * crate::disp::FB_STRIDE..y * crate::disp::FB_STRIDE + FB_W].copy_from_slice(row);
+                }
+                return Composed::Frame;
+            }
+        }
+        let _ = (screen, want);
         Composed::Frame
     }
 

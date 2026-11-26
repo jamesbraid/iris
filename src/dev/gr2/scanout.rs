@@ -120,9 +120,14 @@ impl Gr2Scanout {
         self.scanout.frames > 0
     }
 
-    /// The last composed frame for this tick's consumer (`Scanout::show`).
-    pub fn show(&mut self, need: crate::gfx_display::Need, frame: &mut crate::gfx_display::Frame) -> Result<(), String> {
-        self.scanout.show(FB_W as u32, FB_H as u32, need, frame)
+    /// The composed frame's buffer on the device (0xAABBGGRR words, rows of `FB_W`).
+    pub fn output(&self) -> &wgpu::Buffer {
+        self.scanout.output()
+    }
+
+    /// The composed frame read back into `out` (`FB_W * FB_H` words).
+    pub fn read_into(&mut self, out: &mut [u32]) -> Result<(), String> {
+        self.scanout.read_output(FB_W as u32, FB_H as u32, out)
     }
 }
 
