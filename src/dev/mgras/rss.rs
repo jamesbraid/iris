@@ -932,6 +932,11 @@ pub(crate) fn fb_pixel(f: (u32, u32), b: &[u8]) -> u32 {
     format_comps(f).iter().enumerate().fold(0, |px, (i, &k)| px | (fb_comp(f.1, &b[(i * n).min(b.len())..]) as u32) << (8 * k))
 }
 
+thread_local! {
+    /// `put_line_plain`'s converted pixels, kept between lines so a line allocates nothing.
+    static LINE_PIXELS: std::cell::Cell<Vec<u32>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
 /// A line of host pixels of transfer format `f`, `bpp` bytes each, as
 /// framebuffer pixels (a short last one as `fb_pixel` takes it).
 fn host_pixels(f: (u32, u32), bytes: &[u8], bpp: usize, out: &mut Vec<u32>) {
@@ -3331,7 +3336,8 @@ impl Rss {
             return true;
         }
         self.touch_row(fy);
-        let mut vals = Vec::with_capacity((to - from) as usize);
+        let mut vals = LINE_PIXELS.take();
+        vals.clear();
         host_pixels(x.format, &bytes[from as usize * bpp..(to as usize * bpp).min(bytes.len())], bpp, &mut vals);
         for (b, mask) in &bufs[..n] {
             let mut k = from;
@@ -3354,6 +3360,7 @@ impl Rss {
                 k += run as i32;
             }
         }
+        LINE_PIXELS.set(vals);
         true
     }
 
