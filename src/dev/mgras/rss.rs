@@ -4877,7 +4877,7 @@ mod tests {
         let pages = [0..0x80 * PAGE_WORDS, 0x23F * PAGE_WORDS..0x360 * PAGE_WORDS];
         for re in 0..RES {
             for i in pages.iter().flat_map(|p| p.clone()) {
-                let v = rng.next() & WORD_MASK;
+                let v = rng.next();
                 fast.mem.words[re * RE_WORDS + i] = v;
                 slow.mem.words[re * RE_WORDS + i] = v;
             }
@@ -4966,13 +4966,14 @@ mod tests {
                         overlap += (two_buffers && fast.stats.dma_px_put > put) as u32;
                     }
                 } else {
-                    fast.put_line(&x, line, &bytes);
+                    fast.dma_write_line(line, &bytes);
+                    slow.stats.dma_lines_in += 1;
                     let hit = fast.stats.dma_px_put > put;
                     depth += (hit && x.format == DEPTH_FORMAT) as u32;
                     fragment += (hit && fast.transfer_fragments()) as u32;
                 }
                 put_line_reference(&mut slow, &x, line, &bytes);
-                assert_eq!((fast.stats.dma_px_put, fast.stats.dma_px_clipped), (slow.stats.dma_px_put, slow.stats.dma_px_clipped), "trial {trial} line {line}");
+                assert!(fast.touched == slow.touched && fast.snapshot_bytes() == slow.snapshot_bytes(), "trial {trial} line {line}");
             }
             for re in 0..RES {
                 for p in &pages {
@@ -4981,6 +4982,7 @@ mod tests {
                 }
             }
         }
+        assert!(fast.mem.words == slow.mem.words, "memory outside the colour and depth pages");
         eprintln!("plain {plain} stored {stored} two-buffer {two} overlapping {overlap} depth {depth} fragment {fragment}");
         assert!(stored > 100 && two > 40 && overlap > 10 && depth > 10 && fragment > 10, "reach: plain {plain} stored {stored} two-buffer {two} overlapping {overlap} depth {depth} fragment {fragment}");
     }
