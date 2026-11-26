@@ -837,22 +837,12 @@ fn to_slope(val: i32) -> u32 {
 
 /// Write an 8-bit grayscale PNG (used by `rex fbdump`'s ci.png).
 fn write_png_gray(path: &std::path::Path, rows: &[u8], width: usize, height: usize) -> std::io::Result<()> {
-    let file = std::fs::File::create(path)?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), width as u32, height as u32);
-    enc.set_color(png::ColorType::Grayscale);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut writer = enc.write_header().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    writer.write_image_data(rows).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    crate::disp::write_png(path, width as u32, height as u32, png::ColorType::Grayscale, rows)
 }
 
 /// Write a 24-bit RGB PNG (used by `rex fbdump`'s rgb.png).
 fn write_png_rgb(path: &std::path::Path, rows: &[u8], width: usize, height: usize) -> std::io::Result<()> {
-    let file = std::fs::File::create(path)?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), width as u32, height as u32);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut writer = enc.write_header().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    writer.write_image_data(rows).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    crate::disp::write_png(path, width as u32, height as u32, png::ColorType::Rgb, rows)
 }
 
 /// Compact snapshot of one block/span draw for the draw-debug overlay.

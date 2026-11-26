@@ -192,18 +192,7 @@ pub fn composite_index(rss: &mut Rss, dcb: &Dcb, x: i32, y: i32, bgra: &[u8], st
 
 /// Write a scanned-out frame (`0xFF_BB_GG_RR`, stride `OUT_STRIDE`) as a PNG.
 pub fn save_png(path: &str, frame: &[u32], width: usize, height: usize) -> Result<(), String> {
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), width as u32, height as u32);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut out = enc.write_header().map_err(|e| e.to_string())?;
-    let mut rows = Vec::with_capacity(width * height * 3);
-    for y in 0..height {
-        for px in &frame[y * frame::OUT_STRIDE..y * frame::OUT_STRIDE + width] {
-            rows.extend_from_slice(&[*px as u8, (px >> 8) as u8, (px >> 16) as u8]);
-        }
-    }
-    out.write_image_data(&rows).map_err(|e| e.to_string())
+    crate::disp::write_png_words(path, frame, frame::OUT_STRIDE, width, height).map_err(|e| e.to_string())
 }
 
 /// A buffer as a draw mark's store: its page pointer and its kind.
@@ -568,6 +557,8 @@ mod tests {
         r.write(reg::CLIP_X, x0 << 16 | x1, false);
         // The screen's top row is framebuffer row 767.
         r.write(reg::CLIP_Y, (767 - y1) << 16 | (767 - y0), false);
+        // The marks are the rows a store reached: the primitive stored across its box.
+        (767 - y1..=767 - y0).for_each(|y| r.touch_row(y as i32));
         let marks = Marks::new();
         r.drawn(|b, planes, rect| marks.mark(store_key(&b), planes, rect));
         let mut taken = Vec::new();
@@ -636,6 +627,7 @@ mod tests {
         // No screen mask: the whole screen, where the desktop shows A.
         r.write(reg::PP1FILLMODE, 0x200 | 1 << 14, false);
         r.write(reg::CLIP_MODE, 0, false);
+        (0..rss::HEIGHT as i32).for_each(|y| r.touch_row(y));
         let marks = Marks::new();
         r.drawn(|b, planes, rect| marks.mark(store_key(&b), planes, rect));
         let mut taken = Vec::new();

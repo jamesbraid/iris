@@ -16,8 +16,11 @@ use glow::HasContext;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::fs::{self, File};
+use std::io;
+use std::path::{Path, PathBuf};
 
-pub use crate::disp_timing::{decode_vc2_timings, decode_vc2_timings_gap, CursorGapFault, FB_MAX_H, FB_STRIDE};
+pub use crate::disp_timing::{decode_vc2_timings, decode_vc2_timings_gap, decode_vc2_totals, CursorGapFault, Vc2Totals, FB_MAX_H, FB_STRIDE};
 
 /// Independent revisions of the cached Newport display state. The source
 /// identifies the screen that issued them, so replacing a screen cannot make
@@ -636,108 +639,136 @@ impl Rex3Screen {
     }
 }
 
-/// What a VC2 or VC3 timing generator's tables add up to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Vc2Totals {
-    /// Pixel clocks a line, blanking included.
-    pub h_total: u32,
-    /// Lines a frame, blanking included, over all of its fields.
-    pub v_total: u32,
-    /// Lines with any pixel out of blanking.
-    pub visible_lines: u32,
-    /// Runs of visible lines: 1, or 2 for an interlaced, a two-field or a
-    /// field-sequential stereo format, each with its own vertical blank.
-    pub fields: u32,
-}
-
-/// Total a VC2's video timing tables (the VC3's are laid out the same): the
-/// frame table at the video entry pointer lists (line table, repeat count)
-/// pairs up to a zero count; a line is runs of states, each lasting its
-/// duration field in units of two pixel clocks, and ends with the address
-/// of the line that follows. `visible` says whether a run's states (the
-/// first word's seven A bits, and the C bits of the last second word) put
-/// its line in the picture: the VC2's composite blank is a C bit, the VC3
-/// marks its visible lines in an A bit. None while no table is loaded.
-pub fn decode_vc2_totals(vc2_regs: &[u16; 32], ram: &[u16], visible_run: impl Fn(u8, u8) -> bool) -> Option<Vc2Totals> {
-    let mut frame = vc2_regs[VC2_REG_VIDEO_ENTRY_PTR as usize] as usize;
-    let (mut h_total, mut v_total, mut visible_lines, mut fields) = (0u32, 0u32, 0u32, 0u32);
-    let mut in_picture = false;
-    // The tables are the guest's: every walk is bounded.
-    for _ in 0..1024 {
-        let (mut line, mut repeat) = (*ram.get(frame)? as usize, *ram.get(frame + 1)? as usize);
-        if repeat == 0 {
-            break;
-        }
-        while repeat > 0 {
-            let (mut clocks, mut visible, mut state_c) = (0u32, false, 0u8);
-            for _ in 0..1024 {
-                let w1 = *ram.get(line)?;
-                line += 1;
-                let mut eol = w1 & 0x8000 != 0;
-                if w1 & 0x0080 == 0 {
-                    let w2 = *ram.get(line)?;
-                    line += 1;
-                    eol |= w2 & 0x8000 != 0;
-                    state_c = (w2 & 0x7F) as u8;
-                }
-                visible |= visible_run((w1 & 0x7F) as u8, state_c);
-                clocks += 2 * ((w1 >> 8) & 0x7F) as u32;
-                if eol {
-                    break;
-                }
-            }
-            h_total = h_total.max(clocks);
-            v_total += 1;
-            if visible {
-                visible_lines += 1;
-                fields += !in_picture as u32;
-            }
-            in_picture = visible;
-            if v_total > 8192 {
-                return None;
-            }
-            repeat -= 1;
-            line = *ram.get(line)? as usize;
-        }
-        frame += 2;
-    }
-    (h_total != 0 && v_total != 0 && visible_lines != 0).then_some(Vc2Totals { h_total, v_total, visible_lines, fields })
-}
-
 /// Save `px` (R, G, B, A bytes, `w` x `h`, tightly packed) as a PNG, written
 /// to a temporary name and renamed, so a reader never sees half a file.
 pub fn save_png_rgba8(path: &str, px: &[u8], w: u32, h: u32) -> Result<(), String> {
-    let tmp = format!("{path}.tmp");
-    {
-        let f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-        let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w, h);
-        enc.set_color(png::ColorType::Rgba);
-        enc.set_depth(png::BitDepth::Eight);
-        let mut wr = enc.write_header().map_err(|e| e.to_string())?;
-        wr.write_image_data(px).map_err(|e| e.to_string())?;
-    }
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    write_png(path, w, h, png::ColorType::Rgba, px).map_err(|e| e.to_string())
 }
 
 /// Save the composited rgba buffer as a PNG file.
-/// `rgba` uses 0xFFBBGGRR (GL-native); swap R↔B when writing PNG.
+/// `rgba` uses 0xFFBBGGRR (GL-native); red is the low byte.
 pub fn save_screenshot(path: &str, rgba: &[u32], width: usize, height: usize) -> Result<(), String> {
-    use std::io::BufWriter;
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut enc = png::Encoder::new(BufWriter::new(file), width as u32, height as u32);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut writer = enc.write_header().map_err(|e| e.to_string())?;
-    let mut rows: Vec<u8> = Vec::with_capacity(height * width * 3);
-    for y in 0..height {
-        for x in 0..width {
-            let px = rgba[y * 2048 + x];
-            rows.push(( px        & 0xFF) as u8);
-            rows.push(((px >>  8) & 0xFF) as u8);
-            rows.push(((px >> 16) & 0xFF) as u8);
+    write_png_words(path, rgba, FB_STRIDE, width, height).map_err(|e| e.to_string())
+}
+
+/// The one PNG writer. `data` holds `w` x `h` tightly packed rows of 8-bit
+/// samples in `color`. The image goes to a sibling `<path>.tmp` that is
+/// renamed over `path` once it is finished, so a reader never sees half a file.
+pub fn write_png(path: impl AsRef<Path>, w: u32, h: u32, color: png::ColorType, data: &[u8]) -> io::Result<()> {
+    let path = path.as_ref();
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let encoded = (|| -> io::Result<()> {
+        let mut enc = png::Encoder::new(io::BufWriter::new(File::create(&tmp)?), w, h);
+        enc.set_color(color);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut out = enc.write_header()?;
+        out.write_image_data(data)?;
+        // `finish` reports the last flush; dropping the writer would hide it.
+        out.finish()?;
+        Ok(())
+    })();
+    let written = encoded.and_then(|()| fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// Write `w` x `h` words from `px`, rows `stride` words apart, as an RGB PNG.
+/// Each word is `0xAABBGGRR` or `0xFFBBGGRR`: red is the low byte. The screen
+/// buffers use `FB_STRIDE` as their stride.
+pub fn write_png_words(path: impl AsRef<Path>, px: &[u32], stride: usize, w: usize, h: usize) -> io::Result<()> {
+    if h > 0 && px.len() < (h - 1) * stride + w {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{} words is too few for {w}x{h}", px.len())));
+    }
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for &p in &px[y * stride..y * stride + w] {
+            rgb.extend_from_slice(&[p as u8, (p >> 8) as u8, (p >> 16) as u8]);
         }
     }
-    writer.write_image_data(&rows).map_err(|e| e.to_string())
+    write_png(path, w as u32, h as u32, png::ColorType::Rgb, &rgb)
+}
+
+#[cfg(test)]
+mod png_writer_tests {
+    use super::{write_png, write_png_words};
+    use std::path::{Path, PathBuf};
+
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("iris-png-{}-{name}.png", std::process::id()))
+    }
+
+    fn decode(path: &Path) -> (png::OutputInfo, Vec<u8>) {
+        let file = std::fs::File::open(path).unwrap();
+        let mut r = png::Decoder::new(std::io::BufReader::new(file)).read_info().unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        buf.truncate(info.buffer_size());
+        (info, buf)
+    }
+
+    /// Rows are read `stride` words apart, and red is the low byte. The padding
+    /// words hold junk that must not reach the file.
+    #[test]
+    fn words_are_read_by_stride_with_red_in_the_low_byte() {
+        let path = scratch("words");
+        let px = [
+            0xFF30_2010, 0xFF60_5040, 0xFF90_8070, 0xDEAD_BEEF,
+            0xFF00_FF00, 0xFF00_00FF, 0xFFFF_FFFF, 0xDEAD_BEEF,
+        ];
+        write_png_words(&path, &px, 4, 3, 2).unwrap();
+        let (info, rgb) = decode(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!((info.width, info.height, info.color_type), (3, 2, png::ColorType::Rgb));
+        assert_eq!(rgb, [
+            0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90,
+            0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0xFF,
+        ]);
+    }
+
+    /// A frame with no words (composed on a device only) is refused, not sliced.
+    #[test]
+    fn too_few_words_are_an_error_not_a_panic() {
+        let err = write_png_words(scratch("empty"), &[], 4, 4, 2).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(write_png_words(scratch("short"), &[0; 6], 4, 3, 2).is_err(), "the last row needs its 3 words");
+    }
+
+    /// RGBA keeps its alpha bytes, and a rewrite replaces the old file whole
+    /// with no temporary left behind.
+    #[test]
+    fn rgba_round_trips_and_replaces_the_old_file() {
+        let path = scratch("rgba");
+        std::fs::write(&path, b"old").unwrap();
+        let px = [1u8, 2, 3, 0, 4, 5, 6, 255];
+        write_png(&path, 2, 1, png::ColorType::Rgba, &px).unwrap();
+        let (info, bytes) = decode(&path);
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp_left = Path::new(&tmp).exists();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!((info.width, info.height, info.color_type), (2, 1, png::ColorType::Rgba));
+        assert_eq!(bytes, px);
+        assert!(!tmp_left, "a finished write leaves no temporary file");
+    }
+
+    /// A directory at the target makes the final rename fail. The error comes
+    /// back and the temporary file does not stay behind.
+    #[test]
+    fn a_failed_rename_removes_the_temporary_file() {
+        let path = scratch("blocked");
+        std::fs::create_dir(&path).unwrap();
+        let err = write_png(&path, 1, 1, png::ColorType::Rgb, &[1, 2, 3]);
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp_left = Path::new(&tmp).exists();
+        std::fs::remove_dir(&path).unwrap();
+        assert!(err.is_err(), "renaming a file over a directory must fail");
+        assert!(!tmp_left, "a failed write leaves no temporary file");
+    }
 }
 
 #[cfg(feature = "wgpu")]

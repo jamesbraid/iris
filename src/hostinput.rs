@@ -567,22 +567,7 @@ pub fn save_png(path: &str, px: &[u32], w: usize, h: usize, crop: Option<(usize,
     if cw == 0 || ch == 0 || cx + cw > w || cy + ch > h {
         return Err(format!("crop {cx},{cy} {cw}x{ch} is outside the {w}x{h} screen"));
     }
-    let mut rgb = Vec::with_capacity(cw * ch * 3);
-    for y in cy..cy + ch {
-        for &p in &px[y * w + cx..y * w + cx + cw] {
-            rgb.extend_from_slice(&[p as u8, (p >> 8) as u8, (p >> 16) as u8]);
-        }
-    }
-    let tmp = format!("{path}.tmp");
-    {
-        let f = std::fs::File::create(&tmp).map_err(|e| format!("{path}: {e}"))?;
-        let mut enc = png::Encoder::new(std::io::BufWriter::new(f), cw as u32, ch as u32);
-        enc.set_color(png::ColorType::Rgb);
-        enc.set_depth(png::BitDepth::Eight);
-        let mut wr = enc.write_header().map_err(|e| e.to_string())?;
-        wr.write_image_data(&rgb).map_err(|e| e.to_string())?;
-    }
-    std::fs::rename(&tmp, path).map_err(|e| format!("{path}: {e}"))?;
+    crate::disp::write_png_words(path, &px[cy * w + cx..], w, cw, ch).map_err(|e| format!("{path}: {e}"))?;
     Ok((cw, ch))
 }
 
@@ -599,7 +584,20 @@ fn num<T: std::str::FromStr>(args: &[&str], i: usize, what: &str) -> Result<T, S
     args.get(i).ok_or(format!("missing {what}"))?.parse().map_err(|_| format!("bad {what} '{}'", args[i]))
 }
 
-const SCREEN_HELP: &str = "screen info | screen cursor | screen shot <file.png> [x y w h] | screen pix <x> <y> | screen hash | screen wait [quiet_ms] [timeout_ms]";
+const SCREEN_HELP: &str = "screen info | screen cursor | screen shot <file.png> [x y w h] | screen pix <x> <y> | screen hash | screen wait [quiet_ms] [timeout_ms] | screen list; with several screens, screen <N> <verb> picks one (default 0)";
+
+/// Split `screen` arguments into the screen and the verb's own: `shot a.png` is
+/// screen 0, `1 shot a.png` screen 1. Only a written index is checked against `count`.
+fn screen_route<'a, 'b>(args: &'b [&'a str], count: usize) -> Result<(usize, &'b [&'a str]), String> {
+    let Some(Ok(n)) = args.first().map(|a| a.parse::<usize>()) else { return Ok((0, args)) };
+    if n < count {
+        return Ok((n, &args[1..]));
+    }
+    Err(match count {
+        0 => format!("no screen {n}: this machine has none"),
+        c => format!("no screen {n}: this machine has {c} (screen list)"),
+    })
+}
 const PTR_HELP: &str = "ptr pos | ptr move <x> <y> | ptr click <x> <y> [left|middle|right] [count] | ptr down|up [button] | ptr drag <x1> <y1> <x2> <y2> [button] | ptr rel <dx> <dy> | ptr calibrate";
 const KEY_HELP: &str = "key <name>[+<name>...] [down|up] | key type <text> | key names";
 
