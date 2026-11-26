@@ -839,6 +839,114 @@ fn the_dma_counters_split_descriptors_by_destination_pixel_size_and_path() {
     assert!(text.contains("screen 4 bytes: 3 descriptors, 71 pixels, 1 by rows (6 pixels)"), "{text}");
 }
 
+/// A draw-sentinel upload stores the same memory, written flag and counts by runs as by pixels across forms,
+/// rectangles, pixel modes, draw masks, clips, window offsets and the id test; fast exactly where taken.
+#[test]
+fn a_draw_sentinel_upload_stores_the_same_by_runs_as_by_pixels() {
+    use crate::dev::odyssey::clip::ClipRect;
+    use crate::dev::odyssey::consts::{ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT};
+    use crate::dev::odyssey::dma::DMA_BPP;
+    use crate::dev::odyssey::frame::pbj;
+    let mut seed = 0x2545_f491u32;
+    let mut next = move |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed as usize % n
+    };
+    let boards = || {
+        let (mut s, _, ram) = board_with_ram();
+        // Board::test_screen()'s window-id buffer, ids 0 to 3 in runs of four pixels over the first rows.
+        s.regs().set_pbj(pbj::OVERLAY_BASE, 0x14_2000);
+        s.regs().set_pbj(pbj::STRIDE, 80);
+        let did = s.dest_mem().did;
+        for y in 0..128 {
+            for x in 0..1280 {
+                did.store1(x, y, ((x >> 2) + y) as u8 & 3);
+            }
+        }
+        (s, ram)
+    };
+    let ((mut fast, fast_ram), (mut slow, slow_ram)) = (boards(), boards());
+    slow.slow_dma = true;
+    // (bytes a pixel, word 4, code): RGB, BGR, RGBA, ABGR, the movie's top-down ABGR, BGRA, ARGB; then forms
+    // the runs do not take: 2-byte luminance, 3_3_2, red alone, 5_6_5, depth.
+    let forms = [(3, 0x1000u32, 0x049u32), (3, 0x1000, 0x04d), (4, 0x1000, 0x04b), (4, 0x1000, 0x04c), (4, dma::MOVIE_FORMAT, 0x04c), (4, 0x1000, 0x051), (4, 0x1000, 0x050), (2, 0x1000, 0x062), (1, 0x1000, 0x0a9), (1, 0x1000, 0x044), (2, 0x1000, 0x189), (4, 0x1000, 0x080)];
+    let rects = [(30u32, 40u32, 1u32, 1u32), (30, 40, 17, 5), (0, 0, 300, 4), (1270, 10, 20, 3), (1900, 5, 40, 2), (5, 120, 33, 20), (0, 4090, 5, 10), (63, 63, 3, 3)];
+    // Pixel modes and whether their colour fields take runs: RGBA8 fields (two 16-byte pixels, 4-byte pixels, a scratch
+    // surface) do; the id planes (a byte field) and a 2-byte coded field do not.
+    let modes = [(0x0040_6d50u32, true), (0x2040_6d50, true), (0x0000_24d0, true), (0x0800_24d0, true), (0x2008_0080, false), (0x0000_2450, false)];
+    let masks = [1u32, 4, 5, 0, 1, 1];
+    let clips: [&[(i32, i32, i32, i32)]; 6] = [&[], &[(0, 0, 2047, 4095)], &[(10, 10, 100, 60)], &[(0, 0, 50, 50), (40, 30, 200, 130)], &[(0, 0, 20, 4), (30, 0, 31, 200), (35, 5, 90, 90), (1000, 0, 1900, 4095)], &[(2000, 0, 2100, 5)]];
+    let origins = [[0, 0], [0, 0], [7, 3], [-5, -2], [0, 0]];
+    let (mut took, mut declined_by_runs, mut declined_fields, mut fast_before) = (0, 0, 0, (0, 0));
+    for case in 0..600 {
+        let (bytes, word4, code) = forms[next(forms.len())];
+        let ((x, y, w, h), (mode, takes), mask) = (rects[next(rects.len())], modes[next(modes.len())], masks[next(masks.len())]);
+        let (clip, origin, id) = (clips[next(clips.len())], origins[next(origins.len())], next(3));
+        let (rowbytes, scratch) = (w * bytes, mode == 0x0800_24d0);
+        let total = (rowbytes * h) as usize;
+        let src: Vec<u8> = (0..total).map(|_| next(256) as u8).collect();
+        let split = if total > 1 { 1 + next(total - 1) } else { total };
+        let bpp_idx = DMA_BPP.iter().position(|&b| b as u32 == bytes).unwrap() as u32;
+        let control = if word4 == dma::MOVIE_FORMAT { dma::MOVIE_CONTROL } else { 1 << 30 | bpp_idx << 16 | code };
+        let header = [dma::SENTINEL_DRAW, y << 16 | x, 0x50, h << 16 | w, word4, 0, rowbytes, control];
+        let entries = [pte(PAGE_A, split as u32), pte(PAGE_B, (total - split) as u32)];
+        let (mut flags, mut stats) = ([false; 2], Vec::new());
+        for (k, (s, ram)) in [(&mut *fast, &fast_ram), (&mut *slow, &slow_ram)].into_iter().enumerate() {
+            let select_words = if scratch { [OBJECT, 1, mode, 0] } else { [0x2000, 0x50, mode, 0] };
+            for v in [select(reg::DEST_SELECT)].into_iter().chain(select_words) {
+                s.mmio_write(ODSY_USER_CMD_FIFO, v as u64, 4);
+            }
+            s.draw_mask = mask;
+            s.win.origin = origin;
+            s.win.clip_kept = clip.len() as u32;
+            for (r, &(x0, y0, x1, y1)) in s.win.clip_rect.iter_mut().zip(clip) {
+                *r = ClipRect { x0, y0, x1, y1 };
+            }
+            s.win.id_compare = if id == 0 { 0 } else { ODSY_ID_COMPARE_ENABLE | 3 << ODSY_ID_COMPARE_MASK_SHIFT | (id as u32 - 1) };
+            ram.put(PAGE_A, &src[..split]);
+            ram.put(PAGE_B, &src[split..]);
+            put_table(ram, TABLE, header, &entries);
+            s.vram_ptr().take_written();
+            descriptor(s, TABLE);
+            s.gpu_sync();
+            flags[k] = s.vram_ptr().take_written();
+            stats.push(s.dma_stats.snapshot());
+        }
+        let what = format!("case {case} ({bytes} bytes, code {code:#x}, word 4 {word4:#x}, {w}x{h} at {x},{y}, mode {mode:#x}, mask {mask}, clip {clip:?}, origin {origin:?}, id {id})");
+        assert_eq!(flags[0], flags[1], "{what}: written flag by runs, by pixels");
+        let (a, b) = (fast.vram.ptr_shared(), slow.vram.ptr_shared());
+        let (a, b) = (a.words_at(0, a.size()), b.words_at(0, b.size()));
+        if a != b {
+            let i = a.iter().zip(b).position(|(p, q)| p != q).unwrap();
+            panic!("{what}: word {:#x} is {:#018x} by runs, {:#018x} by pixels", 8 * i, a[i], b[i]);
+        }
+        let (f, s) = (&stats[0], &stats[1]);
+        assert_eq!((f.seen, f.declined), (s.seen, s.declined), "{what}: counts");
+        for (cf, cs) in f.cells.iter().flatten().zip(s.cells.iter().flatten()) {
+            assert_eq!((cf.descriptors, cf.pixels), (cs.descriptors, cs.pixels), "{what}: cells");
+            assert_eq!((cs.fast_descriptors, cs.fast_pixels), (0, 0), "{what}: nothing is fast by pixels");
+        }
+        // A descriptor adds its whole size to the fast counts, or nothing.
+        let now = f.cells[2].iter().fold((0, 0), |t, c| (t.0 + c.fast_descriptors, t.1 + c.fast_pixels));
+        let by_runs = now.0 - fast_before.0;
+        assert_eq!((by_runs, now.1 - fast_before.1), if by_runs == 1 { (1, (w * h) as u64) } else { (0, 0) }, "{what}: fast counts");
+        fast_before = now;
+        // A buffer selected, a byte form of 3 or 4 bytes and fields that take runs: taken by runs, else not.
+        let expect = takes && mask != 0 && matches!(bytes, 3 | 4) && code != 0x080;
+        assert_eq!(by_runs, expect as u64, "{what}: taken by runs");
+        if expect {
+            took += 1;
+        } else if takes {
+            declined_by_runs += 1;
+        } else if mask != 0 && matches!(bytes, 3 | 4) && code != 0x080 {
+            declined_fields += 1;
+        }
+    }
+    assert!(took > 50 && declined_by_runs > 20 && declined_fields > 20, "the cases cover each: {took} by runs, {declined_by_runs} by form or mask, {declined_fields} by field");
+}
+
 /// ms a frame of a `BENCH_W` x `BENCH_H` (720 x 486) image of 4-byte pixels (source code 0, the fallback) DMA'd to the
 /// screen, as many rows a table as its twelve entries take. `BENCH_FRAMES` a run (0: build only), `BENCH_RUNS` runs; the far corner is checked.
 #[test]

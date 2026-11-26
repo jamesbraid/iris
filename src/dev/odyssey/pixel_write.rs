@@ -160,6 +160,27 @@ impl WriteForm {
         }
     }
 
+    /// For a form of whole 8-bit red, green, blue and alpha components, each at most once: the shift
+    /// of each byte's channel in the 0xRRGGBBAA word, and the alpha when the form has none. None otherwise.
+    pub fn byte_shifts(&self) -> Option<([u8; 4], u32)> {
+        let WriteKind::Comps { comps, n, comp_bytes: 1 } = &self.kind else { return None };
+        let (mut shifts, mut seen) = ([0u8; 4], 0u32);
+        for (s, c) in shifts.iter_mut().zip(&comps[..*n as usize]) {
+            *s = match c {
+                Comp::Red => 24,
+                Comp::Green => 16,
+                Comp::Blue => 8,
+                Comp::Alpha => 0,
+                _ => return None,
+            };
+            if seen & 1 << *s != 0 {
+                return None;
+            }
+            seen |= 1 << *s;
+        }
+        Some((shifts, if seen & 1 != 0 { 0 } else { 0xff }))
+    }
+
     /// Whether a pixel of this form carries an alpha (or intensity) value the
     /// board stores, rather than the model's 255.
     pub fn has_alpha(&self) -> bool {

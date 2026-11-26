@@ -13,7 +13,7 @@ use super::board::{Board, ODSY_CMD_OPERANDS_MAX};
 use super::consts::{
     clip, cmd_arity, dma, gl_cmd, image, mode, query, route, tex, write,
     ODSY_DEPTH24_MAX, ODSY_DRAW_WORD_STATE, ODSY_F32_ONE, ODSY_F32_SCALE_16, ODSY_F32_SCALE_32,
-    ODSY_F32_SCALE_8, ODSY_GAMMA_GROUP,
+    ODSY_F32_SCALE_8, ODSY_GAMMA_GROUP, ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT,
 };
 use super::context::{
     ODSY_QUERY_COLOUR, ODSY_QUERY_EDGE, ODSY_QUERY_INDEX, ODSY_QUERY_NORMAL, ODSY_QUERY_TEXCOORD,
@@ -234,6 +234,10 @@ impl DmaStats {
     fn note(&self, kind: DmaKind, bytes: u32, pixels: u64, fast: u64, slow: Option<DmaSlow>) {
         let c = &self.cells[kind as usize][(bytes as usize).min(DMA_SIZES - 1)];
         c.pixels.fetch_add(pixels, Ordering::Relaxed);
+        if matches!(kind, DmaKind::Sentinel) && fast != 0 {
+            c.fast_descriptors.fetch_add(1, Ordering::Relaxed);
+            c.fast_pixels.fetch_add(fast, Ordering::Relaxed);
+        }
         if matches!(kind, DmaKind::Screen) {
             match slow {
                 None => {
@@ -871,33 +875,89 @@ impl Board {
             out += rowbytes as u64;
         }
 
-        for r in 0..h {
-            for c in 0..w {
-                let off = ((r as u64) * (rowbytes as u64) + (c as u64) * (psize as u64)) as usize;
-                let src = &payload[off..];
-                let px = (x as i64) + (c as i64) + self.win.origin[0] as i64;
-                let py = (if top_down {
-                    rows - (y as i64) - (h as i64) + (r as i64)
-                } else {
-                    (y as i64) + (h as i64) - 1 - (r as i64)
-                }) + self.win.origin[1] as i64;
-                if let Some(plane) = depth_stencil {
-                    let value = be32(&src[..4]);
+        let fast = form.as_ref().is_some_and(|f| self.sentinel_rows(f, &payload, (x, y, w, h), top_down, rows));
+        if !fast {
+            for r in 0..h {
+                for c in 0..w {
+                    let off = ((r as u64) * (rowbytes as u64) + (c as u64) * (psize as u64)) as usize;
+                    let src = &payload[off..];
+                    let px = (x as i64) + (c as i64) + self.win.origin[0] as i64;
+                    let py = (if top_down {
+                        rows - (y as i64) - (h as i64) + (r as i64)
+                    } else {
+                        (y as i64) + (h as i64) - 1 - (r as i64)
+                    }) + self.win.origin[1] as i64;
+                    if let Some(plane) = depth_stencil {
+                        let value = be32(&src[..4]);
 
-                    if self.pixel_allowed(px, py) {
-                        if plane == DepthStencil::Depth {
-                            self.depth_store(px, py, value & ODSY_DEPTH24_MAX);
-                        } else {
-                            self.stencil_store(px, py, value as u8);
+                        if self.pixel_allowed(px, py) {
+                            if plane == DepthStencil::Depth {
+                                self.depth_store(px, py, value & ODSY_DEPTH24_MAX);
+                            } else {
+                                self.stencil_store(px, py, value as u8);
+                            }
                         }
+                        continue;
                     }
-                    continue;
+                    let rgba = form.as_ref().expect("a form when not depth or stencil").decode(src);
+                    self.paint_pixel(px, py, rgba);
                 }
-                let rgba = form.as_ref().expect("a form when not depth or stencil").decode(src);
-                self.paint_pixel(px, py, rgba);
             }
         }
-        self.dma_stats.note(DmaKind::Sentinel, psize, w as u64 * h as u64, 0, None);
+        let pixels = w as u64 * h as u64;
+        self.dma_stats.note(DmaKind::Sentinel, psize, pixels, if fast { pixels } else { 0 }, None);
+    }
+
+    /// The pixel loop by runs, for a CPU unit, a 3- or 4-byte form of byte channels and RGBA8 fields.
+    /// False, with nothing stored, for any other descriptor.
+    fn sentinel_rows(&self, form: &WriteForm, payload: &[u8], (x, y, w, h): (u32, u32, u32, u32), top_down: bool, plane_rows: i64) -> bool {
+        #[cfg(test)]
+        if self.slow_dma {
+            return false;
+        }
+        let psize = form.bytes as usize;
+        let buffers = self.draw_buffers();
+        let Some((shift, alpha)) = form.byte_shifts().filter(|_| matches!(psize, 3 | 4) && buffers != 0 && !self.gpu_unit()) else {
+            return false;
+        };
+        let planes = self.dest_mem();
+        let selected = |b: usize| buffers >> b & 1 != 0;
+        if !(0..2).filter(|&b| selected(b)).all(|b| planes.colour[b].takes_runs()) {
+            return false;
+        }
+        let c = self.win.id_compare;
+        let (id, mask) = (c as u8, (c >> ODSY_ID_COMPARE_MASK_SHIFT) as u8);
+        let passes = |x: i64, y: i64| c & ODSY_ID_COMPARE_ENABLE == 0 || planes.did.load1(x as i32, y as i32).is_some_and(|v| (v ^ id) & mask == 0);
+        let x0 = x as i64 + self.win.origin[0] as i64;
+        let rowbytes = w as usize * psize;
+        for r in 0..h as i64 {
+            let py = (if top_down { plane_rows - y as i64 - h as i64 + r } else { y as i64 + h as i64 - 1 - r }) + self.win.origin[1] as i64;
+            let row = &payload[r as usize * rowbytes..][..rowbytes];
+            let runs = self.row_runs(py);
+            for k in 0..runs.n as usize {
+                let (mut a, end) = (runs.start[k].max(x0), runs.end[k].min(x0 + w as i64));
+                while a < end {
+                    if !passes(a, py) {
+                        a += 1;
+                        continue;
+                    }
+                    let mut b = a + 1;
+                    while b < end && passes(b, py) {
+                        b += 1;
+                    }
+                    let seg = &row[(a - x0) as usize * psize..(b - x0) as usize * psize];
+                    for buf in (0..2).filter(|&buf| selected(buf)) {
+                        let stored = match psize {
+                            3 => planes.colour[buf].store_run(py as i32, a as i32, words::<3>(seg, shift, alpha)),
+                            _ => planes.colour[buf].store_run(py as i32, a as i32, words::<4>(seg, shift, alpha)),
+                        };
+                        debug_assert!(stored, "a run inside the checked view");
+                    }
+                    a = b;
+                }
+            }
+        }
+        true
     }
 
     /// True the first time reason (dma::REPORT_*) comes up: report it then.
@@ -908,6 +968,11 @@ impl Board {
         self.diag.dma_read_reported |= reason;
         true
     }
+}
+
+/// A row's `N`-byte pixels as 0xRRGGBBAA words: byte i's channel at `shift[i]`, over `alpha`.
+fn words<const N: usize>(row: &[u8], shift: [u8; 4], alpha: u32) -> impl ExactSizeIterator<Item = u32> + '_ {
+    row.chunks_exact(N).map(move |p| p.iter().zip(shift).fold(alpha, |w, (&b, s)| w | (b as u32) << s))
 }
 
 const fn lay(code: u32, bytes: u8, from: [u8; 8]) -> DmaLayout {

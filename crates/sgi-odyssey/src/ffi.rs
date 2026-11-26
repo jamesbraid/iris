@@ -244,7 +244,7 @@ pub unsafe extern "C" fn sgi_odyssey_gpu_counters(h: *mut IrisEngine, out: *mut 
 }
 
 /// One cell of `IrisVproDmaStats`: the descriptors the board completed and their pixels (clipped ones
-/// included), and the part of them that went by row stores (screen destinations only).
+/// included), and the part of them that went by row stores (screen and draw-sentinel destinations).
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct IrisVproDmaCell {
