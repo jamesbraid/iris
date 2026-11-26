@@ -217,4 +217,74 @@ mod tests {
         assert_eq!(out[939], 0xff30_2010);
         assert_eq!(out[940], 0xff00_00ff, "back to DID 3");
     }
+
+    fn line_table(vc1: &mut Vc1, words: &[u16]) {
+        set16(&mut vc1.regs, 0x40, 0xb00);
+        for y in 0..FB_H {
+            set16(&mut vc1.sram, 0xb00 + y * 2, 0x7ff4);
+        }
+        for (k, &v) in words.iter().enumerate() {
+            set16(&mut vc1.sram, 0x7ff4 + k * 2, v);
+        }
+    }
+
+    /// Writers count 4 zero entries after the last real one: [5, DID 3, 0 x 4]
+    /// is DID 3 across the line, not DID 0 from x 0.
+    #[test]
+    fn counted_zero_padding_ends_the_line_table() {
+        let mut vc1: Box<Vc1> = unsafe { Box::new_zeroed().assume_init() };
+        let mut xmap: Box<[Xmap5; 5]> = unsafe { Box::new_zeroed().assume_init() };
+        let mut dac: Box<[Bt457; 3]> = unsafe { Box::new_zeroed().assume_init() };
+        line_table(&mut vc1, &[5, 0x0003, 0, 0, 0, 0]);
+        for xm in xmap.iter_mut() {
+            xm.mode[3] = 0x8af0_0800; // 8-bit CI, page 17
+            xm.clut[17 * 256 + 5] = 0x00ff_0000;
+        }
+        for d in dac.iter_mut() {
+            d.readmask = 0xff;
+            for i in 0..256 {
+                d.palette[i] = i as u8;
+            }
+        }
+        let vram = vec![5u32; FB_W * FB_H];
+        let mut out = vec![0u32; OUT_STRIDE * FB_H];
+        compose(&vram, &vc1, &xmap, &dac, &mut out);
+        assert_eq!(out[0], 0xff00_00ff, "DID 3 at the left edge");
+        assert_eq!(out[FB_W - 1], 0xff00_00ff, "DID 3 at the right edge");
+    }
+
+    /// The table ends at an entry whose x does not rise or is off the line.
+    #[test]
+    fn line_table_stops_at_a_falling_or_offscreen_x() {
+        let mut vc1: Box<Vc1> = unsafe { Box::new_zeroed().assume_init() };
+        let mut runs = [(0u16, 0u8); Vc1::MAX_DID_RUNS];
+        line_table(&mut vc1, &[3, 0x0003, 0x28c9, 0x2009]); // x 0, 326, 256
+        assert_eq!(vc1.line_did_runs(0, &mut runs), 2);
+        assert_eq!(runs[..2], [(0, 3), (326, 9)]);
+        line_table(&mut vc1, &[3, 0x0003, (1280 << 5) | 9, (1290 << 5) | 4]);
+        assert_eq!(vc1.line_did_runs(0, &mut runs), 1);
+        line_table(&mut vc1, &[3, 0x0003, (1279 << 5) | 9, 0]);
+        assert_eq!(vc1.line_did_runs(0, &mut runs), 2, "x 1279 is still on the line");
+        assert_eq!(runs[1], (1279, 9));
+    }
+
+    /// The table ends at the first bad entry: a later one that rises again is not read.
+    #[test]
+    fn line_table_stops_for_good_at_a_bad_entry() {
+        let mut vc1: Box<Vc1> = unsafe { Box::new_zeroed().assume_init() };
+        let mut runs = [(0u16, 0u8); Vc1::MAX_DID_RUNS];
+        line_table(&mut vc1, &[4, 0x0003, (100 << 5) | 9, (50 << 5) | 4, (200 << 5) | 5]);
+        assert_eq!(vc1.line_did_runs(0, &mut runs), 2);
+        assert_eq!(runs[..2], [(0, 3), (100, 9)]);
+    }
+
+    /// A count of 0 still reads the first entry, which starts the line.
+    #[test]
+    fn line_table_with_a_zero_count_reads_one_entry() {
+        let mut vc1: Box<Vc1> = unsafe { Box::new_zeroed().assume_init() };
+        let mut runs = [(0u16, 0u8); Vc1::MAX_DID_RUNS];
+        line_table(&mut vc1, &[0, 0x0003, (100 << 5) | 9]);
+        assert_eq!(vc1.line_did_runs(0, &mut runs), 1);
+        assert_eq!(runs[0], (0, 3));
+    }
 }
