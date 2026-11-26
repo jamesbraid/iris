@@ -129,6 +129,10 @@ pub struct O2Machine {
     /// The guest switching the machine off, for the machine-events thread.
     events: crate::traits::MachineEvents,
     event_rx: Option<crate::traits::MachineEventQueue>,
+    /// A graphics GPU failure, until the controller takes the receiver, and
+    /// the first one it latched.
+    fatal_rx: Option<std::sync::mpsc::Receiver<crate::traits::MachineFatal>>,
+    fatal_fault: Option<crate::traits::MachineFatal>,
     /// Set once that thread runs; until then the service loop exits the
     /// process itself on a power-off, as it always has.
     controller_up: Arc<AtomicBool>,
@@ -320,6 +324,17 @@ impl O2Machine {
         let display = Arc::new(O2Display::new(bus.clone(), status.clone(), paused.clone()));
         let head: Arc<dyn crate::display::Head> = display.clone();
         display.head.attach(Arc::downgrade(&head));
+        // `[graphics] raster = "wgpu"`: GBE scans out on the host GPU. CRIME's
+        // rendering engine stays on the CPU.
+        let (fatal_tx, fatal_rx) = std::sync::mpsc::channel();
+        let gpu = crate::workstation::open_gpu(cfg, &fatal_tx)?;
+        #[cfg(feature = "wgpu")]
+        if let Some(g) = crate::workstation::share_gpu(&gpu) {
+            eprintln!("o2: GBE scan-out on the GPU: {}", g.caps);
+            display.use_gpu(&g)?;
+        }
+        #[cfg(not(feature = "wgpu"))]
+        let _ = gpu;
         if let Some(port) = o2.control_port {
             match std::net::TcpListener::bind(("127.0.0.1", port)) {
                 Ok(l) => {
@@ -383,6 +398,8 @@ impl O2Machine {
             frames,
             events,
             event_rx: Some(event_rx),
+            fatal_rx: Some(fatal_rx),
+            fatal_fault: None,
             controller_up: Arc::new(AtomicBool::new(false)),
             controller_slot: None,
             boot,
@@ -890,8 +907,15 @@ impl Workstation for O2Machine {
         let slot = self.machine_slot();
         let events = self.event_rx.take();
         assert!(events.is_some(), "register_system_controller called twice");
-        crate::workstation::register_system_controller(&self.monitor, slot, events);
+        crate::workstation::register_system_controller(&self.monitor, slot.clone(), events);
+        crate::workstation::register_fatal_controller(slot, self.fatal_rx.take());
         self.controller_up.store(true, Ordering::SeqCst);
+    }
+    fn fatal_fault(&self) -> Option<crate::traits::MachineFatal> {
+        self.fatal_fault.clone()
+    }
+    fn latch_fatal_fault(&mut self, fault: crate::traits::MachineFatal) -> bool {
+        self.fatal_fault.is_none() && self.fatal_fault.replace(fault).is_none()
     }
     fn monitor(&self) -> &Arc<crate::monitor::Monitor> { &self.monitor }
     /// The PROM's flash, where `setenv` keeps its settings, and the RTC's RAM,
@@ -999,6 +1023,9 @@ pub struct O2Display {
     irq_lines: Mutex<[Option<u32>; 4]>,
     /// The machine is stopped: the guest's state is left alone.
     paused: Arc<AtomicBool>,
+    /// The GPU scan-out (`[graphics] raster = "wgpu"`): the refresh thread's.
+    #[cfg(feature = "wgpu")]
+    gpu: Mutex<Option<crate::dev::o2gfx_wgpu::O2Scanout>>,
 }
 
 /// The scan-out's side of the screen.
@@ -1014,12 +1041,22 @@ struct Scan {
 }
 
 impl O2Display {
+    /// Scan out on `gpu` from now on: a wgpu window on the same device shows
+    /// the GPU's frames as they are.
+    #[cfg(feature = "wgpu")]
+    fn use_gpu(&self, gpu: &crate::SharedGpu) -> Result<(), String> {
+        *self.gpu.lock() = Some(crate::dev::o2gfx_wgpu::O2Scanout::new(gpu)?);
+        Ok(())
+    }
+
     fn new(bus: Arc<Ip32Bus>, status: Arc<crate::status::MachineStatus>, paused: Arc<AtomicBool>) -> Self {
         Self {
             irq_lines: Mutex::new([None; 4]),
             paused,
             head: status.refresh().head(status.clone()),
             scan: Mutex::new(Scan { window: bus.ram.window(), size: (0, 0), memo: Default::default(), black: false }),
+            #[cfg(feature = "wgpu")]
+            gpu: Mutex::new(None),
             bus,
             status,
         }
@@ -1074,10 +1111,42 @@ impl crate::display::Head for O2Display {
     /// GBE's picture straight out of RAM into the screen
     /// (`Gbe::render_direct`); black at the last size while the display is
     /// off.
-    fn compose(&self, screen: &mut Rex3Screen, _want: crate::display::Want) -> crate::display::Composed {
+    fn compose(&self, screen: &mut Rex3Screen, want: crate::display::Want) -> crate::display::Composed {
         let mut scan = self.scan.lock();
         let Scan { window, size, memo, black } = &mut *scan;
         let stride = crate::disp::FB_STRIDE;
+        // On the GPU the tiles GBE reads are copied up every frame: nothing
+        // marks them (`Gbe::render_direct` finds a change by comparing).
+        // A failed device has stopped the machine; no CPU frame replaces it.
+        #[cfg(feature = "wgpu")]
+        if let Some(sc) = self.gpu.lock().as_mut() {
+            match sc.compose(&self.bus.gbe, &self.bus.ram, true) {
+                Err(_) => return crate::display::Composed::NotReady,
+                Ok(Some((w, h))) => {
+                    let (width, height) = ((w as usize).min(stride), (h as usize).min(screen.fb_rgb.len() / stride));
+                    memo.forget();
+                    *black = false;
+                    *size = (width, height);
+                    screen.width = width;
+                    screen.height = height;
+                    screen.prebuilt = true;
+                    if want.gpu {
+                        return crate::display::Composed::Gpu { frame: sc.output().clone(), width: w, height: h };
+                    }
+                    let mut words = vec![0u32; w as usize * h as usize];
+                    if sc.read_into(w, h, &mut words).is_err() {
+                        return crate::display::Composed::NotReady;
+                    }
+                    for (y, row) in words.chunks_exact(w as usize).enumerate().take(height) {
+                        screen.fb_rgb[y * stride..y * stride + width].copy_from_slice(&row[..width]);
+                    }
+                    return crate::display::Composed::Frame;
+                }
+                // The display is off: black, as on the CPU.
+                Ok(None) => {}
+            }
+        }
+        let _ = want;
         let (w, h, new) = match self.bus.gbe.render_direct(window, &mut screen.fb_rgb, stride, memo) {
             Some((w, h, wrote)) => {
                 *black = false;
@@ -1106,6 +1175,8 @@ impl crate::display::Head for O2Display {
 }
 
 impl crate::gfx_display::GfxDisplay for O2Display {
+    #[cfg(feature = "wgpu")]
+    fn gpu(&self) -> Option<std::sync::Arc<crate::wgpu::Gpu>> { self.gpu.lock().as_ref().map(|s| s.gpu()) }
     fn renderer_slot(&self) -> &Mutex<Option<Box<dyn Renderer>>> { self.head.renderer_slot() }
     fn display_stop(&self) -> &crate::gfx_display::DisplayStop { self.head.display_stop() }
     fn screen(&self) -> &Mutex<Rex3Screen> { self.head.screen() }

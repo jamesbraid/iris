@@ -92,6 +92,34 @@ impl std::ops::Index<usize> for ScanSnapshot {
     }
 }
 
+/// What a frame of scan-out reads from GBE's registers.
+pub struct ScanRegs {
+    pub width: u32,
+    pub height: u32,
+    pub frm_tile: u32,
+    pub frm_pixel: u32,
+    pub frm_control: u32,
+    pub ovr_control: u32,
+    pub ovr_tile: u32,
+    pub did_control: u32,
+    /// The 32 mode-table entries (window types).
+    pub modes: Vec<u32>,
+    /// The 6144-entry colour map and the 256-entry gamma map.
+    pub cmap: Vec<u32>,
+    pub gmap: Vec<u32>,
+    pub crs_ctl: u32,
+    pub crs_pos: u32,
+    pub crs_cmap1: Vec<u32>,
+    pub glyph: Vec<u32>,
+}
+
+impl ScanRegs {
+    /// The cursor's top-left on screen (see `Gbe::cursor_xy`).
+    pub fn cursor_xy(&self) -> (i32, i32) {
+        Gbe::cursor_xy(self.crs_pos)
+    }
+}
+
 /// Offsets 0 to the end of the video-capture block.
 const GBE_WORDS: usize = 0x81000 / 4;
 const VT_FREEZE: u32 = 1 << 31;
@@ -592,6 +620,40 @@ impl Gbe {
             }
         }
         snap
+    }
+
+    /// The registers a scan-out reads, latched as `render_direct` latches them,
+    /// for a scan-out that composes elsewhere. None while the display is off.
+    pub fn scan_regs(&self) -> Option<ScanRegs> {
+        let s = {
+            let mut s = self.s.lock().unwrap();
+            self.latch(&mut s);
+            s
+        };
+        let r = &s.r;
+        let g = |off: u32| Self::get(r, off);
+        let (w, h) = ((g(VT_HCMAP) >> 12) & 0xfff, (g(VT_VCMAP) >> 12) & 0xfff);
+        if (g(CTRLSTAT) >> 28) & 3 != 3 || g(DOTCLOCK) & DOTCLOCK_RUN == 0 || g(VT_XY) & VT_FREEZE != 0 || w == 0 || h == 0 || g(VT_FLAGS) & 0xa == 0xa {
+            return None;
+        }
+        let words = |base: u32, n: u32| (0..n).map(|i| g(base + 4 * i)).collect::<Vec<u32>>();
+        Some(ScanRegs {
+            width: w,
+            height: h,
+            frm_tile: g(FRM_SIZE_TILE),
+            frm_pixel: g(FRM_SIZE_PIXEL),
+            frm_control: g(FRM_CONTROL),
+            ovr_control: g(OVR_CONTROL),
+            ovr_tile: g(OVR_WIDTH_TILE),
+            did_control: g(DID_CONTROL),
+            modes: words(MODE, 32),
+            cmap: words(CMAP, 6144),
+            gmap: words(GMAP, 256),
+            crs_ctl: g(CRS_CTL),
+            crs_pos: g(CRS_POS),
+            crs_cmap1: words(CRS_CMAP1, 3),
+            glyph: words(CRS_GLYPH, 64),
+        })
     }
 
     /// CRS_POS: x in bits 11:0 and y in bits 27:16, each a 12-bit signed
