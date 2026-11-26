@@ -429,6 +429,7 @@ fn random_state(rng: &mut Lcg) -> DrawState {
 fn draw(p: &mut Pair, d: &DrawState, smooth: bool, tris: &[Tri]) {
     let planes = p.planes();
     let mut st = BackendState::of(&d.words, planes.stencil.v.kind != super::super::view::Kind::None, !d.index);
+    st.deep = false;
     if d.to_aux {
         st.targets = aux_targets(st.targets, d.index);
     }
@@ -676,6 +677,7 @@ fn clears_and_cpu_shaded_quads_keep_the_order() {
         draw(&mut p, &d, false, &t);
         // Quads shaded on the CPU, stored through the same state.
         let mut st = BackendState::of(&d.words, true, true);
+        st.deep = false;
         st.store = st.select(&planes);
         let raster_words = RasterWords { mode: mode::FLAT_SHADE, ..p.raster };
         let slot = Slot::new(&d.words, &planes, false, false, &raster_words, None, None).unwrap();
@@ -945,7 +947,7 @@ fn scanout_composes_as_the_cpu_frame() {
             _ => cursor::CTL_ENABLE | cursor::CTL_CHANNEL1,
         };
         let displayed = rng.next();
-        let frame = Frame::snapshot(&regs, displayed).expect("a frame");
+        let frame = Frame::snapshot_with(&regs, displayed, false, false, false).expect("a frame");
         let (w, h) = (frame.width as usize, frame.height as usize);
         let mut want = vec![0u32; w * h];
         frame.compose(p.cpu.ptr(), &regs, &mut want, w, h);
@@ -960,7 +962,7 @@ fn scanout_composes_as_the_cpu_frame() {
         }
         // The same frame with the maps' ten bits a channel, on both sides; its top eight bits are the
         // narrow frame's.
-        let wide = Frame::snapshot_wide(&regs, displayed).expect("a frame");
+        let wide = Frame::snapshot_with(&regs, displayed, false, true, false).expect("a frame");
         let mut want10 = vec![0u32; w * h];
         wide.compose(p.cpu.ptr(), &regs, &mut want10, w, h);
         let mut got10 = vec![0u32; w * h];

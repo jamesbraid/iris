@@ -13,6 +13,7 @@
 
 use super::bits::be32;
 use super::consts::ODSY_INDEX_MASK;
+use super::field::Field as DeepField;
 /// A source component.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) enum Comp {
@@ -196,6 +197,56 @@ impl WriteForm {
         matches!(&self.kind, WriteKind::Comps { comps, .. } if comps[0] == Comp::Index)
     }
 
+    /// Whether a component is wider than eight bits, so that decoding it to a byte (`decode`) loses
+    /// what a 10- or 12-bit field keeps.
+    pub fn has_deep(&self) -> bool {
+        match &self.kind {
+            WriteKind::Comps { comp_bytes, comps, .. } => *comp_bytes > 1 && comps[0] != Comp::Index,
+            WriteKind::Packed { fields, n } => fields[..*n as usize].iter().any(|f| f.width > 8),
+        }
+    }
+
+    /// The pixel as `decode` reads it with 12 bits a channel: 16 and 32 bits rounded, 10 and narrower
+    /// repeated. Not for an index form.
+    pub fn decode_deep(&self, b: &[u8]) -> [u32; 4] {
+        let mut c = [0u32, 0, 0, 0xfff];
+        let mut put = |comp: Comp, v: u32| match comp {
+            Comp::Red => c[0] = v,
+            Comp::Green => c[1] = v,
+            Comp::Blue => c[2] = v,
+            Comp::Alpha => c[3] = v,
+            Comp::Lum | Comp::Index => c[..3].fill(v),
+            Comp::Intensity => c.fill(v),
+        };
+        let to12 = |v: u64, bits: u32| match bits {
+            12 => v as u32,
+            10 => ((v << 2) | (v >> 8)) as u32,
+            16 | 32 => ((v * 4095 + (1u64 << (bits - 1)) - 1) / ((1u64 << bits) - 1)) as u32,
+            _ => super::field::deep8(scale8(v, bits)),
+        };
+
+        match &self.kind {
+            WriteKind::Comps { comps, n, comp_bytes } => {
+                for (i, &comp) in comps[..*n as usize].iter().enumerate() {
+                    let at = i * *comp_bytes as usize;
+                    let v = match comp_bytes {
+                        1 => to12(b[at] as u64, 8),
+                        2 => to12(u16::from_be_bytes([b[at], b[at + 1]]) as u64, 16),
+                        _ => to12(be32(&b[at..at + 4]) as u64, 32),
+                    };
+                    put(comp, v);
+                }
+            }
+            WriteKind::Packed { fields, n } => {
+                let word = b[..self.bytes as usize].iter().fold(0u64, |w, &byte| w << 8 | byte as u64);
+                for fl in &fields[..*n as usize] {
+                    put(fl.comp, to12((word >> fl.shift) & ((1u64 << fl.width) - 1), fl.width as u32));
+                }
+            }
+        }
+        c
+    }
+
     /// The pixel in `b` (at least `bytes` long) as the plane word 0xRRGGBBAA,
     /// or for an index form the raw index.
     pub fn decode(&self, b: &[u8]) -> u32 {
@@ -258,9 +309,92 @@ impl WriteForm {
     }
 }
 
+/// What turns the pixels of one form into the values a deep field stores: the common shapes directly,
+/// anything else through `WriteForm::decode_deep`.
+pub(super) enum DeepRow<'a> {
+    /// 10:10:10:2 in red, green, blue, alpha order into a 10:10:10:2 field: the word is the value.
+    Word,
+    /// 8- or 16-bit components into 12-bit lanes: the source component for red, green, blue and alpha (4: none).
+    Lanes8([u8; 4]),
+    Lanes16([u8; 4]),
+    Generic(&'a WriteForm, DeepField),
+}
+
+impl<'a> DeepRow<'a> {
+    pub fn of(form: &'a WriteForm, field: DeepField) -> DeepRow<'a> {
+
+        use super::field::{Codec, FIELD_PACKED};
+
+        match (&form.kind, field.codec) {
+            (WriteKind::Packed { fields, n: 4 }, Codec::Texel { bytes: 4, field: FIELD_PACKED })
+                if [Comp::Red, Comp::Green, Comp::Blue, Comp::Alpha].iter().zip([22, 12, 2, 0]).zip([10, 10, 10, 2]).enumerate().all(|(i, ((&c, shift), width))| fields[i].comp == c && fields[i].shift == shift && fields[i].width == width) =>
+            {
+                DeepRow::Word
+            }
+            (WriteKind::Comps { comps, n, comp_bytes: comp_bytes @ (1 | 2) }, Codec::Lanes) => {
+                let at = |c: Comp| comps[..*n as usize].iter().position(|&x| x == c).map(|i| i as u8);
+                match (at(Comp::Red), at(Comp::Green), at(Comp::Blue)) {
+                    (Some(r), Some(g), Some(b)) => {
+                        let from = [r, g, b, at(Comp::Alpha).unwrap_or(4)];
+                        if *comp_bytes == 1 { DeepRow::Lanes8(from) } else { DeepRow::Lanes16(from) }
+                    }
+                    _ => DeepRow::Generic(form, field),
+                }
+            }
+            _ => DeepRow::Generic(form, field),
+        }
+    }
+
+    /// The value the field stores for the pixel in `px`.
+    #[inline(always)]
+    pub fn value(&self, px: &[u8]) -> u64 {
+        match self {
+            DeepRow::Word => be32(px) as u64,
+            DeepRow::Lanes8(from) => {
+                let c = |k: u8| super::field::deep8(px[(k & 3) as usize] as u32) as u64;
+                let alpha = if from[3] == 4 { 0xfff } else { c(from[3]) };
+                c(from[0]) << 36 | c(from[1]) << 24 | c(from[2]) << 12 | alpha
+            }
+            DeepRow::Lanes16(from) => {
+                // A form without alpha is six bytes, so read only the components it has.
+                let c = |k: u8| {
+                    let k = 2 * (k & 3) as usize;
+                    ((u16::from_be_bytes([px[k], px[k + 1]]) as u32 * 4095 + 32767) / 65535) as u64
+                };
+                let alpha = if from[3] == 4 { 0xfff } else { c(from[3]) };
+                c(from[0]) << 36 | c(from[1]) << 24 | c(from[2]) << 12 | alpha
+            }
+            DeepRow::Generic(form, field) => field.store_deep(form.decode_deep(px)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The direct shapes store what the general decode does, byte for byte.
+    #[test]
+    fn a_deep_row_shape_stores_what_the_general_decode_stores() {
+        use super::super::field::{Codec, Field, FIELD_PACKED};
+        let lanes = Field { at: 0, codec: Codec::Lanes };
+        let packed = Field { at: 0, codec: Codec::Texel { bytes: 4, field: FIELD_PACKED } };
+        let mut seed = 0x9e37_79b9u32;
+        for (code, field) in [(0x6b, lanes), (0x6c, lanes), (0x69, lanes), (0x6d, lanes), (0x4b, lanes), (0x49, lanes), (0x4c, lanes), (0x4d, lanes), (0x42, lanes), (0x4b, packed), (0x49, packed), (0x10b, packed), (0x10c, packed), (0x111, packed)] {
+            let Some(form) = write_form(code) else { panic!("form {code:#x}") };
+            let row = DeepRow::of(&form, field);
+            for _ in 0..2000 {
+                let px: Vec<u8> = (0..16).map(|_| { seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223); (seed >> 24) as u8 }).collect();
+                assert_eq!(row.value(&px), field.store_deep(form.decode_deep(&px)), "form {code:#x}");
+                // The last pixel of a run is exactly `bytes` long.
+                let px = &px[..form.bytes as usize];
+                assert_eq!(row.value(px), field.store_deep(form.decode_deep(px)), "form {code:#x}, exact length");
+            }
+        }
+        assert!(matches!(DeepRow::of(&write_form(0x6b).unwrap(), lanes), DeepRow::Lanes16(_)));
+        assert!(matches!(DeepRow::of(&write_form(0x4b).unwrap(), lanes), DeepRow::Lanes8(_)));
+        assert!(matches!(DeepRow::of(&write_form(0x10b).unwrap(), packed), DeepRow::Word));
+    }
 
     /// UNSIGNED_SHORT_5_6_5 arrives as type 0xa (0x149, 0x14d) or 0xc
     /// (0x189, 0x18d) under RGB and BGR, by the internal format, two bytes

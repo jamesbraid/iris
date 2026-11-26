@@ -91,12 +91,9 @@ impl DisplayRegs {
         if entry < lut::SIZE { self.lut[entry as usize] & lut::ENTRY_MASK } else { 0 }
     }
 
-    /// The gamma table's entry for one 8-bit RGB channel: widened to 12
-    /// bits as the X server widens it (c << 4 | c >> 4; the board's own widening
-    /// is unknown) and mapped to the table in three ranges -- v below 0x200, v / 2 +
-    /// 0x100 below 0x400, else v / 4 + 0x200.
-    fn gamma_word(&self, c: u32) -> u32 {
-        let v = (c << 4) | (c >> 4);
+    /// The gamma table's entry for one 12-bit channel value, mapped to the table in three ranges: v
+    /// below 0x200, v / 2 + 0x100 below 0x400, else v / 4 + 0x200.
+    fn gamma_entry(&self, v: u32) -> u32 {
         let t = if v < 0x200 {
             v
         } else if v < 0x400 {
@@ -106,6 +103,12 @@ impl DisplayRegs {
         };
 
         self.lut[(ODSY_GAMMA_BASE + t) as usize]
+    }
+
+    /// The gamma table's entry for one 8-bit RGB channel, widened to 12 bits as the X server does
+    /// (c << 4 | c >> 4; the board's own widening is unknown).
+    fn gamma_word(&self, c: u32) -> u32 {
+        self.gamma_entry((c << 4) | (c >> 4))
     }
 
     /// One 8-bit RGB channel through the gamma table, shown as the top eight bits
@@ -118,6 +121,16 @@ impl DisplayRegs {
     /// As `gamma`, the entry's whole ten-bit channel.
     pub fn gamma_wide(&self, c: u32, shift: u32) -> u32 {
         (self.gamma_word(c) >> (shift - 2)) & 0x3ff
+    }
+
+    /// As `gamma` and `gamma_wide` for a channel the window keeps at 12 bits: its value indexes the
+    /// table as it is (APPROXIMATION: how the board reduces a 12-bit channel is unknown).
+    pub fn gamma12(&self, v: u32, shift: u32) -> u32 {
+        (self.gamma_entry(v) >> shift) & 0xff
+    }
+
+    pub fn gamma_wide12(&self, v: u32, shift: u32) -> u32 {
+        (self.gamma_entry(v) >> (shift - 2)) & 0x3ff
     }
 
     /// The colormap group main drawable main_id shows through: bits 8:4 of its

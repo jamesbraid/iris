@@ -18,12 +18,12 @@ use crate::dev::odyssey::vram::Surface;
 /// and of one showing colour map group 17, both laid out as the test
 /// screen's window (Board::test_screen(): 16-byte pixels, 4-byte colour
 /// fields, A at unit 6, B at unit 2; the X server's 0x4b2 layout).
-const DISPMODE_RGB: u32 = 0x0096_55a6;
+pub(super) const DISPMODE_RGB: u32 = 0x0096_55a6;
 const DISPMODE_GROUP17: u32 = 0x0096_5f10;
 const LUT_RED: u32 = 0x3ff0_0000;
 const LUT_BLUE: u32 = 0x0000_03ff;
 
-fn backend(s: &mut Board, word: u32) {
+pub(super) fn backend(s: &mut Board, word: u32) {
     s.mmio_write(backend::SELECT, word as u64, 4);
 }
 
@@ -33,14 +33,14 @@ fn backend_entry(s: &mut Board, index: u32, word: u32) {
     backend(s, word);
 }
 
-fn dispmode(s: &mut Board, did: u32, mode: u32) {
+pub(super) fn dispmode(s: &mut Board, did: u32, mode: u32) {
     backend_entry(s, dispmode::BASE + did, mode);
 }
 
 /// What a guest loads before any RGB pixel is visible: the identity gamma
 /// ramp at lookup-RAM 0x1a00 and drawable `did` in an RGB mode. Out of
 /// reset the lookup RAM is zero and the screen black.
-fn display_identity(s: &mut Board, did: u32) {
+pub(super) fn display_identity(s: &mut Board, did: u32) {
     dispmode(s, did, DISPMODE_RGB);
     backend(s, 0x3000_0000 | 0x1a00 << 14 | 0x600);
     for i in 0..0x600u32 {
@@ -930,7 +930,7 @@ fn a_store_through_any_view_of_the_memory_composes_a_new_frame() {
 // copy of the frame equal to a compose of all of it.
 
 /// Bring `shown`, a copy of the frame built from damage alone, up to date; the lines composed.
-fn follow(s: &mut Board, shown: &mut Vec<u32>) -> usize {
+pub(super) fn follow(s: &mut Board, shown: &mut Vec<u32>) -> usize {
     let r = s.test_reader();
     let runs = r.take_damage(false, false);
     let (w, h) = r.size();
@@ -948,14 +948,14 @@ fn follow(s: &mut Board, shown: &mut Vec<u32>) -> usize {
 }
 
 /// The frame as a compose of every line makes it.
-fn whole(s: &mut Board) -> Vec<u32> {
+pub(super) fn whole(s: &mut Board) -> Vec<u32> {
     let r = s.test_reader();
     r.recompose();
     r.update();
     r.frame.clone()
 }
 
-fn assert_same(shown: &[u32], whole: &[u32], w: usize, what: &str) {
+pub(super) fn assert_same(shown: &[u32], whole: &[u32], w: usize, what: &str) {
     let bad = shown.iter().zip(whole).position(|(a, b)| a != b);
     assert!(bad.is_none(), "{what}: line {} differs from a whole compose", bad.unwrap() / w);
 }

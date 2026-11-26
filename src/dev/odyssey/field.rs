@@ -244,7 +244,68 @@ pub(super) fn texel_unpack(v: u64, bytes: u8, field: u8) -> u32 {
     }
 }
 
+/// A colour at the widest depth the board keeps: red, green, blue and alpha as 12-bit values.
+pub(super) type Deep = [u32; 4];
+
+/// An 8-bit channel as 12 bits, its top bits repeated below (as `lanes_of`).
+#[inline(always)]
+pub(super) fn deep8(c: u32) -> u32 {
+    (c << 4) | (c >> 4)
+}
+
+/// A 10-bit channel as 12 bits, its top bits repeated below.
+#[inline(always)]
+fn deep10(c: u32) -> u32 {
+    (c << 2) | (c >> 8)
+}
+
+/// A word 0xRRGGBBAA as a colour, each channel widened.
+#[inline]
+pub(super) fn deep_of_word(w: u32) -> Deep {
+    std::array::from_fn(|k| deep8(chan(w, k as u32)))
+}
+
+/// A colour as the word 0xRRGGBBAA, each channel's top eight bits.
+#[inline]
+pub(super) fn word_of_deep(c: Deep) -> u32 {
+    word4(c.map(|v| v >> 4))
+}
+
 impl Field {
+    /// Whether the field keeps more than eight bits a channel: the 12-bit lanes and 10:10:10:2.
+    #[inline(always)]
+    pub fn is_deep(&self) -> bool {
+        matches!(self.codec, Codec::Lanes | Codec::Texel { bytes: 4, field: FIELD_PACKED })
+    }
+
+    /// The field's colour at its own depth from its value (value_len() bytes); an 8-bit field's
+    /// channels widen as `lanes_of` does.
+    #[inline]
+    pub fn load_deep(&self, v: u64) -> Deep {
+        match self.codec {
+            Codec::Lanes => {
+                let l = lanes_from(v);
+                [l[0] as u32, l[1] as u32, l[2] as u32, l[3] as u32]
+            }
+            Codec::Texel { bytes: 4, field: FIELD_PACKED } => {
+                let w = v as u32;
+                [deep10(w >> 22), deep10((w >> 12) & 0x3ff), deep10((w >> 2) & 0x3ff), (w & 3) * 0x555]
+            }
+            _ => deep_of_word(self.load(v)),
+        }
+    }
+
+    /// The value the field stores for a colour: each channel truncated to the field's width, as
+    /// the 8-bit stores truncate the 12-bit fragment.
+    #[inline]
+    pub fn store_deep(&self, c: Deep) -> u64 {
+        match self.codec {
+            Codec::Lanes => lanes_value(c.map(|v| v as u16)),
+            Codec::Texel { bytes: 4, field: FIELD_PACKED } => ((c[0] >> 2) << 22 | (c[1] >> 2) << 12 | (c[2] >> 2) << 2 | c[3] >> 10) as u64,
+            _ => self.store(word_of_deep(c)),
+        }
+    }
+
     /// The bytes the field holds its value in.
     #[inline(always)]
     pub fn value_len(&self) -> u32 {

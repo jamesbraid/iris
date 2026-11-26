@@ -19,7 +19,7 @@ use super::dma::{PAGE_A, TABLE, colour_destination, descriptor, pte, put_table};
 
 /// A board with guest RAM whose one clip rectangle covers the screen, so
 /// every in-plane pixel is the window's.
-fn window() -> (Box<Board>, Arc<Ram>) {
+pub(super) fn window() -> (Box<Board>, Arc<Ram>) {
     let (mut s, _, ram) = board_with_ram();
     s.win.clip_kept = 1;
     s.win.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: ODSY_BOOT_WIDTH as i32 - 1, y1: ODSY_BOOT_HEIGHT as i32 - 1 };
@@ -216,19 +216,19 @@ fn put_one(s: &mut Board, ram: &Ram, (base, pitch, mode): (u32, u32, u32), word4
 /// it for the test screen: class and code, bit 12, 4-byte fields of
 /// 16-byte pixels, the front and back fields (A at unit 6, B at unit 2),
 /// the read selector and the front bit.
-fn read_word4(class: u32, code: u32) -> u32 {
+pub(super) fn read_word4(class: u32, code: u32) -> u32 {
     0x9263_3000 | class | code << 3
 }
 
 /// Read the `w` x 1 pixels at (x, y) of the window by DMA with word 4
 /// `word4` at `bytes` bytes a pixel, into a guest page pre-filled with
 /// 0xa5 guard bytes. Returns the 64 bytes at the start of the page.
-fn dma_read(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: u32, bytes: u32) -> Vec<u8> {
+pub(super) fn dma_read(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: u32, bytes: u32) -> Vec<u8> {
     dma_read_from(s, ram, dma::SENTINEL_READ, (x, y, w), word4, bytes)
 }
 
 /// The same from the source word 0 `from` names: a sentinel, or a board address.
-fn dma_read_from(s: &mut Board, ram: &Ram, from: u32, (x, y, w): (u32, u32, u32), word4: u32, bytes: u32) -> Vec<u8> {
+pub(super) fn dma_read_from(s: &mut Board, ram: &Ram, from: u32, (x, y, w): (u32, u32, u32), word4: u32, bytes: u32) -> Vec<u8> {
     dma_read_coded(s, ram, from, (x, y, w), word4, bytes, 0)
 }
 
@@ -313,7 +313,7 @@ fn a_read_of_a_byte_type_returns_the_pixel_bytes_in_the_requested_order() {
 }
 
 /// A read header with word 4's field codes (bits 23:20, then 27:24) set.
-fn with_fields(word4: u32, first: u32, second: u32) -> u32 {
+pub(super) fn with_fields(word4: u32, first: u32, second: u32) -> u32 {
     (word4 & !0x0ff0_0000) | first << 20 | second << 24
 }
 
@@ -476,7 +476,7 @@ fn dma_write(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: u32, c
 }
 
 /// The same at `bytes` bytes a pixel.
-fn dma_write_sized(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: u32, code: u32, bytes: u32, payload: &[u8]) {
+pub(super) fn dma_write_sized(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: u32, code: u32, bytes: u32, payload: &[u8]) {
     let bpp_code = DMA_BPP.iter().position(|&b| b as u32 == bytes).expect("a size the header can name") as u32;
 
     ram.put(PAGE_A, payload);

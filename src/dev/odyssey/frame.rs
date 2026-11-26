@@ -116,6 +116,9 @@ pub(super) struct Frame {
     /// Whether `compose` writes the screen's order, 0xAABBGGRR with alpha
     /// set (`Frame::snapshot_for_screen`), not 0x00RRGGBB.
     abgr: bool,
+    /// The gamma table by a 12-bit channel, for the windows that show 10 or 12 bits a channel; None
+    /// when none does.
+    deep: Option<Box<[[u32; 4096]; 3]>>,
     /// The tables carry ten bits a channel as x2r10g10b10 (no alpha) instead of eight.
     wide: bool,
     /// Black, outside any field, in the output's order.
@@ -152,6 +155,8 @@ struct Plan {
     mask: u32,
     /// The field, for the generic reader.
     field: Field,
+    /// Shown through `Frame::deep`.
+    deep: bool,
 }
 
 /// The field readers by codec: the display modes `mode_fields` produces,
@@ -166,7 +171,10 @@ const K_INDEX2: u32 = 5;
 const K_INDEX4: u32 = 6;
 const K_OUTSIDE: u32 = 7;
 const K_GENERIC: u32 = 8;
-const KINDS: usize = 9;
+/// A 10:10:10:2 or 12-bit lane field shown as RGB with its own width through the gamma table (`Frame::deep`).
+const K_DEEP10: u32 = 9;
+const K_DEEP12: u32 = 10;
+const KINDS: usize = 11;
 
 /// The value of the n bytes at byte offset b of `words`: `VramPtr::load`
 /// on words already in hand, the lowest address highest. A field that runs
@@ -188,6 +196,10 @@ fn value(words: &[u64], b: u64, n: u32) -> u64 {
 fn colour<const K: u32, const RGB: bool, const LOG2: u32>(f: &Frame, p: &Plan, words: &[u64], i: usize) -> u32 {
     let log2 = if LOG2 == 0 { f.fb.bpp_log2 as u32 } else { LOG2 };
     let b = ((i as u64) << log2) + p.at;
+    if K == K_DEEP10 || K == K_DEEP12 {
+        let c = if K == K_DEEP10 { Field { at: 0, codec: Codec::Texel { bytes: 4, field: FIELD_PACKED } }.load_deep(value(words, b, 4)) } else { Field { at: 0, codec: Codec::Lanes }.load_deep(value(words, b, 6)) };
+        return f.deep_colour(c);
+    }
     let word = match K {
         K_RGB4 => texel_unpack(value(words, b, 2), 2, FIELD_FOUR),
         K_RGB5 => texel_unpack(value(words, b, 2), 2, FIELD_PACKED),
@@ -232,6 +244,8 @@ macro_rules! readers_for {
             [$t::<K_INDEX4, false, { $log2 }>, $t::<K_INDEX4, true, { $log2 }>],
             [$t::<K_OUTSIDE, false, { $log2 }>, $t::<K_OUTSIDE, true, { $log2 }>],
             [$t::<K_GENERIC, false, { $log2 }>, $t::<K_GENERIC, true, { $log2 }>],
+            [$t::<K_DEEP10, false, { $log2 }>, $t::<K_DEEP10, true, { $log2 }>],
+            [$t::<K_DEEP12, false, { $log2 }>, $t::<K_DEEP12, true, { $log2 }>],
         ]
     };
 }
@@ -245,11 +259,13 @@ const FOLDS: [(u32, u32); 3] = [(0xff, 8), (0xf0, 4), (0xf8, 5)];
 
 impl Plan {
     /// Window `field` shown through `show`, in pixels of 1 << log2 bytes.
-    fn of(field: Field, show: &IdShow, log2: u8) -> Plan {
+    fn of(field: Field, show: &IdShow, log2: u8, deep: bool) -> Plan {
         let k = if field.at as u32 + 2 > 1 << log2 {
             K_OUTSIDE
         } else {
             match field.codec {
+                Codec::Lanes if show.rgb && deep => K_DEEP12,
+                Codec::Texel { bytes: 4, field: FIELD_PACKED } if show.rgb && deep => K_DEEP10,
                 Codec::Lanes => K_LANES,
                 Codec::Texel { bytes: 2, field: FIELD_FOUR } => K_RGB4,
                 Codec::Texel { bytes: 2, field: FIELD_PACKED } => K_RGB5,
@@ -263,11 +279,20 @@ impl Plan {
         let size = if (1..=4).contains(&log2) { log2 as usize } else { 0 };
         let rgb = show.rgb as usize;
         let table = FOLDS.iter().position(|&f| f == (show.keep, show.down)).unwrap_or(0);
-        Plan { span: SPANS[size][k][rgb], one: ONES[size][k][rgb], at: field.at as u64, table, base: show.base, mask: show.mask, field }
+        Plan { span: SPANS[size][k][rgb], one: ONES[size][k][rgb], at: field.at as u64, table, base: show.base, mask: show.mask, field, deep: k as u32 == K_DEEP10 || k as u32 == K_DEEP12 }
     }
 }
 
 impl Frame {
+    /// A colour of 12-bit channels through the gamma table, in the output's order.
+    #[inline(always)]
+    fn deep_colour(&self, c: [u32; 4]) -> u32 {
+        match &self.deep {
+            Some(t) => t[0][c[0] as usize & 0xfff] | t[1][c[1] as usize & 0xfff] | t[2][c[2] as usize & 0xfff],
+            None => self.black,
+        }
+    }
+
     /// The frame the registers describe, with buffer (displayed >> id) & 1
     /// showing for each window; None before the scan-out is set up.
     pub fn snapshot(regs: &DisplayRegs, displayed: u32) -> Option<Frame> {
@@ -288,6 +313,12 @@ impl Frame {
     }
 
     fn snapshot_in(regs: &DisplayRegs, displayed: u32, abgr: bool, wide: bool) -> Option<Frame> {
+        Self::snapshot_with(regs, displayed, abgr, wide, true)
+    }
+
+    /// As `snapshot_in`; without `deep` a 10-bit or 12-bit window is shown from its top eight bits, as the GPU
+    /// scan-out shows it.
+    pub fn snapshot_with(regs: &DisplayRegs, displayed: u32, abgr: bool, wide: bool, deep: bool) -> Option<Frame> {
         let r = &regs.pbj;
         let (width, height, stride) = (r[pbj::WIDTH], r[pbj::HEIGHT], r[pbj::STRIDE]);
         if width == 0 || height == 0 || stride == 0 || width > stride * TILE {
@@ -300,7 +331,7 @@ impl Frame {
         let ctx = ResolveCtx::new(regs, displayed, wide);
         let plans = std::array::from_fn(|id| {
             let show = &ctx.ids[id];
-            Plan::of(fields[id][show.buf & 1], show, fb.bpp_log2)
+            Plan::of(fields[id][show.buf & 1], show, fb.bpp_log2, deep)
         });
         let mut gamma = Box::new([[[0u32; 256]; 3]; 3]);
         for (t, &(keep, down)) in gamma.iter_mut().zip(&FOLDS) {
@@ -314,10 +345,21 @@ impl Frame {
                 }
             }
         }
+        let deep = plans.iter().any(|p| p.deep).then(|| {
+            let mut t = Box::new([[0u32; 4096]; 3]);
+            for v in 0..4096u32 {
+                for (ch, shift) in [lut::RED_SHIFT, lut::GREEN_SHIFT, lut::BLUE_SHIFT].into_iter().enumerate() {
+                    let g = if wide { regs.gamma_wide12(v, shift) << (20 - 10 * ch as u32) } else if abgr { to_screen(regs.gamma12(v, shift) << (16 - 8 * ch as u32)) } else { regs.gamma12(v, shift) << (16 - 8 * ch as u32) };
+                    t[ch][v as usize] = g;
+                }
+            }
+            t
+        });
         Some(Frame {
             width,
             height,
             fb,
+            deep,
             fields,
             wid: Surface::new(r[pbj::OVERLAY_BASE], stride, 1),
             wid_layout: Layout::of(wid_format),
@@ -459,6 +501,11 @@ impl Frame {
         let field = self.fields[id][show.buf & 1];
         if field.at as u32 + 2 > self.fb.bytes_per_pixel() {
             return 0;
+        }
+        if show.rgb && field.is_deep() {
+            let v = self.deep_colour(field.load_deep(mem.load(p + field.at as u64, field.value_len())));
+            // `deep` holds the output's order; this reference returns 0x00RRGGBB.
+            return if self.wide || !self.abgr { v } else { (v & 0xff_ffff).swap_bytes() >> 8 };
         }
         let word = field_word(mem, p, &field);
         if show.rgb {
@@ -768,6 +815,17 @@ mod tests {
         assert!(!shows(0, store_key(0x8000 * UNIT, 2, 4), low, window));
         assert!(shows(0, store_key(0x100 * UNIT + 256, 2, 4), high, window));
         assert!(shows(0, store_key(0x2000 * UNIT, 2, 1), 1, window));
+    }
+
+    /// The display format word sets a window's field codec and its channel fold, so no deep format can meet a
+    /// 4- or 5-bit fold and the deep reader needs no fold check.
+    #[test]
+    fn no_deep_format_is_a_folded_mode() {
+        for format in 0..=mode::FORMAT_MASK {
+            let [field, _] = mode_fields(format << mode::FORMAT_SHIFT);
+            let width = format & dispmode::WIDTH_MASK;
+            assert!(!field.is_deep() || (width != dispmode::WIDTH_4 && width != dispmode::WIDTH_5), "format {format:#x}");
+        }
     }
 
     /// The wide frame keeps the maps' ten bits a channel, its top eight are the narrow frame's, and

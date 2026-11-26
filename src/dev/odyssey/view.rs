@@ -9,7 +9,7 @@
 //! converts through its codec (field.rs). Memory is words (vram.rs): a
 //! field is a bit range of one.
 
-use super::field::{Codec, Field, Layout, FIELD_FOUR, PIXEL_FMT_B};
+use super::field::{deep_of_word, word_of_deep, Codec, Deep, Field, Layout, FIELD_FOUR, PIXEL_FMT_B};
 use super::vram::{Format, Surface, VramPtr, PITCH_MASK, TILE, UNIT};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -281,6 +281,36 @@ impl Rows {
         self.mem.store(a, self.v.value_len(), v);
     }
 
+    /// Whether the field keeps more than eight bits a channel (`Field::is_deep`).
+    #[inline(always)]
+    pub fn is_deep(&self) -> bool {
+        matches!(self.v.kind, Kind::Coded(c) if (Field { at: 0, codec: c }).is_deep())
+    }
+
+    /// The field's colour at its own depth (`Field::load_deep`), when (x, y) is in the view.
+    #[inline(always)]
+    pub fn load_deep(&self, x: i32, y: i32) -> Option<Deep> {
+        let a = self.v.offset(x, y)?;
+        let v = self.mem.load(a, self.v.value_len());
+        Some(match self.v.kind {
+            Kind::Coded(_) => self.v.field().load_deep(v),
+            _ => deep_of_word(v as u32),
+        })
+    }
+
+    /// Store a colour at the field's depth (`Field::store_deep`); a field that is not coded takes
+    /// its 8-bit word.
+    #[inline(always)]
+    pub fn store_deep(&self, x: i32, y: i32, c: Deep) {
+        match self.v.kind {
+            Kind::Coded(_) => {
+                let Some(a) = self.v.offset(x, y) else { return };
+                self.mem.store(a, self.v.value_len(), self.v.field().store_deep(c));
+            }
+            _ => self.store_word(x, y, word_of_deep(c)),
+        }
+    }
+
     #[inline(always)]
     pub fn load1(&self, x: i32, y: i32) -> Option<u8> {
         let a = self.v.offset(x, y)?;
@@ -340,6 +370,33 @@ impl Rows {
         let mut a = self.v.addr(x, y);
         for w in words {
             self.mem.put_unshown(a, 4, w as u64);
+            x += 1;
+            // A tile row is 16 pixels, contiguous.
+            a = if x & 15 == 0 { self.v.addr(x, y) } else { a.wrapping_add(step) };
+        }
+        self.mem.mark_written();
+        true
+    }
+
+    /// The view's field when it keeps more than eight bits a channel.
+    pub fn deep_field(&self) -> Option<Field> {
+        self.is_deep().then(|| self.v.field())
+    }
+
+    /// Store `n` values (as `Field::store_deep` makes them) at pixels x0.. of row y, a tile row at a time; false,
+    /// nothing stored, if the run leaves the view or a value straddles a word. The caller marks the rows.
+    pub fn store_deep_run(&self, y: i32, x0: i32, n: usize, mut value: impl FnMut(usize) -> u64) -> bool {
+        let len = self.v.value_len() as u64;
+        if n == 0 {
+            return true;
+        }
+        if !self.is_deep() || self.v.log2 < 2 || (self.v.at as u64 & 7) + len > 8 || x0 < 0 || y < 0 || y as u32 >= self.v.height || x0 as u64 + n as u64 > self.v.width as u64 {
+            return false;
+        }
+        let (mut x, step) = (x0, 1u64 << self.v.log2);
+        let mut a = self.v.addr(x, y);
+        for i in 0..n {
+            self.mem.put_unshown(a, len as u32, value(i));
             x += 1;
             // A tile row is 16 pixels, contiguous.
             a = if x & 15 == 0 { self.v.addr(x, y) } else { a.wrapping_add(step) };

@@ -4,7 +4,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::field::Field;
+use super::field::{Deep, Field};
 use super::view::{Kind, Rows, View, MAX_DIM};
 use super::vram::{Format, Surface, ADDR_MASK, PITCH_MASK};
 use super::bits::{be32, be64};
@@ -21,7 +21,7 @@ use super::context::{
 use super::draw::{code_is_index, decode_texel12, pixel_bytes, texel12_components};
 use super::geometry::{f32_bits, odyssey_f32};
 use super::pixel_dma::{guest_value, put_guest_value, write_guest, DmaBus, DmaDirection, DmaError, DmaMap, DmaPageList};
-use super::pixel_write::{write_form, WriteForm};
+use super::pixel_write::{write_form, DeepRow, WriteForm};
 #[derive(Clone, Copy, Default)]
 pub(super) struct DmaEntry {
     pub addr: u64,
@@ -76,6 +76,8 @@ pub(super) struct DmaSource {
     pub drawable: bool,
     /// Word 0 is the address of the colour buffer the screen shows: an X server's GetImage.
     pub screen: bool,
+    /// A screen read that a selected pixel mode decodes (not each pixel's display mode): it keeps what the field holds.
+    pub by_mode: bool,
     pub front: bool,
     /// What word 4 names the field as, and its size in bytes: a drawable or screen read holds
     /// each pixel as its own window's display mode says, when that has this size.
@@ -550,7 +552,15 @@ impl Board {
         // already decode.
         let known = pixel_bytes(hdr[dma::HDR_CONTROL] & image::CODE_MASK) == bpp || texel12 || lum_alpha || raw;
         let form = if obj.is_some() && !known { write_form(hdr[dma::HDR_CONTROL] & write::CODE_MASK).filter(|f| f.bytes == bpp) } else { None };
-        if bpp != 4 && bpp != 3 && bpp != 1 && !texel12 && !lum_alpha && !raw && !ci16 && form.is_none() {
+        // A source with a component wider than a byte into a field that keeps more than a byte. (An 8-bit source takes the
+        // screen path's own rule, which forces alpha.)
+        let deep_form = if obj.is_none() && to.is_deep() && !self.gpu_unit() && self.scale_bias_is_identity() {
+            write_form(hdr[dma::HDR_CONTROL] & write::CODE_MASK).filter(|f| f.bytes == bpp && f.has_deep())
+        } else {
+            None
+        };
+        let deep_row = deep_form.as_ref().zip(to.deep_field()).map(|(f, field)| DeepRow::of(f, field));
+        if bpp != 4 && bpp != 3 && bpp != 1 && !texel12 && !lum_alpha && !raw && !ci16 && form.is_none() && deep_form.is_none() {
             self.dma_stats.declined();
             if !self.diag.dma_bpp_reported {
                 self.diag.dma_bpp_reported = true;
@@ -563,13 +573,13 @@ impl Board {
             }
             return;
         }
-        let code = if texel12 || raw || form.is_some() {
+        let code = if texel12 || raw || form.is_some() || deep_form.is_some() {
             hdr[dma::HDR_CONTROL] & image::CODE_MASK
         } else {
             self.dma_code(hdr, bpp)
         };
         // A 4-byte source onto the screen, unscaled: each row's words from a byte order (dma_put()).
-        let plain = obj.is_none() && bpp == 4 && !self.gpu_unit() && self.scale_bias_is_identity();
+        let plain = obj.is_none() && bpp == 4 && !self.gpu_unit() && self.scale_bias_is_identity() && deep_form.is_none();
         #[cfg(test)]
         let plain = plain && !self.slow_dma;
         let order = match code {
@@ -626,6 +636,13 @@ impl Board {
                     pos += skip as u64;
                 }
                 rows_done += 1;
+                if let Some(shape) = &deep_row {
+                    if to.store_deep_run(y.wrapping_add(r) as i32, x as i32, w as usize, |c| shape.value(&row[c * bpp as usize..])) {
+                        fast_rows += 1;
+                        stored = Some((stored.map_or(y.wrapping_add(r) as i32, |s| s.0), y.wrapping_add(r) as i32));
+                        continue;
+                    }
+                }
                 if let Some(o) = order {
                     let v = row[..(w * 4) as usize].chunks_exact(4).map(|p| u32::from_be_bytes(p.try_into().unwrap()));
                     let (ry, rx) = (y.wrapping_add(r) as i32, x as i32);
@@ -661,6 +678,10 @@ impl Board {
                     }
                     if obj.is_some() {
                         to.store_word(ox, oy, self.decode_pixel(code, px).unwrap_or(0));
+                        continue;
+                    }
+                    if let Some(f) = &deep_form {
+                        to.store_deep(ox, oy, f.decode_deep(px));
                         continue;
                     }
                     self.dma_put(&to, ox as i64, oy as i64, px, code);
@@ -881,7 +902,7 @@ impl Board {
             out += rowbytes as u64;
         }
 
-        let fast = form.as_ref().is_some_and(|f| self.sentinel_rows(f, &payload, (x, y, w, h), top_down, rows));
+        let fast = form.as_ref().is_some_and(|f| self.sentinel_rows(f, &payload, (x, y, w, h), top_down, rows) || self.sentinel_deep(f, &payload, (x, y, w, h), top_down, rows));
         if !fast {
             for r in 0..h {
                 for c in 0..w {
@@ -968,6 +989,60 @@ impl Board {
             }
         }
         if let Some((x0, y0, x1, y1)) = reached {
+            for buf in (0..2).filter(|&buf| selected(buf)) {
+                planes.colour[buf].mark_rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+            }
+        }
+        true
+    }
+
+    /// As `sentinel_rows` for windows whose colour fields keep more than a byte (12-bit lanes, 10:10:10:2): runs are
+    /// stored at the field's width, an 8-bit source widened as a store widens it. False, nothing stored, otherwise.
+    fn sentinel_deep(&self, form: &WriteForm, payload: &[u8], (x, y, w, h): (u32, u32, u32, u32), top_down: bool, plane_rows: i64) -> bool {
+        let buffers = self.draw_buffers();
+        if form.is_index() || buffers == 0 || self.gpu_unit() {
+            return false;
+        }
+        let planes = self.dest_mem();
+        let selected = |b: usize| buffers >> b & 1 != 0;
+        if !(0..2).filter(|&b| selected(b)).all(|b| planes.colour[b].is_deep()) {
+            return false;
+        }
+        let shapes: [Option<DeepRow>; 2] = std::array::from_fn(|b| planes.colour[b].deep_field().filter(|_| selected(b)).map(|field| DeepRow::of(form, field)));
+        let c = self.win.id_compare;
+        let (id, mask) = (c as u8, (c >> ODSY_ID_COMPARE_MASK_SHIFT) as u8);
+        let passes = |x: i64, y: i64| c & ODSY_ID_COMPARE_ENABLE == 0 || planes.did.load1(x as i32, y as i32).is_some_and(|v| (v ^ id) & mask == 0);
+        let (x0, psize) = (x as i64 + self.win.origin[0] as i64, form.bytes as usize);
+        let rowbytes = w as usize * psize;
+        // The box the runs reached, for the picture's rows (`Rows::mark_rect`).
+        let mut stored: Option<(i32, i32, i32, i32)> = None;
+        for r in 0..h as i64 {
+            let py = (if top_down { plane_rows - y as i64 - h as i64 + r } else { y as i64 + h as i64 - 1 - r }) + self.win.origin[1] as i64;
+            let row = &payload[r as usize * rowbytes..][..rowbytes];
+            let runs = self.row_runs(py);
+            for k in 0..runs.n as usize {
+                let (mut a, end) = (runs.start[k].max(x0), runs.end[k].min(x0 + w as i64));
+                while a < end {
+                    if !passes(a, py) {
+                        a += 1;
+                        continue;
+                    }
+                    let mut b = a + 1;
+                    while b < end && passes(b, py) {
+                        b += 1;
+                    }
+                    let seg = &row[(a - x0) as usize * psize..(b - x0) as usize * psize];
+                    for buf in (0..2).filter(|&buf| selected(buf)) {
+                        let shape = shapes[buf].as_ref().expect("a deep field of a selected buffer");
+                        let done = planes.colour[buf].store_deep_run(py as i32, a as i32, (b - a) as usize, |i| shape.value(&seg[i * psize..]));
+                        debug_assert!(done, "a run inside the checked view");
+                        stored = Some(stored.map_or((a as i32, py as i32, b as i32 - 1, py as i32), |s| (s.0.min(a as i32), s.1.min(py as i32), s.2.max(b as i32 - 1), s.3.max(py as i32))));
+                    }
+                    a = b;
+                }
+            }
+        }
+        if let Some((x0, y0, x1, y1)) = stored {
             for buf in (0..2).filter(|&buf| selected(buf)) {
                 planes.colour[buf].mark_rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
             }
@@ -1277,6 +1352,7 @@ impl Board {
         let mode = super::field::Layout::of(Format::decode(self.pixel_mode[2]));
         let origin = ((hdr[dma::HDR_ORIGIN] & 0xffff) as i32, (hdr[dma::HDR_ORIGIN] >> 16) as i32);
         let by_mode = (base & ADDR_MASK) == self.pixel_mode[0] & ADDR_MASK && !self.screen_index_window(origin) && [mode.front, mode.back].iter().any(|f| f.at == at && (super::copy::codec_bytes(f.codec) == bytes || !fits));
+        src.by_mode = !drawable && by_mode && (base & ADDR_MASK) == self.pbj(super::frame::pbj::PIXEL_BASE);
         src.screen = !drawable && !by_mode && (base & ADDR_MASK) == self.pbj(super::frame::pbj::PIXEL_BASE);
         src.front = fmt & dma::FMT_FRONT != 0;
         src.bytes = super::copy::field_bytes(fmt >> 13);
@@ -1296,12 +1372,28 @@ impl Board {
     /// id for a drawable or screen read, which holds its colour as that window's display
     /// mode says, so each pixel of a read across windows is decoded by its own.
     pub fn dma_read_pixel(&mut self, src: &DmaSource, x: i64, y: i64, id: Option<u32>) -> u32 {
+        self.dma_read_rows(src, x, y, id).load_word(x as i32, y as i32).unwrap_or(0)
+    }
+
+    /// As `dma_read_pixel` for a source field that keeps more than eight bits a channel (12-bit lanes,
+    /// 10:10:10:2): its colour at 12 bits. None for any other field.
+    pub fn dma_read_deep(&mut self, src: &DmaSource, x: i64, y: i64, id: Option<u32>) -> Option<Deep> {
+        // A texture object keeps what its upload gave it, eight bits widened.
+        if id.is_none() && !src.by_mode {
+            return None;
+        }
+        let rows = self.dma_read_rows(src, x, y, id);
+        rows.is_deep().then(|| rows.load_deep(x as i32, y as i32)).flatten()
+    }
+
+    /// The source field of pixel (x, y), under the display mode of the window `id` when it names one.
+    fn dma_read_rows(&mut self, src: &DmaSource, x: i64, y: i64, id: Option<u32>) -> Rows {
         let b = if src.drawable { self.read_buffer(src.front, x, y) as usize } else { (!src.front) as usize };
         let rows = src.fields[b & 1];
         let codec = id.and_then(|id| self.display_codec(id, rows.v.at())).filter(|c| super::copy::codec_bytes(*c) == src.bytes).or(src.named);
         match (id, codec) {
-            (Some(_), Some(codec)) => Rows::new(rows.mem(), rows.v.with_codec(codec)).load_word(x as i32, y as i32).unwrap_or(0),
-            _ => rows.load_word(x as i32, y as i32).unwrap_or(0),
+            (Some(_), Some(codec)) => Rows::new(rows.mem(), rows.v.with_codec(codec)),
+            _ => rows,
         }
     }
 
@@ -1395,6 +1487,12 @@ impl Board {
         let index_or_red = !packed && first == dma::BYTE_INDEX_OR_RED;
         let index_max: u32 = if first == dma::BYTE_INDEX_HIGH { 0xfff } else { 0xff };
         let mut o: usize = 0;
+        // A layout with a field or a component wider than a byte, read from a field that keeps more.
+        let wide = if packed {
+            l.fields.iter().any(|f| f.width > 8)
+        } else {
+            l.plane == ReadPlane::Colour && l.bytes % 2 == 0 && l.bytes >= 2 && l.from[..l.bytes as usize].chunks(2).all(|p| p[0] == p[1] && p[0] < 4)
+        };
 
         for r in 0..h {
             let board_row = if bottom_up { h - 1 - r } else { r };
@@ -1443,6 +1541,26 @@ impl Board {
                         "sgi-odyssey: DMA colour read at ({}, {}) finds an index pixel (display-mode group {}); its word {:#x} is returned as colour",
                         x, y, group, word
                     );
+                }
+                let deep = if wide && !indexed && group >= ODSY_GAMMA_GROUP { self.dma_read_deep(src, x, y, id) } else { None };
+                if let Some(c) = deep {
+                    // The stored 12 bits, cut to a narrower field or spread over a 16-bit component.
+                    if packed {
+                        let mut v: u32 = 0;
+
+                        for f in l.fields.iter().filter(|f| f.width != 0) {
+                            v |= (c[f.chan as usize] >> (12 - f.width as u32)) << f.shift;
+                        }
+                        out[o..o + l.bytes as usize].copy_from_slice(&v.to_be_bytes()[4 - l.bytes as usize..]);
+                        o += l.bytes as usize;
+                    } else {
+                        for &from in l.from[..l.bytes as usize].iter().step_by(2) {
+                            let v = c[from as usize & 3];
+                            out[o..o + 2].copy_from_slice(&(((v << 4) | (v >> 8)) as u16).to_be_bytes());
+                            o += 2;
+                        }
+                    }
+                    continue;
                 }
                 if packed {
                     let mut v: u32 = 0;

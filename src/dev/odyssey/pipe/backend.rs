@@ -288,6 +288,9 @@ pub(crate) struct BackendState {
     pub blend_fn: BlendFn,
     /// The draw's quad store (`select`); `store_generic` until chosen.
     pub store: QuadStore,
+    /// Whether a 12-bit or 10:10:10:2 field keeps its own width; the GPU unit stores eight bits, so its parity
+    /// tests turn it off on the CPU side.
+    pub deep: bool,
 }
 
 impl BackendState {
@@ -331,6 +334,7 @@ impl BackendState {
             reads: if rgba { blend || logic.is_some() || colour_mask != 0xf } else { logic.is_some() || w.index_mask() != INDEX_MASK },
             blend_fn: blend_for(w.blend_src(), w.blend_dst(), w.blend_equation()),
             store: store_generic,
+            deep: true,
         }
     }
 
@@ -342,7 +346,7 @@ impl BackendState {
         // The copy logical operation stores the source, as no operation does.
         let logic_ok = self.logic.is_none_or(|op| op == LOGIC_COPY);
 
-        if self.stencil || !self.rgba || !blend_ok || !logic_ok || (self.colour_mask != 0 && self.colour_mask != 0xf) {
+        if !self.deep || self.stencil || !self.rgba || !blend_ok || !logic_ok || (self.colour_mask != 0 && self.colour_mask != 0xf) {
             return generic;
         }
         if self.depth_test && planes.depth.v.kind != Kind::Z24 {
@@ -436,6 +440,25 @@ impl BackendState {
         out
     }
 
+    /// As `colour_result` for a field that keeps its 12-bit components: `dst` is the field's own colour
+    /// at 12 bits, and the logical operation and the colour mask act on all of them.
+    #[inline(always)]
+    pub fn colour_result_deep(&self, src: [u32; 4], dst: [u32; 4]) -> [u32; 4] {
+        let mut out = if self.blend { self.blend(src, dst) } else { src };
+
+        if let Some(op) = self.logic {
+            for k in 0..4 {
+                out[k] = logic_op(op, out[k], dst[k]) & 0xfff;
+            }
+        }
+        for k in 0..4 {
+            if self.colour_mask & (1 << k) == 0 {
+                out[k] = dst[k];
+            }
+        }
+        out
+    }
+
 #[cfg(test)]
     /// One fragment at plane pixel (x, y) with depth word zq (the polygon
     /// offset applied by the rasteriser) and colour rgba, through the tests
@@ -493,6 +516,14 @@ impl BackendState {
 
         for (b, rows) in planes.colour.iter().enumerate() {
             if !self.targets[b] {
+                continue;
+            }
+            if self.deep && rows.is_deep() {
+                // 12 or 10 bits a channel kept, not the 8 the other fields store.
+                let dst = if self.reads { rows.load_deep(x, y) } else { Some(src) };
+                if let Some(dst) = dst {
+                    rows.store_deep(x, y, self.colour_result_deep(src, dst));
+                }
                 continue;
             }
             if !self.reads {
@@ -568,34 +599,32 @@ fn compare_code(c: Compare) -> u32 {
     }
 }
 
-/// A colour field's components, 8 bits each, at byte address a.
+/// A colour field's components as 12-bit values, at byte address a: an 8-bit field's widened by
+/// repeating their top bits.
 #[inline(always)]
 fn load_colour<const C: u32>(m: VramPtr, a: u64) -> [u32; 4] {
     if C == C_RGBA8 {
-        unpack_rgba8(m.load(a, 4) as u32)
+        unpack_rgba8(m.load(a, 4) as u32).map(widen8)
     } else if C == C_PACKED10 {
-        // Each component's top 8 of 10 bits; alpha's 2 bits repeated.
         let v = m.load(a, 4) as u32;
-        [(v >> 24) & 0xff, (v >> 14) & 0xff, (v >> 4) & 0xff, (v & 3) * 0x55]
+        let w12 = |c: u32| (c << 2) | (c >> 8);
+        [w12(v >> 22), w12((v >> 12) & 0x3ff), w12((v >> 2) & 0x3ff), (v & 3) * 0x555]
     } else {
         let v = m.load(a, 6);
-        [36, 24, 12, 0].map(|s| ((v >> s) as u32 & 0xfff) >> 4)
+        [36, 24, 12, 0].map(|s| (v >> s) as u32 & 0xfff)
     }
 }
 
-/// Store 8-bit components c at byte address a: a word of bytes, 10:10:10:2,
-/// or lanes widened by repeating their top bits.
+/// Store 12-bit components c at byte address a, each cut to the field's width: a word of bytes,
+/// 10:10:10:2, or 12-bit lanes.
 #[inline(always)]
 fn store_colour<const C: u32>(m: VramPtr, a: u64, c: [u32; 4]) {
     if C == C_RGBA8 {
-        m.store(a, 4, pack_rgba8(c) as u64);
+        m.store(a, 4, pack_rgba8(c.map(|v| v >> 4)) as u64);
     } else if C == C_PACKED10 {
-        // Each component widened to 10 bits by repeating its top bits;
-        // alpha's top 2.
-        let w10 = |v: u32| (v << 2) | (v >> 6);
-        m.store(a, 4, (w10(c[0]) << 22 | w10(c[1]) << 12 | w10(c[2]) << 2 | c[3] >> 6) as u64);
+        m.store(a, 4, ((c[0] >> 2) << 22 | (c[1] >> 2) << 12 | (c[2] >> 2) << 2 | c[3] >> 10) as u64);
     } else {
-        let l = c.map(|v| ((v << 4) | (v >> 4)) as u64 & 0xfff);
+        let l = c.map(|v| v as u64 & 0xfff);
         m.store(a, 6, (l[0] << 36) | (l[1] << 24) | (l[2] << 12) | l[3]);
     }
 }
@@ -630,10 +659,10 @@ fn store_quad<const Z: u32, const OP: u32, const C: u32>(st: &BackendState, m: &
             // The target's colour field, of format C (BackendState::select).
             let (mem, a) = (m.colour[b].mem(), m.colour[b].addr(x, y));
             let out = if OP == OP_REPLACE {
-                src.map(|c| c >> 4)
+                src
             } else {
-                let d = load_colour::<C>(mem, a).map(widen8);
-                (st.blend_fn)(src, d, &st.const_colour).map(|c| c >> 4)
+                let d = load_colour::<C>(mem, a);
+                (st.blend_fn)(src, d, &st.const_colour)
             };
             store_colour::<C>(mem, a, out);
         }
@@ -759,7 +788,12 @@ mod tests {
 
     impl TestPlanes {
         fn new() -> TestPlanes {
-            let mut t = TestPlanes { mem: Vram::new(1 << 16), d: DestViews::of(&[0x100, 1, 0x0040_6d50, 0], 0x800, 1) };
+            TestPlanes::with(0x0040_6d50)
+        }
+
+        /// The same screen with the pixel mode's status word `status`.
+        fn with(status: u32) -> TestPlanes {
+            let mut t = TestPlanes { mem: Vram::new(1 << 16), d: DestViews::of(&[0x100, 1, status, 0], 0x800, 1) };
             let p = t.planes();
             for y in 0..H as i32 {
                 for x in 0..W as i32 {
@@ -819,6 +853,60 @@ mod tests {
         s.fragment(&p, 3, 2, 0x0fffff, [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(t.colour(0, 3, 2), [0, 0, 0, 255]);
         assert_eq!(t.depth(3, 2), 0x0fffff);
+    }
+
+    /// A fragment stored to a 12-bit or 10:10:10:2 window keeps its twelve bits cut to the field's width, by the
+    /// generic and the quad store alike (inferred: the V12 colour-width test settles it).
+    #[test]
+    fn a_deep_window_keeps_the_fragment_at_its_own_width() {
+        let want = [1365, 2048, 1024, 4095];
+        for (status, bits) in [(0x0040_6cd0, 12), (0x0040_6d60, 10)] {
+            let mut t = TestPlanes::with(status);
+            let s = BackendState::of(&words(), false, true);
+            let p = t.planes();
+            s.fragment(&p, 3, 2, 0, [1.0 / 3.0, 0.5, 0.2501, 1.0]);
+            let q = BackQuad { x: 4, y: 2, cov: 1, rgba: [want.map(|c| c as u16), [0; 4], [0; 4], [0; 4]], ..Default::default() };
+            (s.select(&p))(&s, &p, &q);
+            let cut = |c: u32| if bits == 12 { c } else { let v = c >> 2; (v << 2) | (v >> 8) };
+            let alpha = if bits == 12 { 4095 } else { 3 * 0x555 };
+            for x in [3, 4] {
+                assert_eq!(p.colour[0].load_deep(x, 2), Some([cut(want[0]), cut(want[1]), cut(want[2]), alpha]), "{bits} bits at {x}");
+                assert_eq!(unpack_rgba8(p.colour[0].load_word(x, 2).unwrap())[..3], [want[0] >> 4, want[1] >> 4, want[2] >> 4], "its top eight bits");
+            }
+        }
+    }
+
+    /// The logical operation and the colour mask act on a deep window's four 12-bit components, not their top eight.
+    #[test]
+    fn a_deep_window_takes_the_logic_op_and_the_colour_mask_at_twelve_bits() {
+        let mut t = TestPlanes::with(0x0040_6cd0);
+        let p = t.planes();
+        let put = |w: BackendWords, src: [u32; 4]| BackendState::of(&w, false, true).fragment_q(&p, 1, 1, 0, src);
+
+        put(words(), [0xabc, 0x123, 0xfff, 0x800]);
+        put(BackendWords { mode: mode::COLOR_LOGIC_OP, logic_op: 6, ..words() }, [0x0f0, 0x321, 0xfff, 0x001]); // XOR
+        assert_eq!(p.colour[0].load_deep(1, 1), Some([0xa4c, 0x202, 0, 0x801]));
+        put(BackendWords { write_mask: write::DEPTH | (0x7 << write::COLOUR_SHIFT), ..words() }, [0x111, 0x222, 0x333, 0x444]);
+        assert_eq!(p.colour[0].load_deep(1, 1), Some([0x111, 0x222, 0x333, 0x801]), "alpha is masked off");
+    }
+
+    /// A blend over a deep window reads the destination at its own width: half of black over white is
+    /// 2047 of 4095 in the 12-bit window, not the 127 of an 8-bit one widened.
+    #[test]
+    fn blending_over_a_deep_window_stays_in_twelve_bits() {
+        let w = BackendWords { mode: mode::BLEND, blend: [(0x18 << 6) | 0x39, 0, 0], ..words() };
+        let s = BackendState::of(&w, false, true);
+        let mut t = TestPlanes::with(0x0040_6cd0);
+        let p = t.planes();
+        s.fragment(&p, 1, 1, 0, [1.0, 1.0, 1.0, 1.0]);
+        s.fragment(&p, 1, 1, 0, [0.0, 0.0, 0.0, 0.5]);
+        assert_eq!(p.colour[0].load_deep(1, 1), Some([2047, 2047, 2047, 3071]));
+        // The quad store takes the same blend.
+        let white = BackQuad { x: 2, y: 1, cov: 1, rgba: [[4095; 4]; 4], ..Default::default() };
+        let half = BackQuad { rgba: [[0, 0, 0, 2048]; 4], ..white };
+        (s.select(&p))(&s, &p, &white);
+        (s.select(&p))(&s, &p, &half);
+        assert_eq!(p.colour[0].load_deep(2, 1), Some([2047, 2047, 2047, 3071]));
     }
 
     #[test]

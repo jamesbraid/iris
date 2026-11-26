@@ -19,6 +19,7 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 
 mod catalogue;
+mod deep;
 mod display;
 mod fills;
 mod dma;
