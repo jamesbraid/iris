@@ -90,7 +90,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 fn help_names_every_subcommand_and_a_bad_one_gets_the_usage() {
     let v = board();
     let help = ok(&v, "help");
-    for sub in ["status", "regs", "fifo", "state", "geom", "tex", "win", "mem", "backend", "lut", "dispmode", "cursor", "pix", "raw", "peek", "shot", "fbdump", "hash", "unimp", "refusals", "trace", "rec"] {
+    for sub in ["status", "regs", "fifo", "state", "geom", "tex", "win", "mem", "backend", "lut", "dispmode", "cursor", "pix", "raw", "peek", "shot", "fbdump", "hash", "unimp", "refusals", "dma", "trace", "rec"] {
         assert!(help.lines().any(|l| l.starts_with(&format!("vpro {sub}")) || l.starts_with(&format!("vpro [{sub}]"))), "help lacks {sub}:\n{help}");
     }
     let err = vpro(&v, "bogus").expect_err("an unknown subcommand fails");
@@ -211,7 +211,7 @@ fn lut_backend_cursor_and_win_read_their_registers() {
     assert!(text.contains("no glyph drawn"), "{text}");
     let text = ok(&v, "win");
     assert!(text.contains("window: origin (0, 0)"), "{text}");
-    for sub in ["regs", "fifo", "state", "geom", "tex", "unimp", "refusals"] {
+    for sub in ["regs", "fifo", "state", "geom", "tex", "unimp", "refusals", "dma"] {
         let text = ok(&v, sub);
         assert!(!text.is_empty(), "vpro {sub} wrote nothing");
     }

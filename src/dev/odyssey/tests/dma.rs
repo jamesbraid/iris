@@ -578,6 +578,62 @@ fn a_dma_image_to_the_screen_stores_the_same_by_rows_as_by_pixels() {
     assert!(written, "some case stored pixels");
 }
 
+/// The DMA counters tell the row-store path from the per-pixel one, say why it was not taken, and
+/// separate destinations and source pixel sizes.
+#[test]
+fn the_dma_counters_split_descriptors_by_destination_pixel_size_and_path() {
+    const SCREEN: u32 = 0x2000;
+    let (mut s, _, ram) = board_with_ram();
+    let put = |s: &mut Board, dest: u32, word4: u32, control: u32, (x, y, w, h): (u32, u32, u32, u32)| {
+        let bpp = match (control >> 16) & 7 { 1 => 4, 5 => 1, _ => 3 };
+        let at = 0x40_0ff0u64;
+        for v in [select(reg::DEST_SELECT), SCREEN, 0x50, 0x0040_6d50, 0] {
+            s.mmio_write(ODSY_USER_CMD_FIFO, v as u64, 4);
+        }
+        ram.put(at, &vec![0x55u8; (w * h * bpp) as usize]);
+        put_table(&ram, TABLE, [dest, y << 16 | x, 0x50, h << 16 | w, word4, 0, w * bpp, control], &[pte(at, w * h * bpp)]);
+        descriptor(s, TABLE);
+        s.gpu_sync();
+    };
+    let (rgba, bytes3) = (0x3201_0000u32, 0x3207_0000u32);
+    put(&mut s, SCREEN, 0x8263_305a, rgba, (200, 300, 3, 2));
+    put(&mut s, SCREEN, 0x8263_305a, bytes3, (200, 300, 4, 1));
+    put(&mut s, SCREEN, 0x8263_305a, rgba, (1270, 10, 20, 3));
+    put(&mut s, OBJECT, 0x8263_305a, rgba, (0, 0, 2, 2));
+    s.tex_mut().scale_bias[0] = 2048;
+    put(&mut s, SCREEN, 0x8263_305a, rgba, (0, 0, 5, 1));
+    // A sentinel upload (two 4-byte pixels), a one-pixel read to the host, a header with no
+    // destination (declined) and a header that disagrees with its entries (failed).
+    let (sentinel, to_host, nowhere) = (dma::SENTINEL_DRAW, 0x3301_004c, 0);
+    put_table(&ram, TABLE, [sentinel, 40 << 16 | 30, 0x50, 1 << 16 | 2, 0x1000, 0, 8, 1 << 30 | 1 << 16 | 0x080], &[pte(PAGE_A, 8)]);
+    descriptor(&mut s, TABLE);
+    put_table(&ram, TABLE, [SCREEN, 300 << 16 | 200, 0x50, 0x10001, 0x8263_305a, 0, 4, to_host], &[pte(PAGE_A + 16, 4)]);
+    descriptor(&mut s, TABLE);
+    put_table(&ram, TABLE, [nowhere, 0, 0x50, 0x10001, 0x8263_305a, 0, 4, rgba], &[pte(PAGE_A, 4)]);
+    descriptor(&mut s, TABLE);
+    put_table(&ram, TABLE, [SCREEN, 0, 0x50, 0x10002, 0x8263_305a, 0, 8, rgba], &[pte(PAGE_A, 4)]);
+    descriptor(&mut s, TABLE);
+    s.gpu_sync();
+    let st = s.dma_stats.snapshot();
+    let at = |kind: usize, bytes: usize| (st.cells[kind][bytes].descriptors, st.cells[kind][bytes].pixels, st.cells[kind][bytes].fast_descriptors, st.cells[kind][bytes].fast_pixels);
+    // Nine started; seven completed, one declined, one failed.
+    assert_eq!((st.seen, st.declined), (9, 1));
+    // Screen, 4 bytes: the row-store descriptor (6 pixels), the one off the right edge and the scaled one.
+    assert_eq!(at(0, 4), (3, 6 + 60 + 5, 1, 6));
+    assert_eq!(at(0, 3), (1, 4, 0, 0));
+    assert_eq!(at(1, 4), (1, 4, 0, 0));
+    assert_eq!(at(2, 4), (1, 2, 0, 0));
+    assert_eq!(at(3, 4), (1, 1, 0, 0));
+    let done: u64 = st.cells.iter().flatten().map(|c| c.descriptors).sum();
+    assert_eq!(st.seen - st.declined - done, 1, "the header that disagrees with itself");
+    // By reason: size, scale, then the row that leaves the view.
+    assert_eq!(st.slow, [0, 1, 1, 0, 1]);
+    let mut text = Vec::new();
+    st.report(&mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("screen 4 bytes: 3 descriptors, 71 pixels, 1 by rows (6 pixels)"), "{text}");
+}
+
 /// ms a frame of a `BENCH_W` x `BENCH_H` (720 x 486) image of 4-byte pixels (source code 0, the fallback) DMA'd to the
 /// screen, as many rows a table as its twelve entries take. `BENCH_FRAMES` a run (0: build only), `BENCH_RUNS` runs; the far corner is checked.
 #[test]

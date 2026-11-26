@@ -96,6 +96,42 @@ typedef struct IrisVproGpuCounters {
 int sgi_odyssey_gpu_counters(IrisEngine *h, IrisVproGpuCounters *out);
 
 /*
+ * One cell of IrisVproDmaStats: the descriptors the board completed and their
+ * pixels (clipped ones included), and the part of them that went by row stores
+ * (screen destinations only).
+ */
+typedef struct IrisVproDmaCell {
+    uint64_t descriptors;
+    uint64_t pixels;
+    uint64_t fast_descriptors;
+    uint64_t fast_pixels;
+} IrisVproDmaCell;
+
+/*
+ * What the guest's DMA descriptors did since the engine was built. seen counts
+ * descriptors when they start and the cells when they complete, so seen less
+ * the cells and declined is what failed (a bus error, a header that disagrees
+ * with itself); a read never shows seen below the rest. declined counts
+ * descriptors the board does not model. cells[kind][bytes]: kind 0 screen,
+ * 1 memory object, 2 draw-sentinel upload, 3 to host; bytes is the source
+ * pixel's size. slow[why] counts the screen descriptors that did not go wholly
+ * by row stores: 0 GPU unit, 1 not 4-byte pixels, 2 scale or bias, 3 source
+ * code outside RGBA, 4 a row clipped or a field the row store refuses.
+ */
+typedef struct IrisVproDmaStats {
+    uint64_t seen;
+    uint64_t declined;
+    uint64_t slow[5];
+    IrisVproDmaCell cells[4][17];
+} IrisVproDmaStats;
+
+/*
+ * Fill *out with the DMA counters. ERROR when out is NULL. Does not wait for
+ * the board.
+ */
+int sgi_odyssey_dma_stats(IrisEngine *h, IrisVproDmaStats *out);
+
+/*
  * Bring the pixels of a box (corners included, every plane under it) current
  * for a CPU reader. Waits for queued CPU work, then only for GPU work that
  * touches the box.

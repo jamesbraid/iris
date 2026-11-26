@@ -93,6 +93,7 @@ pub(super) const HELP: &[&str] = &[
     "vpro hash                       the memory hash a replay checkpoint takes",
     "vpro unimp                      offsets and command words reported as not modelled",
     "vpro refusals [reset]           bus refusals by reason and register",
+    "vpro dma                        DMA descriptors by destination, pixel size and row-store path",
     "vpro gpu [trace on|off]         the GPU raster unit's counters; trace counts readbacks by cause",
     "vpro trace <file> [fifo,draw,cpu,dma|all]   annotated trace (gputrace builds); alone: its state",
     "vpro trace flush|off            write the trace out / close it",
@@ -275,6 +276,11 @@ impl Odyssey {
             ["refusals"] => {
                 let mut v = Vec::new();
                 self.state.refusals.report(&mut v).map_err(|e| e.to_string())?;
+                String::from_utf8_lossy(&v).into_owned()
+            }
+            ["dma"] => {
+                let mut v = Vec::new();
+                self.state.dma_stats.snapshot().report(&mut v).map_err(|e| e.to_string())?;
                 String::from_utf8_lossy(&v).into_owned()
             }
             ["refusals", "reset"] => {

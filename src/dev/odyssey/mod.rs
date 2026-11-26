@@ -408,7 +408,7 @@ impl Device for Odyssey {
     fn register_commands(&self) -> Vec<(String, String)> {
         vec![(
             "vpro".to_string(),
-            "VPro (Odyssey) graphics: status|regs|fifo|state|geom|tex|win|mem|backend|lut|dispmode|cursor|pix|raw|peek|shot|fbdump|hash|unimp|refusals|gpu|trace|rec (vpro help)".to_string(),
+            "VPro (Odyssey) graphics: status|regs|fifo|state|geom|tex|win|mem|backend|lut|dispmode|cursor|pix|raw|peek|shot|fbdump|hash|unimp|refusals|dma|gpu|trace|rec (vpro help)".to_string(),
         )]
     }
 

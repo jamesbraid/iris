@@ -122,6 +122,25 @@ fn the_scanout_tells_the_size_when_the_buffer_is_short_and_copies_when_it_fits()
     unsafe { iris_engine_free(h) };
 }
 
+/// A descriptor the engine reads (here, one whose header names no destination) shows in the DMA counters.
+#[test]
+fn the_dma_counters_count_a_descriptor_and_refuse_a_null_out() {
+    let v12 = CString::new("v12").unwrap();
+    let h = unsafe { sgi_odyssey_new(&config(v12.as_ptr(), 0), &host()) };
+    let mut st: IrisVproDmaStats = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { sgi_odyssey_dma_stats(h, &mut st) }, IRIS_ENGINE_OK);
+    assert_eq!(st.seen, 0);
+    assert_eq!(unsafe { sgi_odyssey_dma_stats(h, null_mut()) }, IRIS_ENGINE_ERROR);
+    // 0xe01 over table 0: the two doublewords the driver pushes. The host's RAM reads zero, so the header does.
+    for word in [0xe01u64 << 32, 0] {
+        assert_eq!(unsafe { iris_engine_write(h, 0x110000, 64, word) }, IRIS_ENGINE_OK);
+    }
+    assert_eq!(unsafe { iris_engine_quiesce(h, u64::MAX) }, IRIS_ENGINE_OK);
+    assert_eq!(unsafe { sgi_odyssey_dma_stats(h, &mut st) }, IRIS_ENGINE_OK);
+    assert_eq!((st.seen, st.declined, st.cells[0][0].descriptors), (1, 1, 0), "started, declined, never completed");
+    unsafe { iris_engine_free(h) };
+}
+
 /// The counters exist with a GPU unit and are refused without one.
 #[test]
 fn the_gpu_counters_are_there_with_a_gpu_unit_and_refused_without() {

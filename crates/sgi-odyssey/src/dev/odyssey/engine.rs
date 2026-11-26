@@ -37,6 +37,7 @@ use sgi_engine::inject::{hit, Point};
 use sgi_engine::{GpuLoss, BoardEngine, Chunk, DirtyRun, Event, Fault, HostMem, FrameWords, HeadTiming, Idle, Interrupt, Lent, LentFrame, MemFault, Outbox, Pump, Read, Rect, Refused, Source, StateSink, StateSource, Swap, Write, DIRTY_BLOCK};
 
 use super::board::{Board, Params};
+use super::dma::DmaSnapshot;
 use super::gpu_unit::{fail_gpu, Observation};
 use super::consts::{reset_pulse, ODSY_RESET_CONTROL};
 use super::mmio::{access_waits, command_store, fifo_port, level_word, BoardGuard, BoardLocks};
@@ -429,6 +430,11 @@ impl VproEngine {
     pub fn gpu_counters(&self) -> Option<[u64; 6]> {
         let g = self.settle().ok()?;
         g.raster.run_now(|ctx| ctx.gpu.as_ref().map(|u| u.counters()))
+    }
+
+    /// What the DMA descriptors did since the engine was built; reads atomics, no wait for the board.
+    pub fn dma_stats(&self) -> DmaSnapshot {
+        self.locks.dma_stats.snapshot()
     }
 
     /// The GPU unit's counters (batches, records, waits, readbacks) as
