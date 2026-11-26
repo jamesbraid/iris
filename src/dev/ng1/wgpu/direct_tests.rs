@@ -307,7 +307,9 @@ fn direct_ng1_scanout_display_generations_track_real_changes() {
     }
     display.refresh();
     let cursor = display.screen.display_state().generations;
-    assert!(cursor.vc2_regs > first.vc2_regs);
+    // The cursor has its own revision: a move leaves the register revision the expansion follows alone.
+    assert!(cursor.cursor > first.cursor);
+    assert_eq!(cursor.vc2_regs, first.vc2_regs);
     assert_eq!(cursor.vc2_ram, first.vc2_ram);
     assert_eq!(cursor.did, first.did, "cursor movement must not upload unchanged DID");
 

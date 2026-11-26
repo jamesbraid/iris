@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use super::resident::{Position, ResidentError, ResidentRaster, ResidentScanoutBindings, ResidentStatus};
-use super::{Ng1Scanout, Ng1Slot, RESIDENT_BINDINGS, SCANOUT, VC2_WORDS};
+use super::{cursor_header, Ng1Scanout, Ng1Slot, RESIDENT_BINDINGS, SCANOUT, VC2_WORDS};
 use crate::dev::ng1::rex3::{Rex3, REX3_SCREEN_HEIGHT};
 use crate::dev::ng1::vc2::{
     VC2_CTRL_BLACKOUT, VC2_CTRL_DID_EN, VC2_CTRL_VIDEO_TIMING_EN, VC2_REG_DID_ENTRY_PTR,
@@ -468,7 +468,10 @@ impl Ng1ResidentScanout {
             || changed(|g| g.cmap)
             || changed(|g| g.ramdac)
             || geometry_changed;
+        // Nothing else moved: the cursor's header is the slot's first 16 bytes.
+        let cursor_only = !slot_changed && changed(|g| g.cursor);
         let slot = slot_changed.then(|| Ng1Slot::of_display(src));
+        let cursor = cursor_only.then(|| cursor_header(src.vc2_regs, src.cursor_x_adjust));
 
         let control = src.vc2_regs[VC2_REG_DISPLAY_CONTROL as usize];
         let did_params = DidParams {
@@ -486,9 +489,9 @@ impl Ng1ResidentScanout {
         let expansion_uploads = vc2_changed as u64 + did_changed as u64;
         let expansion_bytes = if vc2_changed { (2 * VC2_WORDS) as u64 } else { 0 }
             + if did_changed { size_of::<DidParams>() as u64 } else { 0 };
-        let scanout_uploads = slot_changed as u64 + header_changed as u64;
-        let scanout_bytes = if slot_changed { size_of::<Ng1Slot>() as u64 } else { 0 }
-            + if header_changed { 16 } else { 0 };
+        let slot_len = if slot_changed { size_of::<Ng1Slot>() as u64 } else if cursor_only { 16 } else { 0 };
+        let scanout_uploads = (slot_changed || cursor_only) as u64 + header_changed as u64;
+        let scanout_bytes = slot_len + if header_changed { 16 } else { 0 };
         self.traffic.display.attempt(
             expansion_uploads + scanout_uploads,
             expansion_bytes + scanout_bytes,
@@ -512,7 +515,11 @@ impl Ng1ResidentScanout {
             &self.pipeline,
             dimensions.0,
             dimensions.1,
-            slot.as_ref().map(|slot| bytemuck::bytes_of(slot).as_ref()),
+            match (&slot, &cursor) {
+                (Some(slot), _) => Some(bytemuck::bytes_of(slot).as_ref()),
+                (None, Some(cursor)) => Some(bytemuck::bytes_of(cursor).as_ref()),
+                (None, None) => None,
+            },
             &[&self.bindings.group, display_group],
         );
         if self.scanout.frames != before_submission {

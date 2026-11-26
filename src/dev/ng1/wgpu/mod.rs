@@ -77,6 +77,18 @@ struct Ng1HeadState {
     vc2_words: usize,
 }
 
+/// The slot's first four words: where the cursor's hot spot is and what shape it has. A mouse move
+/// changes only these, so only these go up.
+fn cursor_header(r: &[u16; 32], cursor_x_adjust: i32) -> [u32; 4] {
+    let ctrl = r[VC2_REG_DISPLAY_CONTROL as usize];
+    [
+        ((r[VC2_REG_CURRENT_CURSOR_X as usize] as i32) - 31 + cursor_x_adjust) as u32,
+        ((r[VC2_REG_WORKING_CURSOR_Y as usize] as i32) - 31) as u32,
+        r[VC2_REG_CURSOR_ENTRY_PTR as usize] as u32,
+        ((ctrl & VC2_CTRL_CURSOR_EN != 0) as u32) | ((ctrl & VC2_CTRL_CURSOR_SIZE != 0) as u32) << 1,
+    ]
+}
+
 impl Ng1Slot {
     fn of(src: &CompositorSource<'_>) -> Ng1Slot {
         Self::new(src.vc2_regs, src.xmap_mode, src.ramdac, src.cmap, Ng1HeadState {
@@ -105,12 +117,8 @@ impl Ng1Slot {
         cmap: &[u32; 8192],
         state: Ng1HeadState,
     ) -> Ng1Slot {
-        let ctrl = r[VC2_REG_DISPLAY_CONTROL as usize];
         let mut head = [0u32; 16];
-        head[0] = ((r[VC2_REG_CURRENT_CURSOR_X as usize] as i32) - 31 + state.cursor_x_adjust) as u32;
-        head[1] = ((r[VC2_REG_WORKING_CURSOR_Y as usize] as i32) - 31) as u32;
-        head[2] = r[VC2_REG_CURSOR_ENTRY_PTR as usize] as u32;
-        head[3] = ((ctrl & VC2_CTRL_CURSOR_EN != 0) as u32) | ((ctrl & VC2_CTRL_CURSOR_SIZE != 0) as u32) << 1;
+        head[..4].copy_from_slice(&cursor_header(r, state.cursor_x_adjust));
         head[4] = state.cursor_cmap as u32;
         head[5] = state.popup_cmap as u32;
         head[6] = (state.topscan + 1) as u32;

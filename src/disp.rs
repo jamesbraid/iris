@@ -22,12 +22,17 @@ pub use crate::disp_timing::{decode_vc2_timings, decode_vc2_timings_gap, CursorG
 /// Independent revisions of the cached Newport display state. The source
 /// identifies the screen that issued them, so replacing a screen cannot make
 /// an old compositor cache appear current.
+///
+/// `vc2_regs` leaves out the cursor's position, shape pointer and enable
+/// bits, which have a revision of their own: a mouse move must not look like
+/// a new window-id table.
 #[cfg(feature = "wgpu")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Ng1DisplayGenerations {
     pub(crate) source: u64,
     pub(crate) vc2_ram: u64,
     pub(crate) vc2_regs: u64,
+    pub(crate) cursor: u64,
     pub(crate) xmap: u64,
     pub(crate) cmap: u64,
     pub(crate) ramdac: u64,
@@ -42,7 +47,7 @@ impl Ng1DisplayGenerations {
         let source = NEXT_SOURCE
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .expect("Newport display source identifiers exhausted");
-        Self { source, vc2_ram: 0, vc2_regs: 0, xmap: 0, cmap: 0, ramdac: 0, did: 0, geometry: 0 }
+        Self { source, vc2_ram: 0, vc2_regs: 0, cursor: 0, xmap: 0, cmap: 0, ramdac: 0, did: 0, geometry: 0 }
     }
 
     fn bump(generation: &mut u64) {
@@ -138,6 +143,8 @@ pub struct Rex3Screen {
     display_generations: Ng1DisplayGenerations,
     #[cfg(feature = "wgpu")]
     display_geometry: (usize, usize, usize, i32),
+    /// VC2 RAM or a register but the cursor's changed since the timings were decoded.
+    timings_stale: bool,
     #[cfg(feature = "wgpu")]
     resident_did: Mutex<Option<crate::dev::ng1::wgpu::direct::ResidentDid>>,
 }
@@ -179,6 +186,7 @@ impl Rex3Screen {
             display_generations: Ng1DisplayGenerations::new(),
             #[cfg(feature = "wgpu")]
             display_geometry: (0, 0, 0, 0),
+            timings_stale: true,
             #[cfg(feature = "wgpu")]
             resident_did: Mutex::new(None),
         }
@@ -394,9 +402,15 @@ impl Rex3Screen {
                     if self.vc2_ram != vc2.ram {
                         Ng1DisplayGenerations::bump(&mut self.display_generations.vc2_ram);
                     }
-                    if self.vc2_regs != vc2.regs {
+                    if cursor_regs(&self.vc2_regs) != cursor_regs(&vc2.regs) {
+                        Ng1DisplayGenerations::bump(&mut self.display_generations.cursor);
+                    }
+                    if other_regs_differ(&self.vc2_regs, &vc2.regs) {
                         Ng1DisplayGenerations::bump(&mut self.display_generations.vc2_regs);
                     }
+                }
+                if self.vc2_ram != vc2.ram || other_regs_differ(&self.vc2_regs, &vc2.regs) {
+                    self.timings_stale = true;
                 }
                 self.vc2_ram.copy_from_slice(&vc2.ram);
                 self.vc2_regs.copy_from_slice(&vc2.regs);
@@ -463,16 +477,20 @@ impl Rex3Screen {
         }
 
         // ── 3. Decode video timings and DID ──────────────────────────────────────
-        diag.fetch_or(Rex3::DIAG_LOOP_VID_TIMINGS, Ordering::Relaxed);
-        let (w, h, cursor_x_adjust) = self.decode_video_timings();
-        diag.fetch_and(!Rex3::DIAG_LOOP_VID_TIMINGS, Ordering::Relaxed);
+        // The decode walks the table in VC2 RAM (0.4-0.75 ms), and only the RAM and the
+        // registers other than the cursor's can change its answer.
+        if std::mem::replace(&mut self.timings_stale, false) {
+            diag.fetch_or(Rex3::DIAG_LOOP_VID_TIMINGS, Ordering::Relaxed);
+            let (w, h, cursor_x_adjust) = self.decode_video_timings();
+            diag.fetch_and(!Rex3::DIAG_LOOP_VID_TIMINGS, Ordering::Relaxed);
 
-        self.cursor_x_adjust = cursor_x_adjust;
-        if w > 0 && h > 0 && (w != self.width || h != self.height) {
-            println!("Rex3: Resolution changed to {}x{} cursor_x_adjust={}", w, h, cursor_x_adjust);
-            self.width  = w;
-            self.height = h;
-            resized = true;
+            self.cursor_x_adjust = cursor_x_adjust;
+            if w > 0 && h > 0 && (w != self.width || h != self.height) {
+                println!("Rex3: Resolution changed to {}x{} cursor_x_adjust={}", w, h, cursor_x_adjust);
+                self.width  = w;
+                self.height = h;
+                resized = true;
+            }
         }
 
         if decode_did {
@@ -720,4 +738,26 @@ pub fn save_screenshot(path: &str, rgba: &[u32], width: usize, height: usize) ->
         }
     }
     writer.write_image_data(&rows).map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "wgpu")]
+/// The registers that place and shape the cursor: its position, its pattern's address and the enable
+/// and size bits of the display control.
+fn cursor_regs(regs: &[u16; 32]) -> [u16; 4] {
+    [
+        regs[VC2_REG_CURRENT_CURSOR_X as usize],
+        regs[VC2_REG_WORKING_CURSOR_Y as usize],
+        regs[VC2_REG_CURSOR_ENTRY_PTR as usize],
+        regs[VC2_REG_DISPLAY_CONTROL as usize] & (VC2_CTRL_CURSOR_EN | VC2_CTRL_CURSOR_SIZE),
+    ]
+}
+
+/// Whether any register but the cursor's, or those bits of the display control, differs.
+fn other_regs_differ(a: &[u16; 32], b: &[u16; 32]) -> bool {
+    const CURSOR_BITS: u16 = VC2_CTRL_CURSOR_EN | VC2_CTRL_CURSOR_SIZE;
+    a.iter().zip(b).enumerate().any(|(i, (x, y))| match i as u8 {
+        VC2_REG_CURRENT_CURSOR_X | VC2_REG_WORKING_CURSOR_Y | VC2_REG_CURSOR_ENTRY_PTR => false,
+        VC2_REG_DISPLAY_CONTROL => (x ^ y) & !CURSOR_BITS != 0,
+        _ => x != y,
+    })
 }
