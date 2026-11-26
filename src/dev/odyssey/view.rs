@@ -267,6 +267,12 @@ impl Rows {
         }
     }
 
+    /// Whether `store_run` can take a run inside the view. From 4-byte pixels at a 4-aligned field every
+    /// address is 4-aligned: no word is straddled.
+    pub fn takes_runs(&self) -> bool {
+        self.v.kind == Kind::Rgba8 && self.v.log2 >= 2 && self.v.at & 3 == 0
+    }
+
     /// Store `words` at pixels x0.. of row y as store_word() would, for an RGBA8 view holding the
     /// whole run; false, with nothing stored, otherwise.
     pub fn store_run(&self, y: i32, x0: i32, words: impl ExactSizeIterator<Item = u32>) -> bool {
@@ -274,8 +280,7 @@ impl Rows {
         if n == 0 {
             return true;
         }
-        // From 4-byte pixels at a 4-aligned field every address is 4-aligned: no word is straddled.
-        if self.v.kind != Kind::Rgba8 || self.v.log2 < 2 || self.v.at & 3 != 0 || x0 < 0 || y < 0 || y as u32 >= self.v.height || x0 as u64 + n > self.v.width as u64 {
+        if !self.takes_runs() || x0 < 0 || y < 0 || y as u32 >= self.v.height || x0 as u64 + n > self.v.width as u64 {
             return false;
         }
         let (mut x, step) = (x0, 1u64 << self.v.log2);
@@ -315,6 +320,20 @@ impl Rows {
 mod tests {
     use super::*;
     use super::super::vram::Vram;
+
+    /// Only a 4-byte RGBA8 field at a 4-aligned offset of a pixel of 4 bytes or more takes whole-word runs.
+    #[test]
+    fn only_an_aligned_rgba8_field_of_a_wide_pixel_takes_runs() {
+        let rows = |v: View| Rows::new(VramPtr::null(), v);
+        let view = View { log2: 2, kind: Kind::Rgba8, ..Default::default() };
+        assert!(rows(view).takes_runs());
+        assert!(rows(View { log2: 4, at: 12, ..view }).takes_runs());
+        assert!(!rows(View { at: 2, ..view }).takes_runs(), "a field at 2 mod 4");
+        assert!(!rows(View { log2: 1, ..view }).takes_runs(), "2-byte pixels");
+        for kind in [Kind::None, Kind::Z24, Kind::Byte, Kind::Coded(Codec::Byte), Kind::Coded(Codec::Texel { bytes: 2, field: FIELD_FOUR })] {
+            assert!(!rows(View { kind, ..view }).takes_runs(), "{kind:?}");
+        }
+    }
 
     #[test]
     fn a_double_buffered_window_keeps_its_fields_apart() {

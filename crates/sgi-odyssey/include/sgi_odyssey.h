@@ -98,7 +98,7 @@ int sgi_odyssey_gpu_counters(IrisEngine *h, IrisVproGpuCounters *out);
 /*
  * One cell of IrisVproDmaStats: the descriptors the board completed and their
  * pixels (clipped ones included), and the part of them that went by row stores
- * (screen destinations only).
+ * (screen and draw-sentinel destinations).
  */
 typedef struct IrisVproDmaCell {
     uint64_t descriptors;
