@@ -3296,9 +3296,12 @@ impl Rss {
             note(Path::TilesFar);
             return false;
         }
-        let owns = self.owns_row(fy);
+        // Another engine's row stores and counts nothing here.
+        if !self.owns_row(fy) {
+            return true;
+        }
         // The columns the screen and the masks leave, if the row is in them.
-        let (mut cols, mut rows_ok) = ((0, WIDTH as i32 - 1), owns && (0..HEIGHT as i32).contains(&fy));
+        let (mut cols, mut rows_ok) = ((0, WIDTH as i32 - 1), (0..HEIGHT as i32).contains(&fy));
         for m in (0..4).filter(|m| mode & (1 << m) != 0) {
             let (mx, my) = (self.reg(reg::CLIP_X + 2 * m), self.reg(reg::CLIP_Y + 2 * m));
             rows_ok &= (signed16(my >> 16)..=signed16(my)).contains(&fy);
@@ -3323,9 +3326,7 @@ impl Rss {
         }
         let put = (to.min(whole as i32) - from).max(0) as u64;
         self.stats.dma_px_put += put;
-        if owns {
-            self.stats.dma_px_clipped += whole as u64 - put;
-        }
+        self.stats.dma_px_clipped += whole as u64 - put;
         if from >= to {
             return true;
         }
