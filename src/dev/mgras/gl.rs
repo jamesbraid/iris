@@ -717,6 +717,7 @@ paths! {
     RowMirror "row mirrored",
     RowNarrow "row narrower than a pixel",
     RowShort "row short of words",
+    DmaBytes "draw rows from DMA bytes",
     Zoomed "zoomed draw",
     Tiles "tile lines",
     TilesOff "tile lines off",
@@ -2048,6 +2049,11 @@ impl Gl {
         self.send_pixels_pending != 0
     }
 
+    /// Whether the pending token_08d image is a glDrawPixels (not a texture load), which `draw_pixels_bytes` takes.
+    pub fn wants_draw_pixel_bytes(&self) -> bool {
+        self.send_pixels_pending != 0 && self.send_pixels[6] != SEND_PIXELS_TEXTURE
+    }
+
     /// Words a pending token_08d image needs before it can be drawn or
     /// loaded (words per row times rows, when the header says; 0 for
     /// glBitmap, drawn as it comes).
@@ -2123,21 +2129,23 @@ impl Gl {
     /// the pixels go through the raster engine's format conversion, plane
     /// masks and clipping. Pixel transfer stages (index shift/offset, maps,
     /// zoom) are taken as identity.
-    fn draw_pixels(&mut self, words: &[u32], lut: &[u32], sink: &mut dyn Hq3Sink) {
+    pub fn draw_pixels_bytes(&mut self, bytes: &[u8], lut: &[u32], sink: &mut dyn Hq3Sink) {
+        self.ensure_init();
         self.send_pixels_pending = 0;
         let mut wpr = self.send_pixels_row_words();
-        if self.raster_valid == 0 || wpr == 0 || words.len() < wpr {
+        let nwords = bytes.len() / 4;
+        if self.raster_valid == 0 || wpr == 0 || nwords < wpr {
             return;
         }
         // Rows: header words 3 + 3 * 4 (mandel 1 + 0, snoop 2 + 3 * 18 =
         // 56), else what came.
         let hdr_rows = (self.send_pixels[3] + 3 * self.send_pixels[4]) as usize;
-        let mut rows = if hdr_rows > 0 { hdr_rows.min(words.len() / wpr) } else { words.len() / wpr };
+        let mut rows = if hdr_rows > 0 { hdr_rows.min(nwords / wpr) } else { nwords / wpr };
         let bpp = super::rss::bytes_per_pixel(self.xfrmode) as usize;
         // libGLcore's draws come with their GE pixel pipeline: the host's
         // elements in, the raster engine's pixels out.
         if self.pix.has_program() {
-            if let Some((out, wpr2, rows2)) = self.run_pixel_pipeline(lut, words, wpr, rows, bpp) {
+            if let Some((out, wpr2, rows2)) = self.run_pixel_pipeline(lut, bytes, wpr, rows, bpp) {
                 self.draw_pixel_rows(&out, wpr2, rows2, bpp, sink);
                 return;
             }
@@ -2170,9 +2178,8 @@ impl Gl {
             _ => bpp,
         };
         let comp = if self.xfrmode & 0xF == 1 { 2 } else { 1 };
-        let words: std::borrow::Cow<[u32]> = if host_bpp != bpp && host_bpp % comp == 0 && host_bpp < bpp {
+        if host_bpp != bpp && host_bpp % comp == 0 && host_bpp < bpp {
             // Widen each pixel: its components, then ones (alpha).
-            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
             let mut out: Vec<u8> = Vec::with_capacity(bytes.len() / host_bpp * bpp + 8);
             for row in bytes.chunks(wpr * 4).take(rows) {
                 let mut line: Vec<u8> = Vec::new();
@@ -2185,10 +2192,8 @@ impl Gl {
             }
             let wpr2 = out.len() / rows.max(1) / 4;
             return self.draw_pixel_rows(&out, wpr2, rows, bpp, sink);
-        } else {
-            std::borrow::Cow::Borrowed(words)
-        };
-        self.draw_pixels_words(&words, wpr, rows, bpp, sink);
+        }
+        self.draw_pixel_rows(bytes, wpr, rows, bpp, sink);
     }
 
     /// token_08d' image through the GE pixel pipeline (`pixpipe`): the
@@ -2197,7 +2202,7 @@ impl Gl {
     /// what came. The image is 0xDA8's transfer size; its rows come one a
     /// transport row, or packed together in fewer (libGLcore sends a
     /// short-row image as one).
-    fn run_pixel_pipeline(&self, lut: &[u32], words: &[u32], wpr: usize, rows: usize, bpp: usize) -> Option<(Vec<u8>, usize, usize)> {
+    fn run_pixel_pipeline(&self, lut: &[u32], bytes: &[u8], wpr: usize, rows: usize, bpp: usize) -> Option<(Vec<u8>, usize, usize)> {
         let xs = self.tl_rect[4];
         let (mut w, mut h) = ((xs & 0xFFFF) as usize, (xs >> 16) as usize);
         // Zoomed: 0xDA8's size is the GE's output (rows repeated, columns
@@ -2212,7 +2217,6 @@ impl Gl {
             return None;
         }
         let out_comps = super::rss::xfer_comps(self.xfrmode);
-        let bytes = be_bytes(words);
         let fit = if rows == h { wpr * 4 } else { bytes.len() / h };
         let (comps, esize, _) = self.pix.input_shape_fit(out_comps, Some((fit, w)));
         let row_in = if esize == 0 { (w * comps).div_ceil(8) } else { w * comps * esize };
@@ -2286,7 +2290,7 @@ impl Gl {
         Some((out, wpr_out, h))
     }
 
-    /// A zoomed image (see `draw_pixels_words`): destination pixels from
+    /// A zoomed image (see `draw_pixel_rows`): destination pixels from
     /// 0xDA8's first to last, each taking the source pixel the GE's and the
     /// raster engine's steps give it.
     #[allow(clippy::too_many_arguments)]
@@ -2371,11 +2375,7 @@ impl Gl {
         }
     }
 
-    fn draw_pixels_words(&mut self, words: &[u32], wpr: usize, rows: usize, bpp: usize, sink: &mut dyn Hq3Sink) {
-        self.draw_pixel_rows(&be_bytes(words), wpr, rows, bpp, sink);
-    }
-
-    /// `draw_pixels_words` on the rows as big-endian bytes, `wpr * 4` to a row.
+    /// The rows of a glDrawPixels as big-endian bytes, `wpr * 4` to a row.
     fn draw_pixel_rows(&mut self, bytes: &[u8], wpr: usize, rows: usize, bpp: usize, sink: &mut dyn Hq3Sink) {
         log::debug!(
             "mgras: draw_pixels {rows} rows x {wpr} words, {bpp} bytes a pixel, xfrmode {:#x} xfrfactor {:#x} zoom_inv {} rect {:x?} raster {:?} scissor {} pipeline {:x?} element {}",
@@ -2516,7 +2516,7 @@ impl Gl {
             if self.send_pixels[6] == SEND_PIXELS_TEXTURE {
                 self.tex_load(words, lut, sink);
             } else {
-                self.draw_pixels(words, lut, sink);
+                self.draw_pixels_bytes(&be_bytes(words), lut, sink);
             }
             return;
         }
@@ -3769,7 +3769,7 @@ mod tests {
             gl.xfrmode = 0xC0_0080;
             gl.tl_rect[4] = 3 << 16 | 4;
             let mut sink = Lines::default();
-            gl.draw_pixels_words(&[1, 2, 3, 4, 5, 6, 7], 4, 3, 4, &mut sink);
+            gl.draw_pixel_rows(&be_bytes(&[1, 2, 3, 4, 5, 6, 7]), 4, 3, 4, &mut sink);
             PLAIN_ONLY.store(false, SeqCst);
             sink.0
         };
