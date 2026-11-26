@@ -2,6 +2,12 @@
 //! pixel, click, press keys. Shared by the VNC server and the monitor's
 //! `screen`, `ptr` and `key` commands, for every machine and board.
 //!
+//! A machine can have several screens (a dual-head Newport). They are one
+//! fixed list in topology order, one display each, and `screen N verb` names
+//! one by its place in it, as `cpu N verb` names a CPU. With one screen the
+//! index is optional and nothing else changes. The pointer is steered on one
+//! screen of the list ([`HostInput::for_screen`]).
+//!
 //! The guest's mouse is relative (PS/2), and the X server accelerates what
 //! it reads, so a position cannot be sent. Instead the pointer is steered:
 //! send a move, read back where the board's hardware cursor went (IRIX always
@@ -46,7 +52,11 @@ const STALL_LIMIT: Duration = Duration::from_millis(3000);
 const EXACT_STEP: i32 = 3;
 
 pub struct HostInput {
-    display: Option<Arc<dyn GfxDisplay>>,
+    /// The machine's displays in topology order; empty when headless.
+    displays: Vec<Arc<dyn GfxDisplay>>,
+    /// The screen (an index into the list) the pointer is steered on and the
+    /// commands without an index address.
+    screen: usize,
     ps2: Arc<Ps2Controller>,
     /// Buttons held now (PS/2 bits), sent with every move.
     buttons: AtomicU8,
@@ -72,8 +82,14 @@ pub enum MoveResult {
 
 impl HostInput {
     pub fn new(display: Option<Arc<dyn GfxDisplay>>, ps2: Arc<Ps2Controller>) -> Self {
+        Self::with_displays(display.into_iter().collect(), ps2)
+    }
+
+    /// One for a machine with these displays, in topology order.
+    pub fn with_displays(displays: Vec<Arc<dyn GfxDisplay>>, ps2: Arc<Ps2Controller>) -> Self {
         Self {
-            display,
+            displays,
+            screen: 0,
             ps2,
             buttons: AtomicU8::new(0),
             hotspots: Mutex::new(HashMap::new()),
@@ -85,29 +101,68 @@ impl HostInput {
 
     /// Build one for a machine and add its commands to the machine's monitor.
     pub fn attach(machine: &dyn crate::workstation::Workstation) -> Arc<Self> {
-        let hi = Arc::new(Self::new(machine.get_display(), machine.get_ps2()));
+        let hi = Arc::new(Self::with_displays(machine.displays(), machine.get_ps2()));
         machine.register_monitor_device(hi.clone());
         hi
     }
 
+    /// The display of the screen this one works on.
     pub fn display(&self) -> Option<&Arc<dyn GfxDisplay>> {
-        self.display.as_ref()
+        self.displays.get(self.screen)
+    }
+
+    /// How many screens the machine has.
+    pub fn screen_count(&self) -> usize {
+        self.displays.len()
+    }
+
+    /// Screen `n` of the list.
+    pub fn display_at(&self, n: usize) -> Option<&Arc<dyn GfxDisplay>> {
+        self.displays.get(n)
+    }
+
+    /// Where screen `n` is in the machine, for `screen list`.
+    pub fn screen_label(&self, n: usize) -> Option<String> {
+        self.displays.get(n).map(|_| format!("head {n}"))
+    }
+
+    /// This input with the pointer steered on screen `n`, by that screen's
+    /// cursor. It shares the PS/2 controller but keeps its own button state.
+    pub fn for_screen(&self, n: usize) -> Result<HostInput, String> {
+        if n >= self.displays.len() {
+            return Err(self.no_screen(n));
+        }
+        let mut hi = Self::with_displays(self.displays.clone(), self.ps2.clone());
+        hi.screen = n;
+        Ok(hi)
+    }
+
+    /// The screen the pointer is steered on.
+    pub fn pointer_screen(&self) -> usize {
+        self.screen
+    }
+
+    fn no_screen(&self, n: usize) -> String {
+        match self.screen_count() {
+            0 => format!("no screen {n}: this machine has none"),
+            c => format!("no screen {n}: this machine has {c} (screen list)"),
+        }
     }
 
     pub fn ps2(&self) -> &Arc<Ps2Controller> {
         &self.ps2
     }
 
-    /// The display's visible size, (0, 0) before it has a mode.
-    pub fn screen_size(&self) -> (usize, usize) {
-        self.display.as_ref().map(|d| {
+    /// Screen `n`'s visible size, (0, 0) before it has a mode or when absent.
+    pub fn screen_size(&self, n: usize) -> (usize, usize) {
+        self.displays.get(n).map(|d| {
             let s = d.screen().lock();
             (s.width, s.height)
         }).unwrap_or((0, 0))
     }
 
-    fn cursor(&self) -> Option<HwCursor> {
-        self.display.as_ref()?.hw_cursor()
+    fn cursor(&self, n: usize) -> Option<HwCursor> {
+        self.displays.get(n)?.hw_cursor()
     }
 
     /// The cursor, waiting out a short gap: X servers turn the hardware
@@ -115,7 +170,7 @@ impl HostInput {
     fn cursor_settled(&self) -> Option<HwCursor> {
         let start = Instant::now();
         loop {
-            if let Some(c) = self.cursor() {
+            if let Some(c) = self.cursor(self.screen) {
                 return Some(c);
             }
             if start.elapsed() >= CURSOR_GAP {
@@ -149,7 +204,7 @@ impl HostInput {
 
     /// Where the pointer is, by the hardware cursor; None while it is off.
     pub fn pointer(&self) -> Option<(i32, i32)> {
-        let c = self.cursor()?;
+        let c = self.cursor(self.screen)?;
         let (hx, hy) = self.hotspot(&c);
         Some((c.x + hx, c.y + hy))
     }
@@ -177,7 +232,7 @@ impl HostInput {
                 (tx, ty) = t;
                 stalls = [0; 2];
             }
-            let (w, h) = self.screen_size();
+            let (w, h) = self.screen_size(self.screen);
             if w == 0 {
                 return Err("the display has no video mode yet".into());
             }
@@ -226,7 +281,7 @@ impl HostInput {
             let mut changed_at = sent;
             while sent.elapsed() < MOVE_ANSWER {
                 std::thread::sleep(Duration::from_millis(1));
-                match self.cursor() {
+                match self.cursor(self.screen) {
                     Some(n) if (n.x, n.y) != (c.x, c.y) || n.mask != c.mask => {
                         if now_at.as_ref().is_none_or(|m| (m.x, m.y, &m.mask) != (n.x, n.y, &n.mask)) {
                             changed_at = Instant::now();
@@ -248,7 +303,7 @@ impl HostInput {
                         if let Some((ohx, ohy)) = self.known_hotspot(&c) {
                             // Let X finish the move before reading the glyph.
                             std::thread::sleep(Duration::from_millis(5));
-                            if let Some(n) = self.cursor().filter(|m| m.mask == n.mask) {
+                            if let Some(n) = self.cursor(self.screen).filter(|m| m.mask == n.mask) {
                                 let (px, py) = (c.x + ohx + sx, c.y + ohy + sy);
                                 self.learn(&n, (px - n.x, py - n.y));
                             }
@@ -447,8 +502,11 @@ impl HostInput {
     /// A frame, tight, with its size, and whether it is fresh: false when the
     /// board did not compose a new one within 250 ms, so it is the last one
     /// it did.
-    pub fn frame(&self) -> Result<(usize, usize, Vec<u32>, bool), String> {
-        let d = self.display.as_ref().ok_or("no display (headless)")?;
+    pub fn frame(&self, n: usize) -> Result<(usize, usize, Vec<u32>, bool), String> {
+        if self.displays.is_empty() {
+            return Err("no display (headless)".into());
+        }
+        let d = self.displays.get(n).ok_or_else(|| self.no_screen(n))?;
         let fresh = crate::gfx_display::wait_fresh_frame(&**d, Duration::from_millis(250));
         let mut px = Vec::new();
         let (w, h, _) = crate::gfx_display::copy_frame(&**d, &mut px).ok_or("the display has no video mode yet")?;
@@ -458,12 +516,12 @@ impl HostInput {
     /// Wait until the screen has not changed for `quiet`, at most `timeout`.
     /// Returns whether it settled. Only fresh frames count: an old frame
     /// repeats whatever the guest draws.
-    pub fn wait_still(&self, quiet: Duration, timeout: Duration) -> Result<bool, String> {
+    pub fn wait_still(&self, n: usize, quiet: Duration, timeout: Duration) -> Result<bool, String> {
         let start = Instant::now();
         let mut last = None;
         let mut since = Instant::now();
         while start.elapsed() < timeout {
-            let (w, h, px, fresh) = self.frame()?;
+            let (w, h, px, fresh) = self.frame(n)?;
             if fresh {
                 if last.as_ref() != Some(&(w, h, px.clone())) {
                     last = Some((w, h, px));
@@ -561,14 +619,20 @@ impl crate::traits::Device for HostInput {
     }
 
     fn execute_command(&self, cmd: &str, args: &[&str], mut w: Box<dyn Write + Send>) -> Result<(), String> {
+        let (n, args) = if cmd == "screen" { screen_route(args, self.screen_count())? } else { (0, args) };
         let sub = args.first().copied().unwrap_or("");
         let out = |w: &mut Box<dyn Write + Send>, s: String| { let _ = writeln!(w, "{s}"); };
         match (cmd, sub) {
             ("screen", "info") | ("screen", "") => {
-                let (sw, sh) = self.screen_size();
-                let seq = self.display.as_ref().map(|d| d.screen().lock().frame_seq).unwrap_or(0);
-                out(&mut w, format!("screen {sw}x{sh} frame {seq}"));
-                match self.cursor() {
+                let (sw, sh) = self.screen_size(n);
+                let seq = self.displays.get(n).map(|d| d.screen().lock().frame_seq).unwrap_or(0);
+                if self.screen_count() > 1 {
+                    let label = self.screen_label(n).unwrap_or_default();
+                    out(&mut w, format!("screen {n} ({label}) {sw}x{sh} frame {seq}"));
+                } else {
+                    out(&mut w, format!("screen {sw}x{sh} frame {seq}"));
+                }
+                match self.cursor(n) {
                     Some(c) => {
                         let (hx, hy) = self.hotspot(&c);
                         out(&mut w, format!("cursor glyph at {},{} size {} hotspot {hx},{hy} -> pointer {},{}",
@@ -580,8 +644,18 @@ impl crate::traits::Device for HostInput {
                     if self.ps2.mouse_enabled() { "enabled" } else { "not enabled by the guest" }, self.buttons()));
                 Ok(())
             }
+            ("screen", "list") => {
+                if self.screen_count() == 0 {
+                    out(&mut w, "no screens (headless)".into());
+                }
+                for i in 0..self.screen_count() {
+                    let (sw, sh) = self.screen_size(i);
+                    out(&mut w, format!("{i}: {} {sw}x{sh}", self.screen_label(i).unwrap_or_default()));
+                }
+                Ok(())
+            }
             ("screen", "cursor") => {
-                let c = self.cursor().ok_or("cursor off")?;
+                let c = self.cursor(n).ok_or("cursor off")?;
                 let (hx, hy) = self.hotspot(&c);
                 out(&mut w, format!("glyph at {},{} size {} shape {:016x} hotspot {hx},{hy} (tip {:?})",
                     c.x, c.y, c.size, c.shape_key(), c.tip()));
@@ -600,14 +674,14 @@ impl crate::traits::Device for HostInput {
                 let crop = if args.len() >= 6 {
                     Some((num(args, 2, "x")?, num(args, 3, "y")?, num(args, 4, "w")?, num(args, 5, "h")?))
                 } else { None };
-                let (fw, fh, px, fresh) = self.frame()?;
+                let (fw, fh, px, fresh) = self.frame(n)?;
                 let (cw, ch) = save_png(path, &px, fw, fh, crop)?;
                 out(&mut w, format!("saved {path} {cw}x{ch} (screen {fw}x{fh}){}", stale_note(fresh)));
                 Ok(())
             }
             ("screen", "pix") => {
                 let (x, y): (usize, usize) = (num(args, 1, "x")?, num(args, 2, "y")?);
-                let (fw, fh, px, fresh) = self.frame()?;
+                let (fw, fh, px, fresh) = self.frame(n)?;
                 if x >= fw || y >= fh {
                     return Err(format!("{x},{y} is outside the {fw}x{fh} screen"));
                 }
@@ -616,7 +690,7 @@ impl crate::traits::Device for HostInput {
                 Ok(())
             }
             ("screen", "hash") => {
-                let (fw, fh, px, fresh) = self.frame()?;
+                let (fw, fh, px, fresh) = self.frame(n)?;
                 out(&mut w, format!("{} {fw}x{fh}{}", frame_hash(fw, fh, &px), stale_note(fresh)));
                 Ok(())
             }
@@ -624,7 +698,7 @@ impl crate::traits::Device for HostInput {
                 let quiet = args.get(1).map(|_| num::<u64>(args, 1, "quiet_ms")).transpose()?.unwrap_or(500);
                 let timeout = args.get(2).map(|_| num::<u64>(args, 2, "timeout_ms")).transpose()?.unwrap_or(10_000);
                 let t = Instant::now();
-                let still = self.wait_still(Duration::from_millis(quiet), Duration::from_millis(timeout))?;
+                let still = self.wait_still(n, Duration::from_millis(quiet), Duration::from_millis(timeout))?;
                 out(&mut w, if still {
                     format!("still for {quiet} ms after {} ms", t.elapsed().as_millis())
                 } else {
@@ -743,10 +817,10 @@ mod tests {
     fn a_screen_that_composes_no_frame_is_not_still() {
         let display: Arc<dyn GfxDisplay> = Arc::new(crate::gfx_display::testing::FakeDisplay::new(4, 2, true));
         let hi = HostInput::new(Some(display), Arc::new(Ps2Controller::new(None)));
-        assert!(!hi.wait_still(Duration::from_millis(1), Duration::from_millis(600)).unwrap());
+        assert!(!hi.wait_still(0, Duration::from_millis(1), Duration::from_millis(600)).unwrap());
         let display: Arc<dyn GfxDisplay> = Arc::new(crate::gfx_display::testing::FakeDisplay::new(4, 2, false));
         let hi = HostInput::new(Some(display), Arc::new(Ps2Controller::new(None)));
-        assert!(hi.wait_still(Duration::from_millis(1), Duration::from_secs(5)).unwrap(), "a composed, unchanging screen is still");
+        assert!(hi.wait_still(0, Duration::from_millis(1), Duration::from_secs(5)).unwrap(), "a composed, unchanging screen is still");
     }
 
     /// Equal frames hash equal and one changed pixel changes the hash.

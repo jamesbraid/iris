@@ -2387,7 +2387,7 @@ fn resident_frame_gpu_restore_invalidates_capture_and_rebinds_display() {
                 let mut captured = Vec::new();
                 crate::gfx_display::fresh_frame(&*board.0, &mut captured, Duration::from_secs(10))
                     .expect("capture initial drawn frame");
-                assert_eq!(frontend.screen_size(), (WIDTH, HEIGHT));
+                assert_eq!(frontend.screen_size(0), (WIDTH, HEIGHT));
                 assert!(board.0.hw_cursor().is_some());
                 assert_pixels_eq("snapshot display", &captured, &software_frame(&board.0, &expected_rgb, &expected_aux));
                 let original_capture = captured.clone();
@@ -2420,7 +2420,7 @@ fn resident_frame_gpu_restore_invalidates_capture_and_rebinds_display() {
                     stale.compose(&screen.display_state(), &mut source).unwrap().stamp()
                 };
                 board.0.load_state(&registers).unwrap();
-                assert_eq!(frontend.screen_size(), (0, 0));
+                assert_eq!(frontend.screen_size(0), (0, 0));
                 assert!(board.0.hw_cursor().is_none());
                 assert!(crate::gfx_display::copy_frame(&*board.0, &mut captured).is_none());
                 board.0.request_frame();
@@ -2452,7 +2452,7 @@ fn resident_frame_gpu_restore_invalidates_capture_and_rebinds_display() {
                 let (_, _, restored_seq) = crate::gfx_display::copy_frame(&*board.0, &mut captured)
                     .expect("capture restored frame");
                 assert!(restored_seq > changed_seq);
-                assert_eq!(frontend.screen_size(), (WIDTH, HEIGHT));
+                assert_eq!(frontend.screen_size(0), (WIDTH, HEIGHT));
                 assert!(board.0.hw_cursor().is_some());
                 assert_pixels_eq("restored display", &captured, &original_capture);
                 assert_pixels_eq("restored software oracle", &captured, &software_frame(&board.0, &saved_rgb, &saved_aux));

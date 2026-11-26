@@ -144,6 +144,24 @@ impl VncServer {
         Ok(VncServer { shared, addr, _port: crate::ports::register("tcp", addr, "VNC") })
     }
 
+    /// One server per screen, the first on `listen` and screen N on the port N
+    /// above it (any free port with port 0), each steering by its own cursor.
+    pub fn start_screens(
+        input: &Arc<HostInput>, listen: &str, max_fps: Option<u32>, name: &str, password: Option<auth::Password>,
+    ) -> Result<Vec<VncServer>, String> {
+        let count = input.screen_count();
+        if count == 0 {
+            // Nothing to show: say why, as a single server would.
+            return Self::start_with_password(input.clone(), listen, max_fps, name, password).map(|s| vec![s]);
+        }
+        let mut servers = Vec::with_capacity(count);
+        for n in 0..count {
+            let input = Arc::new(input.for_screen(n)?);
+            servers.push(Self::start_with_password(input, &listen_for_screen(listen, n)?, max_fps, name, password.clone())?);
+        }
+        Ok(servers)
+    }
+
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
@@ -151,6 +169,25 @@ impl VncServer {
     pub fn clients(&self) -> usize {
         self.shared.clients.load(Ordering::Relaxed)
     }
+}
+
+/// The address screen `n` listens on: `listen` (a port, or `host:port`) with
+/// `n` added to its port. Port 0 stays 0.
+fn listen_for_screen(listen: &str, n: usize) -> Result<String, String> {
+    let (host, port) = match listen.rsplit_once(':') {
+        Some((h, p)) => (Some(h), p),
+        None => (None, listen),
+    };
+    let base: u16 = port.parse().map_err(|_| format!("VNC: bad port in '{listen}'"))?;
+    let port = match base {
+        0 => 0,
+        b => u16::try_from(n).ok().and_then(|n| b.checked_add(n))
+            .ok_or_else(|| format!("VNC: port {b} + screen {n} is past 65535"))?,
+    };
+    Ok(match host {
+        Some(h) => format!("{h}:{port}"),
+        None => port.to_string(),
+    })
 }
 
 impl Drop for VncServer {
