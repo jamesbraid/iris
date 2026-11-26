@@ -39,7 +39,7 @@ pub trait Renderer: Send {
     #[cfg(feature = "wgpu")]
     fn takes_gpu_frames(&self) -> bool { false }
 
-    /// Present a frame of 0x00RRGGBB words (rows of `width`) that is on the
+    /// Present a frame of 0xAABBGGRR words (rows of `width`) that is on the
     /// board's GPU, with `screen` giving the overlay's sources; the status
     /// bar and overlay as `present` draws them. `screen.rgba` is not updated.
     #[cfg(feature = "wgpu")]
