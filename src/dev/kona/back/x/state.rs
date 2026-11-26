@@ -75,6 +75,21 @@ impl Default for XState {
     }
 }
 
+/// Whether `selector` only loads X server state, which draws nothing and changes nothing the display shows.
+pub fn is_load(selector: u32) -> bool {
+    matches!(
+        selector,
+        WINDOW_SYSTEM_GRAPHICS_CONTEXT_LOAD
+            | WINDOW_SYSTEM_DRAWABLE_ORIGIN_AND_SIZE_LOAD
+            | WINDOW_SYSTEM_FOUR_WORD_DATA_PRELOAD_BYTE_FORM
+            | WINDOW_SYSTEM_CLIP_LOAD
+            | super::stipple::X_LOAD_STIPPLE
+            | super::stipple::X_STORE_STIPPLE
+            | super::stipple::X_ROTATE_STIPPLE
+            | WINDOW_SYSTEM_SCISSOR_LOAD
+    )
+}
+
 impl XState {
     /// Whether a pixel transfer is part way, which a snapshot does not carry.
     pub fn busy(&self) -> bool {
@@ -247,6 +262,15 @@ impl XState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The damage the back end skips for a state load is right only while `is_load` and `command` agree.
+    #[test]
+    fn is_load_names_the_commands_command_takes() {
+        let mut x = XState::default();
+        for selector in 0..0x400 {
+            assert_eq!(is_load(selector), x.command(selector, &[]), "selector {selector:#x}");
+        }
+    }
 
     fn clip(x: &mut XState, rects: &[[i32; 4]]) {
         let flat: Vec<u32> = std::iter::once(rects.len() as u32).chain(rects.iter().flatten().map(|v| *v as u32)).collect();

@@ -190,6 +190,8 @@ fn a_job_touches_the_store_unless_it_is_a_retrace() {
     send(&mut b, Job::Retrace { tag: 1 });
     assert!(!b.store.take_touched());
     command(&mut b, Grammar::Textport, 2, &[7]);
+    assert!(!b.store.take_touched(), "a colour draws nothing");
+    command(&mut b, Grammar::Textport, 5, &[1, 1, 4, 3]);
     assert!(b.store.take_touched());
     b.reset();
     assert!(b.store.take_touched(), "a reset is shown");

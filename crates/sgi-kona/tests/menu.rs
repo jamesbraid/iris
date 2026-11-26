@@ -172,3 +172,64 @@ fn the_prom_maintenance_menu_replays_to_its_recorded_frame() {
     let frame: Vec<u8> = words.iter().flat_map(|p| [*p as u8, (*p >> 8) as u8, (*p >> 16) as u8]).collect();
     assert!(ppm[header.len()..] == frame[..], "the menu frame differs from the recorded one");
 }
+
+/// Records of the menu replay taken as one frame by the damage test.
+const FRAME_RECORDS: usize = 500;
+
+/// Composing only the rows the engine marks, after every `FRAME_RECORDS` records of the menu, shows what a whole
+/// compose does, and most frames mark a part of the picture.
+#[test]
+fn composing_the_marked_rows_of_the_menu_gives_the_frame_a_whole_compose_does() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let text = std::fs::read_to_string(dir.join("maintenance-menu.replay")).expect("the menu replay");
+    let mut e = engine(Ram::default());
+    let (mut shown, mut whole) = (Vec::new(), Vec::new());
+    let (mut frames, mut full, mut named) = (0, 0, 0);
+    // The head has no picture until the PROM loads its video format; the first look at it is everything.
+    let mut compare = |e: &mut Engine, shown: &mut Vec<u32>, at: usize| {
+        settle(e);
+        let Some((w, h)) = BoardEngine::scanout(e, 0, &mut whole).unwrap() else { return };
+        let (w, h) = (w as usize, h as usize);
+        shown.resize(w * h, 0);
+        if let Some((a, b)) = e.take_damage(0) {
+            assert!(e.scan_source().expect("a source").rows(0, a as usize, b as usize, shown).is_ok());
+            (frames, full, named) = (frames + 1, full + h, named + (b - a) as usize);
+        }
+        if let Some(y) = (0..h).find(|&y| shown[y * w..(y + 1) * w] != whole[y * w..(y + 1) * w]) {
+            panic!("record {at}: row {y} is stale after composing the damage");
+        }
+    };
+    for (n, line) in text.lines().enumerate() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        match f.first().copied() {
+            Some("write") => {
+                let (size, off, val) = (num(f[1]) as u32, num(f[2]) as u32, num(f[3]));
+                e.set_source(Source { id: 1, charged: (0xc10000..0xc14000).contains(&off) });
+                while e.write(off, size * 8, val) == Write::Busy {
+                    settle(&mut e);
+                }
+                e.run(usize::MAX);
+            }
+            Some("read") => {
+                let (size, off) = (num(f[1]) as u32, num(f[2]) as u32);
+                for k in 0..size / 4 {
+                    loop {
+                        match e.read(off + 4 * k, 32) {
+                            Read::Value(_) => break,
+                            Read::Busy => settle(&mut e),
+                            Read::Fault => panic!("line {}: the pipe faulted: {:?}", n + 1, e.fault()),
+                        }
+                    }
+                }
+            }
+            _ => continue,
+        }
+        if n % FRAME_RECORDS == 0 {
+            compare(&mut e, &mut shown, n);
+        }
+    }
+    compare(&mut e, &mut shown, usize::MAX);
+    eprintln!("menu: {frames} frames, rows composed {full} whole, {named} marked");
+    assert!(frames > 50, "the menu draws over many frames");
+    assert!(named * 4 < full, "the menu's text marks a part of the picture: {named} of {full}");
+}

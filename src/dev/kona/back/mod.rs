@@ -747,23 +747,32 @@ impl KonaBackend {
             }
         }
         // A retrace changes no pixel; every other job may. The flag goes up after
-        // the job's own writes (the tiles raise it for theirs), so a frame the
+        // the job's own writes (the tiles and store ops raise it for theirs), so a frame the
         // display started meanwhile is followed by another.
         let retrace = matches!(job, Job::Retrace { .. });
-        // A geometry command's pixels all come through the tiles, which mark the rows they draw.
-        let by_tiles = !self.store.is_gpu() && self.draws_by_tiles(&job);
+        // A draw through the tiles or a store op marks the rows it writes itself.
+        let marks_rows = !self.store.is_gpu() && self.marks_its_rows(port, &job);
         let reply = self.handle_job(port, job);
-        if !retrace && !by_tiles {
+        if !retrace && !marks_rows {
             self.store.cpu().touch();
         }
         reply
     }
 
-    /// Whether `job` changes the picture by tile jobs alone: a geometry command, which leaves the tables and the
-    /// channels alone (a clear of the accumulation planes, which are not shown, is left out to be safe).
-    fn draws_by_tiles(&self, job: &Job<'_>) -> bool {
+    /// Whether `job` writes pixels by tile jobs and store ops alone, which mark their rows, and leaves what the
+    /// picture is shown through alone. A clear of the unshown accumulation planes is left out to be safe.
+    fn marks_its_rows(&mut self, port: &BackPort<'_>, job: &Job<'_>) -> bool {
         match job {
             Job::Command { grammar: Grammar::Gl, selector, args, .. } => gl::class(*selector) == gl::Class::Geometry && !(*selector == CLEAR_SELECTED_BUFFERS && args.first().is_some_and(|m| m & crate::dev::kona::defs::gl::ACCUM_BUFFER_BIT != 0)),
+            Job::Command { grammar: Grammar::Textport, selector, .. } => matches!(*selector, TEXTPORT_SET_COLOUR | TEXTPORT_SET_RASTER_POSITION | TEXTPORT_FILL_BOX | TEXTPORT_PLOT_POINT | TEXTPORT_UNMODELLED_1 | TEXTPORT_UNMODELLED_7 | TEXTPORT_UNMODELLED_8),
+            Job::Command { grammar: Grammar::Kernel, selector, .. } => x::state::is_load(*selector) || x::fill::paints(*selector) || x::fill::is_draw(*selector) || x::pixel::is_pixel(*selector),
+            Job::Data { grammar: Grammar::Kernel, selector, .. } => matches!(*selector, x::pixel::X_PIXEL_WRITE | x::stipple::X_STORE_STIPPLE),
+            Job::Bitmap { .. } => true,
+            // A DMA packet is an X image's rows when nothing else waits for it.
+            Job::DmaIn { .. } => {
+                let c = self.contexts.select(port.context());
+                c.tex.pending.is_none() && c.gl.pix.pending.is_none() && c.x.dma_write_words().is_some()
+            }
             _ => false,
         }
     }

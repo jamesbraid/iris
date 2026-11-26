@@ -106,15 +106,11 @@ fn what_changes_no_pixel_marks_nothing() {
     assert_eq!(e.take_damage(0), None, "a read");
 }
 
-/// Each of these can change what the whole picture shows or how, or writes pixels no tile wrote: all rows.
+/// Each of these can change what the whole picture shows or how, or writes pixels nothing marks: all rows.
+/// The textport, bitmap and X server jobs that mark the rows they draw are in `row_damage`.
 #[test]
 fn what_else_can_change_the_picture_marks_every_row() {
-    const GC: [u32; 13] = [0x5a000, 0x1ffe, 0xa5000, 0x1ffe, 0xf00fff, 0, 0x180c, 0x40001, 1, 6, 5, 1, 1];
     let steps: Vec<(&str, Box<dyn Fn(&mut Rig)>)> = vec![
-        ("an X fill", Box::new(|r| {
-            r.x(WINDOW_SYSTEM_GRAPHICS_CONTEXT_LOAD, &GC);
-            r.x(FILL_BOXES_TWO_CORNERS, &[2 << 16 | 3, 5 << 16 | 7]);
-        })),
         ("a colour map load", Box::new(|r| {
             r.send(Job::Data { grammar: Grammar::Kernel, selector: LOAD_COLOUR_MAP_ENTRIES, args: &[0, 1], words: &[0x3ff] });
         })),
@@ -136,6 +132,35 @@ fn what_else_can_change_the_picture_marks_every_row() {
         ("a swap", Box::new(|r| {
             r.x(DISPLAY_MODE_BYTE, &[1, 1, 1]);
         })),
+        // The pixels of a GL draw by DMA are written by no op that marks rows, even with an X write waiting too.
+        ("a GL pixel draw by DMA", Box::new(|r| {
+            r.x(WINDOW_SYSTEM_GRAPHICS_CONTEXT_LOAD, &[0x900, 0x1ffe, 0xa5000, 0x1ffe, 0xf00fff, 0, 0x180c, 0x40001, 1, 6, 5, 1, 1]);
+            r.x(WINDOW_SYSTEM_PIXEL_PATH_SET_UP, &[0x10, 1, 1, 4, 4, 3, 0]);
+            r.x(WINDOW_SYSTEM_PIXEL_WRITE, &[0, 50]);
+            r.command(Grammar::Gl, DRAW_PIXEL_RECTANGLE_FROM_HOST_DATA, &[2, 2, pixel::FORMAT_RGBA, pixel::TYPE_UNSIGNED_BYTE, 0, 1, 0, 0]);
+            damage(r);
+            r.put_words(0x40_0000, &[0xff; 4]);
+            r.send(Job::DmaIn { io: 0x40_0000, physical: true, lines: 2, per_line: 8, pitch: 8 });
+        })),
+        ("a texel draw by DMA", Box::new(|r| {
+            r.x(WINDOW_SYSTEM_GRAPHICS_CONTEXT_LOAD, &[0x900, 0x1ffe, 0xa5000, 0x1ffe, 0xf00fff, 0, 0x180c, 0x40001, 1, 6, 5, 1, 1]);
+            r.x(WINDOW_SYSTEM_PIXEL_PATH_SET_UP, &[0x10, 1, 1, 4, 4, 3, 0]);
+            r.x(WINDOW_SYSTEM_PIXEL_WRITE, &[0, 50]);
+            let mut hdr = [0u32; 20];
+            hdr[..4].copy_from_slice(&[0x0de1, 2, 2, 5]);
+            hdr[4] = 1;
+            hdr[6] = 1;
+            hdr[9] = 0x30;
+            hdr[13] = 1;
+            hdr[14] = 1;
+            hdr[16] = 0x11;
+            hdr[17] = 0x2200;
+            hdr[18] = 0x1000;
+            r.command(Grammar::Gl, DRAW_TEXELS_INTO_TEXTURE_MEMORY, &hdr);
+            damage(r);
+            r.put_words(0x40_0000, &[0xff; 4]);
+            r.send(Job::DmaIn { io: 0x40_0000, physical: true, lines: 1, per_line: 16, pitch: 16 });
+        })),
         ("a clear of the accumulation planes", Box::new(|r| {
             r.command(Grammar::Gl, CLEAR_SELECTED_BUFFERS, &[sgi_kona::dev::kona::defs::gl::ACCUM_BUFFER_BIT]);
         })),
@@ -147,8 +172,8 @@ fn what_else_can_change_the_picture_marks_every_row() {
         step(&mut r);
         assert_eq!(damage(&r), ALL, "{what}");
     }
-    // Every other job the back end is sent is no geometry command either: each GL selector of another class, each
-    // kernel selector, and the other kinds of job, with zero operands.
+    // Every other job the back end is sent is no geometry command either: each GL selector of another class and
+    // the other kinds of job, with zero operands.
     let mut r = gl_window();
     let mut each = |what: String, job: Job<'_>| {
         damage(&r);
@@ -159,11 +184,7 @@ fn what_else_can_change_the_picture_marks_every_row() {
     for selector in (0..0x200).filter(|&s| class(s) != Class::Geometry) {
         each(format!("GL selector {selector:#x} ({:?})", class(selector)), Job::Command { grammar: Grammar::Gl, selector, args: &zeros, packed: 0, handled: false });
     }
-    for selector in 0..0x400 {
-        each(format!("kernel selector {selector:#x}"), Job::Command { grammar: Grammar::Kernel, selector, args: &zeros, packed: 0, handled: false });
-    }
     each("a GL data run".into(), Job::Data { grammar: Grammar::Gl, selector: DRAW_TEXELS_INTO_TEXTURE_MEMORY, args: &zeros, words: &zeros });
-    each("a bitmap blit".into(), Job::Bitmap { header: &[4, 4, 0, 0, 0, 0], payload: &[0xf000_f000; 4] });
     each("a DMA in".into(), Job::DmaIn { io: 0x1000, physical: true, lines: 1, per_line: 16, pitch: 16 });
     for command in 0..0x80 {
         each(format!("video command {command:#x}"), Job::Video { command, data: &zeros });

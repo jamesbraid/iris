@@ -288,9 +288,22 @@ impl Store {
             StoreOp::Bitmap { word, x0, y0, width, height, bits, value } => bitmap(s, word, x0, y0, width, height, bits, value),
             StoreOp::Tri { ds, job } => pixel::run(s, &RasterJob::Tri(*job), ds, Rect { x0: 0, y0: 0, x1: s.width() as i32, y1: s.height() as i32 }),
             StoreOp::Clear { ds, req } => pixel::run(s, &RasterJob::Clear(ClearJob { req: *req, state: 0 }), ds, Rect { x0: 0, y0: 0, x1: s.width() as i32, y1: s.height() as i32 }),
-            StoreOp::XFill { plan, b, spans } => x_fill::draw(plan, b, spans),
-            StoreOp::XImage { plan, kind, conv, geo, words, spans, pad } => x_pixel::draw_by_op(plan, kind, conv, geo, words, spans, pad),
-            StoreOp::XCopy { plan, setup, rect, spans, row } => x_pixel::copy_write(plan, setup, rect, spans, row),
+            StoreOp::XFill { plan, b, spans } => {
+                x_fill::draw(plan, b, spans);
+                mark(s, plan.store_rect(b));
+            }
+            StoreOp::XImage { plan, kind, conv, geo, words, spans, pad } => {
+                x_pixel::draw_by_op(plan, kind, conv, geo, words, spans, pad);
+                if let Some(r) = x_pixel::image_rect(plan, geo) {
+                    mark(s, r);
+                }
+            }
+            StoreOp::XCopy { plan, setup, rect, spans, row } => {
+                x_pixel::copy_write(plan, setup, rect, spans, row);
+                if let Some(r) = x_pixel::copy_rect(plan, setup, rect) {
+                    mark(s, r);
+                }
+            }
             StoreOp::Accumulate { ds, accumulation, colour, passes } => done.fragments = gl_pixels::accumulate_cpu(self, ds, accumulation, colour, passes),
             StoreOp::ClearAccumulation { ds, first, values } => done.fragments = gl_pixels::clear_accumulation_cpu(self, ds, first, values),
             StoreOp::Frags { ds, x0, y0, w, h, kind, data } => done.fragments = gl_pixels::frags_cpu(self, ds, x0, y0, w, h, kind, data),
@@ -323,6 +336,11 @@ impl std::ops::Deref for Store {
     }
 }
 
+/// Say the rows of `r` changed, for the CPU draws that mark their own damage.
+fn mark(s: &PixelStore, r: Rect) {
+    s.touch_rows(r.y0, r.y1);
+}
+
 fn plot(s: &PixelStore, word: usize, x: i64, y: i64, value: u32) {
     // Allocated whether or not the point lands: a draw's set-up allocates first.
     s.ensure(word);
@@ -333,6 +351,7 @@ fn plot(s: &PixelStore, word: usize, x: i64, y: i64, value: u32) {
     }
     // SAFETY: the pixel is inside the managed area, which the array covers.
     unsafe { a.store(y as usize * a.pitch() + x as usize, value) };
+    s.touch_rows(y as i32, y as i32 + 1);
 }
 
 fn fill_box(s: &PixelStore, word: usize, x1: i64, y1: i64, x2: i64, y2: i64, value: u32) {
@@ -342,12 +361,15 @@ fn fill_box(s: &PixelStore, word: usize, x1: i64, y1: i64, x2: i64, y2: i64, val
     let xs = xs.start.max(0)..xs.end.min(s.width() as i64);
     let ys = ys.start.max(0)..ys.end.min(s.height() as i64);
     let pitch = a.pitch();
-    for y in ys {
+    for y in ys.clone() {
         let row = y as usize * pitch;
         for x in xs.clone() {
             // SAFETY: both ranges are clipped to the managed area.
             unsafe { a.store(row + x as usize, value) };
         }
+    }
+    if xs.start < xs.end {
+        s.touch_rows(ys.start as i32, ys.end as i32);
     }
 }
 
@@ -378,5 +400,8 @@ fn bitmap(s: &PixelStore, plane: usize, x0: i64, y0: i64, width: u32, height: u3
             }
             bit += 1;
         }
+    }
+    if lo < hi {
+        s.touch_rows(y0.clamp(0, h) as i32, (y0 + height as i64).clamp(0, h) as i32);
     }
 }

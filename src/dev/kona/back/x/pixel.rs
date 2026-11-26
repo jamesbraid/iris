@@ -553,6 +553,13 @@ pub(in crate::dev::kona::back) fn draw_by_op(p: &Plan<'_>, kind: u8, c: &Conv, g
     }
 }
 
+/// The store pixels an image can reach: its box cut to the plan's bounds; None when none of it lands.
+pub(in crate::dev::kona::back) fn image_rect(p: &Plan<'_>, g: &Geo) -> Option<Rect> {
+    let (xa, xb) = (g.x.max(p.bounds.x1), (g.x + g.width).min(p.bounds.x2));
+    let (ya, yb) = (g.y.max(p.bounds.y1), (g.y + g.height).min(p.bounds.y2));
+    (xa < xb && ya < yb).then(|| p.store_rect((xa, ya, xb, yb)))
+}
+
 /// Store one row of source words under the logic operation, a constant of the
 /// loop: `row[0]` lands at column `x0`, the spans are the columns the clip lets
 /// through, `dbase` the destination row's first index.
@@ -591,6 +598,12 @@ fn copy_extent(plan: &Plan<'_>, s: &Setup, [sx, sy, dx, dy]: [i64; 4]) -> Option
     let (i0, i1) = ((-sx).max(0).max(b.x1 - dx), w.min(width - sx).min(b.x2 - dx));
     let (j0, j1) = ((-sy).max(0).max(b.y1 - dy), h.min(plan.height - sy).min(b.y2 - dy));
     (i0 < i1 && j0 < j1).then_some((i0, i1, j0, j1))
+}
+
+/// The store pixels a copy writes; None when none of it lands.
+pub(in crate::dev::kona::back) fn copy_rect(plan: &Plan<'_>, s: &Setup, rect @ [_, _, dx, dy]: [i64; 4]) -> Option<Rect> {
+    let (i0, i1, j0, j1) = copy_extent(plan, s, rect)?;
+    Some(plan.store_rect((dx + i0, dy + j0, dx + i1, dy + j1)))
 }
 
 /// Whether a copy is allowed: every source word, and every destination word a write reads, must fit
