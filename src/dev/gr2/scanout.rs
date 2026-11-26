@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 
-use crate::gfx_display::ScanoutShow;
 use crate::wgpu::{defines, storage_layout, Fragment, Gpu, Scanout, ScanoutPipeline, ScanoutShaders};
 
 use super::bt457::Bt457;
@@ -120,6 +119,11 @@ impl Gr2Scanout {
         self.scanout.frames > 0
     }
 
+    /// The device the scan-out composes on.
+    pub fn gpu(&self) -> Arc<Gpu> {
+        Arc::clone(self.scanout.gpu())
+    }
+
     /// The composed frame's buffer on the device (0xAABBGGRR words, rows of `FB_W`).
     pub fn output(&self) -> &wgpu::Buffer {
         self.scanout.output()
@@ -149,11 +153,11 @@ pub(super) fn test_gpu() -> Option<Arc<Gpu>> {
 pub(super) fn gpu_frame(gpu: &Arc<Gpu>, vram: &[u32], vc1: &Vc1, xmap: &[Xmap5; 5], dac: &[Bt457; 3]) -> Vec<u32> {
     let mut sc = Gr2Scanout::new(gpu).expect("scan-out pipeline");
     sc.compose(vram, vc1, xmap, dac).expect("compose");
-    let mut frame = crate::gfx_display::Frame::default();
-    sc.show(Default::default(), &mut frame).expect("read");
+    let mut words = vec![0u32; FB_W * FB_H];
+    sc.read_into(&mut words).expect("read");
     let mut out = vec![0u32; super::gr2comp::OUT_STRIDE * FB_H];
     for y in 0..FB_H {
-        out[y * super::gr2comp::OUT_STRIDE..][..FB_W].copy_from_slice(&frame.words[y * FB_W..][..FB_W]);
+        out[y * super::gr2comp::OUT_STRIDE..][..FB_W].copy_from_slice(&words[y * FB_W..][..FB_W]);
     }
     out
 }
@@ -325,7 +329,7 @@ mod tests {
     /// from the CPU in its place.
     #[test]
     fn a_failed_gpu_is_fatal_and_publishes_no_frame() {
-        use crate::gfx_display::GfxDisplay;
+        use crate::display::{Composed, Head, Want};
         use std::sync::atomic::{AtomicUsize, Ordering};
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = Arc::clone(&calls);
@@ -336,20 +340,20 @@ mod tests {
             return eprintln!("skipped: {e}");
         }
         };
-        let board = super::super::Gr2::with_gpu(super::super::Gr2Variant::Xz, crate::disp::StatusSource::detached(), Some(gpu.share()))
+        let board = super::super::Gr2::with_gpu(super::super::Gr2Variant::Xz, crate::status::MachineStatus::detached(), Some(gpu.share()))
             .expect("the GPU scan-out");
-        let mut frame = crate::gfx_display::Frame::default();
-        assert_eq!(board.gpu_frame(true, Default::default(), &mut frame), Ok(true), "composes while the device is up");
+        let mut screen = crate::disp::Rex3Screen::new();
+        let want = Want { readback: false, gpu: false };
+        assert!(matches!(Head::compose(&*board, &mut screen, want), Composed::Frame), "composes while the device is up");
         // Not `device.destroy()`: Vulkan and Metal report that late or not at all.
         gpu.fail("wgpu device lost (test): injected");
-        assert!(board.gpu_frame(true, Default::default(), &mut frame).is_err());
-        assert!(board.gpu_frame(true, Default::default(), &mut frame).is_err(), "and keeps failing");
+        assert!(matches!(Head::compose(&*board, &mut screen, want), Composed::NotReady));
+        assert!(matches!(Head::compose(&*board, &mut screen, want), Composed::NotReady), "and keeps failing");
         assert!(gpu.check().is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1, "the machine hears it once");
-        assert!(board.screens()[0].latest().is_none(), "no frame is published");
         // A board without the GPU path still composes on the CPU.
-        let cpu = super::super::Gr2::new(super::super::Gr2Variant::Xz, crate::disp::StatusSource::detached());
-        assert_eq!(cpu.gpu_frame(true, Default::default(), &mut frame), Ok(false));
+        let cpu = super::super::Gr2::new(super::super::Gr2Variant::Xz, crate::status::MachineStatus::detached());
+        assert!(matches!(Head::compose(&*cpu, &mut screen, want), Composed::Frame));
     }
 
     /// The slot holds every window ID run the CPU follows, and the used part

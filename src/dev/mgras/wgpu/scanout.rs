@@ -11,8 +11,6 @@
 
 use std::sync::Arc;
 
-#[cfg(feature = "present")]
-use crate::gfx_display::ScanoutShow;
 use crate::wgpu::{Fragment, Gpu, Scanout, ScanoutPipeline, ScanoutShaders};
 
 use super::super::dcb::Dcb;
@@ -218,13 +216,9 @@ impl MgrasScanout {
         D_RUNS + n
     }
 
-    /// Compose the frame for this tick's consumer (`Scanout::show`).
-    #[cfg(feature = "present")]
-    pub fn show(&mut self, r: &Rss, dcb: &Dcb, need: crate::gfx_display::Need, frame: &mut crate::gfx_display::Frame) -> Result<(), String> {
-        let n = self.build(r, dcb, false);
-        let (w, h) = (self.width, self.height);
-        self.scanout.compose(&self.pipeline, w, h, bytemuck::cast_slice(&self.slot[..n]), &[&self.group])?;
-        self.scanout.show(w, h, need, frame)
+    /// What the refresh thread's head asks for: the frame composed and lent (`lend`).
+    pub fn compose(&mut self, r: &Rss, dcb: &Dcb) -> Result<(wgpu::Buffer, u32, u32), String> {
+        self.lend(r, dcb)
     }
 
     /// Compose the frame and leave it in [`output`](Scanout::output) (0xAABBGGRR, rows of
