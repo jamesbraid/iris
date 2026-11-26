@@ -88,6 +88,25 @@ pub const HQ_PCX_1E6: u32 = 0x1e6;
 /// GL microcode request that completes by raising FIN3: Xsgi sends it and
 /// spins on version bit 0, then clears FIN3 via 0x6b000.
 pub const HQ_GL_FIN3: u32 = 0x155;
+// Known word counts (token included, from shipped binaries), no modelled effect.
+// The purposes in the comments are inferred.
+/// Finish flag 2, diagnostic only.
+pub const CMD_DIAG_FIN2: u32 = 1;
+/// Line stipple pattern and flag; line width and wide flag; stipple repeat.
+pub const CMD_LINE_STIPPLE: u32 = 22;
+pub const CMD_LINE_WIDTH: u32 = 23;
+pub const CMD_STIPPLE_REPEAT: u32 = 24;
+/// Subpixel, point smooth and line smooth switches.
+pub const CMD_SUBPIXEL: u32 = 32;
+pub const CMD_POINT_SMOOTH: u32 = 33;
+pub const CMD_LINE_SMOOTH: u32 = 34;
+/// Polygon offset: 2 words a dispatch, often sent as 4 (two dispatches).
+pub const CMD_POLY_OFFSET: u32 = 228;
+/// Unknown effect.
+pub const CMD_TOKEN_230: u32 = 230;
+pub const CMD_EDGE_FLAG: u32 = 246;
+/// Token and 5 data words, sent by the X server at start-up.
+pub const CMD_X_INIT_BLOCK: u32 = 354;
 /// OpenGL tokens (libglcore's FIFO block: block offset X is FIFO
 /// index (X - 0x2000) / 4).
 /// glFinish / SwapBuffers: the readback trigger (0x228C); the client then spins
@@ -434,7 +453,7 @@ pub fn gl_token_name(tok: u32) -> Option<&'static str> {
         0x0e9 => "GL_PEEK_COLOR", 0x0ea => "GL_PEEK_NORMAL", 0x107 => "GL_PEEK_RASTER_COLOR",
         0x105 => "GL_SET_RASTER_POS", 0x18c..=0x18e => "GL_BITMAP", 0x0fe => "GL_INDEX",
         0x010 => "GL_STENCIL_WMASK", 0x011 => "GL_DITHER", 0x013 => "GL_SHADE_MODEL",
-        0x017 => "GL_LINE_WIDTH", 0x018 => "GL_LINE_STIPPLE", 0x01b => "GL_CULL_A", 0x01c => "GL_CULL_B",
+        0x016 => "GL_LINE_STIPPLE", 0x017 => "GL_LINE_WIDTH", 0x018 => "GL_STIPPLE_REPEAT", 0x020 => "GL_SUBPIXEL", 0x01b => "GL_CULL_A", 0x01c => "GL_CULL_B",
         0x021 => "GL_POINT_SMOOTH", 0x022 => "GL_LINE_SMOOTH", 0x025 => "GL_BLEND_CODES",
         0x028 => "GL_FOG", 0x037 => "GL_MODELVIEW", 0x038 => "GL_PROJECTION", 0x039 => "GL_LOAD_NORMAL_MAT",
         0x03a => "GL_TEXTURE_MATRIX", 0x03b => "GL_VIEWPORT", 0x03c => "GL_SCISSOR",
@@ -671,6 +690,10 @@ impl Hq2Engine {
             GE_LOAD_CTX | GE_LOAD_CTX_EXTRA => STREAM,
             HQ_GL_FIN3 | CMD_READBACK_KICK | CMD_SWAP_WAIT => 1,
             HQ_PCX_1E0 | HQ_PCX_1E6 => 1,
+            CMD_DIAG_FIN2 | CMD_STIPPLE_REPEAT | CMD_SUBPIXEL | CMD_POINT_SMOOTH | CMD_LINE_SMOOTH
+            | CMD_TOKEN_230 | CMD_EDGE_FLAG => 1,
+            CMD_LINE_STIPPLE | CMD_LINE_WIDTH | CMD_POLY_OFFSET => 2,
+            CMD_X_INIT_BLOCK => 6,
             X2D_SESSION_START | X2D_AUX_PLANE_MASK | X2D_BIT_ZERO_COLOR | X2D_BIT_ONE_COLOR | X2D_PLANE_SELECT
             | X2D_CID_FIELD | X2D_PRIM_TERMINATOR => 1,
             X2D_PIXEL_LAYOUT => 2,
@@ -716,6 +739,7 @@ impl Hq2Engine {
             if self.need == OPEN {
                 self.complete(out, &mut done);
             }
+            self.end_short_raster_pos(out, &mut done);
             self.need = 0;
             self.nargs = 0;
             self.restarted = 1;
@@ -757,6 +781,9 @@ impl Hq2Engine {
             }
             self.nargs += 1;
         } else {
+            // Approximation: 4 operands or none, told at the next command start. Misread: operands on
+            // the token's own index (colour only), bare DATA after the short form (operands).
+            self.end_short_raster_pos(out, &mut done);
             // GL self-streaming ports (matrix, vertex, colour, normal): every
             // word goes to the same index; they close any open command.
             let mid_fixed = self.need != 0 && self.need != OPEN && self.need != STREAM && self.nargs < self.need;
@@ -829,6 +856,13 @@ impl Hq2Engine {
         }
         if self.need != OPEN && self.nargs >= self.need {
             self.complete(out, &mut done);
+        }
+    }
+
+    /// A raster-position token with no operand yet is the short form: complete it (colour latch only).
+    fn end_short_raster_pos(&mut self, out: &mut dyn Re3Sink, done: &mut Option<&mut dyn FnMut(String)>) {
+        if self.cmd == gl::T_SET_RASTER_POS && self.need == 4 && self.nargs == 1 {
+            self.complete(out, done);
         }
     }
 

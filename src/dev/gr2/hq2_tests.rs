@@ -3418,3 +3418,101 @@ fn undecoded_accesses_read_zero_drop_and_are_counted() {
     let due: Vec<u32> = (1..=20).filter(|&n| report_due(n)).collect();
     assert_eq!(due, [1, 2, 4, 8, 16]);
 }
+
+/// Drops every RE3 write: these tests read the interpreter's word accounting, not pixels.
+struct NullSink;
+impl hq2::Re3Sink for NullSink {
+    fn reg(&mut self, _: usize, _: u32) {}
+    fn copy(&mut self, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32, _: u32) {}
+    fn finish(&mut self, _: usize) {}
+    fn read_image(&mut self, _: &hq2::ReadImage, _: hq2::ReadDest) {}
+    fn op(&mut self, _: u32, _: u64) {}
+    fn shram(&mut self, _: usize, _: u32) {}
+    fn gedma_out(&mut self, _: &[u32]) {}
+}
+
+fn engine() -> Box<hq2::Hq2Engine> {
+    // SAFETY: the interpreter's state is plain data, valid when zeroed.
+    unsafe { Box::<hq2::Hq2Engine>::new_zeroed().assume_init() }
+}
+
+/// Push (index, word) pairs and collect what the interpreter reports for each command it completes.
+fn feed(e: &mut hq2::Hq2Engine, words: &[(u32, u32)]) -> Vec<String> {
+    let mut log = Vec::new();
+    for &(index, val) in words {
+        e.push(index, val, &mut NullSink, Some(&mut |s: String| log.push(s)));
+    }
+    log
+}
+
+fn strays(log: &[String]) -> usize {
+    log.iter().filter(|s| s.starts_with("stray DATA")).count()
+}
+
+/// Commands whose effect is not modelled still take exactly their words (counts from shipped binaries): the
+/// command is done at its last word, and the next DATA word is a stray, not an argument.
+#[test]
+fn unmodelled_commands_take_exactly_their_words() {
+    for (tok, n) in [(1u32, 1usize), (22, 2), (23, 2), (24, 1), (32, 1), (33, 1), (34, 1), (230, 1), (246, 1), (354, 6)] {
+        let mut e = engine();
+        let mut words = vec![(tok, 0)];
+        words.extend((1..n).map(|_| (hq2::PUC_DATA, 0)));
+        let log = feed(&mut e, &words);
+        assert_eq!(log.len(), 1, "token {tok} completes at word {n}: {log:?}");
+        assert!(log[0].contains(&format!("({n} words, not implemented)")), "token {tok}: {}", log[0]);
+        let log = feed(&mut e, &[(hq2::PUC_DATA, 0)]);
+        assert_eq!(strays(&log), 1, "token {tok}: word {} is not its argument", n + 1);
+    }
+}
+
+/// 228 takes 2 words a dispatch and arrives as one pair or two (4 words); 133 is the same size.
+#[test]
+fn paired_commands_take_two_words_a_dispatch() {
+    let mut e = engine();
+    let log = feed(&mut e, &[(228, 1), (228, 2), (228, 3), (228, 4)]);
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert!(log.iter().all(|s| s.contains("(2 words, not implemented)")), "{log:?}");
+    let log = feed(&mut e, &[(228, 1), (hq2::PUC_DATA, 2), (hq2::PUC_DATA, 3)]);
+    assert_eq!((log.len(), strays(&log)), (2, 1), "a pair with its word on DATA, then a stray: {log:?}");
+    let mut e = engine();
+    let log = feed(&mut e, &[(133, 0x40c0_0000), (133, 0x3f80_0000), (hq2::PUC_DATA, 0)]);
+    assert_eq!(strays(&log), 1, "133 is a pair: {log:?}");
+}
+
+/// The raster-position token carries 4 operands with one microcode and none with another. The short form
+/// ends where the next command starts, and that command is not lost: a 3-word normal follows intact.
+#[test]
+fn raster_position_takes_four_words_or_one() {
+    let fl = |v: f32| v.to_bits();
+    let rgb = [(0x1982, fl(0.25)), (0x1982, fl(0.5)), (0x1982, fl(0.75))];
+    let mut e = engine();
+    feed(&mut e, &rgb);
+    let long = feed(&mut e, &[(0x105, fl(20.0)), (hq2::PUC_DATA, fl(30.0)), (hq2::PUC_DATA, 0), (hq2::PUC_DATA, fl(1.0))]);
+    assert_eq!(long.len(), 1, "{long:?}");
+    assert!(long[0].starts_with("GL_SET_RASTER_POS -> window"), "{long:?}");
+    assert_eq!(strays(&feed(&mut e, &[(hq2::PUC_DATA, 0)])), 1, "the 4th word was the last");
+
+    let mut e = engine();
+    feed(&mut e, &rgb);
+    let log = feed(&mut e, &[(0x105, 0), (0x10d, 0), (0x10d, 0), (0x10d, 0), (hq2::PUC_DATA, 0)]);
+    assert!(log[0].starts_with("GL_SET_RASTER_POS (colour only)") && log[0].contains("colour (0.250, 0.500, 0.750)"), "{log:?}");
+    assert_eq!(strays(&log), 1, "the normal took its 3 words: {log:?}");
+
+    // A long form cut short is dropped, not read as the short form; UNSTALL ends a pending short form.
+    let mut e = engine();
+    feed(&mut e, &rgb);
+    let log = feed(&mut e, &[(0x105, 0), (hq2::PUC_DATA, 0), (0x10d, 0)]);
+    assert!(log.iter().all(|s| !s.contains("colour only")), "{log:?}");
+    let mut e = engine();
+    feed(&mut e, &rgb);
+    let log = feed(&mut e, &[(0x105, 0), (hq2::HQ_TOKEN_UNSTALL, 0)]);
+    assert!(log.len() == 1 && log[0].contains("colour only") && log[0].contains("(0.250, 0.500, 0.750)"), "{log:?}");
+}
+
+/// The trace labels of tokens 0x016, 0x017, 0x018 and 0x020.
+#[test]
+fn line_and_subpixel_tokens_have_their_labels() {
+    for (tok, name) in [(0x016, "GL_LINE_STIPPLE"), (0x017, "GL_LINE_WIDTH"), (0x018, "GL_STIPPLE_REPEAT"), (0x020, "GL_SUBPIXEL")] {
+        assert_eq!(hq2::index_label(tok), name);
+    }
+}
