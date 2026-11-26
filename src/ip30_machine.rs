@@ -2215,7 +2215,7 @@ mod snapshot_tests {
             let board = gfx.mgras().clone();
             board.start_engines();
             let rss = |reg: u32, value: u32, exec: bool| {
-                let addr = crate::dev::mgras::MGRAS_SLOT_GFX_BASE as u64
+                let addr = crate::dev::mgras::GFX_SLOT_BASE as u64
                     + 0x7C000 + 4 * reg as u64 + if exec { 0x1000 } else { 0 };
                 loop {
                     let status = board.write32(addr, value);
