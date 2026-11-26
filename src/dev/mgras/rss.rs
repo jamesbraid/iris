@@ -3690,15 +3690,10 @@ impl Rss {
             self.te_write(true, |te, regs| te.load_line(regs, line, bytes));
             return;
         }
-        match self.xfer.take() {
-            Some(x) if !x.read => {
-                self.put_line(&x, line, bytes);
-                self.xfer.set(Some(x));
-            }
-            x => {
-                self.xfer.set(x);
-                self.stats.dma_lines_dropped += 1;
-            }
+        // `put_line` never touches the armed transfer, so it needs no take and put back.
+        match self.xfer.as_ref().copied() {
+            Some(x) if !x.read => self.put_line(&x, line, bytes),
+            _ => self.stats.dma_lines_dropped += 1,
         }
     }
 
@@ -4843,6 +4838,26 @@ mod tests {
                 r.put(fx, fy, from_host(x.format, v));
             }
         }
+    }
+
+    /// A DMA line stores only into an armed write transfer and leaves it armed; any other line is counted dropped.
+    #[test]
+    fn dma_lines_store_only_into_an_armed_write_transfer() {
+        let mut r = x_server();
+        let bytes = [0x11u8; 16];
+        r.dma_write_line(0, &bytes);
+        assert_eq!((r.stats.dma_lines_in, r.stats.dma_lines_dropped, r.stats.dma_px_put), (1, 1, 0), "nothing armed");
+        for (reg, v) in [(reg::XFRMODE, 0xC0_0080), (reg::XFRSIZE, 4 << 16 | 4), (reg::FILLMODE, 5 << 22)] {
+            r.write(reg, v, false);
+        }
+        block(&mut r, 0, 0, 3, 3);
+        let x = *r.xfer.as_ref().unwrap();
+        r.dma_write_line(0, &bytes);
+        assert_eq!((r.stats.dma_lines_dropped, r.stats.dma_px_put), (1, 4), "armed for writing");
+        assert!(r.xfer.as_ref().is_some_and(|y| !y.read && y.block.ys == x.block.ys), "still armed");
+        r.arm_transfer(x.block, true, false);
+        r.dma_write_line(1, &bytes);
+        assert_eq!((r.stats.dma_lines_dropped, r.stats.dma_px_put), (2, 4), "armed for reading");
     }
 
     struct Xorshift(u64);
