@@ -64,7 +64,6 @@ fn make_rex3_unstarted() -> TestBoard<Rex3> {
         .expect("make_rex3_unstarted thread panicked")
 }
 
-#[cfg(any(not(feature = "rex-dirty-upload"), feature = "rex-gpu"))]
 fn start_rex3_processor_only(rex: &Rex3) {
     assert!(!rex.running.swap(true, Ordering::SeqCst));
     let rex3 = unsafe { std::mem::transmute::<&Rex3, &'static Rex3>(rex) };
@@ -657,7 +656,7 @@ mod resident_gate_tests {
         with_big_stack(|| {
             for stage in ["before submission", "after submission", "while idle"] {
                 let backend = std::env::var("REX3_RESIDENT_BACKEND").unwrap_or_else(|_| "auto".into());
-                let gpu = Gpu::open(&GpuOptions { backend: backend.clone(), ..GpuOptions::default() })
+                let gpu = Gpu::standalone(&GpuOptions { backend: backend.clone(), ..GpuOptions::default() })
                     .unwrap_or_else(|error| panic!("required resident backend {backend}: {error}"));
                 let expected_backend = match backend.as_str() {
                     "vulkan" => Some(wgpu::Backend::Vulkan),
@@ -701,8 +700,8 @@ mod resident_gate_tests {
                         std::thread::yield_now();
                     }
                 }
-                gpu.inject_device_loss(stage);
-                gpu.inject_device_loss("later loss must not replace the first");
+                gpu.fail(stage);
+                gpu.fail("later loss must not replace the first");
                 if stage == "before submission" {
                     rex.gfifo_push(GFIFO_PURE_GO, 0);
                 }
@@ -11280,3 +11279,6 @@ fn rexget_clears_the_sign_extension() {
     // Writing then reading a negative coordinate leaves its 23-bit form.
     assert_eq!((-0x80i32 as u32).rexset(9, 7).rexget(9, 7), 0x007F_FF80);
 }
+
+#[path = "rex3_frame_pins.rs"]
+mod frame_pins;

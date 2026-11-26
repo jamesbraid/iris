@@ -5137,6 +5137,61 @@ mod tests {
         assert_eq!(px(9, 20), [0, 0, 0]);
     }
 
+    /// A composed-frame pin for the O2, with no guest. Rectangles of
+    /// three cmap colours are drawn through the engine's register path into
+    /// one screen tile list, the GBE is set to a 512 x 128 8-bit mode, and the
+    /// frame `render_from` makes is hashed with its size.
+    #[test]
+    fn o2_composed_frame_is_pinned() {
+        let run = || {
+            let ram = Arc::new(O2Memory::single(32 << 20));
+            let re = TestRe::new(ram.clone());
+            let g = gbe();
+            let tile = 0x0010_0000u32;
+            let list = 0x0020_0000u32;
+            ram.write(list as usize, &((tile >> 16) as u16).to_be_bytes());
+            re.write64(0x1500_0000 + TLB_A, (0x8000u64 | (tile >> 16) as u64) << 48);
+            re.write32(0x1500_0000 + BUFMODE_DST, 0);
+            re.write32(0x1500_0000 + DRAWMODE, 0xf << 3);
+            re.write32(0x1500_0000 + PRIMITIVE, 3 << 24);
+            for (i, (x0, y0, x1, y1)) in [(10u32, 20u32, 99u32, 59u32), (60, 40, 200, 100), (300, 5, 340, 120)].into_iter().enumerate() {
+                re.write32(0x1500_0000 + FG, 0x0101_0101 * (i as u32 + 5));
+                re.write32(0x1500_0000 + VERTEX_0, (x0 << 16) | y0);
+                re.write32(0x1500_0000 + (VERTEX_1 | 0x800), (x1 << 16) | y1);
+            }
+            for (off, v) in [
+                (CTRLSTAT, 0x300a_a000u32),
+                (DOTCLOCK, 0x0010_020f),
+                (VT_XYMAX, 0x0042_9690),
+                (FRM_CONTROL_SHADOW, list | 1),
+                (VT_XY, 0),
+                (VT_HCMAP, 512 << 12),
+                (VT_VCMAP, 128 << 12),
+                (FRM_SIZE_TILE, 1 << 5),
+                (FRM_SIZE_PIXEL, 128 << 16),
+                (MODE, 0x403),
+                (CMAP + 4 * 5, 0x11223300),
+                (CMAP + 4 * 6, 0xc0402000),
+                (CMAP + 4 * 7, 0x30d06000),
+            ] {
+                g.write32((0x1600_0000 + off) as u64, v);
+            }
+            let mut bytes = vec![0u8; 2048 * 2048 * 4];
+            let (w, h) = g.render_from(&ram, &mut bytes).expect("display on");
+            assert_eq!((w, h), (512, 128));
+            let (w, h) = (w as usize, h as usize);
+            // R, G, B, A bytes: 0xAABBGGRR as a little-endian word.
+            let px: Vec<u32> = bytes[..w * h * 4].chunks_exact(4).map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3]])).collect();
+            let colours = crate::test_frame_pin::colour_count(w, h, w, &px);
+            assert!(colours >= 4, "{colours} colours");
+            crate::test_frame_pin::frame_hash(w, h, w, &px)
+        };
+        let a = run();
+        eprintln!("o2 frame hash {a}");
+        assert_eq!(a, run(), "two runs");
+        assert_eq!(a, "157f9d6d7ec6fdb63e840b5b5568bb081ef850edc0d5d868684e0a455122fd38");
+    }
+
     /// IRIX draws menu text into the 8-bit overlay as stippled lines with
     /// FG 0x00000002: every set bit is index 2, whatever its byte in the word.
     #[test]
