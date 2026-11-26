@@ -1390,8 +1390,10 @@ pub struct GraphicsSection {
     /// `dx12` or `gl`.
     #[serde(default = "default_gpu_backend")]
     pub gpu_backend: String,
-    /// Several screens (dual-head Newport): `cycle` (default) one window with
-    /// a hotkey, `side-by-side` one window, `per-screen` a window each.
+    /// Several screens (dual-head Newport): `per-screen` (default) a window each. `cycle` (one
+    /// window, a hotkey steps through the screens) and `side-by-side` (one window with the
+    /// screens next to each other) are accepted by the parser and refused by `validate` until the
+    /// window code has them.
     #[serde(default, skip_serializing_if = "ScreenWindows::is_default")]
     pub windows: ScreenWindows,
     /// InfiniteReality2: the file that keeps the pipe's flash EEPROM between
@@ -1471,17 +1473,17 @@ impl Default for GraphicsSection {
 #[serde(rename_all = "kebab-case")]
 pub enum ScreenWindows {
     /// One window showing one screen; a hotkey steps to the next.
-    #[default]
     Cycle,
     /// One window with the screens next to each other.
     SideBySide,
     /// One window per screen.
+    #[default]
     PerScreen,
 }
 
 impl ScreenWindows {
     fn is_default(&self) -> bool {
-        *self == Self::Cycle
+        *self == Self::PerScreen
     }
 
     pub fn as_str(self) -> &'static str {
@@ -4020,10 +4022,16 @@ impl MachineConfig {
         self.cpu_part()?;
         self.machine.profile.accepts_cpus(self.machine.cpus())?;
         self.validate_virtio_9p()?;
-        if self.graphics.windows != ScreenWindows::Cycle && self.screen_count() < 2 {
+        if self.graphics.windows != ScreenWindows::default() {
+            if self.screen_count() < 2 {
+                return Err(format!(
+                    "graphics.windows = \"{}\" needs a machine with several screens (graphics.heads = 2); \
+                     a single screen has one window",
+                    self.graphics.windows.as_str()
+                ));
+            }
             return Err(format!(
-                "graphics.windows = \"{}\" needs a machine with several screens (graphics.heads = 2); \
-                 a single screen has one window",
+                "graphics.windows = \"{}\" is not available yet: each screen has a window of its own (\"per-screen\")",
                 self.graphics.windows.as_str()
             ));
         }
@@ -5121,32 +5129,35 @@ mod export_tests {
     #[test]
     fn windows_key_picks_how_several_screens_are_shown() {
         let cfg = |t: &str| toml::from_str::<MachineConfig>(t).unwrap();
-        assert_eq!(cfg("").graphics.windows, ScreenWindows::Cycle);
+        assert_eq!(cfg("").graphics.windows, ScreenWindows::PerScreen);
         for (name, mode) in [("cycle", ScreenWindows::Cycle), ("side-by-side", ScreenWindows::SideBySide), ("per-screen", ScreenWindows::PerScreen)] {
             let c = cfg(&format!("[graphics]\nheads = 2\nwindows = \"{name}\"\n"));
             assert_eq!(c.graphics.windows, mode);
             assert_eq!(mode.as_str(), name);
-            assert!(c.validate().is_ok(), "{name}: {:?}", c.validate());
         }
         assert!(toml::from_str::<MachineConfig>("[graphics]\nwindows = \"tabs\"\n").is_err());
+        // Only a window of its own for each screen exists so far.
+        assert!(cfg("[graphics]\nheads = 2\nwindows = \"per-screen\"\n").validate().is_ok());
+        let err = cfg("[graphics]\nheads = 2\nwindows = \"cycle\"\n").validate().unwrap_err();
+        assert!(err.contains("not available yet"), "{err}");
     }
 
     #[test]
-    fn windows_key_other_than_cycle_needs_several_screens() {
+    fn windows_key_other_than_the_default_needs_several_screens() {
         let one = toml::from_str::<MachineConfig>("[graphics]\nwindows = \"side-by-side\"\n").unwrap();
         assert_eq!(one.screen_count(), 1);
         let err = one.validate().unwrap_err();
         assert!(err.contains("graphics.windows") && err.contains("several screens"), "{err}");
         assert!(toml::from_str::<MachineConfig>("[graphics]\nheads = 2\n").unwrap().validate().is_ok());
         assert_eq!(toml::from_str::<MachineConfig>("[graphics]\nheads = 2\n").unwrap().screen_count(), 2);
-        // The default needs nothing, and leaves a single-screen config's text alone.
+        // The default leaves a config's text alone.
         let plain = MachineConfig::default();
         assert!(plain.validate().is_ok());
         assert!(!toml::to_string(&plain).unwrap().contains("windows"));
         let mut two = plain.clone();
         two.graphics.heads = 2;
-        two.graphics.windows = ScreenWindows::PerScreen;
-        assert!(toml::to_string(&two).unwrap().contains("windows = \"per-screen\""));
+        two.graphics.windows = ScreenWindows::Cycle;
+        assert!(toml::to_string(&two).unwrap().contains("windows = \"cycle\""));
     }
 
     /// IDs 1 to 15 are valid on the Octane's wide buses, and 1 to 7 on the
