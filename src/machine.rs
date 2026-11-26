@@ -629,8 +629,11 @@ impl Machine {
                 backend: cfg.graphics.gpu_backend.clone(),
                 ..Default::default()
             };
-            let gpu = crate::wgpu::Gpu::new(&options)
-                .map_err(|error| format!("create Newport resident GPU: {error}"))?;
+            let lost = fatal_tx.clone();
+            let gpu = crate::wgpu::Gpu::new(&options, Box::new(move |why| {
+                let _ = lost.send(MachineFatal::new("Newport resident GPU", why));
+            }))
+            .map_err(|error| format!("create Newport resident GPU: {error}"))?;
             if !matches!(gpu.caps.backend, wgpu::Backend::Vulkan | wgpu::Backend::Dx12) {
                 return Err(format!(
                     "Newport resident GPU resolved graphics.gpu_backend = {:?} to unsupported {:?}; \
@@ -708,6 +711,16 @@ impl Machine {
             Some(r)
         };
 
+        // The GPU for the IMPACT board when it draws on one, and the GR2's scan-out.
+        let gpu = if cfg.graphics_board().is_impact() || matches!(cfg.graphics_board(), crate::config::GraphicsBoard::Xz | crate::config::GraphicsBoard::Elan | crate::config::GraphicsBoard::Extreme) {
+            crate::workstation::open_gpu(&cfg, &fatal_tx).unwrap_or_else(|e| {
+                eprintln!("graphics: {e}");
+                std::process::exit(1)
+            })
+        } else {
+            None
+        };
+
         // GR2 (XZ / Extreme) in the GIO gfx slot. Created even when headless:
         // selecting the board is explicit, and the PROM needs it to probe.
         let gr2: Option<Arc<crate::dev::gr2::Gr2>> = match cfg.graphics_board() {
@@ -722,7 +735,10 @@ impl Machine {
                     _ if guinness => Gr2Variant::Elan,
                     _ => Gr2Variant::Xz,
                 };
-                let g = Gr2::new(variant, status.clone());
+                let g = Gr2::with_gpu(variant, status.clone(), crate::workstation::share_gpu(&gpu)).unwrap_or_else(|e| {
+                    eprintln!("gr2: {e}");
+                    std::process::exit(1)
+                });
                 // GR2 retrace is GIO interrupt 2 (LIO_GIO_2): on Indigo2 through
                 // the EXTIO SG_RETRACE fan-out, on Indy the direct line. It is a
                 // latch the guest clears (see Ioc::write8/int2_write8), so only
@@ -751,7 +767,7 @@ impl Machine {
                 Some(crate::dev::mgras::Mgras::with_raster(cfg.graphics_board(), {
                     use crate::dev::ioc::IocInterrupt::{GioSgFifo, GioSgGraphics, GioSgRetrace};
                     [ioc.irq_line(GioSgFifo), ioc.irq_line(GioSgGraphics), ioc.irq_line(GioSgRetrace)]
-                }, status.clone(), cfg.graphics.raster, &cfg.graphics.gpu_backend).unwrap_or_else(|e| {
+                }, status.clone(), crate::workstation::share_gpu(&gpu)).unwrap_or_else(|e| {
                     eprintln!("mgras: {e}");
                     std::process::exit(1)
                 }))
@@ -3135,8 +3151,8 @@ mod gr2_checkpoint_tests {
     use super::*;
     use crate::config::{GraphicsBoard, MachineProfile};
     use crate::dev::gr2::re3::{
-        FB_W, IR_FLAT, REG_FUNC, REG_IR, REG_NUMPIX, REG_PIXMASK, REG_R, REG_XMAX, REG_YMAX,
-        REG_YX, ROP_COPY,
+        FB_W, DRAW_FLAT_5, RE3_LOGIC_OP, RE3_DRAW_TRIGGER, RE3_SPAN_LEN, RE3_COLOR_PLANE_MASK, RE3_RED_START, RE3_CLIP_X_HI, RE3_CLIP_Y_HI,
+        RE3_XY_PACKED, ROP_COPY,
     };
     use crate::dev::gr2::{Gr2, GR2_BASE};
     use crate::traits::{BusDevice, Resettable, BUS_BUSY};
@@ -3161,14 +3177,14 @@ mod gr2_checkpoint_tests {
     fn draw_test_pixel(g: &Gr2, value: u32) {
         g.start();
         for (reg, data) in [
-            (REG_FUNC, ROP_COPY),
-            (REG_PIXMASK, 0x00ff_ffff),
-            (REG_XMAX, 1279),
-            (REG_YMAX, 1023),
-            (REG_R, value << 11),
-            (REG_YX, (20 << 12) | 30),
-            (REG_NUMPIX, 1),
-            (REG_IR, IR_FLAT),
+            (RE3_LOGIC_OP, ROP_COPY),
+            (RE3_COLOR_PLANE_MASK, 0x00ff_ffff),
+            (RE3_CLIP_X_HI, 1279),
+            (RE3_CLIP_Y_HI, 1023),
+            (RE3_RED_START, value << 11),
+            (RE3_XY_PACKED, (20 << 12) | 30),
+            (RE3_SPAN_LEN, 1),
+            (RE3_DRAW_TRIGGER, DRAW_FLAT_5),
         ] {
             write(g, reg, data);
         }

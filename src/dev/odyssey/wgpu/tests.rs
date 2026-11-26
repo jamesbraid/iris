@@ -106,7 +106,7 @@ fn device_loss_keeps_dirty_readback_metadata_and_sets_fault() {
     raster.attach_mirror(mirror.ptr());
     raster.gpu_dirty[0] = 1;
     raster.gpu_dirty_any = true;
-    gpu.fail("dirty readback");
+    gpu.fail("wgpu device lost (test): dirty readback");
 
     let error = raster.read_back_now(Observation::Validation).expect_err("device loss");
 

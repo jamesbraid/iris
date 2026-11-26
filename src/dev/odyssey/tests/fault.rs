@@ -21,7 +21,7 @@ fn board() -> Arc<Odyssey> {
         ram.dma_view(),
         crate::status::MachineStatus::detached(),
         (2, 32),
-        (crate::config::RasterUnit::Cpu, "auto"),
+        None,
     )
     .expect("board")
 }

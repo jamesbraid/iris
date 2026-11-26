@@ -357,6 +357,12 @@ impl Gpu {
     /// Open the GPU `opts` asks for. Fails with the reasons each candidate
     /// backend gave when none works. `fatal` runs once, on the first error
     /// the device reports (or `fail` is given), from whichever thread saw it.
+    /// `new` for a caller with no machine to stop on a loss (a window's own device, a replay, a tool): the
+    /// loss is logged, and every later `check()` reports it.
+    pub fn standalone(opts: &GpuOptions) -> Result<Arc<Gpu>, String> {
+        Self::new(opts, Box::new(|why| log::error!("wgpu: {why}")))
+    }
+
     pub fn new(opts: &GpuOptions, fatal: Box<dyn Fn(&str) + Send + Sync>) -> Result<Arc<Gpu>, String> {
         let _opening = OPENING.lock();
         let fatal: Arc<dyn Fn(&str) + Send + Sync> = Arc::from(fatal);
@@ -631,6 +637,7 @@ impl Gpu {
 
     /// Block until `submission` has finished (or everything, with None).
     pub fn wait(&self, submission: Option<wgpu::SubmissionIndex>) -> Result<(), String> {
+        #[cfg(not(sgi_gpu_core))]
         crate::pf_scope!(crate::perfetto::events::WGPU_WAIT);
         let waited = wait_for(&self.device, submission);
         // wgpu cannot wait for a submission it refused (a pipeline that

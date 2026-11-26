@@ -212,7 +212,7 @@ pub(crate) fn attach_vpro(
         bedrock.inbound(widget),
         status.clone(),
         (cfg.graphics.threads, cfg.graphics.tile),
-        (cfg.graphics.raster, cfg.graphics.gpu_backend.as_str()),
+        crate::workstation::share_gpu(&crate::workstation::open_gpu_unattended(cfg)?),
     )?;
     bedrock.io.connect_widget(widget, attach(vpro.clone())?);
     Ok(vpro)

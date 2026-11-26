@@ -81,7 +81,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::config::GraphicsBoard;
-use crate::dev::ng1::rex3::Renderer;
+use crate::display::Renderer;
 use crate::gfifo::GFifo;
 use crate::locks::SpinLock;
 use crate::traits::{BusDevice, BusRead8, BusRead16, BusRead32, BusRead64, BUS_BUSY, BUS_ERR, BUS_OK, Device, Saveable};
@@ -587,28 +587,22 @@ impl Mgras {
     /// `irqs` are the FIFO, general and retrace interrupts, as the slot
     /// wires them.
     pub fn new(board: GraphicsBoard, irqs: [crate::irq::IrqLine; 3], status: Arc<crate::status::MachineStatus>) -> Arc<Self> {
-        Self::with_raster(board, irqs, status, crate::config::RasterUnit::Cpu, "auto").expect("the CPU raster engines")
+        Self::with_raster(board, irqs, status, None).expect("the CPU raster engines")
     }
 
     /// `new` with the raster engines where `raster` says: the CPU's threads,
-    /// or one engine whose primitives go to the host GPU through wgpu
-    /// (`wgpu/`; `backend` is `[graphics] gpu_backend`).
+    /// or, with `gpu`, one engine whose primitives go to the host GPU
+    /// through wgpu (`wgpu/`; the machine opened the device and hands the
+    /// board its own handle on it, `Gpu::share`).
     pub fn with_raster(
         board: GraphicsBoard,
         irqs: [crate::irq::IrqLine; 3],
         status: Arc<crate::status::MachineStatus>,
-        raster: crate::config::RasterUnit,
-        backend: &str,
+        gpu: Option<crate::SharedGpu>,
     ) -> Result<Arc<Self>, String> {
-        let gpu = raster == crate::config::RasterUnit::Wgpu;
-        #[cfg(not(feature = "wgpu"))]
-        if gpu {
-            let _ = backend;
-            return Err("graphics.raster = \"wgpu\" needs a build with the wgpu feature".into());
-        }
+        let on_gpu = gpu.is_some();
         #[cfg(feature = "wgpu")]
-        let (unit, scanout, device) = if gpu {
-            let g = crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions { backend: backend.to_string(), ..Default::default() })?;
+        let (unit, scanout, device) = if let Some(g) = gpu {
             eprintln!("mgras: raster engine on the GPU: {}", g.caps);
             let unit = Box::new(wgpu::GpuRaster::new(&g)?);
             let scanout = Box::new(wgpu::scanout::MgrasScanout::new(&g, &unit.pix_buffer())?);
@@ -635,7 +629,7 @@ impl Mgras {
             addr_of_mut!((*p).eng).write(UnsafeCell::new(Hq3Engine::new(if board == GraphicsBoard::MaxImpact { 2 } else { 1 })));
             let planes = (*p).planes.get();
             // One unit draws every scanline.
-            let nrss = if gpu { 1 } else { Self::engines_for(board) };
+            let nrss = if on_gpu { 1 } else { Self::engines_for(board) };
             addr_of_mut!((*p).nrss).write(nrss);
             for id in 0..MAX_ENGINES {
                 let e = match id {
@@ -1364,7 +1358,7 @@ impl Mgras {
         let mut out = vec![0u32; frame::OUT_STRIDE * frame::H];
         let f = self.snapshot_frame();
         f.compose(&mut out);
-        disp::save_png(path, &out, f.width, f.height)
+        crate::disp::write_png_words(path, &out, frame::OUT_STRIDE, f.width, f.height).map_err(|e| e.to_string())
     }
 
     /// Identity for a board outside the Indigo2 (the Octane's XIO boards):

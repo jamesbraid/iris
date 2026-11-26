@@ -24,7 +24,7 @@ impl Lcg {
 }
 
 fn gpu() -> Option<Arc<Gpu>> {
-    match Gpu::new(&GpuOptions::default()) {
+    match Gpu::standalone(&GpuOptions::default()) {
         Ok(g) => Some(g),
         Err(e) => {
             eprintln!("skipped: {e}");

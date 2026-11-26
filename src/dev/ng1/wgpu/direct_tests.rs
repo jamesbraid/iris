@@ -207,7 +207,7 @@ fn required_gpu() -> Arc<Gpu> {
         "auto" => None,
         _ => panic!("unknown required backend {backend}"),
     };
-    let gpu = Gpu::new(&GpuOptions { backend: backend.clone(), ..GpuOptions::default() })
+    let gpu = Gpu::open(&GpuOptions { backend: backend.clone(), ..GpuOptions::default() })
         .unwrap_or_else(|error| panic!("required scanout backend {backend}: {error}"));
     if let Some(expected) = expected {
         assert_eq!(gpu.caps.backend, expected, "the requested backend must actually be used");

@@ -67,7 +67,7 @@ fn required_gpu() -> Arc<Gpu> {
         "auto" => None,
         _ => panic!("unknown required backend {backend}"),
     };
-    let gpu = Gpu::new(&GpuOptions {
+    let gpu = Gpu::standalone(&GpuOptions {
         backend: backend.clone(),
         ..GpuOptions::default()
     })

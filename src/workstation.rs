@@ -247,6 +247,11 @@ pub trait Workstation: Send {
     fn get_display_head1(&self) -> Option<Arc<dyn GfxDisplay>> {
         None
     }
+    /// Every display with a screen for the host, in topology order (slot or
+    /// brick, then channel): the order `screen N` indexes. Empty when headless.
+    fn displays(&self) -> Vec<Arc<dyn GfxDisplay>> {
+        self.get_display().into_iter().chain(self.get_display_head1()).collect()
+    }
     /// The keyboard and mouse the host window types into.
     fn get_ps2(&self) -> Arc<Ps2Controller>;
     /// Add a host-side command set (the screen, pointer and key commands)
@@ -906,6 +911,56 @@ pub(crate) fn register_system_controller(
                 }
             }
         }).unwrap();
+    }
+}
+
+/// The machine's GPU when `[graphics] raster` asks for one: opened once, on
+/// the adapter `gpu_backend` names, for every board that draws on it (each
+/// takes `share_gpu`). The first failure the device reports reaches the
+/// machine as one `MachineFatal` on `faults`, whichever board saw it.
+pub(crate) fn open_gpu(cfg: &crate::config::MachineConfig, faults: &std::sync::mpsc::Sender<MachineFatal>) -> Result<Option<crate::SharedGpu>, String> {
+    if cfg.graphics.raster != crate::config::RasterUnit::Wgpu {
+        return Ok(None);
+    }
+    #[cfg(feature = "wgpu")]
+    {
+        let faults = faults.clone();
+        let opts = crate::wgpu::GpuOptions { backend: cfg.graphics.gpu_backend.clone(), ..Default::default() };
+        crate::wgpu::Gpu::new(&opts, Box::new(move |why| {
+            let _ = faults.send(MachineFatal::new("graphics GPU", why));
+        }))
+        .map(Some)
+    }
+    #[cfg(not(feature = "wgpu"))]
+    {
+        let _ = faults;
+        Err("graphics.raster = \"wgpu\" needs a build with the wgpu feature".into())
+    }
+}
+
+/// As `open_gpu`, for a machine with no fatal-fault path of its own: a device loss is logged, and every board
+/// reports it from its next `check()`.
+pub(crate) fn open_gpu_unattended(cfg: &crate::config::MachineConfig) -> Result<Option<crate::SharedGpu>, String> {
+    if cfg.graphics.raster != crate::config::RasterUnit::Wgpu {
+        return Ok(None);
+    }
+    #[cfg(feature = "wgpu")]
+    {
+        let opts = crate::wgpu::GpuOptions { backend: cfg.graphics.gpu_backend.clone(), ..Default::default() };
+        crate::wgpu::Gpu::open(&opts).map(Some)
+    }
+    #[cfg(not(feature = "wgpu"))]
+    Err("graphics.raster = \"wgpu\" needs a build with the wgpu feature".into())
+}
+
+/// A board's handle on the machine's GPU (`Gpu::share`).
+pub(crate) fn share_gpu(gpu: &Option<crate::SharedGpu>) -> Option<crate::SharedGpu> {
+    #[cfg(feature = "wgpu")]
+    return gpu.as_ref().map(|g| g.share());
+    #[cfg(not(feature = "wgpu"))]
+    {
+        let _ = gpu;
+        None
     }
 }
 

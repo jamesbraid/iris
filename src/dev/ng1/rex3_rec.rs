@@ -711,7 +711,7 @@ pub(crate) mod tests {
     fn resident_replay_board(state: Option<&[u8]>) -> Result<ReplayBoard, String> {
         let state = state.map(|s| s.to_vec());
         let backend = std::env::var("REX3_GPU_BACKEND").unwrap_or_else(|_| "auto".into());
-        let gpu = crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions {
+        let gpu = crate::wgpu::Gpu::standalone(&crate::wgpu::GpuOptions {
             backend: backend.clone(),
             ..Default::default()
         })

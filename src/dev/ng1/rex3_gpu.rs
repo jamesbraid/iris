@@ -489,10 +489,10 @@ impl Rex3Gpu {
             optional_features: options.timestamps,
             ..Default::default()
         };
-        let (gpu, timestamp_failure) = match Gpu::new(&gpu_options) {
+        let (gpu, timestamp_failure) = match Gpu::standalone(&gpu_options) {
             Ok(gpu) => (gpu, None),
             Err(error) if options.timestamps => {
-                let fallback = Gpu::new(&GpuOptions {
+                let fallback = Gpu::standalone(&GpuOptions {
                     optional_features: false,
                     ..gpu_options
                 })
