@@ -7,3 +7,5 @@ src/dev/odyssey/testdata/golden/*.txt text eol=lf
 src/dev/odyssey/testdata/golden/*.tsv text eol=lf
 # Embedded with include_bytes!: never touch their bytes.
 data/proms/*.deflate binary
+# The menu frame is compared byte for byte.
+crates/sgi-kona/tests/data/*.ppm binary
