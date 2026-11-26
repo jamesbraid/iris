@@ -2611,6 +2611,115 @@ fn draw_pixels_fast_paths_match_plain_ones() {
     }
 }
 
+/// A DMA line of 18 bytes under 5-word rows: each line pads to a whole word, so the next row starts on one. The
+/// bytes route (fast) and the words route (plain) draw the same, and the draw is on the board.
+#[test]
+fn draw_pixels_dma_lines_pad_to_words() {
+    let draw = |paint: bool| {
+        let m = live_board();
+        draw_pixels_setup(&m, (0, 0, 40, 40), 0xC0_0080, 1, 1.0 / 255.0, [255.0f32.to_bits(); 12], None);
+        draw_pixels_memory(&m, 18 * 4, 4, 0x1234_5678);
+        if paint {
+            draw_pixels_dma(&m, [0.0, 0.0], [0; 4], 5, 4);
+        }
+        m.wait_idle();
+        let hash = m.state_hash();
+        m.stop_engines();
+        hash
+    };
+    let (fast, plain) = fast_and_plain(|| draw(true));
+    assert_eq!(fast, plain);
+    assert_ne!(fast, fast_and_plain(|| draw(false)).0, "the draw left no pixels");
+}
+
+/// A second glDrawPixels by DMA, of other bytes, draws its own rows and not the first image's left in the buffer.
+#[test]
+fn draw_pixels_dma_twice_draws_the_second_image() {
+    let draw = |again: bool| {
+        let m = live_board();
+        draw_pixels_setup(&m, (0, 0, 40, 40), 0xC0_0080, 1, 1.0 / 255.0, [255.0f32.to_bits(); 12], None);
+        draw_pixels_memory(&m, 20 * 4 * 4, 4, 0x1234_5678);
+        draw_pixels_dma(&m, [0.0, 0.0], [0; 4], 20, 4);
+        if again {
+            draw_pixels_memory(&m, 20 * 4 * 4, 4, 0x8765_4321);
+            draw_pixels_dma(&m, [0.0, 0.0], [0; 4], 20, 4);
+        }
+        m.wait_idle();
+        let hash = m.state_hash();
+        m.stop_engines();
+        hash
+    };
+    let (fast, plain) = fast_and_plain(|| draw(true));
+    assert_eq!(fast, plain);
+    assert_ne!(fast, fast_and_plain(|| draw(false)).0, "the second image left no pixels");
+}
+
+/// An image in two parts, the first by DMA and the second by DMA, FIFO words or an unaligned FIFO command, with a
+/// snapshot or a context switch between: the bytes read so far survive, and both routes draw the same.
+#[cfg(not(feature = "engine-crate"))]
+#[test]
+fn draw_pixels_in_two_parts_survive_a_snapshot() {
+    let draw = |between: u8, part2: u8| {
+        let m = live_board();
+        draw_pixels_setup(&m, (0, 0, 40, 40), 0xC0_0080, 1, 1.0 / 255.0, [255.0f32.to_bits(); 12], None);
+        draw_pixels_memory(&m, 20 * 4 * 4, 4, 0x1234_5678);
+        draw_pixels_arm(&m, 80, 2);
+        draw_pixels_dma(&m, [0.0, 0.0], [0; 4], 20, 4);
+        m.wait_idle();
+        if between == 1 {
+            m.stop_engines();
+            let (metadata, parts) = m.snapshot_parts().unwrap();
+            m.restore_snapshot_parts(&metadata, &parts).unwrap();
+            m.start_engines();
+        } else if between == 2 {
+            switch_to_gl_context(&m, 0xD, 0, 0, 40, 40);
+            switch_to_gl_context(&m, 0xC, 0, 0, 40, 40);
+        }
+        let words: Vec<u32> = (1..=40).map(|i| i * 0x0101_0101).collect();
+        match part2 {
+            0 => {
+                draw_pixels_arm(&m, 80, 2);
+                fifo_dma(&m, 0x0B, 1);
+            }
+            1 => fifo_pixel_data(&m, &words),
+            _ => {
+                // One byte of alignment, 160 of pixels, then a word to a doubleword.
+                write(&m, 32, CFIFO, 0x8000_0000 | 1 << 22 | 160);
+                let bytes: Vec<u8> = [0xAA].into_iter().chain(words.iter().flat_map(|w| w.to_be_bytes())).chain([0; 3]).collect();
+                bytes.chunks(4).for_each(|c| write(&m, 32, CFIFO, u32::from_be_bytes(c.try_into().unwrap()) as u64));
+                write(&m, 32, CFIFO, 0);
+            }
+        }
+        m.wait_idle();
+        let hash = m.state_hash();
+        m.stop_engines();
+        hash
+    };
+    for part2 in 0..3 {
+        let (fast, plain) = fast_and_plain(|| draw(1, part2));
+        assert_eq!(fast, plain, "part 2 {part2}");
+        assert_eq!(fast, fast_and_plain(|| draw(0, part2)).0, "part 2 {part2}");
+        let (fast, plain) = fast_and_plain(|| draw(2, part2));
+        assert_eq!(fast, plain, "part 2 {part2}, context switch");
+    }
+}
+
+/// A glDrawPixels by host DMA takes the bytes route on the fast paths and the words route on the plain ones.
+#[test]
+fn draw_pixels_dma_counts_its_route() {
+    use super::gl::{path_count, Path};
+    let _held = super::gl::COMPARING.lock();
+    let draw = |plain: bool| {
+        super::gl::PLAIN_ONLY.store(plain, std::sync::atomic::Ordering::SeqCst);
+        let before = path_count(Path::DmaBytes);
+        random_draw(GraphicsBoard::HighImpact, 1);
+        super::gl::PLAIN_ONLY.store(false, std::sync::atomic::Ordering::SeqCst);
+        path_count(Path::DmaBytes) - before
+    };
+    assert!(draw(false) >= 1, "the fast draw did not take the bytes route");
+    assert_eq!(draw(true), 0, "the plain draw took the bytes route");
+}
+
 /// 16-bit elements, and bytes to shorts, go through the element pipeline: the same random draws as above (a hundred
 /// more seeds, `HighImpact`) leave the board as `run_row` does, and a good share of them take that route.
 #[test]

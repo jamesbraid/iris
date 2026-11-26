@@ -643,6 +643,9 @@ pub struct Hq3Engine {
     /// rows mixed into broken glyphs).
     bitmap_in: Vec<u32>,
     bitmap_parked: Vec<(u32, Vec<u32>)>,
+    /// glDrawPixels rows that came by host DMA, as the bytes they were read as, each DMA line padded to a word;
+    /// `fold_dma_pixels` turns them into `bitmap_in`'s words when anything else needs them.
+    dma_pixels: Vec<u8>,
     /// The words of an unaligned pixel data command so far.
     pix_unaligned: Vec<u32>,
     /// A token whose data comes as the next pixel data command (a GE
@@ -726,6 +729,7 @@ impl Hq3Engine {
             eram_write_ge0: None,
             eram_read_ge0: None,
             bitmap_in: Vec::new(),
+            dma_pixels: Vec::new(),
             bitmap_parked: Vec::new(),
             pix_unaligned: Vec::new(),
             payload_for: None,
@@ -774,7 +778,7 @@ impl Hq3Engine {
             eram_write_ge: self.eram_write_ge,
             eram_write_ge0: self.eram_write_ge0,
             eram_read_ge0: self.eram_read_ge0,
-            bitmap_in: self.bitmap_in.clone(),
+            bitmap_in: self.bitmap_in.iter().copied().chain(be_words(&self.dma_pixels)).collect(),
             bitmap_parked: self.bitmap_parked.clone(),
             pix_unaligned: self.pix_unaligned.clone(),
             payload_for: self.payload_for,
@@ -845,6 +849,7 @@ impl Hq3Engine {
         self.eram_write_ge0 = s.eram_write_ge0;
         self.eram_read_ge0 = s.eram_read_ge0;
         self.bitmap_in = s.bitmap_in;
+        self.dma_pixels.clear();
         self.bitmap_parked = s.bitmap_parked;
         self.pix_unaligned = s.pix_unaligned;
         self.payload_for = s.payload_for;
@@ -868,6 +873,7 @@ impl Hq3Engine {
     /// follows through the FIFO as raw words (see `push`).
     pub fn begin_context_switch(&mut self, sink: &mut dyn Hq3Sink) {
         self.gl.end_raster(sink);
+        self.fold_dma_pixels();
         if let Some(slot) = self.slot {
             self.bitmap_parked.retain(|(s, _)| *s != slot);
             if !self.bitmap_in.is_empty() {
@@ -919,6 +925,7 @@ impl Hq3Engine {
     /// recycles slots, so a fresh context finds a dead one's state there).
     fn load_context(&mut self, slot: u32, first: bool, sink: &mut dyn Hq3Sink) {
         self.slot = Some(slot);
+        self.dma_pixels.clear();
         self.bitmap_in = match self.bitmap_parked.iter().position(|(s, _)| *s == slot) {
             Some(i) if !first => self.bitmap_parked.remove(i).1,
             _ => Vec::new(),
@@ -1067,6 +1074,7 @@ impl Hq3Engine {
                 } else if let Some(buf) = self.eram_in.as_mut() {
                     buf.extend_from_slice(&words);
                 } else if self.gl.wants_bitmap_rows() {
+                    self.fold_dma_pixels();
                     self.bitmap_in.extend_from_slice(&words);
                 }
                 words.truncate(CFIFO_KEEP);
@@ -1083,6 +1091,7 @@ impl Hq3Engine {
             } else if let Some(buf) = self.eram_in.as_mut() {
                 buf.push(w);
             } else if self.gl.wants_bitmap_rows() {
+                self.fold_dma_pixels();
                 self.bitmap_in.push(w);
             }
         }
@@ -1388,10 +1397,23 @@ impl Hq3Engine {
             self.eram_in = Some(buf);
             return;
         }
+        if super::gl::fast_paths() && self.bitmap_in.is_empty() && self.gl.wants_draw_pixel_bytes() {
+            // A glDrawPixels by host DMA: the rows stay the bytes they were read as.
+            super::gl::note(super::gl::Path::DmaBytes);
+            let mut buf = std::mem::take(&mut self.dma_pixels);
+            self.dma(word, DmaPeer::PixelBytes(&mut buf), sink);
+            if buf.len() >= self.gl.pixel_words_needed() * 4 {
+                self.gl.draw_pixels_bytes(&buf, &self.lut.0[..], sink);
+                buf.clear();
+            }
+            self.dma_pixels = buf;
+            return;
+        }
         if self.gl.wants_bitmap_rows() {
             // token_08d whose rows come by host DMA (snoop's zoomed
             // image, distort's textures) rather than as FIFO pixel data;
             // possibly in several DMAs.
+            self.fold_dma_pixels();
             let mut buf = std::mem::take(&mut self.bitmap_in);
             self.dma(word, DmaPeer::EramIn(&mut buf), sink);
             if buf.len() >= self.gl.pixel_words_needed() {
@@ -1720,11 +1742,29 @@ impl Hq3Engine {
                             buf.push(u32::from_be_bytes(last));
                         }
                     }
+                    DmaPeer::PixelBytes(buf) => {
+                        buf.extend_from_slice(&bytes);
+                        buf.resize(buf.len().next_multiple_of(4), 0);
+                    }
                     _ => sink.dma_write_line(i, &bytes),
                 }
             }
         }
     }
+
+    /// Moves glDrawPixels rows read by DMA into `bitmap_in`'s words, for the paths that only take words.
+    fn fold_dma_pixels(&mut self) {
+        if self.dma_pixels.is_empty() {
+            return;
+        }
+        let bytes = std::mem::take(&mut self.dma_pixels);
+        self.bitmap_in.extend(be_words(&bytes));
+    }
+}
+
+/// Whole big-endian words of `bytes` (each DMA line of `dma_pixels` is padded to a word).
+fn be_words(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
+    bytes.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
 }
 
 /// The formatter's work on DMA'd pixel bytes (mode register 0xC00, see
@@ -1774,6 +1814,7 @@ pub(super) fn format_pixels(mode: u32, bytes: &mut [u8]) {
 enum DmaPeer<'a> {
     Raster,
     EramIn(&'a mut Vec<u32>),
+    PixelBytes(&'a mut Vec<u8>),
     EramOut(&'a [u32], usize),
 }
 
@@ -1782,6 +1823,7 @@ impl DmaPeer<'_> {
         match self {
             DmaPeer::Raster => "raster",
             DmaPeer::EramIn(_) => "ERAM write",
+            DmaPeer::PixelBytes(_) => "pixel write",
             DmaPeer::EramOut(..) => "ERAM read",
         }
     }
