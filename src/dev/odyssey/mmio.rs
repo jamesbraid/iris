@@ -336,6 +336,7 @@ pub(super) struct BoardLocks {
     pub fifo: Arc<CommandFifo>,
     pub raster: Arc<RasterQueue>,
     pub refusals: Arc<RefusalStats>,
+    pub dma_stats: Arc<super::dma::DmaStats>,
     /// What the display thread reads of the board.
     pub shared: Arc<DisplayShared>,
     /// The display FIFO, which a processor reaches without the board.
@@ -508,6 +509,7 @@ impl BoardLocks {
     pub fn new(s: Box<Board>) -> Self {
         let (front, fifo, raster, shared, trace) = (s.front.clone(), s.fifo.clone(), s.raster.clone(), s.display.clone(), s.trace.clone());
         let display_fifo = s.display_fifo.clone();
+        let dma_stats = s.dma_stats.clone();
         BoardLocks {
             board: Arc::new(BoardCell::new(s)),
             submit: Arc::new(crate::locks::SpinLock::new(())),
@@ -515,6 +517,7 @@ impl BoardLocks {
             fifo,
             raster,
             refusals: Arc::new(RefusalStats::new()),
+            dma_stats,
             shared,
             display_fifo,
             rec: RecSlot::new(None),

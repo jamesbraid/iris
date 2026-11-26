@@ -2,6 +2,8 @@
 //!
 //! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::field::Field;
 use super::view::{Kind, Rows, View, MAX_DIM};
 use super::vram::{Format, Surface, ADDR_MASK, PITCH_MASK};
@@ -127,6 +129,147 @@ impl Board {
     }
 }
 
+/// What the guest's DMA descriptors did, for a shell to read while it runs. Counted a descriptor at a
+/// time, never a pixel at a time. One rule: a descriptor counts in `seen` when it starts and in a cell
+/// only once it completed, so `seen` minus the cells and `declined` is what failed (a bus error, a
+/// header that disagrees with itself); a live read never shows more finished than started.
+#[derive(Default)]
+pub struct DmaStats {
+    seen: AtomicU64,
+    /// Descriptors the board does not model: a readback opcode, a sentinel it does not take, no
+    /// destination, a draw-sentinel form or a pixel size it does not decode.
+    declined: AtomicU64,
+    /// Completed descriptors by destination and source bytes a pixel.
+    cells: [[DmaCell; DMA_SIZES]; DMA_KINDS],
+    /// Screen descriptors that did not go wholly by row stores, by the first reason that applies.
+    slow: [AtomicU64; DMA_SLOWS],
+}
+
+#[derive(Default)]
+struct DmaCell {
+    descriptors: AtomicU64,
+    pixels: AtomicU64,
+    fast_descriptors: AtomicU64,
+    fast_pixels: AtomicU64,
+}
+
+pub const DMA_KINDS: usize = 4;
+/// Source bytes a pixel, 0 to 16; 0 for a descriptor that decoded none.
+pub const DMA_SIZES: usize = 17;
+pub const DMA_SLOWS: usize = 5;
+
+/// Where a descriptor's pixels go.
+#[derive(Clone, Copy)]
+pub(super) enum DmaKind {
+    Screen,
+    Memory,
+    /// The draw sentinel's upload.
+    Sentinel,
+    ToHost,
+}
+
+/// Why a screen descriptor's pixels did not all go by row stores.
+#[derive(Clone, Copy)]
+pub(super) enum DmaSlow {
+    Gpu,
+    /// Not 4-byte pixels.
+    Size,
+    /// A scale or bias other than one and zero.
+    Scale,
+    /// A source code outside the RGBA family.
+    Code,
+    /// Some row left the view, or the field is coded or not RGBA8.
+    Rows,
+}
+
+const DMA_KIND_NAMES: [&str; DMA_KINDS] = ["screen", "memory", "sentinel", "to-host"];
+const DMA_SLOW_NAMES: [&str; DMA_SLOWS] = ["gpu", "size", "scale", "code", "rows"];
+
+/// One counter cell as read: see `DmaStats`.
+#[derive(Clone, Copy, Default)]
+pub struct DmaCounts {
+    pub descriptors: u64,
+    pub pixels: u64,
+    pub fast_descriptors: u64,
+    pub fast_pixels: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct DmaSnapshot {
+    pub seen: u64,
+    pub declined: u64,
+    /// By `DmaKind` (screen, memory, sentinel, to host), then source bytes a pixel.
+    pub cells: [[DmaCounts; DMA_SIZES]; DMA_KINDS],
+    /// By `DmaSlow` (gpu, size, scale, code, rows).
+    pub slow: [u64; DMA_SLOWS],
+}
+
+impl DmaSnapshot {
+    /// The monitor's text: each cell that counted, then the reasons a screen descriptor was not all row stores.
+    pub fn report(&self, w: &mut dyn std::io::Write) -> std::io::Result<()> {
+        writeln!(w, "seen {} declined {}", self.seen, self.declined)?;
+        for (kind, row) in self.cells.iter().enumerate() {
+            for (bytes, c) in row.iter().enumerate().filter(|(_, c)| c.descriptors != 0) {
+                writeln!(w, "{} {bytes} bytes: {} descriptors, {} pixels, {} by rows ({} pixels)", DMA_KIND_NAMES[kind], c.descriptors, c.pixels, c.fast_descriptors, c.fast_pixels)?;
+            }
+        }
+        for (name, n) in DMA_SLOW_NAMES.iter().zip(self.slow) {
+            writeln!(w, "screen not by rows, {name}: {n}")?;
+        }
+        Ok(())
+    }
+}
+
+impl DmaStats {
+    fn seen(&self) {
+        self.seen.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn declined(&self) {
+        self.declined.fetch_add(1, Ordering::Release);
+    }
+
+    /// A completed descriptor: `pixels` of the rows it moved (clipped ones included), `fast` of them by row
+    /// stores. The Release add pairs with the Acquire loads in `snapshot`.
+    fn note(&self, kind: DmaKind, bytes: u32, pixels: u64, fast: u64, slow: Option<DmaSlow>) {
+        let c = &self.cells[kind as usize][(bytes as usize).min(DMA_SIZES - 1)];
+        c.pixels.fetch_add(pixels, Ordering::Relaxed);
+        if matches!(kind, DmaKind::Screen) {
+            match slow {
+                None => {
+                    c.fast_descriptors.fetch_add(1, Ordering::Relaxed);
+                }
+                Some(why) => {
+                    self.slow[why as usize].fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            c.fast_pixels.fetch_add(fast, Ordering::Relaxed);
+        }
+        c.descriptors.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn snapshot(&self) -> DmaSnapshot {
+        let mut out = DmaSnapshot { seen: 0, declined: 0, cells: [[DmaCounts::default(); DMA_SIZES]; DMA_KINDS], slow: [0; DMA_SLOWS] };
+        for (row, from) in out.cells.iter_mut().zip(&self.cells) {
+            for (o, c) in row.iter_mut().zip(from) {
+                *o = DmaCounts {
+                    descriptors: c.descriptors.load(Ordering::Acquire),
+                    pixels: c.pixels.load(Ordering::Relaxed),
+                    fast_descriptors: c.fast_descriptors.load(Ordering::Relaxed),
+                    fast_pixels: c.fast_pixels.load(Ordering::Relaxed),
+                };
+            }
+        }
+        for (o, c) in out.slow.iter_mut().zip(&self.slow) {
+            *o = c.load(Ordering::Relaxed);
+        }
+        out.declined = self.declined.load(Ordering::Acquire);
+        // Last, so it is never below what the loads above saw finish.
+        out.seen = self.seen.load(Ordering::Relaxed);
+        out
+    }
+}
+
 /// Bytes per pixel, indexed by word 7's bits 18:16.
 pub(super) static DMA_BPP: [u8; (dma::BPP_MASK + 1) as usize] = [2, 4, 8, 16, 12, 1, 6, 3];
 
@@ -243,17 +386,19 @@ impl Board {
         // A read at the screen's own address (the X server's GetImage) holds its colour the same
         // way: by the display mode of the window id under the pixel.
         let screen_read = !drawable && read && addr == self.pbj(super::frame::pbj::PIXEL_BASE);
+        let index_window = screen_read && self.screen_index_window(origin);
         let codec = |at: u8| {
             let named = if let Some(field) = one_or_two {
                 super::field::Codec::Texel { bytes: 2, field }
             } else {
                 super::copy::source_codec(bytes, fmt & 0xff)
             };
-            if (drawable || screen_read) && read {
+            if drawable && read {
                 return self.drawable_codec(origin.0, origin.1, at).filter(|c| super::copy::codec_bytes(*c) == bytes).unwrap_or(named);
             }
-            match [layout.front, layout.back].into_iter().find(|f| selected && f.at == at && (super::copy::codec_bytes(f.codec) == bytes || !fits)) {
+            match [layout.front, layout.back].into_iter().find(|f| selected && !index_window && f.at == at && (super::copy::codec_bytes(f.codec) == bytes || !fits)) {
                 Some(f) => f.codec,
+                None if screen_read => self.drawable_codec(origin.0, origin.1, at).filter(|c| super::copy::codec_bytes(*c) == bytes).unwrap_or(named),
                 None => named,
             }
         };
@@ -263,6 +408,14 @@ impl Board {
             Rows::new(mem, View::colour(&surface, Field { at, codec: codec(at) }, MAX_DIM))
         };
         ([field((fmt >> 20) & 0xf), field((fmt >> 24) & 0xf)], drawable)
+    }
+
+    /// Whether the window under `origin` shows colour indices: a pixel mode left selected on the screen does not
+    /// pack its pixels.
+    fn screen_index_window(&self, origin: (i32, i32)) -> bool {
+        let did = super::pipe::backend::DestMem::of(self.vram_ptr(), &self.dest_views()).did.load1(origin.0, origin.1).unwrap_or(0);
+        let id = (did as u32 >> super::consts::ODSY_DID_MAIN_SHIFT) & (super::consts::dispmode::COUNT - 1);
+        self.regs().display_group(id) < ODSY_GAMMA_GROUP
     }
 
     /// The source format of a DMA: word 7's low byte, the same code as an image
@@ -394,6 +547,7 @@ impl Board {
         let known = pixel_bytes(hdr[dma::HDR_CONTROL] & image::CODE_MASK) == bpp || texel12 || lum_alpha || raw;
         let form = if obj.is_some() && !known { write_form(hdr[dma::HDR_CONTROL] & write::CODE_MASK).filter(|f| f.bytes == bpp) } else { None };
         if bpp != 4 && bpp != 3 && bpp != 1 && !texel12 && !lum_alpha && !raw && !ci16 && form.is_none() {
+            self.dma_stats.declined();
             if !self.diag.dma_bpp_reported {
                 self.diag.dma_bpp_reported = true;
                 crate::dlog!(
@@ -436,6 +590,8 @@ impl Board {
         let mut row = vec![0u8; rowbytes as usize];
         let mut i: usize = 0;
         let mut left: u32 = if n > 0 { e[0].len } else { 0 };
+        let (mut rows_done, mut fast_rows) = (0u64, 0u64);
+        let mut complete = false;
         'done: {
             for r in 0..h {
                 let mut got: u32 = 0;
@@ -463,6 +619,7 @@ impl Board {
                 if left != 0 {
                     pos += skip as u64;
                 }
+                rows_done += 1;
                 if let Some(o) = order {
                     let v = row[..(w * 4) as usize].chunks_exact(4).map(|p| u32::from_be_bytes(p.try_into().unwrap()));
                     let (ry, rx) = (y.wrapping_add(r) as i32, x as i32);
@@ -472,6 +629,7 @@ impl Board {
                         ByteOrder::Abgr => to.store_run(ry, rx, v.map(|v| v.swap_bytes() | 0xff)),
                     };
                     if stored {
+                        fast_rows += 1;
                         continue;
                     }
                 }
@@ -501,6 +659,24 @@ impl Board {
                     self.dma_put(&to, ox as i64, oy as i64, px, code);
                 }
             }
+            complete = true;
+        }
+        let slow = if obj.is_some() {
+            None
+        } else if order.is_some() {
+            (fast_rows < rows_done).then_some(DmaSlow::Rows)
+        } else if self.gpu_unit() {
+            Some(DmaSlow::Gpu)
+        } else if bpp != 4 {
+            Some(DmaSlow::Size)
+        } else if !self.scale_bias_is_identity() {
+            Some(DmaSlow::Scale)
+        } else {
+            Some(DmaSlow::Code)
+        };
+        if complete {
+            let kind = if obj.is_some() { DmaKind::Memory } else { DmaKind::Screen };
+            self.dma_stats.note(kind, bpp, rows_done * w as u64, fast_rows * w as u64, slow);
         }
         if direct {
             let (x0, y0) = (x as i32, y as i32);
@@ -640,6 +816,7 @@ impl Board {
         let rows: i64 = (self.gl_clip_box[1] & clip::BOX_FIELD_MASK) as i64 + 1;
 
         if psize == 0 {
+            self.dma_stats.declined();
             if self.dma_report(dma::REPORT_UPLOAD_SENTINEL) {
                 crate::dlog!(
                     LogModule::Odyssey,
@@ -720,6 +897,7 @@ impl Board {
                 self.paint_pixel(px, py, rgba);
             }
         }
+        self.dma_stats.note(DmaKind::Sentinel, psize, w as u64 * h as u64, 0, None);
     }
 
     /// True the first time reason (dma::REPORT_*) comes up: report it then.
@@ -1012,7 +1190,14 @@ impl Board {
         src.depth = depth_at(Kind::Z24, 0);
         src.stencil = depth_at(Kind::Byte, 3);
         src.drawable = drawable;
-        src.screen = !drawable && (base & ADDR_MASK) == self.pbj(super::frame::pbj::PIXEL_BASE);
+        // A screen read is decoded by each pixel's display mode, unless a pixel mode selected on the
+        // surface already names the field's packing.
+        let (at, bytes) = (2 * ((fmt >> 20) & 0xf) as u8, super::copy::field_bytes(fmt >> 13));
+        let fits = (bytes as u32) <= 1u32 << (((fmt >> 16) & 0xf) + 1);
+        let mode = super::field::Layout::of(Format::decode(self.pixel_mode[2]));
+        let origin = ((hdr[dma::HDR_ORIGIN] & 0xffff) as i32, (hdr[dma::HDR_ORIGIN] >> 16) as i32);
+        let by_mode = (base & ADDR_MASK) == self.pixel_mode[0] & ADDR_MASK && !self.screen_index_window(origin) && [mode.front, mode.back].iter().any(|f| f.at == at && (super::copy::codec_bytes(f.codec) == bytes || !fits));
+        src.screen = !drawable && !by_mode && (base & ADDR_MASK) == self.pbj(super::frame::pbj::PIXEL_BASE);
         src.front = fmt & dma::FMT_FRONT != 0;
         src.bytes = super::copy::field_bytes(fmt >> 13);
         src.named = Some(super::copy::source_codec(src.bytes, fmt & 0xff));
@@ -1327,6 +1512,7 @@ impl Board {
                 }
             }
             if self.dma_read_write(bus, &e[..n], rowbytes, h, skip, &mut payload) {
+                self.dma_stats.note(DmaKind::ToHost, bpp, w as u64 * h as u64, 0, None);
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA read: seq {} source {:#x} at {},{} {}x{} wrote {} bytes", seq, hdr[dma::HDR_DEST], src.x, src.y, w, h, total);
             }
             return;
@@ -1338,6 +1524,7 @@ impl Board {
         if !self.dma_read_write(bus, &e[..n], rowbytes, h, skip, &mut payload) {
             return;
         }
+        self.dma_stats.note(DmaKind::ToHost, bpp, w as u64 * h as u64, 0, None);
         crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA read: seq {} source {:#x} at {},{} {}x{} wrote {} bytes", seq, hdr[dma::HDR_DEST], src.x, src.y, w, h, total);
     }
 
@@ -1353,6 +1540,7 @@ impl Board {
         let table = dma_table_address(self.cmd.operand[0], self.cmd.operand[1]);
         crate::pf_scope!(crate::perfetto::events::ODSY_DMA, table);
         self.dma_seq += 1;
+        self.dma_stats.seen();
         let seq = self.dma_seq;
         let bus = DmaBus {
             mem: self.guest.clone(),
@@ -1380,6 +1568,7 @@ impl Board {
             self.trace_dma(seq, what, table, &hdr);
         }
         if readback {
+            self.dma_stats.declined();
             if !self.diag.dma_readback_reported {
                 self.diag.dma_readback_reported = true;
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA opcode 0xe03 (buffer {:#x}) is not modeled", hdr[dma::HDR_DEST]);
@@ -1389,15 +1578,19 @@ impl Board {
         } else if hdr[dma::HDR_DEST] & dma::SENTINEL != 0 {
             if hdr[dma::HDR_DEST] == dma::SENTINEL_DRAW {
                 self.dma_draw_sentinel_short(&bus, table, seq, &hdr);
-            } else if self.dma_report(dma::REPORT_UPLOAD_SENTINEL) {
-                crate::dlog!(
-                    LogModule::Odyssey,
-                    "sgi-odyssey: DMA upload to sentinel {:#x} with word 4 {:#x} is not modeled",
-                    hdr[dma::HDR_DEST],
-                    hdr[dma::HDR_FORMAT]
-                );
+            } else {
+                self.dma_stats.declined();
+                if self.dma_report(dma::REPORT_UPLOAD_SENTINEL) {
+                    crate::dlog!(
+                        LogModule::Odyssey,
+                        "sgi-odyssey: DMA upload to sentinel {:#x} with word 4 {:#x} is not modeled",
+                        hdr[dma::HDR_DEST],
+                        hdr[dma::HDR_FORMAT]
+                    );
+                }
             }
         } else if hdr[dma::HDR_DEST] == 0 {
+            self.dma_stats.declined();
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA header at {:#x} names no destination buffer", table);
         } else {
             self.dma_to_buffer(&bus, table, seq, &hdr);

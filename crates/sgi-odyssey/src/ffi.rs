@@ -10,6 +10,7 @@ use sgi_engine::inject::Point;
 use sgi_engine::{BoardEngine, GpuLoss, Rect};
 
 use crate::dev::odyssey::board::Params;
+use crate::dev::odyssey::dma::DmaCounts;
 use crate::dev::odyssey::engine::{memory_bytes_for, Config, Mode, VproEngine};
 use crate::wgpu::{Gpu, GpuOptions};
 
@@ -238,6 +239,58 @@ pub unsafe extern "C" fn sgi_odyssey_gpu_counters(h: *mut IrisEngine, out: *mut 
                 }
                 None => IRIS_ENGINE_ERROR,
             }
+        })
+    }
+}
+
+/// One cell of `IrisVproDmaStats`: the descriptors the board completed and their pixels (clipped ones
+/// included), and the part of them that went by row stores (screen destinations only).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct IrisVproDmaCell {
+    pub descriptors: u64,
+    pub pixels: u64,
+    pub fast_descriptors: u64,
+    pub fast_pixels: u64,
+}
+
+/// What the guest's DMA descriptors did since the engine was built. `seen` counts descriptors when they
+/// start and the cells when they complete, so `seen` less the cells and `declined` is what failed (a bus
+/// error, a header that disagrees with itself); a read never shows `seen` below the rest. `declined`
+/// counts descriptors the board does not model. `cells[kind][bytes]`: kind 0 screen, 1 memory object,
+/// 2 draw-sentinel upload, 3 to host; `bytes` the source pixel's size. `slow[why]` counts the screen
+/// descriptors that did not go wholly by row stores: 0 GPU unit, 1 not 4-byte pixels, 2 scale or bias,
+/// 3 source code outside RGBA, 4 a row clipped or a field the row store refuses.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IrisVproDmaStats {
+    pub seen: u64,
+    pub declined: u64,
+    pub slow: [u64; 5],
+    pub cells: [[IrisVproDmaCell; 17]; 4],
+}
+
+/// Fill `*out` with the DMA counters. OK; ERROR when `out` is NULL. Reads atomics and does not wait for the board.
+///
+/// # Safety
+/// `h` is a live VPro handle and `out` points to an `IrisVproDmaStats`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_odyssey_dma_stats(h: *mut IrisEngine, out: *mut IrisVproDmaStats) -> c_int {
+    unsafe {
+        call::<VproEngine, _>(h, Point::Flags, IRIS_ENGINE_FAULT, |e| {
+            if out.is_null() {
+                return IRIS_ENGINE_ERROR;
+            }
+            let s = e.dma_stats();
+            let mut cells = [[IrisVproDmaCell::default(); 17]; 4];
+            for (row, from) in cells.iter_mut().zip(&s.cells) {
+                for (o, c) in row.iter_mut().zip(from) {
+                    let DmaCounts { descriptors, pixels, fast_descriptors, fast_pixels } = *c;
+                    *o = IrisVproDmaCell { descriptors, pixels, fast_descriptors, fast_pixels };
+                }
+            }
+            *out = IrisVproDmaStats { seen: s.seen, declined: s.declined, slow: s.slow, cells };
+            IRIS_ENGINE_OK
         })
     }
 }

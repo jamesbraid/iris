@@ -404,6 +404,8 @@ pub(super) struct Board {
     /// Tests: take the per-pixel DMA put, to compare it with the row path.
     #[cfg(test)]
     pub slow_dma: bool,
+    /// What the DMA descriptors did, read by the shell (`VproEngine::dma_stats`).
+    pub dma_stats: std::sync::Arc<super::dma::DmaStats>,
 
     // Buffer selection.
     pub draw_mask: u32,
@@ -614,6 +616,7 @@ impl Default for Board {
             },
             #[cfg(test)]
             slow_dma: false,
+            dma_stats: Default::default(),
             draw_mask: 0,
             draw_word: 0,
             read_word: 0,
