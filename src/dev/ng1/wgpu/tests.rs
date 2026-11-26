@@ -35,7 +35,7 @@ fn gpu() -> Option<Arc<Gpu>> {
 
 /// Random planes, window ids, XMAP modes, CMAP, RAMDAC, cursor and
 /// scroll, composed by `SwCompositor` and by the kernel: every pixel the
-/// same (the software word is 0xAABBGGRR, the kernel's 0x00RRGGBB).
+/// same (both words are 0xAABBGGRR).
 #[test]
 fn the_gpu_compose_matches_the_software_compositor() {
     let Some(gpu) = gpu() else { return };
@@ -111,11 +111,11 @@ fn the_gpu_compose_matches_the_software_compositor() {
         for y in 0..height {
             for x in 0..width {
                 let s = want[y * stride + x];
-                let w = ((s & 0xff) << 16) | (s & 0xff00) | ((s >> 16) & 0xff);
+                let w = s;
                 let g = out[y * width + x];
                 if g != w {
                     if bad < 4 {
-                        eprintln!("round {round} ({x}, {y}): gpu {g:06x} software {w:06x}, mode {:#x}", xmap[(did[y * stride + x] & 31) as usize]);
+                        eprintln!("round {round} ({x}, {y}): gpu {g:08x} software {w:08x}, mode {:#x}", xmap[(did[y * stride + x] & 31) as usize]);
                     }
                     bad += 1;
                 }

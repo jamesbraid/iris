@@ -109,11 +109,13 @@ impl Display {
             super::reader::Composed::No => return Composed::Unchanged,
             super::reader::Composed::InTarget => {}
             super::reader::Composed::InFrame => {
-                // 0x00RRGGBB to opaque 0xAABBGGRR: a byte swap with alpha set.
+                // The GPU scan-out's readback is already the screen's order; a CPU frame
+                // in 0x00RRGGBB is a byte swap with alpha set.
+                let abgr = reader.frame_abgr;
                 for (y, src) in reader.frame[..width * height].chunks_exact(width).enumerate().take(h) {
                     let at = y * FB_STRIDE;
-                    for (d, &rgb) in screen.fb_rgb[at..at + w].iter_mut().zip(&src[..w]) {
-                        *d = super::frame::to_screen(rgb);
+                    for (d, &px) in screen.fb_rgb[at..at + w].iter_mut().zip(&src[..w]) {
+                        *d = if abgr { px } else { super::frame::to_screen(px) };
                     }
                 }
             }

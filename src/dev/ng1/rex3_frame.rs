@@ -557,7 +557,7 @@ impl ResidentDirectDisplay {
             for (dst, &src) in screen.fb_rgb[row..row + width]
                 .iter_mut().zip(&self.capture[y * width..(y + 1) * width])
             {
-                *dst = 0xff00_0000 | src.swap_bytes() >> 8;
+                *dst = src;
             }
         }
         Ok((Composed::Frame, stamp))

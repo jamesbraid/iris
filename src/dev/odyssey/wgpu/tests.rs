@@ -951,9 +951,11 @@ fn scanout_composes_as_the_cpu_frame() {
         frame.compose(p.cpu.ptr(), &regs, &mut want, w, h);
         let mut got = vec![0u32; w * h];
         scan.run(&frame, &regs, w as u32, h as u32, &mut got).unwrap_or_else(|e| panic!("{e}"));
-        let diffs = want.iter().zip(&got).filter(|(a, b)| a != b).count();
+        // The GPU scan-out hands frames in the screen's order, opaque 0xAABBGGRR.
+        let screen: Vec<u32> = want.iter().map(|&p| super::super::frame::to_screen(p)).collect();
+        let diffs = screen.iter().zip(&got).filter(|(a, b)| a != b).count();
         if diffs != 0 {
-            let (i, (a, b)) = want.iter().zip(&got).enumerate().find(|(_, (a, b))| a != b).unwrap();
+            let (i, (a, b)) = screen.iter().zip(&got).enumerate().find(|(_, (a, b))| a != b).unwrap();
             panic!("round {round}: {diffs} pixels differ, first at ({}, {}): cpu {a:#08x} gpu {b:#08x}", i % w, i / w);
         }
         // The same frame with the maps' ten bits a channel, on both sides; its top eight bits are the
@@ -966,7 +968,7 @@ fn scanout_composes_as_the_cpu_frame() {
         if let Some((i, (a, b))) = want10.iter().zip(&got10).enumerate().find(|(_, (a, b))| a != b) {
             panic!("round {round}: wide pixels differ, first at ({}, {}): cpu {a:#08x} gpu {b:#08x}", i % w, i / w);
         }
-        for (i, (&n, &t)) in want.iter().zip(&got10).enumerate() {
+        for (i, (&n, &t)) in screen.iter().zip(&got10).enumerate() {
             let top = |c: u32| (c >> 2) & 0xff;
             assert_eq!(n, 0xff00_0000 | top(t >> 20) | top(t >> 10) << 8 | top(t) << 16, "round {round}: pixel {i}");
             assert_eq!(t >> 30, 0);

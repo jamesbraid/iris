@@ -842,7 +842,7 @@ impl ScanoutReader {
     /// As `update`, composing on the CPU into `target` (rows of `stride`,
     /// in the order `screen_order` names) instead of `frame`: the display
     /// thread's frames go straight into the screen. The GPU scan-out's
-    /// readback still lands in `frame`, as 0x00RRGGBB.
+    /// readback still lands in `frame`, in the screen's order.
     pub fn update_to(&mut self, target: Option<(&mut [u32], usize)>) -> Composed {
         let shared = self.shared();
         if shared.gpu_fault.lock().is_some() {
@@ -916,7 +916,8 @@ impl ScanoutReader {
                             self.frame.copy_within(y * fw as usize..(y + 1) * fw as usize, y * w);
                         }
                     }
-                    self.frame_abgr = false;
+                    // The shared scan-out driver stores the screen's order.
+                    self.frame_abgr = true;
                     return Composed::InFrame;
                 }
                 Err(e) => {
