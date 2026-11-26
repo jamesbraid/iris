@@ -160,6 +160,9 @@ blanking is in the frame composed right after it.
 On the machine side the retrace is GIO interrupt 2. The header of `gr2disp.rs` says
 the IOC latches the retrace until the host acknowledges it. The register code here does not confirm that.
 
+The command FIFO's count (status bits 12:6) and the FIFO-full level (`Gr2::cmd_fifo_irq`) are modelled;
+iris's machine does not wire the level to GIO interrupt 0. Only the engine crate reports it, in `irq_levels`.
+
 The board reports a plain 60 Hz 1280 x 1024 monitor, chosen to avoid monitor IDs
 with special handling (`MONITOR_ID`).
 

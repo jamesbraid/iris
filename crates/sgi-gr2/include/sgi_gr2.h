@@ -33,7 +33,7 @@ typedef struct IrisGr2Config {
 
 /*
  * Bit 0 of iris_engine_irq_levels (and of Pump.irq_levels) is the HQ2 FIFO level, which the shell wires to the board's
- * GIO interrupt line 0. The engine does not raise it yet: the FIFO depth and the compare that sets it are not known.
+ * GIO interrupt line 0. It is up while the command FIFO's count is at or above the full threshold the guest programmed.
  */
 #define IRIS_GR2_IRQ_FIFO 1       /* 1 << 0 */
 

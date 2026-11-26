@@ -104,10 +104,11 @@ impl Resettable for Gr2 {
 
 impl BusDevice for Gr2 {
     fn read32(&self, addr: u64) -> BusRead32 {
-        if self.fin2_wait.load(Ordering::Relaxed) != 0 {
+        let off = slot_off(addr) & (GR2_SLOT_SIZE - 4);
+        if self.fin2_wait.load(Ordering::Relaxed) != 0 || off == HQREGS + hq2::HQ_VERSION {
             self.set_time(host_clock_ns());
         }
-        let r = self.reg_read(slot_off(addr) & (GR2_SLOT_SIZE - 4));
+        let r = self.reg_read(off);
         crate::pf_level!(self.pf_wait, crate::perfetto::events::GR2_WAIT, r.status == BUS_BUSY);
         r
     }

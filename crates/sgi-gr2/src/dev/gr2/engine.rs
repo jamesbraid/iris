@@ -9,7 +9,8 @@
 //!   shell that records and replays calls sees the answer vary with host speed: record the `Stalled` it
 //!   got (and the time it then advanced to), and replay that, not the rule.
 //! - HQ2_GEDMA is a data port (`push_words`) and a read port (`pull_words`).
-//! - No interrupt is raised yet (`irq_levels` is 0), and the retrace is the shell's: `frame` is told of it.
+//! - `irq_levels` bit 0 is the HQ2 FIFO-full line (`Gr2::cmd_fifo_irq`), which time alone can lower: the pump's
+//!   `next_deadline` says when. The retrace is the shell's: `frame` is told of it.
 //! - `scanout` composes on the CPU and waits a bounded time for queued work (`OBSERVE_WAIT`). Its size and
 //!   `head_timing` come from the VC1 and the monitor code (`display.rs`).
 
@@ -21,6 +22,7 @@ use parking_lot::Mutex;
 use sgi_engine::{BoardEngine, Event, Fault, HeadTiming, HostMem, Idle, Mark, Outbox, Pump, Read, Rect, Refused, StallOn, StateSink, StateSource, Write};
 
 use super::board::{Gr2, Gr2Probe, GR2_BASE, GR2_SLOT_SIZE};
+use super::variant::Gr2Variant;
 use super::display;
 use super::gr2comp;
 use super::re3::{FB_H, FB_W};
@@ -104,6 +106,8 @@ pub struct Gr2Engine<M: HostMem> {
     /// `compose`'s output, stride `OUT_STRIDE`.
     compose_buf: Vec<u32>,
     clock_ns: u64,
+    /// `irq_levels` as the shell was last told, so `Event::Irq` goes out when it changes.
+    irq_seen: u64,
 }
 
 fn new_board(config: &Config, out: &Arc<Outbox>, failure: &Arc<Failure>) -> Result<Arc<Gr2>, String> {
@@ -111,7 +115,8 @@ fn new_board(config: &Config, out: &Arc<Outbox>, failure: &Arc<Failure>) -> Resu
     if !matches!(p.ges, 1 | 2 | 4 | 8) {
         return Err(format!("{} geometry engines: the board has 1, 2, 4 or 8", p.ges));
     }
-    let gr = Gr2::build(p, crate::disp::StatusSource::detached(), None)?;
+    // The variant names the board in iris's snapshots; the engine is built from its probe.
+    let gr = Gr2::build(Gr2Variant::Xz, p, crate::status::MachineStatus::detached(), None)?;
     #[cfg(feature = "gr2-jit")]
     {
         use super::re3_jit::{MODE_ASYNC, MODE_OFF, MODE_SYNC};
@@ -136,7 +141,7 @@ impl<M: HostMem> Gr2Engine<M> {
         let failure = Arc::new(Failure::default());
         let gr = new_board(&config, &out, &failure)?;
         gr.start_engine();
-        Ok(Gr2Engine { gr, config, out, failure, _mem: mem, parked: false, generation: 0, picture: None, progress: Mutex::new((0, Instant::now())), timing: Mutex::new((0, 0)), compose_buf: Vec::new(), clock_ns: 0 })
+        Ok(Gr2Engine { gr, config, out, failure, _mem: mem, parked: false, generation: 0, picture: None, progress: Mutex::new((0, Instant::now())), timing: Mutex::new((0, 0)), compose_buf: Vec::new(), clock_ns: 0, irq_seen: 0 })
     }
 
     /// The board, for tests and for shells that read its registers directly.
@@ -187,6 +192,15 @@ impl<M: HostMem> Gr2Engine<M> {
         if self.gr.take_dirty() {
             self.generation += 1;
             self.out.damage(&[Mark { store: 0, planes: !0, rect: Rect::new(0, 0, FB_W as i32 - 1, FB_H as i32 - 1) }]);
+        }
+    }
+
+    /// Announce a change of the interrupt levels.
+    fn irq_changed(&mut self) {
+        let now = self.irq_levels();
+        if now != self.irq_seen {
+            self.irq_seen = now;
+            self.out.post(Event::Irq);
         }
     }
 
@@ -274,6 +288,7 @@ impl<M: HostMem> BoardEngine for Gr2Engine<M> {
             64 => self.gr.write64_inner(GR2_BASE + off as u64, val),
             _ => self.gr.reg_write_narrow(off & (GR2_SLOT_SIZE - 4), val as u32),
         };
+        self.irq_changed();
         match st {
             BUS_OK => Write::Done,
             BUS_BUSY => Write::Busy,
@@ -290,7 +305,9 @@ impl<M: HostMem> BoardEngine for Gr2Engine<M> {
         if bits != 32 || !(FIFO..FIFO_END).contains(&off) || self.parked || self.faulted() {
             return Write::Busy;
         }
-        match self.gr.reg_write(off & (GR2_SLOT_SIZE - 4), val as u32) {
+        let st = self.gr.reg_write(off & (GR2_SLOT_SIZE - 4), val as u32);
+        self.irq_changed();
+        match st {
             BUS_OK => Write::Done,
             _ => Write::Busy,
         }
@@ -415,8 +432,9 @@ impl<M: HostMem> BoardEngine for Gr2Engine<M> {
         if self.fault_text().is_none() {
             self.sync_dirty();
         }
+        self.irq_changed();
         self.out.rearm();
-        Pump { idle: self.idle_state(), events: self.out.pending(), next_deadline: None, irq_levels: 0 }
+        Pump { idle: self.idle_state(), events: self.out.pending(), next_deadline: self.gr.cmd_fifo_irq_falls_at(), irq_levels: self.irq_levels() }
     }
 
     fn wait_idle(&mut self, now_ns: u64, budget_ns: u64) -> Idle {
@@ -431,7 +449,7 @@ impl<M: HostMem> BoardEngine for Gr2Engine<M> {
     }
 
     fn irq_levels(&self) -> u64 {
-        0
+        crate::ffi::IRIS_GR2_IRQ_FIFO * self.gr.cmd_fifo_irq() as u64
     }
 
     fn drain_events(&mut self, out: &mut Vec<Event>, max: usize) {
@@ -482,6 +500,7 @@ impl<M: HostMem> BoardEngine for Gr2Engine<M> {
         let fresh = new_board(&self.config, &self.out, &self.failure).map_err(Refused::Mismatch)?;
         super::state::load(&fresh, src)?;
         self.gr = fresh;
+        self.irq_seen = self.irq_levels();
         self.picture = None;
         self.generation += 1;
         self.out.post(Event::Irq);
@@ -497,6 +516,7 @@ impl<M: HostMem> BoardEngine for Gr2Engine<M> {
             return Err(Refused::NotQuiesced);
         }
         self.gr = new_board(&self.config, &self.out, &self.failure).map_err(Refused::Mismatch)?;
+        self.irq_seen = self.irq_levels();
         *self.failure.text.lock() = None;
         self.out.clear();
         self.picture = None;
