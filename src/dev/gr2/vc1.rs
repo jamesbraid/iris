@@ -4,6 +4,8 @@
 //! compositor needs is used: the DID tables, cursor glyph, cursor position
 //! and `sysctl`.
 
+use super::re3::FB_W;
+
 pub const VC1_CMD0: u32 = 0x00;
 pub const VC1_FIRST_CONTROL: u32 = 0x04;
 pub const VC1_SRAM: u32 = 0x08;
@@ -202,6 +204,8 @@ impl Vc1 {
     /// table pointer per scanline; a line table is [count, entry * count]
     /// with entry = (x << 5) | did (confirmed against Xsgi's tables:
     /// [3, 0x0003, 0x28c9, 0x7583] = DID 3, DID 9 from x 326, DID 3 from 940).
+    /// Approximation: writers count 4 zero entries after the last real one, so the table ends
+    /// at the first x that does not rise or is past the 1280-pixel line (not the mode's width).
     pub fn line_did_runs(&self, y: usize, runs: &mut [(u16, u8); Self::MAX_DID_RUNS]) -> usize {
         let frame = self.reg16(DID_EP) as usize;
         if frame == 0 {
@@ -210,12 +214,20 @@ impl Vc1 {
         }
         let line = self.sram16(frame + y * 2) as usize;
         let count = (self.sram16(line) as usize).clamp(1, Self::MAX_DID_RUNS);
-        for (k, r) in runs.iter_mut().enumerate().take(count) {
+        let mut n = 0;
+        let mut prev_x = 0;
+        for k in 0..count {
             let e = self.sram16(line + 2 + k * 2);
-            *r = ((e >> 5) & 0x7ff, (e & 0x1f) as u8);
+            let x = (e >> 5) & 0x7ff;
+            if k > 0 && (x <= prev_x || x as usize >= FB_W) {
+                break;
+            }
+            runs[n] = (x, (e & 0x1f) as u8);
+            n += 1;
+            prev_x = x;
         }
         runs[0].0 = 0;
-        count
+        n
     }
 
     /// DID at display pixel (x, y).
