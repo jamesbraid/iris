@@ -697,3 +697,77 @@ fn bench_image_dma() {
     let min = ms.iter().cloned().fold(f64::MAX, f64::min);
     println!("vpro image dma {w}x{h} 4-byte ({per_table} rows a table): ms a frame {ms:.2?} ({:.2} ns a pixel at the min)", min * 1e6 / (w * h) as f64);
 }
+
+/// ms a frame of a `BENCH_W` x `BENCH_H` (720 x 486) image of `BENCH_BYTES` (3) byte pixels DMA'd to the draw sentinel,
+/// `BENCH_ROWS` rows a table, `BENCH_ID` the id test on; `BENCH_FRAMES` a run (0: build only), `BENCH_RUNS` runs.
+#[test]
+#[ignore = "benchmark"]
+fn bench_sentinel_dma() {
+    use crate::dev::odyssey::consts::{ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT};
+    use crate::dev::odyssey::frame::pbj;
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (w, h, runs, frames, bytes) = (env("BENCH_W", 720), env("BENCH_H", 486), env("BENCH_RUNS", 5), env("BENCH_FRAMES", 4), env("BENCH_BYTES", 3));
+    let (mut s, _, ram) = board_with_ram();
+    let pitch = (w as u32).div_ceil(16).max(80);
+    for v in [select(reg::DEST_SELECT), 0x2000, pitch, 0x0040_6d50, 0] {
+        s.mmio_write(ODSY_USER_CMD_FIFO, v as u64, 4);
+    }
+    s.win.clip_kept = 1;
+    s.win.clip_rect[0] = crate::dev::odyssey::clip::ClipRect { x0: 0, y0: 0, x1: w as i32 - 1, y1: h as i32 - 1 };
+    if env("BENCH_ID", 0) != 0 {
+        // The id buffer after the 16-byte-pixel frame; every id is 0 and the test compares all eight bits with 0.
+        let base = 0x2000 + pitch * (h as u32).div_ceil(16) * 256;
+        s.regs().set_pbj(pbj::OVERLAY_BASE, base);
+        s.regs().set_pbj(pbj::STRIDE, pitch);
+        s.win.id_compare = ODSY_ID_COMPARE_ENABLE | 0xff << ODSY_ID_COMPARE_MASK_SHIFT;
+    }
+    let rowbytes = w * bytes;
+    let per_table = env("BENCH_ROWS", (12 * 0xffff / rowbytes).max(1));
+    let base = 0x40_0000u64;
+    let mut px = vec![0u8; rowbytes * h];
+    let mut seed = 0x1234_5678u32;
+    for p in px.iter_mut() {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *p = (seed >> 24) as u8;
+    }
+    ram.put(base, &px);
+    // RGB bytes (format 9, type 2) or RGBA bytes (format 0xb): the library's codes.
+    let (bpp_code, code) = if bytes == 3 { (7, 0x049) } else { (1, 0x04b) };
+    let frame = |s: &mut Board| {
+        let mut y = 0;
+        while y < h {
+            let rows = per_table.min(h - y);
+            let (mut at, mut left) = (base + (y * rowbytes) as u64, rows * rowbytes);
+            let mut entries = Vec::new();
+            while left > 0 {
+                let n = left.min(0xffff);
+                entries.push(pte(at, n as u32));
+                at += n as u64;
+                left -= n;
+            }
+            let header = [dma::SENTINEL_DRAW, (y as u32) << 16, 0x50, (rows as u32) << 16 | w as u32, 0x1000, 0, rowbytes as u32, 1 << 30 | bpp_code << 16 | code];
+            put_table(&ram, TABLE, header, &entries);
+            descriptor(s, TABLE);
+            y += rows;
+        }
+    };
+    if frames > 0 {
+        frame(&mut s);
+        let f = crate::dev::odyssey::vram::Format::decode(0x0040_6d50);
+        let l = crate::dev::odyssey::field::Layout::of(f);
+        let screen = Rows::new(s.vram_ptr(), View::colour(&Surface::new(0x2000, pitch, f.fb_log2), l.field(false), MAX_DIM));
+        s.gpu_sync();
+        assert_ne!(screen.load_word(w as i32 - 1, h as i32 - 1).unwrap_or(0), 0, "the far corner pixel was stored");
+    }
+    let mut ms = Vec::new();
+    for _ in 0..runs {
+        let t = std::time::Instant::now();
+        for _ in 0..frames {
+            frame(&mut s);
+        }
+        s.gpu_sync();
+        ms.push(t.elapsed().as_secs_f64() * 1e3 / frames.max(1) as f64);
+    }
+    let min = ms.iter().cloned().fold(f64::MAX, f64::min);
+    println!("vpro sentinel dma {w}x{h} {bytes}-byte ({per_table} rows a table): ms a frame {ms:.2?} ({:.2} ns a pixel at the min)", min * 1e6 / (w * h) as f64);
+}
