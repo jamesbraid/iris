@@ -1166,6 +1166,12 @@ impl Core {
             START_INPUT_DMA | COPY_LIST_BY_INPUT_DMA_THEN_LIST_DMA | DESCRIBE_DMA_PAGE_POOL | EXECUTE_LIST_BY_LIST_DMA | EXECUTE_LIST_BY_INPUT_DMA | EXECUTE_LIST_BY_LIST_DMA_REPEATED
             | EXECUTE_LIST_BY_INPUT_DMA_REPEATED | COPY_USER_LIST_BY_LIST_DMA | MOVE_LIST_BY_LIST_DMA => self.dma_command(h, be, p.selector, a),
             PUBLISH_RETRACE_SEQUENCE_NUMBER => {
+                // Without the bit the firmware reports a violation and spins; the report is unknown, so the pipe
+                // stops (approximated). The kernel sends 0x30000 at the token and 0x10000 at the payload.
+                if !self.kernel_privileged && !self.kernel_input {
+                    self.stop(format!("kona: retrace sequence number token {:#x} without the privileged bit; the pipe stops", p.selector));
+                    return;
+                }
                 self.job(h, be, Job::Retrace { tag: a[0] });
             }
             DISPLAY_GENERATOR_REQUEST_CARRIER => {

@@ -1020,7 +1020,9 @@ impl<M: HostMem> KonaEngine<M> {
                     return;
                 }
             }
-            if self.pending() == 0 {
+            // Every fresh stage needs a pump, not only one staged on an idle stream: stores staged while the worker is
+            // busy would wait for the next read, with nothing to run them.
+            if self.stage.is_empty() {
                 self.sh.events.out.wake();
             }
             self.stage.push(Stored { off, val, src: self.source, counted });

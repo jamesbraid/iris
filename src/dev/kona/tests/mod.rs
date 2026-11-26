@@ -49,7 +49,7 @@ impl Recorder {
                 };
                 jobs.lock().push(line);
                 match job {
-                    Job::Retrace { tag } => port.retrace_done(*tag),
+                    Job::Retrace { tag } => port.set_retrace_tag(*tag),
                     Job::Command { selector, handled: false, .. } => {
                         if let Some((_, token, words)) = reasons.iter().find(|(s, ..)| s == selector) {
                             port.post_reason_words(*token, words);

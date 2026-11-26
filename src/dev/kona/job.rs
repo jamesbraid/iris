@@ -7,7 +7,7 @@
 //!
 //! A back end runs on the host interface processor's thread, in stream order.
 //! It reaches the front end only through the `BackPort` it is handed: the
-//! return and reason pages, the mailbox, the retrace completion and the
+//! return and reason pages, the mailbox, the retrace tag and the
 //! pipe's address space for its own DMA.
 
 use super::pipe::Core;
@@ -59,7 +59,7 @@ pub enum Job<'a> {
     /// A video command whose checksum verified: the command number and its
     /// data words.
     Video { command: u32, data: &'a [u32] },
-    /// A retrace request: complete it with `BackPort::retrace_done`.
+    /// A retrace sequence number token: perform it with `BackPort::set_retrace_tag`.
     Retrace { tag: u32 },
     /// A context change.
     Context(ContextEvent),
@@ -123,10 +123,13 @@ impl BackPort<'_> {
         self.core.reason_page.is_some()
     }
 
-    /// A retrace request was honoured: the tag register reads `tag` and the
-    /// video interrupt rises.
-    pub fn retrace_done(&mut self, tag: u32) {
-        self.host.with_front(|f| ((), f.retrace(tag)));
+    /// A retrace sequence number token was performed: the tag register reads
+    /// `tag`. No interrupt goes with it.
+    pub fn set_retrace_tag(&mut self, tag: u32) {
+        self.host.with_front(|f| {
+            f.set_retrace_tag(tag);
+            ((), None)
+        });
     }
 
     /// A buffer swap was consumed (the display-mode swap command).

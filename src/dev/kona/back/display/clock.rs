@@ -1,19 +1,13 @@
 //! The display's clock: one frame at a time, at the video format's rate.
 //!
-//! At each frame boundary the display completes the retrace requests that are
-//! waiting and raises the video interrupt. The interrupt rises once a frame
-//! even when no request is pending. The back end drains the raster jobs before
-//! it queues a retrace request, so a request is satisfied when it is made (no
-//! tickets: approximated), and the display completes it at the next boundary
-//! (the sequence register changes at the retrace; when a real pipe changes it
-//! is unknown, approximated here as the retrace). In a frame the requests are
-//! completed first and the frame composed after, so a swap applied before a
-//! request shows in the frame that completes it.
+//! At each frame boundary the display raises the video interrupt, once a frame
+//! whether or not anything was drawn. The retrace sequence register is not
+//! the clock's: the pipe sets it when it performs the token.
 //!
 //! The frames come from the machine's display refresh thread
 //! (`crate::display`), which runs whether or not the pipe works, so they never
 //! mark activity for the driver's watchdog. The head holds only the handle the
-//! front end gave it and what it must complete, nothing of the pipe's state.
+//! front end gave it, nothing of the pipe's state.
 //!
 //! Grades. The frame rate is 60 Hz until a video format's refresh rate can be
 //! parsed from its load (approximated).
@@ -31,12 +25,8 @@ pub const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
 /// What the board and its display thread share.
 #[derive(Default)]
 pub struct Clock {
-    /// Retrace requests waiting for a frame boundary: the epoch each was made in
-    /// and its tag.
-    pending: Mutex<Vec<(u64, u32)>>,
-    /// Frames the display has run, and requests it has completed.
+    /// Frames the display has run.
     frames: AtomicU64,
-    completed: AtomicU64,
     /// The display is to hold still (a snapshot), and the lock every frame
     /// callback runs under, so holding still can wait one out.
     paused: AtomicBool,
@@ -44,35 +34,13 @@ pub struct Clock {
 }
 
 impl Clock {
-    /// A retrace request made in `epoch`, to complete at the next frame.
-    pub fn request(&self, epoch: u64, tag: u32) {
-        self.pending.lock().push((epoch, tag));
-    }
-
-    /// Forget the waiting requests: a reset cancels them.
-    pub fn cancel(&self) {
-        self.pending.lock().clear();
-    }
-
     pub fn frames(&self) -> u64 {
         self.frames.load(Relaxed)
     }
 
-    pub fn completed(&self) -> u64 {
-        self.completed.load(Relaxed)
-    }
-
-    /// One frame boundary: complete what waits, then raise the video
-    /// interrupt if nothing did (completing a request raises it).
+    /// One frame boundary: raise the video interrupt.
     pub fn frame(&self, handle: &DisplayHandle) {
-        let waiting = std::mem::take(&mut *self.pending.lock());
-        if waiting.is_empty() {
-            handle.video_frame(handle.epoch());
-        }
-        for (epoch, tag) in &waiting {
-            handle.retrace_done(*epoch, *tag);
-        }
-        self.completed.fetch_add(waiting.len() as u64, Relaxed);
+        handle.video_frame(handle.epoch());
         self.frames.fetch_add(1, Release);
     }
 
@@ -199,55 +167,30 @@ mod tests {
         kona.bus_read(off, 4).1 as u32
     }
 
-    /// A frame completes a waiting request (the tag register changes, one video
-    /// interrupt goes out) and, with nothing waiting, still raises the video
-    /// interrupt once the driver has acknowledged the last.
+    /// A frame raises one video interrupt until the driver acknowledges it, and
+    /// leaves the tag register alone.
     #[test]
-    fn a_frame_completes_requests_and_raises_video() {
+    fn a_frame_raises_video_and_leaves_the_tag() {
         let (kona, host, h) = board();
         let clock = Clock::default();
-        clock.request(h.epoch(), 0x42);
         clock.frame(&h);
-        assert_eq!(read(&kona, RETRACE_TAG), 0x42);
         assert_eq!(host.sent().len(), 1);
-        assert_eq!((clock.frames(), clock.completed()), (1, 1));
+        assert_eq!(clock.frames(), 1);
         clock.frame(&h);
         assert_eq!(host.sent().len(), 1, "not again before the acknowledge");
         kona.bus_write(INT_CAUSE, 4, 8);
         clock.frame(&h);
         assert_eq!(host.sent().len(), 2);
-        assert_eq!(read(&kona, RETRACE_TAG), 0x42, "a frame with no request leaves the tag");
+        assert_eq!(read(&kona, RETRACE_TAG), 0, "a frame never changes the tag");
         kona.stop();
     }
 
-    /// A reset cancels the waiting requests, and one made in an earlier epoch is
-    /// dropped by the front end.
+    /// The thread runs frames by itself; stopping joins it.
     #[test]
-    fn a_reset_cancels_waiting_requests() {
-        let (kona, _host, h) = board();
-        let clock = Clock::default();
-        clock.request(h.epoch(), 0x7);
-        clock.cancel();
-        clock.frame(&h);
-        assert_eq!(read(&kona, RETRACE_TAG), 0);
-        let old = h.epoch();
-        kona.stop();
-        crate::traits::Resettable::power_on(&*kona);
-        clock.request(old, 0x9);
-        clock.frame(&h);
-        assert_eq!(read(&kona, RETRACE_TAG), 0, "a stale epoch is dropped");
-    }
-
-    /// The thread runs frames by itself and completes a request; stopping joins it.
-    #[test]
-    fn the_thread_completes_a_request_and_joins() {
+    fn the_thread_runs_frames_and_joins() {
         let (kona, _host, h) = board();
         let clock = Arc::new(Clock::default());
         let mut t = DisplayThread::spawn(clock.clone(), h.clone(), Duration::from_millis(1), quiet());
-        clock.request(h.epoch(), 0x55);
-        assert!(crate::test_board::until(|| read(&kona, RETRACE_TAG) == 0x55));
-        assert_eq!(read(&kona, RETRACE_TAG), 0x55);
-        // The counters follow the completion within the same frame.
         assert!(crate::test_board::until(|| clock.frames() >= 1));
         t.stop();
         let f = clock.frames();
