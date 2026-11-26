@@ -291,13 +291,12 @@ fn the_kernel_pool_packets_are_consumed_whole_and_answer_nothing() {
     t.assert_probe_answers();
 }
 
-/// The video interrupt is periodic: a retrace with no request waiting raises the video cause (bit 3) with
-/// the tag still 0, but sends the general vector only while the interrupt enable has the video bit set, and
-/// once per cause, not once per retrace; masking and unmasking it again with the cause still pending sends
-/// nothing; clearing the cause and a later retrace sends the next; and a retrace request (0x1e7 with its
-/// tag) completes at the next retrace with the tag in the register, the cause's vector held back while
-/// masked. The count of vectors, 3 in all, is the sequence of QEMU's `periodic-video-mask` qtest
-/// (the kernel's programming is a software expectation).
+/// The video interrupt is periodic: a retrace raises the video cause (bit 3), but sends the general vector
+/// only while the interrupt enable has the video bit set, and once per cause, not once per retrace; masking
+/// and unmasking it again with the cause still pending sends nothing; clearing the cause and a later retrace
+/// sends the next; and a retrace token (0x1e7 with its tag) sets the tag in the register when the pipe
+/// performs it, with no retrace and no vector of its own. The count of vectors, 3 in all, is the sequence
+/// of QEMU's `periodic-video-mask` qtest (the kernel's programming is a software expectation).
 #[test]
 fn the_periodic_video_cause_sends_its_vector_once_per_cause_and_only_while_unmasked() {
     let mut t = Rig::new();
@@ -320,10 +319,11 @@ fn the_periodic_video_cause_sends_its_vector_once_per_cause_and_only_while_unmas
     let again = general(&mut t);
     assert_eq!(again, 1, "a cause cleared and raised again sends the next vector");
     t.w(INT_ENABLE, 0);
+    t.w(0xc00108, 0x10000);
     t.cmd(&[0x1e7, 0x8765]);
+    assert_eq!(t.r(RETRACE_TAG), 0x8765, "the token sets the tag before any retrace");
     t.e.frame(0);
-    assert_eq!(t.r(RETRACE_TAG), 0x8765, "a request completes at the next retrace with its tag");
-    assert_eq!(general(&mut t), 0, "masked: its vector waits");
+    assert_eq!(general(&mut t), 0, "masked: the retrace's vector waits");
     t.w(INT_ENABLE, CAUSE_VIDEO);
     t.e.frame(0);
     assert_eq!(general(&mut t), 1, "unmasked: it goes");

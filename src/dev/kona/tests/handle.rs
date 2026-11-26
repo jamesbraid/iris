@@ -109,12 +109,11 @@ fn a_reset_cycles_the_back_end() {
     board.stop();
 }
 
-/// A ticket made before a reset cannot complete after it: the tag register
-/// and the video cause stay as the reset left them. A ticket of the new epoch
-/// completes. The reset joins the back end first, so this is the epoch check
-/// alone, not a race with a display thread mid-call.
+/// A frame announced before a reset cannot raise the video cause after it. A
+/// frame of the new epoch does. The reset joins the back end first, so this is
+/// the epoch check alone, not a race with a display thread mid-call.
 #[test]
-fn a_ticket_from_before_a_reset_is_dropped() {
+fn a_frame_from_before_a_reset_is_dropped() {
     let r = Rig::new();
     r.program_video();
     let board = TestBoard::new(r.f.kona.clone());
@@ -124,15 +123,12 @@ fn a_ticket_from_before_a_reset_is_dropped() {
     let old = h.epoch();
     r.f.kona.power_on();
     r.program_video();
-    h.retrace_done(old, 0x55);
     h.video_frame(old);
-    assert_eq!(r.f.r(RETRACE_TAG), 0);
     assert_eq!(r.f.r(INT_CAUSE) & CAUSE_VIDEO, 0);
     assert!(r.f.host.sent().is_empty());
     let now = r.handle().epoch();
     assert_ne!(now, old);
-    h.retrace_done(now, 0x56);
-    assert_eq!(r.f.r(RETRACE_TAG), 0x56);
+    h.video_frame(now);
     assert_eq!(r.f.r(INT_CAUSE) & CAUSE_VIDEO, CAUSE_VIDEO);
     assert_eq!(r.f.host.sent().len(), 1);
     board.stop();
@@ -201,7 +197,6 @@ fn a_handle_outlives_the_board_harmlessly() {
     drop(r);
     assert!(weak.upgrade().is_none(), "the board is freed with the handle outstanding");
     assert_eq!(h.epoch(), 0);
-    h.retrace_done(0, 1);
     h.video_frame(0);
     h.activity();
 }

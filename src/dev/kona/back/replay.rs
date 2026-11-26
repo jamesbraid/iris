@@ -1144,13 +1144,14 @@ mod tests {
             .rw(b'W', 4, PORT, 9)
             .rw(b'W', 4, PORT, 0)
             .rw(b'R', 4, 0x800240, 0x1234abcd)
+            .rw(b'W', 4, 0xc00108, 0x10000)
             .rw(b'W', 4, PORT, 0x1e7)
             .rw(b'W', 4, PORT, 0x42)
             .rw(b'R', 4, 0x800248, 0x42)
             .marker(3, 0x42)
             .marker(1, 0)
             .rw(b'R', 4, 0x800248, 0)
-            .end(11);
+            .end(12);
         let rec = Recording::parse(&b).unwrap();
         let (rep, census) = replay(&rec).unwrap();
         assert_eq!(rep.loads_compared, 3, "{}", rep.render());

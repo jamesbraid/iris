@@ -1054,26 +1054,47 @@ fn a_suspend_answers_with_no_words() {
     assert_eq!(f.host.word(REASON_PAGE + 4), 0);
 }
 
-/// New: a retrace request completes through the back end: the tag register
-/// reads the tag, the video cause rises and, once the driver enabled it, one
-/// interrupt goes out on the general vector, not another until the cause is
-/// acknowledged.
+/// New: a privileged retrace token reaches the back end, which sets the tag
+/// register. The token raises no interrupt of its own: the video cause is the
+/// frame's.
 #[test]
-fn a_retrace_completes_the_tag_and_raises_video_once() {
+fn a_retrace_token_sets_the_tag_and_raises_no_interrupt() {
     let f = Fixture::hooked();
     f.program_interrupts();
     f.w(INT_ENABLE, 0xf7c);
+    f.kick(0x10000);
     f.cmd(&[0x1e7, 0x77]);
     assert_eq!(f.r(RETRACE_TAG), 0x77);
-    assert_eq!(f.r(INT_CAUSE) & 8, 8);
-    assert_eq!(f.host.sent().len(), 1);
-    assert_eq!(f.host.sent()[0].vector, GENERAL_VECTOR);
     f.cmd(&[0x1e7, 0x78]);
     assert_eq!(f.r(RETRACE_TAG), 0x78);
-    assert_eq!(f.host.sent().len(), 1, "not again before the acknowledge");
-    f.w(INT_CAUSE, 8);
-    f.cmd(&[0x1e7, 0x79]);
-    assert_eq!(f.host.sent().len(), 2);
+    assert_eq!(f.r(INT_CAUSE) & 8, 0);
+    assert!(f.host.sent().is_empty());
+}
+
+/// New: the kernel may send the bracket after the token, before its payload
+/// (as its other window tokens go); that is privileged too.
+#[test]
+fn a_retrace_token_with_the_bracket_after_it_is_privileged() {
+    let f = Fixture::hooked();
+    f.cmd(&[0x1e7]);
+    f.kick(0x10000);
+    f.cmd(&[0x55]);
+    assert_eq!(f.r(RETRACE_TAG), 0x55);
+    assert_eq!(f.kona.failure(), None);
+}
+
+/// New: the token needs the privileged bit. Without it the firmware reports a
+/// violation and spins (the report is not known): the pipe stops taking
+/// commands, the tag stays, and the board says why.
+#[test]
+fn an_unprivileged_retrace_token_stops_the_pipe() {
+    let f = Fixture::hooked();
+    f.cmd(&[0x1e7, 0x77]);
+    assert_eq!(f.r(RETRACE_TAG), 0);
+    assert!(f.kona.failure().is_some_and(|why| why.contains("privileged")), "{:?}", f.kona.failure());
+    f.kick(0x10000);
+    f.cmd(&[0x1e7, 0x78]);
+    assert_eq!(f.r(RETRACE_TAG), 0, "a stopped pipe takes no more");
 }
 
 /// New: the GL grammar. Once a context is active, a word whose low 16 bits are
