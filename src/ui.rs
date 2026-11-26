@@ -850,8 +850,6 @@ struct WgpuRenderer {
     ng1: Option<Result<crate::dev::ng1::wgpu::Ng1Scanout, ()>>,
     /// The frame read back for screenshots and VNC, 0xAABBGGRR.
     readback: Vec<u32>,
-    /// The first presentation error, reported once.
-    failed: bool,
     /// The presenter is on the board's own device, so frames the board
     /// composes there can be presented as they are.
     board_device: bool,
@@ -859,12 +857,10 @@ struct WgpuRenderer {
 
 #[cfg(feature = "wgpu")]
 impl WgpuRenderer {
+    /// A failed present is a GPU failure: it stops the machine (once), like a board's.
     fn report(&mut self, r: Result<(), String>) {
         if let Err(e) = r {
-            if !self.failed {
-                self.failed = true;
-                eprintln!("iris: wgpu present: {e}");
-            }
+            self.presenter.gpu().fail(&format!("present: {e}"));
         }
     }
 }
@@ -1037,24 +1033,42 @@ pub struct Ui {
     scroll_pixels_per_line: f64,
     lock_aspect_ratio: bool,
     renderer: crate::config::UiRenderer,
+    /// What the window's own GPU does when it fails: stop the machine, as a board's device does.
+    fatal: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 impl Ui {
-    pub fn new(ps2: Arc<Ps2Controller>, display: Arc<dyn GfxDisplay>, discs: Option<Arc<dyn DiscChanger>>, timer_manager: Arc<TimerManager>, event_loop: &EventLoop<()>, scale: u32, scroll_pixels_per_line: f64, lock_aspect_ratio: bool, renderer: crate::config::UiRenderer) -> Result<Self, String> {
-        let view = Self::open(display, event_loop, crate::machine::emulator_name().to_string(), scale, renderer)?;
-        Ok(Self { ps2, views: vec![view], discs, timer_manager, initial_scale: scale, scroll_pixels_per_line, lock_aspect_ratio, renderer })
+    pub fn new(ps2: Arc<Ps2Controller>, display: Arc<dyn GfxDisplay>, discs: Option<Arc<dyn DiscChanger>>, timer_manager: Arc<TimerManager>, event_loop: &EventLoop<()>, scale: u32, scroll_pixels_per_line: f64, lock_aspect_ratio: bool, renderer: crate::config::UiRenderer, machine: crate::workstation::MachineSlot) -> Result<Self, String> {
+        let fatal = Self::window_fatal(machine);
+        let view = Self::open(display, event_loop, crate::machine::emulator_name().to_string(), scale, renderer, &fatal)?;
+        Ok(Self { ps2, views: vec![view], discs, timer_manager, initial_scale: scale, scroll_pixels_per_line, lock_aspect_ratio, renderer, fatal })
+    }
+
+    /// What the window's own GPU does when it fails: tell the machine, through its fatal controller.
+    #[cfg(feature = "wgpu")]
+    fn window_fatal(machine: crate::workstation::MachineSlot) -> Arc<dyn Fn(&str) + Send + Sync> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        crate::workstation::register_fatal_controller(machine, Some(rx));
+        Arc::new(move |why| {
+            let _ = tx.send(crate::traits::MachineFatal::new("window GPU", why));
+        })
+    }
+
+    #[cfg(not(feature = "wgpu"))]
+    fn window_fatal(_machine: crate::workstation::MachineSlot) -> Arc<dyn Fn(&str) + Send + Sync> {
+        Arc::new(|_| {})
     }
 
     /// A window of its own for another head of the machine (a second Newport).
     /// Keyboard and mouse reach the guest from either window.
     pub fn add_head(&mut self, display: Arc<dyn GfxDisplay>, event_loop: &EventLoop<()>) -> Result<(), String> {
         let title = format!("{} (head {})", crate::machine::emulator_name(), self.views.len());
-        self.views.push(Self::open(display, event_loop, title, self.initial_scale, self.renderer)?);
+        self.views.push(Self::open(display, event_loop, title, self.initial_scale, self.renderer, &self.fatal)?);
         Ok(())
     }
 
     /// Open a window and put its renderer in `display`'s renderer slot.
-    fn open(display: Arc<dyn GfxDisplay>, event_loop: &EventLoop<()>, title: String, scale: u32, renderer: crate::config::UiRenderer) -> Result<View, String> {
+    fn open(display: Arc<dyn GfxDisplay>, event_loop: &EventLoop<()>, title: String, scale: u32, renderer: crate::config::UiRenderer, fatal: &Arc<dyn Fn(&str) + Send + Sync>) -> Result<View, String> {
         #[cfg(feature = "wgpu")]
         if display.requires_same_device_wgpu_presenter()
             && renderer != crate::config::UiRenderer::Wgpu
@@ -1076,7 +1090,7 @@ impl Ui {
 
         #[cfg(feature = "wgpu")]
         if renderer == crate::config::UiRenderer::Wgpu {
-            match Self::new_wgpu(&display, event_loop, window_builder.clone(), scale) {
+            match Self::new_wgpu(&display, event_loop, window_builder.clone(), scale, fatal) {
                 Ok((window, window_size, resize_request, display_res)) => {
                     return Ok(View::new(display, window, window_size, resize_request, display_res));
                 }
@@ -1089,7 +1103,7 @@ impl Ui {
             }
         }
         #[cfg(not(feature = "wgpu"))]
-        let _ = renderer;
+        let _ = (renderer, fatal);
 
         let template = ConfigTemplateBuilder::new()
             .with_alpha_size(8)
@@ -1256,10 +1270,14 @@ impl Ui {
         event_loop: &EventLoop<()>,
         attrs: WindowAttributes,
         scale: u32,
+        fatal: &Arc<dyn Fn(&str) + Send + Sync>,
     ) -> Result<(Arc<Window>, Arc<Mutex<Option<(u32, u32)>>>, Arc<Mutex<Option<ResizeRequest>>>, Arc<Mutex<(u32, u32)>>), String> {
         let gpu = match display.gpu() {
             Some(g) => g,
-            None => crate::wgpu::Gpu::open(&crate::wgpu::GpuOptions::default())?,
+            None => {
+                let fatal = fatal.clone();
+                crate::wgpu::Gpu::new(&crate::wgpu::GpuOptions::default(), Box::new(move |e| fatal(e)))?
+            }
         };
         #[allow(deprecated)]
         let window = Arc::new(event_loop.create_window(attrs).map_err(|e| format!("create the window: {e}"))?);
@@ -1285,7 +1303,6 @@ impl Ui {
             compositor: SwCompositor::new(),
             ng1: None,
             readback: Vec::new(),
-            failed: false,
             board_device: display.gpu().is_some_and(|g| Arc::ptr_eq(&g, &gpu)),
         };
         *display.renderer_slot().lock() = Some(Box::new(renderer));
@@ -1294,7 +1311,7 @@ impl Ui {
 
     /// Run the UI event loop (blocks the current thread)
     pub fn run(self, event_loop: EventLoop<()>) {
-        let Ui { ps2, views, discs, timer_manager, initial_scale, scroll_pixels_per_line, lock_aspect_ratio, renderer: _ } = self;
+        let Ui { ps2, views, discs, timer_manager, initial_scale, scroll_pixels_per_line, lock_aspect_ratio, renderer: _, fatal: _ } = self;
         let scale = initial_scale;
 
         let mouse_delta = Arc::new(Mutex::new(MouseDelta { accum: (0.0, 0.0), wheel: 0.0, buttons: 0 }));
@@ -1513,7 +1530,7 @@ pub(crate) fn install_test_wgpu_renderer(
     event_loop: &EventLoop<()>,
     attrs: WindowAttributes,
 ) -> Result<Arc<Window>, String> {
-    Ui::new_wgpu(display, event_loop, attrs, 1).map(|(window, _, _, _)| window)
+    Ui::new_wgpu(display, event_loop, attrs, 1, &(Arc::new(|_: &str| {}) as Arc<dyn Fn(&str) + Send + Sync>)).map(|(window, _, _, _)| window)
 }
 
 /// `Ui::run`'s event-loop state: `run_app` takes the old closure's captures as a struct.

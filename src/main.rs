@@ -215,7 +215,7 @@ fn main() {
         #[cfg(feature = "wgpu")]
         iris::wgpu::set_display(event_loop.owned_display_handle());
         let display = machine.get_display().expect("a graphics board must be present in non-headless mode");
-        let mut ui = match Ui::new(machine.get_ps2(), display, machine.disc_changer(), machine.get_timer_manager(), &event_loop, scale, scroll_pixels_per_line, lock_aspect_ratio, ui_renderer) {
+        let mut ui = match Ui::new(machine.get_ps2(), display, machine.disc_changer(), machine.get_timer_manager(), &event_loop, scale, scroll_pixels_per_line, lock_aspect_ratio, ui_renderer, machine.machine_slot()) {
             Ok(ui) => ui,
             Err(error) => {
                 eprintln!("iris: cannot initialize the graphics window: {error}");
