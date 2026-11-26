@@ -188,8 +188,20 @@ fn the_shell_loop_quiesces_an_engine_stalled_at_a_swap() {
     assert_eq!((e.queued(), e.pixel(7, 8, COLOUR_WORD)), (0, 9));
 }
 
+/// A privileged kernel command: the bracket register's privileged bit around the token.
+fn privileged(e: &mut Engine, token: u32, words: &[u32]) {
+    store(e, COMMAND_PAGE_BRACKET, 0x10000, A);
+    kernel(e, token, words);
+    store(e, COMMAND_PAGE_BRACKET, 0, A);
+    e.run(usize::MAX);
+}
+
+const COMMAND_PAGE_BRACKET: u32 = 0xc00108;
+
+/// A token behind a swap is performed once the frame shows the swap, with no frame of its own to wait
+/// for; the one video packet is the frame's.
 #[test]
-fn a_retrace_completes_at_the_frame_after_the_one_that_shows_the_swap() {
+fn a_tag_behind_a_pending_swap_is_set_when_the_swap_is_performed() {
     let mut e = engine();
     // A destination, the vectors and the video cause enabled, as the driver programs them.
     store(&mut e, INT_DEST_LOWER, 0x1000, A);
@@ -197,21 +209,101 @@ fn a_retrace_completes_at_the_frame_after_the_one_that_shows_the_swap() {
     store(&mut e, INT_ENABLE, CAUSE_VIDEO, A);
 
     kernel(&mut e, DISPLAY_MODE_BYTE, &SWAP);
-    kernel(&mut e, PUBLISH_RETRACE_SEQUENCE_NUMBER, &[0x1234]);
-    assert_eq!(e.queued(), 1, "the request waits behind the swap");
-    assert_eq!(e.read(RETRACE_TAG, 32), Read::Value(0), "the tag changes at the retrace, not at the request");
-    drain(&mut e);
+    privileged(&mut e, PUBLISH_RETRACE_SEQUENCE_NUMBER, &[0x1234]);
+    assert_eq!(e.queued(), 3, "the bracket, the token and the bracket after it wait behind the swap");
+    assert_eq!(e.read(RETRACE_TAG, 32), Read::Value(0), "the swap has not been performed");
+    assert_eq!(packets(&drain(&mut e)), []);
 
-    // The frame that shows the swap starts the video interrupt, with no tag; the request behind
-    // the swap is made after it and completes at the next frame.
     e.frame(0);
     assert!(!e.swap_waiting());
     e.run(usize::MAX);
-    assert_eq!(e.read(RETRACE_TAG, 32), Read::Value(0), "the request was made after that retrace");
-    assert_eq!(packets(&drain(&mut e)), [Interrupt { sender: SENDER, widget: 0, addr: 0x1000, vector: 0x11, level: true }], "the video interrupt, to the host");
+    assert_eq!(e.read(RETRACE_TAG, 32), Read::Value(0x1234), "performed behind the swap, in the same frame");
+    assert_eq!(packets(&drain(&mut e)), [Interrupt { sender: SENDER, widget: 0, addr: 0x1000, vector: 0x11, level: true }], "the frame's video interrupt, and nothing for the token");
+}
 
+/// Each token sets the register to its own payload as the pipe performs it; many in a frame, no counter.
+#[test]
+fn several_tags_in_one_frame_leave_the_last_before_any_retrace() {
+    let mut e = engine();
+    store(&mut e, INT_DEST_LOWER, 0x1000, A);
+    store(&mut e, INT_VECTORS, 0x20000 | 0x11, A);
+    store(&mut e, INT_ENABLE, CAUSE_VIDEO, A);
+    e.run(usize::MAX);
+    drain(&mut e);
+    for tag in [1, 2, 3] {
+        privileged(&mut e, PUBLISH_RETRACE_SEQUENCE_NUMBER, &[tag]);
+        assert_eq!(e.read(RETRACE_TAG, 32), Read::Value(tag as u64), "set when the token ran");
+    }
+    assert_eq!(e.queued(), 0);
+    assert_eq!(packets(&drain(&mut e)), [], "a token raises no interrupt");
+    assert_eq!(e.read(INT_CAUSE, 32), Read::Value(0), "and no cause");
     e.frame(0);
+    assert_eq!(e.read(RETRACE_TAG, 32), Read::Value(3), "a retrace leaves the tag alone");
+}
+
+/// The payload is stored as given: no monotonic check, no clamp, no mask.
+#[test]
+fn a_tag_is_stored_as_given() {
+    let mut e = engine();
+    for tag in [0x20, 0x10, 0, 0xffff_ffff, 0x8000_0001] {
+        privileged(&mut e, PUBLISH_RETRACE_SEQUENCE_NUMBER, &[tag]);
+        assert_eq!(e.read(RETRACE_TAG, 32), Read::Value(tag as u64));
+    }
+}
+
+/// Privilege is judged over the whole command: bracket after the token passes, none at all does not.
+#[test]
+fn a_tag_with_the_bracket_between_token_and_payload_is_privileged() {
+    let mut e = engine();
+    store(&mut e, COMMAND_PAGE + (PUBLISH_RETRACE_SEQUENCE_NUMBER << COMMAND_SLOT_SHIFT) + COMMAND_DATA_SLOT, 0x77, A);
+    e.run(usize::MAX);
+    assert!(e.fault().is_some(), "token and payload with no bracket at all");
+    let mut e = engine();
+    store(&mut e, COMMAND_PAGE, PUBLISH_RETRACE_SEQUENCE_NUMBER, A);
+    store(&mut e, COMMAND_PAGE_BRACKET, 0x10000, A);
+    store(&mut e, COMMAND_PAGE, 0x55, A);
+    e.run(usize::MAX);
+    assert_eq!(e.fault(), None);
+    assert_eq!(e.read(RETRACE_TAG, 32), Read::Value(0x55));
+}
+
+/// The kernel's recorded order is 0x30000 (privileged, force) at the token and 0x10000 at the payload. A bracket
+/// cleared before the payload still counts: the token opened privileged.
+#[test]
+fn a_tag_sent_in_the_recorded_bracket_order_is_set() {
+    let mut e = engine();
+    for (off, v) in [(COMMAND_PAGE_BRACKET, 0x30000), (COMMAND_PAGE, PUBLISH_RETRACE_SEQUENCE_NUMBER), (COMMAND_PAGE_BRACKET, 0x10000), (COMMAND_PAGE, 0x66), (COMMAND_PAGE_BRACKET, 0)] {
+        store(&mut e, off, v, A);
+    }
+    e.run(usize::MAX);
+    assert_eq!((e.fault(), e.read(RETRACE_TAG, 32)), (None, Read::Value(0x66)));
+    for (off, v) in [(COMMAND_PAGE_BRACKET, 0x30000), (COMMAND_PAGE, PUBLISH_RETRACE_SEQUENCE_NUMBER), (COMMAND_PAGE_BRACKET, 0), (COMMAND_PAGE, 0x67)] {
+        store(&mut e, off, v, A);
+    }
+    e.run(usize::MAX);
+    assert_eq!((e.fault(), e.read(RETRACE_TAG, 32)), (None, Read::Value(0x67)));
+}
+
+/// A reset clears the tag.
+#[test]
+fn a_reset_clears_the_tag() {
+    let mut e = engine();
+    privileged(&mut e, PUBLISH_RETRACE_SEQUENCE_NUMBER, &[0x1234]);
     assert_eq!(e.read(RETRACE_TAG, 32), Read::Value(0x1234));
+    e.quiesce(u64::MAX).unwrap();
+    e.reset().unwrap();
+    assert_eq!(e.read(RETRACE_TAG, 32), Read::Value(0));
+}
+
+/// Without the privileged bit the pipe stops (the engine faults) and the tag is untouched.
+#[test]
+fn an_unprivileged_tag_faults_the_engine_and_changes_nothing() {
+    let mut e = engine();
+    privileged(&mut e, PUBLISH_RETRACE_SEQUENCE_NUMBER, &[0x40]);
+    kernel(&mut e, PUBLISH_RETRACE_SEQUENCE_NUMBER, &[0x41]);
+    assert!(e.fault().is_some_and(|why| why.contains("privileged")), "{:?}", e.fault());
+    assert_eq!(e.advance(0).idle, Idle::Faulted);
+    assert_eq!(e.read(RETRACE_TAG, 32), Read::Fault);
 }
 
 /// A pending-bit packet adds nothing when an equal one waits unread; once the shell has it, the
@@ -719,6 +811,24 @@ fn running_the_stream_notifies_the_shell_once_per_pump() {
     e.run(usize::MAX);
     assert_eq!(n.load(Ordering::SeqCst), 2, "the credit the finished store returns");
     assert!(credits(&drain(&mut e)).len() == 1);
+}
+
+/// Stores staged behind unrun stores (the packets after a mid-burst detach) must call for a pump too.
+#[test]
+fn a_store_staged_behind_unrun_stores_still_wakes_the_pump() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    let n = Arc::new(AtomicU32::new(0));
+    let hook = n.clone();
+    let notify = Box::new(move || drop(hook.fetch_add(1, Ordering::SeqCst))) as Box<dyn Fn() + Send + Sync>;
+    let mut e = Engine::new(KonaConfig::ir2(2).unwrap().with_pool(0, 32), Ram::default(), Options::default(), Some(notify)).expect("engine");
+    store(&mut e, COMMAND_PAGE, 1, A);
+    store(&mut e, LOW_WINDOW_WRITE, 1, A);
+    e.advance(0);
+    assert_eq!(n.load(Ordering::SeqCst), 1);
+    store(&mut e, COMMAND_PAGE, 2, A);
+    assert_eq!(e.queued(), 2, "the first is still unrun");
+    assert_eq!(n.load(Ordering::SeqCst), 2, "the second asked for a pump");
 }
 
 /// The shared swap-ready line (kona `devices/dg/swap-ready-and-swap-barrier.md`): a pipe holding it low keeps every pipe's

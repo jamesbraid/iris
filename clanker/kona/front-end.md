@@ -104,10 +104,11 @@ display thread and tile scheduler get a `DisplayHandle` instead, from
 `KonaBackend::attach`, which `Device::start` calls before the thread runs and
 again after each stop:
 
-- `retrace_done(epoch, tag)` and `video_frame(epoch)` set the retrace tag and
-  the video cause and send the general-vector packet once, with the register
-  lock dropped, so they cannot deadlock the Host Interface Processor's thread.
-  Both are for the display thread. `video_frame` is the tagless form.
+- `video_frame(epoch)` sets the video cause and sends the general-vector packet
+  once, with the register lock dropped, so it cannot deadlock the Host Interface
+  Processor's thread. It is for the display thread. The retrace tag is not the
+  display's: `BackPort::set_retrace_tag` sets it when the pipe performs a 0x1e7
+  token, on `kona-hip`, with no cause.
 - `activity()` sets the watchdog latch. The tile scheduler calls it whenever the
   producer waits (a full ring, a spent budget, no free draw-state entry, a
   drain); the display thread must not, or the watchdog could
@@ -153,5 +154,5 @@ QEMU's model (jamesbraid/qemu-sgi-origami), not hardware facts.
 | Replies post at once instead of after queued work | approximated |
 | A forced bracket with no context current suspends a user command with no owner to resume it | approximated (as QEMU) |
 | The indirect data port does not advance its address on read | unknown |
-| With no display thread running, a retrace request completes at once | approximated |
+| A 0x1e7 token sets the retrace tag when the pipe performs it, in stream order, with no retrace gating | inferred (the host-visible timing is approximated) |
 | Identify and config part numbers, names, revisions and chip words | inferred from QEMU's model of a deskside pipe |

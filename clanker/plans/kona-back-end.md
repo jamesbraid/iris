@@ -125,9 +125,9 @@ flowchart TB
 - **Display at retrace.** The display thread composes the whole frame every
   retrace from the pixel store and the loaded tables, with no change tracking.
   A swap takes effect when its command is reached in the stream: it loads the
-  display's bank table, and the next composed frame shows it. A retrace request
-  waits for the next frame boundary, tagged with the reset epoch it was made in
-  so a reset drops it.
+  display's bank table, and the next composed frame shows it. A retrace token
+  sets the retrace tag when the pipe performs it, in stream order; the display
+  thread only raises the video interrupt.
 
 ## Threads
 
@@ -192,7 +192,7 @@ All steps are on the one branch, each with its tests.
 | Depth as an integer fraction | unknown | goldens |
 | Fragment operation order, blend and dither arithmetic | unknown | goldens |
 | Lines, points, stipple, texture filtering, format rounding | unknown | goldens |
-| Retrace completes at the next frame boundary; swap applies in stream order | approximated | replay |
+| A retrace token sets the tag when performed, with no frame wait; swap applies in stream order | inferred (timing approximated) | replay |
 | One pixel store, one texture store, ID planes | unknown layout | allocation test |
 | No credit count | decided | a large GL stream never trips a pipe kill |
 | IR3 renders as IR2; IR4 identity only | approximated | `hinv`, visuals |

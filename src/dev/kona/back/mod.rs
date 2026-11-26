@@ -106,7 +106,7 @@ impl JobKind {
             JobKind::Data => "data runs",
             JobKind::Bitmap => "bitmaps",
             JobKind::Video => "video commands",
-            JobKind::Retrace => "retrace requests",
+            JobKind::Retrace => "retrace tokens",
             JobKind::Context => "context changes",
             JobKind::Indirect => "indirect stores",
             JobKind::DmaIn => "DMA packets",
@@ -187,14 +187,14 @@ pub(super) struct TestHook {
 }
 
 /// A hook that answers every job as nothing, as a board with no drawing does:
-/// retrace requests complete at once, DMA rows are unclaimed.
+/// retrace tokens set the tag, DMA rows are unclaimed.
 #[cfg(test)]
 pub(super) fn null_hook() -> TestHook {
     TestHook {
         job: Box::new(|port, job| {
             Some(match job {
                 Job::Retrace { tag } => {
-                    port.retrace_done(*tag);
+                    port.set_retrace_tag(*tag);
                     Reply::Done
                 }
                 Job::DmaIn { .. } => Reply::Unclaimed,
@@ -214,7 +214,7 @@ pub struct KonaBackend {
     /// Held between `attach` and `stop`, for the display thread once there is
     /// one.
     handle: Option<DisplayHandle>,
-    /// What the display thread completes, and the thread while the board runs.
+    /// What the display thread paces, and the thread while the board runs.
     clock: Arc<Clock>,
     thread: Option<DisplayThread>,
     /// The compositor a caller that supplies the frame boundaries itself drives (`attach_manual`), in
@@ -588,7 +588,7 @@ impl KonaBackend {
         writeln!(w, "managed area      {} x {}", c.managed.0, c.managed.1)?;
         writeln!(w, "record bound      {} words per pixel", c.record_words())?;
         writeln!(w, "display handle    {}", if self.handle.is_some() { "attached" } else { "detached" })?;
-        writeln!(w, "display           {} frames, {} retraces completed, thread {}", self.clock.frames(), self.clock.completed(), if self.thread.is_some() { "running" } else { "stopped" })?;
+        writeln!(w, "display           {} frames, thread {}", self.clock.frames(), if self.thread.is_some() { "running" } else { "stopped" })?;
         writeln!(w, "pixel store       {} word arrays of {} x {}", self.store.cpu().allocated().len(), self.store.cpu().width(), self.store.cpu().height())?;
         if let Some(line) = self.store.gpu_report() {
             writeln!(w, "pixel planes      on the GPU: {line}")?;
@@ -768,8 +768,8 @@ impl KonaBackend {
         }
     }
 
-    /// The board is starting: spawn the display thread, which completes retrace
-    /// requests and raises the video interrupt through `handle`.
+    /// The board is starting: spawn the display thread, which raises the video
+    /// interrupt through `handle`.
     pub fn attach(&mut self, handle: DisplayHandle) {
         #[cfg(test)]
         if let Some(hook) = &mut self.hook {
@@ -786,8 +786,7 @@ impl KonaBackend {
         self.handle = Some(handle);
     }
 
-    /// As `attach`, with no display thread: retrace requests wait for `frame`, which the caller
-    /// calls at each frame boundary it chooses.
+    /// As `attach`, with no display thread: `frame` is the caller's, at each frame boundary it chooses.
     pub fn attach_manual(&mut self, handle: DisplayHandle) {
         let sink = Compositor::new(self.store.clone(), textport::COLOUR_WORD, self.map.clone(), self.tables.clone(), self.display.clone());
         #[cfg(feature = "wgpu")]
@@ -970,9 +969,8 @@ impl KonaBackend {
         self.swaps.iter().rev().find(|s| s.0 == id).map_or_else(|| self.tables.lock().bank(id), |s| s.1)
     }
 
-    /// A frame boundary of a back end attached with `attach_manual`: the waiting swaps show, so
-    /// that a swap ahead of a retrace request shows in the frame that completes it, then the
-    /// waiting retrace requests complete, the video interrupt rises, and the frame is composed.
+    /// A frame boundary of a back end attached with `attach_manual`: the waiting swaps show, the
+    /// video interrupt rises, and the frame is composed.
     pub fn frame(&mut self) {
         if !self.swap_held {
             for (id, bank) in std::mem::take(&mut self.swaps) {
@@ -993,7 +991,6 @@ impl KonaBackend {
             return;
         }
         self.resets += 1;
-        self.clock.cancel();
         self.swaps.clear();
         // Jobs queued before the reset finish first: they write the store it clears.
         self.drain();
@@ -1044,7 +1041,6 @@ impl KonaBackend {
         self.thread = None;
         self.manual = None;
         self.handle = None;
-        self.clock.cancel();
     }
 
     pub fn quiesce(&mut self) {
@@ -1531,13 +1527,8 @@ impl KonaBackend {
                 self.gl.command(&mut c.gl, selector, args, packed, &mut self.prims);
                 self.flush();
             }
-            // With the display thread running (or frames supplied by `frame`), a retrace completes at its next
-            // frame boundary; with none (before the board starts, in a test)
-            // there is no boundary, so it completes at once.
-            Job::Retrace { tag } => match &self.handle {
-                Some(h) if self.thread.is_some() || self.manual.is_some() => self.clock.request(h.epoch(), tag),
-                _ => port.retrace_done(tag),
-            },
+            // The drain above ran every earlier draw, so the tag follows them; no frame boundary is waited for.
+            Job::Retrace { tag } => port.set_retrace_tag(tag),
             Job::DmaIn { io, physical, lines, per_line, pitch } => return self.dma_rows(port, io, physical, lines, per_line, pitch),
             Job::FirmwareStart { combination } => {
                 // The store keeps the configured size; a combination that sets another is logged and the

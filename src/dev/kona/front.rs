@@ -62,9 +62,8 @@ pub(super) struct Front {
     /// cause: it rises every frame, so it says so once.
     video_unrouted_logged: bool,
     /// Which run of the board a back end's call belongs to. A reset moves it
-    /// on, so a call a back end thread made from before the reset (a retrace
-    /// it completes, a frame it announces) is dropped instead of raising a
-    /// cause the reset cleared. Not itself reset.
+    /// on, so a frame a display thread announces from before the reset is
+    /// dropped instead of raising a cause the reset cleared. Not itself reset.
     epoch: u64,
     /// The registers the adaptor reset writes (`visit_xg`): plain storage, reset values unknown.
     xg_req_timeout: u32,
@@ -328,21 +327,10 @@ impl Front {
         self.voc_deliver()
     }
 
-    /// A retrace the back end counted: the tag register reads the request's
-    /// tag, and the video cause rises.
-    pub fn retrace(&mut self, tag: u32) -> Option<InterruptPacket> {
+    /// The pipe performed a retrace sequence number token: the tag register
+    /// reads its payload. No cause rises; the video interrupt is the frame's.
+    pub fn set_retrace_tag(&mut self, tag: u32) {
         self.retrace_tag = tag;
-        self.int_cause |= CAUSE_VIDEO;
-        self.video_deliver()
-    }
-
-    /// A retrace the back end counted in `epoch`: as `retrace`, unless a
-    /// reset has begun a later epoch.
-    pub fn retrace_in(&mut self, epoch: u64, tag: u32) -> Option<InterruptPacket> {
-        if epoch != self.epoch {
-            return None;
-        }
-        self.retrace(tag)
     }
 
     /// A frame the display announced in `epoch`: the video cause rises, with

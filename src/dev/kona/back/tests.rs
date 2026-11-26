@@ -95,8 +95,8 @@ fn the_board_routes_the_kona_command() {
     assert!(kona.execute_command("kona", &["frob"], Box::new(out)).is_err());
 }
 
-/// Jobs are counted by kind, a retrace completes at once and the managed
-/// area is reported when the firmware starts.
+/// Jobs are counted by kind, a retrace token sets the tag at once and the
+/// managed area is reported when the firmware starts.
 #[test]
 fn jobs_are_counted_and_retraces_complete() {
     let (_host, kona) = board();
@@ -108,12 +108,13 @@ fn jobs_are_counted_and_retraces_complete() {
     w(0xc10000, 0x1000_0000);
     w(0xc10000, 0);
     w(0xc10000, 0x4000);
+    w(0xc00108, 0x10000);
     w(0xc10000, 0x1e7);
     w(0xc10000, 0x42);
     let (_, text) = monitor(&kona, &["counters"]);
     assert!(text.contains("textport commands 1"), "{text}");
     assert!(text.contains("kernel commands   2"), "{text}");
-    assert!(text.contains("retrace requests  1"), "{text}");
+    assert!(text.contains("retrace tokens    1"), "{text}");
     assert_eq!(kona.bus_read(0x800248, 4), (crate::traits::BUS_OK, 0x42));
 }
 
@@ -294,21 +295,18 @@ fn a_stipple_is_stored_loaded_and_masks_a_fill() {
     assert_eq!(command(&mut b, Grammar::Kernel, STORE_WINDOW_SYSTEM_STIPPLE, &[4, 2, 0]), Reply::Done);
 }
 
-/// With the board running, a retrace request waits for the display thread's
-/// next frame boundary; the tag register then reads its tag and `status` shows
-/// the thread and its frames.
+/// With the board running, a retrace token sets the tag register when the
+/// pipe performs it, and `status` shows the display thread running.
 #[test]
-fn a_retrace_completes_at_a_frame_boundary_on_a_running_board() {
+fn a_retrace_token_sets_the_tag_on_a_running_board() {
     use crate::traits::Device;
     let (_host, kona) = board();
     kona.start();
-    for w in [0x1e7u32, 0x77] {
-        assert_eq!(kona.bus_write(0xc10000, 4, w as u64), crate::traits::BUS_OK);
+    for (off, w) in [(0xc00108, 0x10000), (0xc10000, 0x1e7), (0xc10000, 0x77)] {
+        assert_eq!(kona.bus_write(off, 4, w as u64), crate::traits::BUS_OK);
     }
     wait_for(|| kona.bus_read(0x800248, 4).1 == 0x77);
     assert_eq!(kona.bus_read(0x800248, 4).1, 0x77);
-    // The counter follows the completion within the same frame.
-    wait_for(|| monitor(&kona, &["status"]).1.contains("1 retraces completed"));
     let text = monitor(&kona, &["status"]).1;
     assert!(text.contains("thread running"), "{text}");
     kona.stop();
