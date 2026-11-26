@@ -651,6 +651,9 @@ pub(super) struct ScanoutReader {
     /// Whether `frame` holds the screen's order (else 0x00RRGGBB, as the
     /// GPU scan-out's readback gives it).
     pub frame_abgr: bool,
+    /// What the last `take_damage` found the display's registers, mode and buffer bits to be: a
+    /// change from it is the whole picture's.
+    damage_for: Option<(u64, u64, u32)>,
 }
 
 impl ScanoutReader {
@@ -665,6 +668,7 @@ impl ScanoutReader {
         self.snap_gen = u64::MAX;
         self.composed = None;
         self.settling = false;
+        self.damage_for = None;
         self.frame = Vec::new();
         self.frame_width = 0;
         self.frame_height = 0;
@@ -780,6 +784,88 @@ impl ScanoutReader {
                 None
             }
         }
+    }
+
+    /// The picture lines that may have changed since the last call, as runs `(first, end)`: those under stores,
+    /// else every line (scan-out state changed, GPU scan-out or `whole`). `running`: units are still storing.
+    pub fn take_damage(&mut self, running: bool, whole: bool) -> Vec<(u32, u32)> {
+        let shared = self.shared();
+        if shared.gpu_fault.lock().is_some() {
+            return Vec::new();
+        }
+        self.sync(&shared);
+        if self.frame.is_empty() {
+            return Vec::new();
+        }
+        let displayed = shared.front.lock().displayed_buffer;
+        self.snap_gen = shared.regs.snapshot(&mut self.snap, self.snap_gen);
+        let now = Some((self.mode_gen, self.snap_gen, displayed));
+        let h = self.frame_height;
+        let mut bands = vec![false; h.div_ceil(super::vram::TILE) as usize];
+        let mem = shared.vram.get();
+        let all = whole || self.damage_for != now || shared.gpu_scanout.get().is_some();
+        self.damage_for = now;
+        if let Some(mem) = mem {
+            let block = 1u64 << super::vram::SHOWN_BLOCK_SHIFT;
+            let snap = &self.snap;
+            mem.take_shown(running, |at| {
+                for (first, end) in Frame::rows_under(snap, at, at + block).into_iter().flatten() {
+                    let end = end.min(h);
+                    for b in first / super::vram::TILE..end.div_ceil(super::vram::TILE) {
+                        bands[b as usize] = true;
+                    }
+                }
+            });
+        }
+        let mut runs: Vec<(u32, u32)> = Vec::new();
+        for (b, _) in bands.iter().enumerate().filter(|(_, hit)| all || **hit) {
+            let (first, end) = (b as u32 * super::vram::TILE, ((b as u32 + 1) * super::vram::TILE).min(h));
+            match runs.last_mut() {
+                Some(r) if r.1 == first => r.1 = end,
+                _ => runs.push((first, end)),
+            }
+        }
+        runs
+    }
+
+    /// Compose the next frame whether or not anything changed.
+    #[cfg(test)]
+    pub fn recompose(&mut self) {
+        self.composed = None;
+    }
+
+    /// The frame's size once a new mode is taken; 0 by 0 with no mode.
+    pub fn size(&mut self) -> (u32, u32) {
+        let shared = self.shared();
+        self.sync(&shared);
+        (self.frame_width, self.frame_height)
+    }
+
+    /// Compose lines `first` up to `end` on the CPU into `frame`, keeping the other lines; false with no
+    /// mode or after a GPU fault. Not for the GPU scan-out.
+    pub fn compose_rows(&mut self, first: u32, end: u32) -> bool {
+        let shared = self.shared();
+        if shared.gpu_fault.lock().is_some() {
+            return false;
+        }
+        self.sync(&shared);
+        if self.frame.is_empty() {
+            return false;
+        }
+        let displayed = shared.front.lock().displayed_buffer;
+        self.snap_gen = shared.regs.snapshot(&mut self.snap, self.snap_gen);
+        let w = self.frame_width as usize;
+        let snapshot = if self.screen_order { Frame::snapshot_for_screen(&self.snap, displayed) } else { Frame::snapshot(&self.snap, displayed) };
+        self.frame_abgr = self.screen_order;
+        match (snapshot, shared.vram.get()) {
+            (Some(frame), Some(mem)) => frame.compose_rows(*mem, &self.snap, &mut self.frame, w, first as usize, end as usize),
+            _ => {
+                let black = if self.screen_order { super::frame::to_screen(0) } else { 0 };
+                let stop = (end as usize * w).min(self.frame.len());
+                self.frame[first as usize * w..stop].fill(black);
+            }
+        }
+        true
     }
 
     /// Compose the frame again if anything the scan-out reads has changed

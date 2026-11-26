@@ -473,26 +473,49 @@ impl Frame {
     /// The whole frame into `out` (rows of `stride` pixels, at most
     /// `rows` of them), the cursor over it.
     pub fn compose(&self, mem: VramPtr, regs: &DisplayRegs, out: &mut [u32], stride: usize, rows: usize) {
+        self.compose_rows(mem, regs, out, stride, 0, rows);
+    }
+
+    /// Lines `first` up to `end` of the frame into `out`, which holds the frame's rows from line 0
+    /// (rows of `stride` pixels, at most `end` of them): what `compose` makes of them, the cursor over.
+    pub fn compose_rows(&self, mem: VramPtr, regs: &DisplayRegs, out: &mut [u32], stride: usize, first: usize, end: usize) {
         let w = (self.width as usize).min(stride);
-        let h = (self.height as usize).min(rows);
+        let h = (self.height as usize).min(end);
         // A band of 16 lines at a time, tile by tile: a tile is contiguous
         // in memory and so is a row of tiles, so the band reads memory in
         // order. Line by line, each tile row would be a jump to the next
         // tile, a page apart in a 16-byte frame buffer, which the hardware
         // prefetcher does not follow.
-        for band in (0..h).step_by(TILE as usize) {
-            let lines = (h - band).min(TILE as usize);
+        for band in (first - first % TILE as usize..h).step_by(TILE as usize) {
+            let (from, to) = (band.max(first), (band + TILE as usize).min(h));
             for x in (0..w).step_by(TILE as usize) {
                 let n = (w - x).min(TILE as usize);
-                for y in band..band + lines {
+                for y in from..to {
                     let at = y * stride + x;
                     self.tile_row(mem, x as u32, y as u32, &mut out[at..at + n]);
                 }
             }
-            for y in band..band + lines {
+            for y in from..to {
                 regs.cursor_row_in(y as u32, &mut out[y * stride..y * stride + w], w as u32, self.abgr, self.wide);
             }
         }
+    }
+
+    /// The picture lines, from the first and up to the end, that board memory bytes `lo` up to `hi`
+    /// hold the pixels of: the frame buffer's or the window-id buffer's. None for bytes in neither.
+    pub fn rows_under(regs: &DisplayRegs, lo: u64, hi: u64) -> [Option<(u32, u32)>; 2] {
+        let r = &regs.pbj;
+        let (height, pitch) = (r[pbj::HEIGHT] as u64, r[pbj::STRIDE] as u64);
+        let rows = |base: u32, log2: u8| {
+            let (start, tile) = (base as u64 * UNIT, ((TILE * TILE) as u64) << log2);
+            let stop = start + height.div_ceil(TILE as u64) * pitch * tile;
+            let (lo, hi) = (lo.max(start), hi.min(stop));
+            (pitch != 0 && lo < hi).then(|| {
+                let (a, b) = ((lo - start) / tile / pitch, (hi - 1 - start) / tile / pitch);
+                ((a * TILE as u64) as u32, ((b + 1) * TILE as u64).min(height) as u32)
+            })
+        };
+        [rows(r[pbj::PIXEL_BASE] & super::vram::ADDR_MASK, (r[pbj::DEPTH] & 7) as u8 + 1), rows(r[pbj::OVERLAY_BASE] & super::vram::ADDR_MASK, 1)]
     }
 
     /// Up to 16 pixels of line y from x, a tile row, before the cursor,

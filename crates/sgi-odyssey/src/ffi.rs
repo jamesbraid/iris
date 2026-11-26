@@ -295,6 +295,63 @@ pub unsafe extern "C" fn sgi_odyssey_dma_stats(h: *mut IrisEngine, out: *mut Iri
     }
 }
 
+/// See `sgi_odyssey_take_damage` in the C header.
+///
+/// # Safety
+/// `h` is a live VPro handle, `runs` points to `2 * cap` words and `n` to a `size_t`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_odyssey_take_damage(h: *mut IrisEngine, runs: *mut u32, cap: usize, n: *mut usize) -> c_int {
+    unsafe {
+        call::<VproEngine, _>(h, Point::Pixel, IRIS_ENGINE_FAULT, |e| {
+            if n.is_null() || cap == 0 || runs.is_null() {
+                return IRIS_ENGINE_ERROR;
+            }
+            if e.fault().is_some() {
+                return IRIS_ENGINE_FAULT;
+            }
+            let mut found = e.take_damage();
+            while found.len() > cap {
+                // Join the two runs with the least between them.
+                let at = (1..found.len()).min_by_key(|&i| found[i].0 - found[i - 1].1).unwrap_or(1);
+                found[at - 1].1 = found[at].1;
+                found.remove(at);
+            }
+            for (i, (first, end)) in found.iter().enumerate() {
+                *runs.add(2 * i) = *first;
+                *runs.add(2 * i + 1) = *end;
+            }
+            *n = found.len();
+            IRIS_ENGINE_OK
+        })
+    }
+}
+
+/// See `sgi_odyssey_scanout_rows` in the C header.
+///
+/// # Safety
+/// `h` is a live VPro handle, `buf` points to `cap` words and `w` and `hgt` to `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_odyssey_scanout_rows(h: *mut IrisEngine, first: u32, end: u32, buf: *mut u32, cap: usize, w: *mut u32, hgt: *mut u32) -> c_int {
+    unsafe {
+        call::<VproEngine, _>(h, Point::Pixel, IRIS_ENGINE_FAULT, |e| {
+            if w.is_null() || hgt.is_null() || (buf.is_null() && cap != 0) {
+                return IRIS_ENGINE_ERROR;
+            }
+            if e.fault().is_some() {
+                return IRIS_ENGINE_FAULT;
+            }
+            let out = if cap == 0 { &mut [][..] } else { std::slice::from_raw_parts_mut(buf, cap) };
+            let (fw, fh) = e.scanout_rows(first, end, out).unwrap_or((0, 0));
+            *w = fw;
+            *hgt = fh;
+            if fw as usize * fh as usize > cap {
+                return IRIS_ENGINE_ERROR;
+            }
+            IRIS_ENGINE_OK
+        })
+    }
+}
+
 /// Bring the pixels of a box (corners included, every plane under it) current for a CPU reader.
 ///
 /// # Safety

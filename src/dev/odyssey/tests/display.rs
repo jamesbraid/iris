@@ -12,6 +12,7 @@ use crate::dev::odyssey::tests::{
     RETRACE_VECTOR, SOFTSYNC_VECTOR, VPRO_WIDGET,
 };
 use super::*;
+use crate::dev::odyssey::vram::Surface;
 
 /// The display mode of a window showing 24-bit RGB through the gamma ramp,
 /// and of one showing colour map group 17, both laid out as the test
@@ -923,4 +924,245 @@ fn a_store_through_any_view_of_the_memory_composes_a_new_frame() {
     assert_eq!(composes(&mut s), 2);
     s.vram.ptr_shared().store(0x4000, 4, 2);
     assert_eq!(composes(&mut s), 2);
+}
+
+// Row damage: a store marks the picture lines under it, and a compose of only those lines keeps a
+// copy of the frame equal to a compose of all of it.
+
+/// Bring `shown`, a copy of the frame built from damage alone, up to date; the lines composed.
+fn follow(s: &mut Board, shown: &mut Vec<u32>) -> usize {
+    let r = s.test_reader();
+    let runs = r.take_damage(false, false);
+    let (w, h) = r.size();
+    let (w, h) = (w as usize, h as usize);
+    shown.resize(w * h, 0);
+    let mut rows = 0;
+    for (first, end) in runs {
+        assert!(first < end && end as usize <= h, "run {first}..{end} of {h} lines");
+        assert!(r.compose_rows(first, end));
+        let (a, b) = (first as usize * w, end as usize * w);
+        shown[a..b].copy_from_slice(&r.frame[a..b]);
+        rows += (end - first) as usize;
+    }
+    rows
+}
+
+/// The frame as a compose of every line makes it.
+fn whole(s: &mut Board) -> Vec<u32> {
+    let r = s.test_reader();
+    r.recompose();
+    r.update();
+    r.frame.clone()
+}
+
+fn assert_same(shown: &[u32], whole: &[u32], w: usize, what: &str) {
+    let bad = shown.iter().zip(whole).position(|(a, b)| a != b);
+    assert!(bad.is_none(), "{what}: line {} differs from a whole compose", bad.unwrap() / w);
+}
+
+/// Every kind of change leaves the damage-built copy equal to the whole frame, and a store marks
+/// only the lines it reached.
+#[test]
+fn marked_rows_equal_the_whole_frame() {
+    // The GPU scan-out composes every frame, so there are no marked lines to follow.
+    if super::gpu_unit_tests() {
+        return;
+    }
+    type Change = fn(&mut Board);
+    let changes: [(&str, bool, Change); 11] = [
+        ("a draw", true, |s| rgb_fill(s, 0xff, 0, 0, 100, 100, 110, 110)),
+        ("a pixel write", true, |s| pixel_write(s, 5, 5, 0x1122_3344)),
+        ("a gamma entry", false, |s| backend_entry(s, crate::dev::odyssey::consts::ODSY_GAMMA_BASE + 0x100, 0x3ff)),
+        ("a colour-map entry", false, |s| backend_entry(s, 7, LUT_RED)),
+        ("a display mode", false, |s| dispmode(s, 3, DISPMODE_GROUP17)),
+        ("an overlay mode", false, |s| backend_entry(s, crate::dev::odyssey::consts::overlay::MODE_BASE + 1, 1)),
+        ("the cursor position", false, |s| cursor_entry(s, cursor::POSITION, 9 << 16 | 4)),
+        ("the scan-out geometry", false, |s| backend_entry(s, 0x2802, 1024)),
+        ("the video mode", false, |s| s.set_scanout_size(1024, 768)),
+        ("a buffer swap", false, |s| {
+            reg_write(s, swap::ARM, 0x1);
+            retrace(s);
+        }),
+        ("a window id", true, |s| drawable(s, 1, 200, 600, 232, 616)),
+    ];
+    for (what, store, change) in changes {
+        let mut s = composed_board();
+        let mut shown = Vec::new();
+        let h = s.test_reader().size().1 as usize;
+        assert_eq!(follow(&mut s, &mut shown), h, "the first look marks every line");
+        assert_eq!(follow(&mut s, &mut shown), 0, "nothing changed");
+        change(&mut s);
+        let rows = follow(&mut s, &mut shown);
+        let (w, h) = s.test_reader().size();
+        let (w, h) = (w as usize, h as usize);
+        let again = whole(&mut s);
+        assert_same(&shown, &again, w, what);
+        if store {
+            // A tile row of 16 lines, two when the store crosses one, three when a block of the
+            // window-id buffer does.
+            assert!(rows > 0 && rows <= 48, "{what} marked {rows} of {h} lines");
+        } else {
+            assert_eq!(rows, h, "{what} marks every line");
+        }
+        assert_eq!(follow(&mut s, &mut shown), 0, "{what}: marked once");
+    }
+}
+
+/// A long run of draws, pixel writes and window ids, the copy checked after each: it never falls
+/// behind the whole frame, and the lines composed are a small part of what a whole compose costs.
+#[test]
+fn a_run_of_stores_is_followed_by_marked_rows_alone() {
+    if super::gpu_unit_tests() {
+        return;
+    }
+    let mut s = composed_board();
+    let mut shown = Vec::new();
+    let w = s.test_reader().size().0 as usize;
+    let h = s.test_reader().size().1 as usize;
+    follow(&mut s, &mut shown);
+    let (mut seed, mut composed, steps) = (0x2545_f491_4f6c_dd1du64, 0usize, 60usize);
+    let mut next = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n) as u32
+    };
+    for step in 0..steps {
+        let (x, y) = (next(1200), next(940));
+        match next(3) {
+            0 => rgb_fill(&mut s, next(256), next(256), next(256), x, y, x + 1 + next(60), y + 1 + next(60)),
+            1 => pixel_write(&mut s, x as i32, y as i32, next(1 << 24) << 8 | 0xff),
+            _ => drawable(&mut s, next(2) as u8, x as i32, y as i32, x as i32 + 20, y as i32 + 20),
+        }
+        composed += follow(&mut s, &mut shown);
+        let again = whole(&mut s);
+        assert_same(&shown, &again, w, &format!("step {step}"));
+    }
+    assert!(composed < steps * h / 4, "{composed} lines composed for {steps} small stores of {h}");
+}
+
+/// Memory that is neither the frame buffer nor the window-id buffer marks no line, and every way to
+/// store to the memory marks the lines under it.
+#[test]
+fn every_writer_marks_its_lines_and_other_memory_marks_none() {
+    if super::gpu_unit_tests() {
+        return;
+    }
+    let mut s = composed_board();
+    let mut shown = Vec::new();
+    follow(&mut s, &mut shown);
+    // Texture memory, past the screen's planes.
+    s.vram.ptr().store(0x16f800 * 16, 4, 1);
+    assert_eq!(follow(&mut s, &mut shown), 0);
+    // The pixel at (40, 500): tile row 31, at the board's own 16 bytes a pixel.
+    let at = Surface::new(0x2000, 80, 4).offset(40, 500) + 12;
+    let stores: [(&str, Box<dyn Fn(&Board)>); 7] = [
+        ("store", Box::new(move |s| s.vram.ptr_shared().store(at, 4, 7))),
+        ("store_quiet", Box::new(move |s| s.vram.ptr_shared().store_quiet(at, 4, 8))),
+        ("an untracked store", Box::new(move |s| s.vram.ptr_shared().untracked().store(at, 4, 9))),
+        ("a words write", Box::new(move |s| s.vram.ptr_shared().write_words_untracked(at & !7, &[1]))),
+        ("a marked range", Box::new(move |s| s.vram.ptr_shared().mark_shown(at, 4))),
+        ("a row store", Box::new(|s| {
+            let rows = crate::dev::odyssey::tests::screen_field(s, 0);
+            assert!(rows.store_run(500, 44, [7u32; 9].into_iter()));
+            rows.mark_rect(44, 500, 9, 1);
+        })),
+        ("a fill", Box::new(|s| crate::dev::odyssey::tests::screen_field(s, 0).fill(500, 44, 52, 7))),
+    ];
+    for (what, store) in stores {
+        store(&s);
+        let rows = follow(&mut s, &mut shown);
+        assert_eq!(rows, 16, "{what} marks the tile row it is in");
+        let r = s.test_reader();
+        r.recompose();
+        r.update();
+        let w = r.frame_width as usize;
+        assert_eq!(shown[500 * w..501 * w], r.frame[500 * w..501 * w], "{what}");
+    }
+}
+
+/// ms for a compose of the whole 1280 x 1024 test screen and of `BENCH_ROWS` lines of it (the lines a small
+/// store marks), the best of `BENCH_RUNS` runs of `BENCH_FRAMES`.
+#[test]
+#[ignore = "benchmark"]
+fn bench_marked_rows() {
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (rows, runs, frames) = (env("BENCH_ROWS", 16), env("BENCH_RUNS", 5), env("BENCH_FRAMES", 20));
+    let mut s = composed_board();
+    for y in (0..1024).step_by(7) {
+        rgb_fill(&mut s, y & 255, 255 - (y & 255), 90, 0, y, 1280, y + 1);
+    }
+    let best = |s: &mut Board, rows: Option<usize>| {
+        let mut best = f64::MAX;
+        for _ in 0..runs {
+            let t = std::time::Instant::now();
+            for _ in 0..frames {
+                let r = s.test_reader();
+                match rows {
+                    Some(n) => assert!(r.compose_rows(0, n as u32)),
+                    None => {
+                        r.recompose();
+                        r.update();
+                    }
+                }
+                std::hint::black_box(&r.frame);
+            }
+            best = best.min(t.elapsed().as_secs_f64() * 1e3 / frames as f64);
+        }
+        best
+    };
+    let whole = best(&mut s, None);
+    let part = best(&mut s, Some(rows));
+    println!("vpro compose 1280x1024: whole {whole:.3} ms, {rows} lines {part:.3} ms");
+}
+
+/// An image DMA'd to the screen by its address marks the rows its row stores reached, and nothing more.
+#[test]
+fn a_dma_image_marks_the_rows_it_stored() {
+    use crate::dev::odyssey::tests::dma::{descriptor, pte, put_table, PAGE_A, TABLE};
+    if super::gpu_unit_tests() {
+        return;
+    }
+    let (mut s, _, ram) = crate::dev::odyssey::tests::board_with_ram();
+    display_identity(&mut s, 0);
+    assert!(s.scanout_update());
+    let mut shown = Vec::new();
+    follow(&mut s, &mut shown);
+    // 20 by 3 pixels of 4 bytes at (100, 50): the plain fallback code, which goes by row stores.
+    let image: Vec<u8> = (0..60u32).flat_map(|i| (i * 0x0101_0101 | 0xff).to_be_bytes()).collect();
+    ram.put(PAGE_A, &image);
+    put_table(&ram, TABLE, [0x2000, 50 << 16 | 100, 80, 3 << 16 | 20, 0x8263_305a, 0, 80, 0x3201_0000], &[pte(PAGE_A, 240)]);
+    descriptor(&mut s, TABLE);
+    assert_eq!(follow(&mut s, &mut shown), 16, "the tile row the three rows are in");
+    let again = whole(&mut s);
+    let w = s.test_reader().frame_width as usize;
+    assert_same(&shown, &again, w, "a DMA image");
+    assert_ne!(again[51 * w + 101], 0, "the image is in the picture");
+}
+
+/// A draw-sentinel upload of 3-byte pixels, which goes by runs, marks the rows it stored, and the picture of the rows
+/// marked is the whole picture's.
+#[test]
+fn a_draw_sentinel_upload_marks_the_rows_it_stored() {
+    use crate::dev::odyssey::tests::dma::{descriptor, pte, put_table, PAGE_A, TABLE};
+    if super::gpu_unit_tests() {
+        return;
+    }
+    let (mut s, _, ram) = crate::dev::odyssey::tests::board_with_ram();
+    display_identity(&mut s, 0);
+    s.win.clip_kept = 1;
+    s.win.clip_rect[0] = crate::dev::odyssey::clip::ClipRect { x0: 0, y0: 0, x1: 1279, y1: 1023 };
+    assert!(s.scanout_update());
+    let mut shown = Vec::new();
+    follow(&mut s, &mut shown);
+    // 20 by 3 pixels of RGB bytes (write code 0x49, 3 bytes a pixel) at (100, 50).
+    let image: Vec<u8> = (0..60u8).flat_map(|i| [i, 255 - i, i ^ 0x5a]).collect();
+    ram.put(PAGE_A, &image);
+    put_table(&ram, TABLE, [crate::dev::odyssey::consts::dma::SENTINEL_DRAW, 50 << 16 | 100, 0x50, 3 << 16 | 20, 0x1000, 0, 60, 1 << 30 | 7 << 16 | 0x49], &[pte(PAGE_A, 180)]);
+    descriptor(&mut s, TABLE);
+    assert_eq!(follow(&mut s, &mut shown), 16, "the tile row the three rows are in");
+    let again = whole(&mut s);
+    let w = s.test_reader().frame_width as usize;
+    assert_same(&shown, &again, w, "a draw-sentinel upload");
+    assert_ne!(again[51 * w + 110] & 0xffffff, 0, "the image is in the picture");
 }

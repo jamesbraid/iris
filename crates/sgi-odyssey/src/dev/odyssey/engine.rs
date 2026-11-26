@@ -480,6 +480,45 @@ impl VproEngine {
         (r.frame_width != 0).then(|| (r.frame_width, r.frame_height, r.frame.iter().map(rgb).collect()))
     }
 
+    /// The picture lines that may have changed since the last call, as runs `(first, end)`; every line
+    /// for a change to anything but the two buffers, and for the GPU paths. Running stores show up later.
+    pub fn take_damage(&mut self) -> Vec<(u32, u32)> {
+        if self.faulted() {
+            return Vec::new();
+        }
+        let running = self.mode == Mode::Threaded && !self.parked;
+        self.reader.attach(&self.locks.shared);
+        self.reader.take_damage(running, self.gpu)
+    }
+
+    /// Lines `first` up to `end` into `out` as `scanout` makes them, the other words untouched; `out`
+    /// holds the whole frame or nothing is written. None with no mode or once the engine has stopped.
+    pub fn scanout_rows(&mut self, first: u32, end: u32, out: &mut [u32]) -> Option<(u32, u32)> {
+        if self.gpu {
+            // The GPU scan-out composes whole behind the work submitted.
+            let (w, h, pixels) = self.scanout()?;
+            let (a, b) = (first.min(h) as usize * w as usize, end.min(h) as usize * w as usize);
+            if out.len() >= pixels.len() {
+                out[a..b].copy_from_slice(&pixels[a..b]);
+            }
+            return Some((w, h));
+        }
+        if !self.settle_scanout() {
+            return None;
+        }
+        let r = &mut self.reader;
+        r.attach(&self.locks.shared);
+        let (w, h) = r.size();
+        let (first, end) = (first.min(h), end.min(h));
+        if first < end && out.len() >= w as usize * h as usize && r.compose_rows(first, end) {
+            // The reader composes 0xAABBGGRR; this API hands out 0x00RRGGBB.
+            let rgb = |p: &u32| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16) & 0xff;
+            let range = first as usize * w as usize..end as usize * w as usize;
+            out[range.clone()].iter_mut().zip(&r.frame[range]).for_each(|(o, p)| *o = rgb(p));
+        }
+        (w != 0).then_some((w, h))
+    }
+
     /// As `scanout` with the colour maps' ten bits a channel, x2b10g10r10 (XB30, red low), whose top eight bits
     /// are what `scanout` gives.
     pub fn scanout10(&mut self) -> Option<(u32, u32, Vec<u32>)> {
@@ -839,6 +878,7 @@ impl BoardEngine for VproEngine {
     fn cpu_wrote(&mut self, off: u64, len: u64) {
         self.activity += 1;
         self.vram.mark_for_upload(off, len);
+        self.vram.mark_shown(off, len);
     }
 
     fn observe(&mut self, r: &Rect) -> Result<(), Fault> {

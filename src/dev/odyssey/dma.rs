@@ -595,6 +595,8 @@ impl Board {
         let mut i: usize = 0;
         let mut left: u32 = if n > 0 { e[0].len } else { 0 };
         let (mut rows_done, mut fast_rows) = (0u64, 0u64);
+        // The first and last rows a row store reached, for the picture's rows (`Rows::mark_rect`).
+        let mut stored: Option<(i32, i32)> = None;
         let mut complete = false;
         'done: {
             for r in 0..h {
@@ -627,13 +629,14 @@ impl Board {
                 if let Some(o) = order {
                     let v = row[..(w * 4) as usize].chunks_exact(4).map(|p| u32::from_be_bytes(p.try_into().unwrap()));
                     let (ry, rx) = (y.wrapping_add(r) as i32, x as i32);
-                    let stored = match o {
+                    let done = match o {
                         ByteOrder::Rgba => to.store_run(ry, rx, v.map(|v| v | 0xff)),
                         ByteOrder::Xrgb => to.store_run(ry, rx, v.map(|v| v << 8 | 0xff)),
                         ByteOrder::Abgr => to.store_run(ry, rx, v.map(|v| v.swap_bytes() | 0xff)),
                     };
-                    if stored {
+                    if done {
                         fast_rows += 1;
+                        stored = Some((stored.map_or(ry, |s| s.0), ry));
                         continue;
                     }
                 }
@@ -664,6 +667,9 @@ impl Board {
                 }
             }
             complete = true;
+        }
+        if let Some((first, last)) = stored {
+            to.mark_rect(x as i32, first, w as i32, last - first + 1);
         }
         let slow = if obj.is_some() {
             None
@@ -930,6 +936,8 @@ impl Board {
         let passes = |x: i64, y: i64| c & ODSY_ID_COMPARE_ENABLE == 0 || planes.did.load1(x as i32, y as i32).is_some_and(|v| (v ^ id) & mask == 0);
         let x0 = x as i64 + self.win.origin[0] as i64;
         let rowbytes = w as usize * psize;
+        // The box the runs reached, for the picture's rows (`Rows::mark_rect`).
+        let mut reached: Option<(i32, i32, i32, i32)> = None;
         for r in 0..h as i64 {
             let py = (if top_down { plane_rows - y as i64 - h as i64 + r } else { y as i64 + h as i64 - 1 - r }) + self.win.origin[1] as i64;
             let row = &payload[r as usize * rowbytes..][..rowbytes];
@@ -953,8 +961,15 @@ impl Board {
                         };
                         debug_assert!(stored, "a run inside the checked view");
                     }
+                    let (ax, bx, ay) = (a as i32, b as i32 - 1, py as i32);
+                    reached = Some(reached.map_or((ax, ay, bx, ay), |s| (s.0.min(ax), s.1.min(ay), s.2.max(bx), s.3.max(ay))));
                     a = b;
                 }
+            }
+        }
+        if let Some((x0, y0, x1, y1)) = reached {
+            for buf in (0..2).filter(|&buf| selected(buf)) {
+                planes.colour[buf].mark_rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
             }
         }
         true

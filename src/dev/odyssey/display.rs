@@ -186,7 +186,7 @@ impl Board {
 /// without a display thread: the same reader the display uses.
 #[cfg(test)]
 impl Board {
-    fn test_reader(&mut self) -> &mut ScanoutReader {
+    pub(super) fn test_reader(&mut self) -> &mut ScanoutReader {
         self.raster_wait();
         self.reader.attach(&self.display);
         &mut self.reader

@@ -209,6 +209,66 @@ impl DirtyBlocks {
     }
 }
 
+/// Bytes in one block of the shown map, log2: 4 KiB, a tile of 16-byte pixels or eight of 2-byte ones.
+pub(super) const SHOWN_BLOCK_SHIFT: u32 = 12;
+
+/// Which blocks of board memory were stored to since a display last asked, for the picture rows
+/// they sit under (`ScanoutReader::take_damage`). Every unit's store marks it, as the shell's map.
+pub(super) struct ShownBlocks {
+    bits: Box<[AtomicU64]>,
+    /// What the last `take` took, which the next reports again while threads run.
+    again: Box<[AtomicU64]>,
+    blocks: u64,
+}
+
+impl Default for ShownBlocks {
+    fn default() -> Self {
+        ShownBlocks::new(0)
+    }
+}
+
+impl ShownBlocks {
+    fn new(size: u64) -> ShownBlocks {
+        let blocks = (size >> SHOWN_BLOCK_SHIFT).max(1);
+        let map = || (0..blocks.div_ceil(64)).map(|_| AtomicU64::new(0)).collect::<Box<[_]>>();
+        ShownBlocks { bits: map(), again: map(), blocks }
+    }
+
+    #[inline]
+    fn mark_range(&self, off: u64, len: u64) {
+        if len == 0 || off >= self.blocks << SHOWN_BLOCK_SHIFT {
+            return;
+        }
+        let last = ((off + len - 1) >> SHOWN_BLOCK_SHIFT).min(self.blocks - 1);
+        for b in (off >> SHOWN_BLOCK_SHIFT)..=last {
+            // A bit already set is only read, as `VramPtr::put` does.
+            let (word, bit) = (&self.bits[(b >> 6) as usize], 1u64 << (b & 63));
+            if word.load(Ordering::Relaxed) & bit == 0 {
+                word.fetch_or(bit, Ordering::Release);
+            }
+        }
+    }
+
+    /// Each marked block's first byte address, unmarked. With `running`, a store may have raced the take
+    /// and not re-marked, so the blocks of this take come again with the next.
+    fn take(&self, running: bool, mut each: impl FnMut(u64)) {
+        for (i, w) in self.bits.iter().enumerate() {
+            if w.load(Ordering::Relaxed) == 0 && self.again[i].load(Ordering::Relaxed) == 0 {
+                continue;
+            }
+            let taken = w.swap(0, Ordering::Acquire);
+            let mut bits = taken | self.again[i].swap(if running { taken } else { 0 }, Ordering::Relaxed);
+            while bits != 0 {
+                let b = i as u64 * 64 + bits.trailing_zeros() as u64;
+                bits &= bits - 1;
+                if b < self.blocks {
+                    each(b << SHOWN_BLOCK_SHIFT);
+                }
+            }
+        }
+    }
+}
+
 /// The memory's words: its own, or a region the shell lent.
 enum Words {
     Own(Vec<u64>),
@@ -269,13 +329,15 @@ pub(super) struct Vram {
     /// Where the tile workers drew, for the display (`VramPtr::marks`):
     /// their draws' stores do not set `written`.
     marks: Arc<crate::display::Marks>,
+    /// Blocks stored to since the display last took its damage.
+    shown: Arc<ShownBlocks>,
 }
 
 impl Vram {
     /// Memory of at least size bytes, a power of two, so an address masks
     /// into it.
     pub fn new(size: u64) -> Vram {
-        Vram { words: Words::Own(vec![0; (size.next_power_of_two() / 8).max(1) as usize]), dirty: None, upload: false, report: false, written: Arc::default(), marks: Arc::default() }
+        Vram { words: Words::Own(vec![0; (size.next_power_of_two() / 8).max(1) as usize]), dirty: None, upload: false, report: false, written: Arc::default(), marks: Arc::default(), shown: Arc::new(ShownBlocks::new(size.next_power_of_two())) }
     }
 
     /// Memory of `bytes` at `ptr`, which the caller owns: the shell lends
@@ -286,7 +348,7 @@ impl Vram {
     /// until the board is dropped, and nothing else writes it meanwhile.
     pub unsafe fn lent(ptr: *mut u64, bytes: u64) -> Vram {
         assert!(bytes.is_power_of_two() && bytes >= 8, "board memory is a power of two");
-        Vram { words: Words::Lent { ptr, len: (bytes / 8) as usize }, dirty: None, upload: false, report: false, written: Arc::default(), marks: Arc::default() }
+        Vram { words: Words::Lent { ptr, len: (bytes / 8) as usize }, dirty: None, upload: false, report: false, written: Arc::default(), marks: Arc::default(), shown: Arc::new(ShownBlocks::new(bytes)) }
     }
 
     /// Start keeping the dirty map (the GPU instantiation's mirror).
@@ -317,13 +379,13 @@ impl Vram {
     /// sized once, at allocation, and never moves, so the pointer stays
     /// good for the board's life.
     pub fn ptr(&mut self) -> VramPtr {
-        VramPtr { ptr: self.words.as_mut_ptr(), mask: self.words.len() - 1, dirty: self.dirty_ptr(), maps: self.maps_ptr(), report: self.report_ptr(), written: Arc::as_ptr(&self.written), marks: Arc::as_ptr(&self.marks) }
+        VramPtr { ptr: self.words.as_mut_ptr(), mask: self.words.len() - 1, dirty: self.dirty_ptr(), maps: self.maps_ptr(), report: self.report_ptr(), written: Arc::as_ptr(&self.written), marks: Arc::as_ptr(&self.marks), shown: self.shown.bits.as_ptr(), shown_map: Arc::as_ptr(&self.shown) }
     }
 
     /// ptr() from a shared borrow: the memory is written through the pointer
     /// by units that race as the board's do (see VramPtr).
     pub fn ptr_shared(&self) -> VramPtr {
-        VramPtr { ptr: self.words.as_ptr() as *mut u64, mask: self.words.len() - 1, dirty: self.dirty_ptr(), maps: self.maps_ptr(), report: self.report_ptr(), written: Arc::as_ptr(&self.written), marks: Arc::as_ptr(&self.marks) }
+        VramPtr { ptr: self.words.as_ptr() as *mut u64, mask: self.words.len() - 1, dirty: self.dirty_ptr(), maps: self.maps_ptr(), report: self.report_ptr(), written: Arc::as_ptr(&self.written), marks: Arc::as_ptr(&self.marks), shown: self.shown.bits.as_ptr(), shown_map: Arc::as_ptr(&self.shown) }
     }
 
     /// The maps, or null when the GPU unit's upload does not need one.
@@ -351,6 +413,7 @@ impl Vram {
         if let (Some(d), true) = (&self.dirty, self.report) {
             d.mark_range(0, self.words.len() as u64 * 8, false);
         }
+        self.shown.mark_range(0, self.words.len() as u64 * 8);
         self.written.store(true, Ordering::Relaxed);
     }
 
@@ -383,6 +446,9 @@ pub(super) struct VramPtr {
     written: *const AtomicBool,
     /// `Vram::marks`, likewise; null for no memory.
     marks: *const crate::display::Marks,
+    /// The words of `Vram::shown`'s map, and the map.
+    shown: *const AtomicU64,
+    shown_map: *const ShownBlocks,
 }
 
 /// Whether the n bytes at byte address a do not lie in one aligned 8-byte word. Every field the
@@ -409,6 +475,7 @@ fn straddle_reported(a: u64, n: u32) {
 
 /// Where a null view's stores, which never happen, would mark.
 static NOWHERE: AtomicBool = AtomicBool::new(false);
+static NOWHERE_SHOWN: AtomicU64 = AtomicU64::new(0);
 
 // SAFETY: the array outlives every user (Board owns it and stops the raster
 // and display threads before it drops), and never moves.
@@ -473,6 +540,13 @@ impl VramPtr {
     /// `store_quiet` for bytes the caller knows lie in one word.
     #[inline(always)]
     pub fn put(&self, a: u64, n: u32, v: u64) {
+        self.put_unshown(a, n, v);
+        self.mark_shown_word(a);
+    }
+
+    /// `put` without the picture-row mark, for a loop that marks its run with `mark_shown`.
+    #[inline(always)]
+    pub fn put_unshown(&self, a: u64, n: u32, v: u64) {
         debug_assert!((a & 7) as u32 + n <= 8);
         let p = self.word(a);
         // SAFETY: as load().
@@ -497,6 +571,18 @@ impl VramPtr {
                     word.fetch_or(bit, Ordering::Relaxed);
                 }
             }
+        }
+    }
+
+    /// Mark the block of the word at byte address a for the picture's rows; the release pairs with
+    /// `take`'s acquire, so a row composed for a block's mark sees the data stored before it.
+    #[inline(always)]
+    fn mark_shown_word(&self, a: u64) {
+        let b = ((a >> 3) as usize & self.mask) >> (SHOWN_BLOCK_SHIFT - 3);
+        // SAFETY: the map's words live as long as the memory (Vram::shown), and `b` is in it.
+        let (word, bit) = unsafe { (&*self.shown.add(b >> 6), 1u64 << (b & 63)) };
+        if word.load(Ordering::Relaxed) & bit == 0 {
+            word.fetch_or(bit, Ordering::Release);
         }
     }
 
@@ -530,6 +616,25 @@ impl VramPtr {
     pub fn marks(&self) -> Option<&crate::display::Marks> {
         // SAFETY: the table lives as long as the memory (Vram::marks).
         unsafe { self.marks.as_ref() }
+    }
+
+    /// Mark the memory under `len` bytes at byte offset `off` as stored to, for the picture's rows: a
+    /// writer that bypasses `put` (the shell's own stores, a GPU readback).
+    #[inline]
+    pub fn mark_shown(&self, off: u64, len: u64) {
+        if !self.shown_map.is_null() {
+            // SAFETY: the map lives as long as the memory (Vram::shown).
+            unsafe { (*self.shown_map).mark_range(off, len) }
+        }
+    }
+
+    /// Each block of memory stored to since the last call, as its first byte address, unmarked.
+    /// `running` says units that store are still going (see `ShownBlocks::take`).
+    pub fn take_shown(&self, running: bool, each: impl FnMut(u64)) {
+        if !self.shown_map.is_null() {
+            // SAFETY: as mark_shown().
+            unsafe { (*self.shown_map).take(running, each) }
+        }
     }
 
     /// The same memory with no dirty map: for a writer that uploads what
@@ -578,6 +683,7 @@ impl VramPtr {
         debug_assert!(off % 8 == 0 && off + 8 * words.len() as u64 <= self.size());
         // SAFETY: in range; as above.
         unsafe { std::ptr::copy_nonoverlapping(words.as_ptr(), self.ptr.add((off >> 3) as usize), words.len()) }
+        self.mark_shown(off, 8 * words.len() as u64);
         if !self.report.is_null() {
             // SAFETY: the maps live as long as the memory (Vram::dirty).
             unsafe { (*self.maps).mark_range(off, 8 * words.len() as u64, false) }
@@ -622,7 +728,7 @@ impl VramPtr {
 
     /// No memory: a view of a field the surface lacks, which nothing reads.
     pub fn null() -> VramPtr {
-        VramPtr { ptr: std::ptr::null_mut(), mask: 0, dirty: std::ptr::null(), maps: std::ptr::null(), report: std::ptr::null(), written: &NOWHERE, marks: std::ptr::null() }
+        VramPtr { ptr: std::ptr::null_mut(), mask: 0, dirty: std::ptr::null(), maps: std::ptr::null(), report: std::ptr::null(), written: &NOWHERE, marks: std::ptr::null(), shown: &NOWHERE_SHOWN, shown_map: std::ptr::null() }
     }
 }
 

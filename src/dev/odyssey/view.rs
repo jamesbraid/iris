@@ -311,8 +311,23 @@ impl Rows {
         self.v.kind == Kind::Rgba8 && self.v.log2 >= 2 && self.v.at & 3 == 0
     }
 
+    /// Mark the picture's rows under the pixels `w` by `h` from (x, y), which `put_unshown` stored, a band of tiles
+    /// at a time: the tiles of a band lie side by side in memory, so one range covers them.
+    pub fn mark_rect(&self, x: i32, y: i32, w: i32, h: i32) {
+        let (x1, y1) = ((x + w).min(self.v.width as i32) - 1, (y + h).min(self.v.height as i32) - 1);
+        if w <= 0 || h <= 0 || x < 0 || y < 0 || x > x1 || y > y1 {
+            return;
+        }
+        let tile = (TILE as u64 * TILE as u64) << self.v.log2;
+        for band in y >> 4..=y1 >> 4 {
+            let from = self.v.addr(x & !15, band << 4) - self.v.at as u64;
+            let last = self.v.addr(x1 & !15, band << 4) - self.v.at as u64;
+            self.mem.mark_shown(from, last.saturating_sub(from) + tile);
+        }
+    }
+
     /// Store `words` at pixels x0.. of row y as store_word() would, for an RGBA8 view holding the
-    /// whole run; false, with nothing stored, otherwise.
+    /// whole run; false, with nothing stored, otherwise. The caller marks the rows (`mark_rect`).
     pub fn store_run(&self, y: i32, x0: i32, words: impl ExactSizeIterator<Item = u32>) -> bool {
         let n = words.len() as u64;
         if n == 0 {
@@ -324,7 +339,7 @@ impl Rows {
         let (mut x, step) = (x0, 1u64 << self.v.log2);
         let mut a = self.v.addr(x, y);
         for w in words {
-            self.mem.put(a, 4, w as u64);
+            self.mem.put_unshown(a, 4, w as u64);
             x += 1;
             // A tile row is 16 pixels, contiguous.
             a = if x & 15 == 0 { self.v.addr(x, y) } else { a.wrapping_add(step) };
@@ -348,8 +363,12 @@ impl Rows {
         };
         let len = self.v.value_len();
         for x in x0..=x1 {
-            self.mem.store_quiet(self.v.addr(x, y), len, v);
+            let a = self.v.addr(x, y);
+            if !super::vram::straddles(a, len) {
+                self.mem.put_unshown(a, len, v);
+            }
         }
+        self.mark_rect(x0, y, x1 - x0 + 1, 1);
         self.mem.mark_written();
     }
 }

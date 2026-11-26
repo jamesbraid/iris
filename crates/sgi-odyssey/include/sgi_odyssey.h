@@ -150,6 +150,28 @@ int sgi_odyssey_observe(IrisEngine *h, int32_t x0, int32_t y0, int32_t x1,
 int sgi_odyssey_scanout(IrisEngine *h, uint32_t *buf, size_t cap, uint32_t *w,
                       uint32_t *hgt);
 
+/*
+ * The picture lines that may have changed since the last call: up to cap runs
+ * as pairs of line numbers, first up to end, into runs (2 * cap words), in
+ * line order, and their number in *n (0 for none). Past cap runs, the nearest
+ * are joined. A store to the frame buffer or the window-id buffer marks the
+ * lines under it; any other change to what the scan-out reads, and a GPU
+ * scan-out, mark every line. FAULT on a faulted engine.
+ */
+int sgi_odyssey_take_damage(IrisEngine *h, uint32_t *runs, size_t cap,
+                          size_t *n);
+
+/*
+ * As sgi_odyssey_scanout for lines first up to end only: they are composed
+ * into buf at their place in the frame (line y from word y * *w), every other
+ * word untouched, so cap must hold the whole frame (ERROR with the size set,
+ * nothing written, when it does not). *w and *hgt are the frame's size, 0 by 0
+ * with no video mode. FAULT on a faulted engine.
+ */
+int sgi_odyssey_scanout_rows(IrisEngine *h, uint32_t first, uint32_t end,
+                           uint32_t *buf, size_t cap, uint32_t *w,
+                           uint32_t *hgt);
+
 #ifdef __cplusplus
 }
 #endif

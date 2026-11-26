@@ -122,6 +122,23 @@ fn the_scanout_tells_the_size_when_the_buffer_is_short_and_copies_when_it_fits()
     unsafe { iris_engine_free(h) };
 }
 
+/// The damage entries refuse a missing out or a zero capacity, and a row scan-out with a short buffer reports the size.
+#[test]
+fn the_damage_entries_refuse_a_missing_out_and_report_the_size_for_a_short_buffer() {
+    let v12 = CString::new("v12").unwrap();
+    let h = unsafe { sgi_odyssey_new(&config(v12.as_ptr(), 0), &host()) };
+    let (mut runs, mut n) = ([0u32; 4], 9usize);
+    assert_eq!(unsafe { sgi_odyssey_take_damage(h, null_mut(), 2, &mut n) }, IRIS_ENGINE_ERROR);
+    assert_eq!(unsafe { sgi_odyssey_take_damage(h, runs.as_mut_ptr(), 0, &mut n) }, IRIS_ENGINE_ERROR);
+    assert_eq!(unsafe { sgi_odyssey_take_damage(h, runs.as_mut_ptr(), 2, &mut n) }, IRIS_ENGINE_OK);
+    assert!(n <= 2, "at most the capacity");
+    let (mut w, mut hgt) = (0u32, 0u32);
+    let mut small = [0xdead_beefu32; 4];
+    assert_eq!(unsafe { sgi_odyssey_scanout_rows(h, 0, 1, small.as_mut_ptr(), small.len(), &mut w, &mut hgt) }, IRIS_ENGINE_ERROR);
+    assert!(w > 0 && hgt > 0 && small.iter().all(|&p| p == 0xdead_beef), "the size, and nothing written");
+    unsafe { iris_engine_free(h) };
+}
+
 /// A descriptor the engine reads (here, one whose header names no destination) shows in the DMA counters.
 #[test]
 fn the_dma_counters_count_a_descriptor_and_refuse_a_null_out() {

@@ -653,6 +653,28 @@ fn program_scanout(e: &mut VproEngine) {
     }
 }
 
+/// A store announced with `cpu_wrote` marks the 16-line band of the picture it sits in; the first look is every
+/// line; `scanout_rows` composes the lines asked for and leaves every other word alone.
+#[test]
+fn the_damage_names_the_lines_a_store_reached_and_scanout_rows_composes_only_those() {
+    let (mut e, _) = engine(Mode::Inline);
+    program_scanout(&mut e);
+    assert_eq!(e.take_damage(), vec![(0, 1024)], "the first look is every line");
+    assert!(e.take_damage().is_empty(), "nothing changed");
+    let (x, y) = (100u64, 50u64);
+    e.cpu_wrote(0x2_0000 + (((y >> 4) * 80 + (x >> 4)) << 8 | (y & 15) << 4 | (x & 15)) * 16, 16);
+    assert_eq!(e.take_damage(), vec![(48, 64)]);
+    e.cpu_wrote(0x4000_0000, 16);
+    assert!(e.take_damage().is_empty(), "memory outside the two buffers marks no line");
+    let mut out = vec![0xdead_beefu32; 1280 * 1024];
+    assert_eq!(e.scanout_rows(48, 64, &mut out), Some((1280, 1024)));
+    assert!(out[48 * 1280..64 * 1280].iter().all(|&p| p >> 24 == 0), "the lines asked for are composed");
+    assert!(out[..48 * 1280].iter().chain(&out[64 * 1280..]).all(|&p| p == 0xdead_beef), "the others are not touched");
+    let mut short = vec![0xdead_beefu32; 16];
+    assert_eq!(e.scanout_rows(0, 1, &mut short), Some((1280, 1024)));
+    assert!(short.iter().all(|&p| p == 0xdead_beef), "a short buffer is left alone");
+}
+
 /// A CPU store into lent memory, announced with `cpu_wrote`, is in the next scan-out of a GPU engine: the
 /// call submits it to the unit before it composes, as it did before it stopped settling the board (the
 /// regression: the frame stayed as the unit last drew it). Needs a GPU adapter; returns early without one.
