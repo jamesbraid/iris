@@ -1577,10 +1577,13 @@ impl Hq2Engine {
                 }
             }
             T_SET_RASTER_POS => {
-                let wv = g.transform([f(a[0]), f(a[1]), f(a[2]), f(a[3])]);
-                let (rx, ry) = (wv.x - g.win[0] as f32, wv.y - g.win[1] as f32);
-                g.rpos = [rx, ry];
-                g.cpos = [rx.floor() as i32, ry.floor() as i32, (wv.ok == 0 || wv.oc != 0) as i32];
+                // Without operands (inferred) it only latches the current colour.
+                if self.last_total >= 4 {
+                    let wv = g.transform([f(a[0]), f(a[1]), f(a[2]), f(a[3])]);
+                    let (rx, ry) = (wv.x - g.win[0] as f32, wv.y - g.win[1] as f32);
+                    g.rpos = [rx, ry];
+                    g.cpos = [rx.floor() as i32, ry.floor() as i32, (wv.ok == 0 || wv.oc != 0) as i32];
+                }
                 g.cpos_color = g.color;
             }
             T_BITMAP_SHORT | T_BITMAP_TALL | T_BITMAP_HUGE => self.gl_bitmap(cmd, &a, out),
@@ -1730,6 +1733,8 @@ impl Hq2Engine {
             T_PIXEL_SCALE => format!("GL_PIXEL_ZOOM {} x {} ({})", f(a[1]), f(a[2]), f(a[0])),
             T_READ_BOX => format!("GL_READ_BOX ({}, {}) {}x{} [{:#x} {:#x} {:#x}] {} -> shram[{:#x}], FIN3",
                 a[0] as i32, a[1] as i32, a[2], a[3], a[4], a[5], a[6], self.gl_read_desc(), READBACK_SHRAM),
+            T_SET_RASTER_POS if self.last_total < 4 => format!("GL_SET_RASTER_POS (colour only) colour ({:.3}, {:.3}, {:.3})",
+                g.cpos_color[0], g.cpos_color[1], g.cpos_color[2]),
             T_SET_RASTER_POS => format!("GL_SET_RASTER_POS -> window ({:.2}, {:.2}){} colour ({:.3}, {:.3}, {:.3})",
                 g.rpos[0], g.rpos[1], if g.cpos[2] != 0 { " invalid" } else { "" },
                 g.cpos_color[0], g.cpos_color[1], g.cpos_color[2]),

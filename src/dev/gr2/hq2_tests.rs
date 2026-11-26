@@ -3277,7 +3277,7 @@ fn gr2_composed_frame_is_pinned_on_the_gpu() {
 /// An engine thread that panics is reported to the shell's hook and kept.
 #[test]
 fn a_panic_on_an_engine_thread_is_reported() {
-    let g = Gr2::new(Gr2Variant::Xz, crate::disp::StatusSource::detached());
+    let g = Gr2::new(Gr2Variant::Xz, crate::status::MachineStatus::detached());
     let (tx, rx) = std::sync::mpsc::channel();
     let tx = parking_lot::Mutex::new(tx);
     g.set_panic_hook(Box::new(move |m| {
@@ -3295,7 +3295,7 @@ fn a_panic_on_an_engine_thread_is_reported() {
 /// The board is not started, so queued words stay queued and nothing moves behind the test.
 #[test]
 fn what_would_wait_matches_what_does_and_a_stall_names_its_end() {
-    let g = Gr2::new(Gr2Variant::Xz, crate::disp::StatusSource::detached());
+    let g = Gr2::new(Gr2Variant::Xz, crate::status::MachineStatus::detached());
     let waits = |off: u32, write: bool| g.access_would_wait(off, write);
     let busy_read = |off: u32| g.reg_read(off).status == BUS_BUSY;
     for off in [0x6a040, 0x6a068, 0x6c200, 0x6c600, 0x40000] {
@@ -3460,7 +3460,7 @@ fn operands_at_the_ends_of_their_range_are_bounded() {
 /// the byte window holds what it was given; an Indigo-style board has no window.
 #[test]
 fn the_window_at_6c1c0_follows_the_board_configuration() {
-    let built = |w| Gr2::build(Gr2Probe { aux_window: w, ..Gr2Variant::Xz.probe() }, crate::disp::StatusSource::detached(), None).unwrap();
+    let built = |w| Gr2::build(Gr2Variant::Xz, Gr2Probe { aux_window: w, ..Gr2Variant::Xz.probe() }, crate::status::MachineStatus::detached(), None).unwrap();
     let legacy = built(AuxWindow::Legacy);
     assert_eq!(Gr2Variant::Xz.probe().aux_window, AuxWindow::Legacy, "iris's boards default to the old window");
     assert_eq!(legacy.write32(GR2_BASE + 0x6c1c0, 0xdead_beef), BUS_OK);
@@ -3487,7 +3487,7 @@ fn the_window_at_6c1c0_follows_the_board_configuration() {
 /// of two only.
 #[test]
 fn undecoded_accesses_read_zero_drop_and_are_counted() {
-    let g = &Gr2::new(Gr2Variant::Xz, crate::disp::StatusSource::detached());
+    let g = &Gr2::new(Gr2Variant::Xz, crate::status::MachineStatus::detached());
     assert_eq!(g.write32(GR2_BASE + 0x3f0000, 0x1234), BUS_OK);
     assert_eq!(g.read32(GR2_BASE + 0x3f0000).data, 0);
     assert_eq!(r32(g, 0), 0, "the store did not land on a decoded word");
@@ -3498,4 +3498,96 @@ fn undecoded_accesses_read_zero_drop_and_are_counted() {
     assert_eq!(g.undecoded_accesses(), (10, 1));
     let due: Vec<u32> = (1..=20).filter(|&n| report_due(n)).collect();
     assert_eq!(due, [1, 2, 4, 8, 16]);
+}
+
+/// Drops every RE3 write: these tests read the interpreter's word accounting, not pixels.
+struct NullSink;
+impl hq2::Re3Sink for NullSink {
+    fn reg(&mut self, _: usize, _: u32) {}
+    fn copy(&mut self, _: i32, _: i32, _: i32, _: i32, _: i32, _: i32, _: u32) {}
+    fn finish(&mut self, _: usize) {}
+    fn read_image(&mut self, _: &hq2::ReadImage, _: hq2::ReadDest) {}
+    fn op(&mut self, _: u32, _: u64) {}
+    fn shram(&mut self, _: usize, _: u32) {}
+    fn gedma_out(&mut self, _: &[u32]) {}
+}
+
+fn engine() -> Box<hq2::Hq2Engine> {
+    // SAFETY: the interpreter's state is plain data, valid when zeroed.
+    unsafe { Box::<hq2::Hq2Engine>::new_zeroed().assume_init() }
+}
+
+/// Push (index, word) pairs and collect what the interpreter reports for each command it completes.
+fn feed(e: &mut hq2::Hq2Engine, words: &[(u32, u32)]) -> Vec<String> {
+    let mut log = Vec::new();
+    for &(index, val) in words {
+        e.push(index, val, &mut NullSink, Some(&mut |s: String| log.push(s)));
+    }
+    log
+}
+
+fn strays(log: &[String]) -> usize {
+    log.iter().filter(|s| s.starts_with("stray DATA")).count()
+}
+
+/// Commands whose effect is not modelled still take exactly their words (counts from shipped binaries): the
+/// command is done at its last word, and the next DATA word is a stray, not an argument.
+#[test]
+fn unmodelled_commands_take_exactly_their_words() {
+    for (tok, n) in [(1u32, 1usize), (354, 6)] {
+        let mut e = engine();
+        let mut words = vec![(tok, 0)];
+        words.extend((1..n).map(|_| (hq2::PUC_DATA, 0)));
+        let log = feed(&mut e, &words);
+        assert_eq!(log.len(), 1, "token {tok} completes at word {n}: {log:?}");
+        assert!(log[0].contains(&format!("({n} words, not implemented)")), "token {tok}: {}", log[0]);
+        let log = feed(&mut e, &[(hq2::PUC_DATA, 0)]);
+        assert_eq!(strays(&log), 1, "token {tok}: word {} is not its argument", n + 1);
+    }
+}
+
+/// 133 takes 2 words a dispatch.
+#[test]
+fn paired_commands_take_two_words_a_dispatch() {
+    let mut e = engine();
+    let log = feed(&mut e, &[(133, 0x40c0_0000), (133, 0x3f80_0000), (hq2::PUC_DATA, 0)]);
+    assert_eq!(strays(&log), 1, "133 is a pair: {log:?}");
+}
+
+/// The raster-position token carries 4 operands with one microcode and none with another. The short form
+/// ends where the next command starts, and that command is not lost: a 3-word normal follows intact.
+#[test]
+fn raster_position_takes_four_words_or_one() {
+    let fl = |v: f32| v.to_bits();
+    let rgb = [(0x1982, fl(0.25)), (0x1982, fl(0.5)), (0x1982, fl(0.75))];
+    let mut e = engine();
+    feed(&mut e, &rgb);
+    let long = feed(&mut e, &[(0x105, fl(20.0)), (hq2::PUC_DATA, fl(30.0)), (hq2::PUC_DATA, 0), (hq2::PUC_DATA, fl(1.0))]);
+    assert_eq!(long.len(), 1, "{long:?}");
+    assert!(long[0].starts_with("GL_SET_RASTER_POS -> window"), "{long:?}");
+    assert_eq!(strays(&feed(&mut e, &[(hq2::PUC_DATA, 0)])), 1, "the 4th word was the last");
+
+    let mut e = engine();
+    feed(&mut e, &rgb);
+    let log = feed(&mut e, &[(0x105, 0), (0x10d, 0), (0x10d, 0), (0x10d, 0), (hq2::PUC_DATA, 0)]);
+    assert!(log[0].starts_with("GL_SET_RASTER_POS (colour only)") && log[0].contains("colour (0.250, 0.500, 0.750)"), "{log:?}");
+    assert_eq!(strays(&log), 1, "the normal took its 3 words: {log:?}");
+
+    // A long form cut short is dropped, not read as the short form; UNSTALL ends a pending short form.
+    let mut e = engine();
+    feed(&mut e, &rgb);
+    let log = feed(&mut e, &[(0x105, 0), (hq2::PUC_DATA, 0), (0x10d, 0)]);
+    assert!(log.iter().all(|s| !s.contains("colour only")), "{log:?}");
+    let mut e = engine();
+    feed(&mut e, &rgb);
+    let log = feed(&mut e, &[(0x105, 0), (hq2::HQ_TOKEN_UNSTALL, 0)]);
+    assert!(log.len() == 1 && log[0].contains("colour only") && log[0].contains("(0.250, 0.500, 0.750)"), "{log:?}");
+}
+
+/// The trace labels of tokens 0x016, 0x017, 0x018 and 0x020.
+#[test]
+fn line_and_subpixel_tokens_have_their_labels() {
+    for (tok, name) in [(0x016, "GL_LINE_STIPPLE_PATTERN"), (0x017, "GL_LINE_WIDTH"), (0x018, "GL_LINE_STIPPLE"), (0x020, "GL_POINT_SIZE")] {
+        assert_eq!(hq2::index_label(tok), name);
+    }
 }

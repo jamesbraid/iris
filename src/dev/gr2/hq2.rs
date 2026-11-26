@@ -88,6 +88,12 @@ pub const HQ_PCX_1E6: u32 = 0x1e6;
 /// GL microcode request that completes by raising FIN3: Xsgi sends it and
 /// spins on version bit 0, then clears FIN3 via 0x6b000.
 pub const HQ_GL_FIN3: u32 = 0x155;
+// Known word counts (token included, from shipped binaries), no modelled effect. The GL state tokens
+// with the same property are modelled in `gl`.
+/// Finish flag 2, diagnostic only.
+pub const CMD_DIAG_FIN2: u32 = 1;
+/// Token and 5 data words, sent by the X server at start-up.
+pub const CMD_X_INIT_BLOCK: u32 = 354;
 /// OpenGL tokens (libglcore's FIFO block: block offset X is FIFO
 /// index (X - 0x2000) / 4).
 /// glFinish / SwapBuffers: the readback trigger (0x228C); the client then spins
@@ -724,6 +730,8 @@ impl Hq2Engine {
             GE_LOAD_CTX | GE_LOAD_CTX_EXTRA => STREAM,
             HQ_GL_FIN3 | CMD_READBACK_KICK | CMD_SWAP_WAIT => 1,
             HQ_PCX_1E0 | HQ_PCX_1E6 => 1,
+            CMD_DIAG_FIN2 => 1,
+            CMD_X_INIT_BLOCK => 6,
             X2D_SESSION_START | X2D_AUX_PLANE_MASK | X2D_BIT_ZERO_COLOR | X2D_BIT_ONE_COLOR | X2D_PLANE_SELECT
             | X2D_CID_FIELD | X2D_PRIM_TERMINATOR => 1,
             X2D_PIXEL_LAYOUT => 2,
@@ -769,6 +777,7 @@ impl Hq2Engine {
             if self.need == OPEN {
                 self.complete(out, &mut done);
             }
+            self.end_short_raster_pos(out, &mut done);
             self.need = 0;
             self.nargs = 0;
             self.restarted = 1;
@@ -810,6 +819,9 @@ impl Hq2Engine {
             }
             self.nargs += 1;
         } else {
+            // Approximation: 4 operands or none, told at the next command start. Misread: operands on
+            // the token's own index (colour only), bare DATA after the short form (operands).
+            self.end_short_raster_pos(out, &mut done);
             // GL self-streaming ports (matrix, vertex, colour, normal): every
             // word goes to the same index; they close any open command.
             let mid_fixed = self.need != 0 && self.need != OPEN && self.need != STREAM && self.nargs < self.need;
@@ -882,6 +894,13 @@ impl Hq2Engine {
         }
         if self.need != OPEN && self.nargs >= self.need {
             self.complete(out, &mut done);
+        }
+    }
+
+    /// A raster-position token with no operand yet is the short form: complete it (colour latch only).
+    fn end_short_raster_pos(&mut self, out: &mut dyn Re3Sink, done: &mut Option<&mut dyn FnMut(String)>) {
+        if self.cmd == gl::T_SET_RASTER_POS && self.need == 4 && self.nargs == 1 {
+            self.complete(out, done);
         }
     }
 
