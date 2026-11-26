@@ -304,6 +304,8 @@ pub struct HeadHandle {
     bar: Mutex<StatusBar>,
     /// The timing the board asked for, and a count of the requests.
     timing: Mutex<(VideoTiming, u64)>,
+    /// Where the next restart of the phase begins, on the thread's clock (0: when the thread sees it).
+    restart_at: AtomicU64,
     /// Lines the board wants [`Head::line`] called at.
     lines: Mutex<Vec<u32>>,
     chain: Mutex<Chain>,
@@ -416,6 +418,15 @@ impl HeadHandle {
 
     pub fn timing(&self) -> VideoTiming {
         self.timing.lock().0
+    }
+
+    /// The phase restarts even though the timing is the same (a mode load or a reset), at `at_ns`
+    /// on the thread's clock when the board knows when the guest wrote it, else when the thread
+    /// sees the request. A time more than a field in the past or in the future is not believed.
+    pub fn restart_phase(&self, at_ns: Option<u64>) {
+        self.restart_at.store(at_ns.unwrap_or(0), Ordering::Release);
+        self.timing.lock().1 += 1;
+        self.kick();
     }
 
     /// The lines of a field, counted from the start of its vertical blank,
@@ -662,6 +673,7 @@ impl Refresh {
             status: Mutex::new(status),
             bar: Mutex::new(StatusBar::new()),
             timing: Mutex::new((timing, 0)),
+            restart_at: AtomicU64::new(0),
             lines: Mutex::new(Vec::new()),
             chain: Mutex::new(Chain::default()),
             phase: Mutex::new(Phase { timing, epoch_ns: 0 }),
@@ -930,7 +942,10 @@ impl Slot {
                 let (timing, seq) = *handle.timing.lock();
                 if seq != self.timing_seq {
                     (self.timing, self.timing_seq) = (timing, seq);
-                    self.rephase(handle, now);
+                    let at = handle.restart_at.swap(0, Ordering::AcqRel);
+                    let period = self.timing.field_period_ns();
+                    let epoch = if at != 0 && at <= now && now - at < period { at } else { now };
+                    self.rephase(handle, epoch);
                     self.field = self.timing.fields as u64;
                     continue;
                 }

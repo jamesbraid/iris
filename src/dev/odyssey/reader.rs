@@ -623,6 +623,8 @@ pub(super) struct ScanoutReader {
     pub frame_height: u32,
     mode_gen: u64,
     restart_gen: u64,
+    /// A restart the head has not been told of, with the time of the write that caused it (-1: none known).
+    pub restarted: Option<i64>,
     /// The mode of the frame, and the retraces since the front end last restarted them.
     pub mode: ScanoutMode,
     pub retraces: u64,
@@ -673,7 +675,7 @@ impl ScanoutReader {
     }
 
     /// Take a new mode and retrace restart the front end published.
-    fn sync(&mut self, shared: &DisplayShared) {
+    pub(super) fn sync(&mut self, shared: &DisplayShared) {
         let cell = &shared.mode;
         let (gen, restart) = (cell.gen.load(Acquire), cell.restart.load(Acquire));
         let mode = ScanoutMode {
@@ -699,6 +701,7 @@ impl ScanoutReader {
         if restart != self.restart_gen {
             self.restart_gen = restart;
             self.retraces = 0;
+            self.restarted = Some(cell.restart_at.load(Relaxed));
         }
     }
 
@@ -767,7 +770,7 @@ impl ScanoutReader {
         }
         let displayed = shared.front.lock().displayed_buffer;
         self.snap_gen = shared.regs.snapshot(&mut self.snap, self.snap_gen);
-        let frame = Frame::snapshot_in(&self.snap, displayed, wide)?;
+        let frame = if wide { Frame::snapshot_wide(&self.snap, displayed)? } else { Frame::snapshot(&self.snap, displayed)? };
         let (w, h) = (frame.width.min(self.frame_width), frame.height.min(self.frame_height));
         let composed = run(&mut scanout.lock(), &frame, &self.snap, w, h);
         match composed {

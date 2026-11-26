@@ -147,6 +147,11 @@ impl Head for Scan {
         if let Some(timing) = reader.mode.video_timing() {
             self.display.head.set_timing(timing);
         }
+        // A mode load or reset restarts the phase at the guest's write, when the shell said when
+        // that was (`write_at`).
+        if let Some(at) = reader.restarted.take() {
+            self.display.head.restart_phase((at >= 0).then_some(at as u64));
+        }
     }
 
     /// What the scan-out reads changes without a mark the display could
