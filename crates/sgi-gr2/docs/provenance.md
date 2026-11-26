@@ -71,7 +71,8 @@ file, the state file or the C interface.
 | `vc1.rs` | Display-ID table format, cursor encoding and its timing-table offsets, control bits | VC1 |
 | `xmap5.rs` | Mode-word fields, colour-map layout and size, cursor colour entries | XMAP5 |
 | `gr2comp.rs` | Plane priority and the per-pixel plane layout | display composition |
-| `hq2.rs` | Status bits other than those above; FIFO count and the interrupt level | HQ2 status and interrupts |
+| `board.rs` | The command FIFO's 63-word depth and the full-line compare, from a shipped developer header (software expectation); the drain rate is an approximation for scale only; the low-water flag and the empty threshold keep no meaning | HQ2 status and interrupts |
+| `hq2.rs` | Status bits other than those above | HQ2 status and interrupts |
 | `variant.rs`, `Gr2Probe` | iris's board revisions 4 (Xz) and 6 (Extreme), eight engines on the Extreme, HQ2 revision 2, monitor code 0, and port 1 as `0x3e`, whose bits 3:2 are iris's old "no corona" reading, which the survey does not decode; ports 2 and 3 as absent | iris variants (survey request 13: the IP22 and Indy boards) |
 | `hq2.rs` | Status bit 13 (a FIFO low-water flag) set on every board, as iris always set it. No IP20 program reads it; the IP22 kernel is not covered by that finding | HQ2 status and interrupts |
 | Comment scrub done for the QEMU copy | The comments that named a vendor header, a header section, a vendor source file or an `ignore/` path now say what they mean and cite none of them. The facts they carried are unchanged and still rest on the headers alone where this table says so. What remains are comments naming the shipped GL library and its FIFO layout, which are software expectations from shipped binaries, and iris notes under `clanker/`. | |

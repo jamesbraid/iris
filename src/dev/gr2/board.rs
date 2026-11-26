@@ -68,6 +68,11 @@ pub const SHRAM_WORDS: usize = 32768;
 /// shram word the PROM sets to 1 (UCODE_TP) once the textport microcode runs.
 pub const TP_PROBE_ID: usize = 0x7fff;
 
+/// Words the HQ2 command FIFO holds (software expectation).
+pub const CMD_FIFO_DEPTH: u32 = 63;
+/// Approximation, for scale only: a word leaves the FIFO every 4 clocks of a 33 MHz HQ2.
+pub const CMD_FIFO_DRAIN_NS: u64 = 121;
+
 pub const HQ_QUEUE_CAP: usize = 65536;
 pub const RE3_QUEUE_CAP: usize = 65536;
 /// Words the HQ2_GEDMA read port holds ahead of its reader (power of two).
@@ -180,6 +185,9 @@ pub struct Gr2 {
     pub(super) gedma_out_tail: AtomicU32,
     /// Shell time `gedma_push` began to wait for a reader (0: not waiting); it gives up a limit later.
     pub(super) gedma_stall_since: AtomicU64,
+    /// The command FIFO's count and the time it was settled at, as `time << 7 | count`. The CPU's
+    /// stores raise it and `CMD_FIFO_DRAIN_NS` of shell time drains a word; only those stores write it.
+    pub(super) cmd_fifo: AtomicU64,
     pub(super) hq_fifo: GFifo<HQ_QUEUE_CAP>,
     pub(super) re3_fifo: GFifo<RE3_QUEUE_CAP>,
     /// Pending half of a two-entry COPY op (RE3 thread only).
@@ -355,6 +363,42 @@ impl Gr2 {
             Err(t) => t,
         };
         now.saturating_sub(last) < FIN2_STALL_LIMIT.as_nanos() as u64
+    }
+
+    /// Words in the HQ2 command FIFO at shell time `now`.
+    pub(super) fn cmd_fifo_count(&self, now: u64) -> u32 {
+        let s = self.cmd_fifo.load(Ordering::Relaxed);
+        let gone = now.saturating_sub(s >> 7) / CMD_FIFO_DRAIN_NS;
+        (s & 0x7f).saturating_sub(gone) as u32
+    }
+
+    /// `n` words entered the command FIFO: settle the drain, then add them. The count clamps at the
+    /// depth (stores wait only on the host queue). One CPU thread stores, so no read-modify-write race.
+    fn cmd_fifo_push(&self, n: u32) {
+        let now = self.now_ns();
+        let s = self.cmd_fifo.load(Ordering::Relaxed);
+        let (count, since) = (s & 0x7f, s >> 7);
+        let gone = now.saturating_sub(since) / CMD_FIFO_DRAIN_NS;
+        let (left, at) = if gone >= count { (0, now) } else { (count - gone, since + gone * CMD_FIFO_DRAIN_NS) };
+        let left = (left as u32 + n).min(CMD_FIFO_DEPTH);
+        self.cmd_fifo.store(at << 7 | left as u64, Ordering::Relaxed);
+    }
+
+    /// The FIFO-full line: the count has reached the programmed threshold (inferred: at, not above).
+    /// A threshold of 0, the power-on value, keeps it low.
+    pub fn cmd_fifo_irq(&self) -> bool {
+        let t = self.regs().hq.fifo_full;
+        t != 0 && self.cmd_fifo_count(self.now_ns()) >= t
+    }
+
+    /// Shell time the line falls at if no more words arrive, while it is up.
+    pub fn cmd_fifo_irq_falls_at(&self) -> Option<u64> {
+        if !self.cmd_fifo_irq() {
+            return None;
+        }
+        let s = self.cmd_fifo.load(Ordering::Relaxed);
+        let over = (s & 0x7f) - self.regs().hq.fifo_full as u64 + 1;
+        Some((s >> 7) + over * CMD_FIFO_DRAIN_NS)
     }
 
     /// The shell's time, as `set_time` last had it.
@@ -682,8 +726,10 @@ impl Gr2 {
                 // every FIN2 it raised (sampling after would race).
                 let hq_working = off - HQREGS == hq2::HQ_VERSION
                     && (!self.hq_fifo.is_empty() || self.hq_busy.load(Ordering::Acquire));
-                let v = r.hq.read(off - HQREGS);
+                let mut v = r.hq.read(off - HQREGS);
                 if off - HQREGS == hq2::HQ_VERSION {
+                    // Status bits 12:6: words in the command FIFO.
+                    v |= self.cmd_fifo_count(self.now_ns()) << 6;
                     if self.fin2_wait.load(Ordering::Acquire) != 0 {
                         if v & 2 != 0 {
                             self.fin2_wait.store(0, Ordering::Release);
@@ -769,6 +815,7 @@ impl Gr2 {
                     }
                     return BUS_BUSY;
                 }
+                self.cmd_fifo_push(1);
                 self.wake_hq();
             }
             HQUCODE..HQUCODE_END => r.hq.ucode[((off - HQUCODE) >> 2) as usize] = val,
@@ -1203,6 +1250,7 @@ impl Gr2 {
                 }
                 return BUS_BUSY;
             }
+            self.cmd_fifo_push(2);
             self.wake_hq();
             return BUS_OK;
         }

@@ -531,3 +531,104 @@ fn the_size_and_timing_follow_the_vc1_and_the_monitor_code() {
     rig.idle();
     assert_eq!(rig.e.frame_size(0), Some((1280, 1024)));
 }
+
+/// The HQ2 command FIFO: each store raises the count in status bits 12:6, shell time drains a word every
+/// `CMD_FIFO_DRAIN_NS`, it stops at 63, and `irq_levels` bit 0 is up while the count is at or above the
+/// threshold the guest wrote to `fifo_full`.
+#[test]
+fn command_fifo_count_drains_with_time_and_raises_the_full_line() {
+    use sgi_gr2::dev::gr2::engine::Gr2Engine;
+    use sgi_gr2::dev::gr2::{CMD_FIFO_DEPTH, CMD_FIFO_DRAIN_NS};
+    let mut rig = Rig::new(Gr2Variant::Xz);
+    let e = &mut rig.e;
+    let status = |e: &mut Gr2Engine<Ram>, now: u64| match { e.advance(now); e.read(0x6a040, 32) } {
+        Read::Value(v) => v as u32,
+        r => panic!("{r:?}"),
+    };
+    let count = |e: &mut Gr2Engine<Ram>, now| (status(e, now) >> 6) & 0x7f;
+    let store = |e: &mut Gr2Engine<Ram>, now, n| {
+        for _ in 0..n {
+            assert_eq!(e.write_at(now, 0x40000 + 4 * hq2::PUC_COLOR, 32, 0), Write::Done);
+        }
+    };
+    let irq_event = |e: &mut Gr2Engine<Ram>| {
+        let mut ev = Vec::new();
+        e.drain_events(&mut ev, 100);
+        ev.contains(&Event::Irq)
+    };
+    let t0 = 1_000_000;
+    assert_eq!(count(e, t0), 0);
+    assert_eq!(e.irq_levels(), 0, "threshold 0: the line stays low");
+    assert_eq!(e.write_at(t0, 0x6a05c, 32, 40), Write::Done);
+    store(e, t0, 39);
+    assert_eq!((count(e, t0), e.irq_levels()), (39, 0));
+    assert_eq!(e.advance(t0).next_deadline, None, "no deadline while the line is low");
+    irq_event(e);
+    store(e, t0, 1);
+    assert_eq!((count(e, t0), e.irq_levels()), (40, 1), "up at the threshold, not above it");
+    assert!(irq_event(e), "the change is announced");
+    let pump = e.advance(t0);
+    assert_eq!((pump.irq_levels, pump.next_deadline), (1, Some(t0 + CMD_FIFO_DRAIN_NS)));
+    assert_ne!(status(e, t0) & (1 << 13), 0, "bit 13 is unchanged");
+    assert_eq!(count(e, t0 + CMD_FIFO_DRAIN_NS - 1), 40);
+    assert_eq!((count(e, t0 + CMD_FIFO_DRAIN_NS), e.irq_levels()), (39, 0), "one word drained, the line falls");
+    assert!(irq_event(e), "time lowered it: announced by the pump");
+
+    // The handler raises the threshold past the count to lower the line.
+    let t1 = t0 + CMD_FIFO_DRAIN_NS;
+    store(e, t1, 6);
+    assert_eq!((count(e, t1), e.irq_levels()), (45, 1));
+    irq_event(e);
+    assert_eq!(e.write_at(t1, 0x6a05c, 32, 46), Write::Done);
+    assert_eq!(e.irq_levels(), 0);
+    assert!(irq_event(e));
+    assert_eq!(e.advance(t1).next_deadline, None, "threshold 46 on a count of 45: low, no deadline");
+    assert_eq!(e.write_at(t1, 0x6a05c, 32, 60), Write::Done);
+    assert_eq!(e.advance(t1).next_deadline, None, "threshold far above the count: low, no deadline");
+
+    store(e, t1, 40);
+    assert_eq!(count(e, t1), CMD_FIFO_DEPTH, "a full FIFO holds the count at its depth");
+    let t2 = t1 + 63 * CMD_FIFO_DRAIN_NS;
+    assert_eq!(count(e, t2 - 1), 1);
+    assert_eq!(count(e, t2), 0);
+    assert_eq!(e.write_at(t2, 0x40000 + 4 * hq2::PUC_COLOR, 64, 0), Write::Done);
+    assert_eq!(count(e, t2), 2, "a 64-bit store is two words");
+}
+
+/// Words stored less than one drain interval apart do not restart the drain: it keeps counting from the
+/// first, and the line announced through `try_store` reaches the shell.
+#[test]
+fn command_fifo_drain_keeps_its_phase_and_try_store_announces_the_line() {
+    use sgi_gr2::dev::gr2::engine::Gr2Engine;
+    use sgi_gr2::dev::gr2::CMD_FIFO_DRAIN_NS;
+    let mut rig = Rig::new(Gr2Variant::Xz);
+    let e = &mut rig.e;
+    let count = |e: &mut Gr2Engine<Ram>, now: u64| {
+        e.advance(now);
+        match e.read(0x6a040, 32) {
+            Read::Value(v) => (v as u32 >> 6) & 0x7f,
+            r => panic!("{r:?}"),
+        }
+    };
+    let t0 = 5_000_000;
+    for (now, n) in [(t0, 3), (t0 + CMD_FIFO_DRAIN_NS - 21, 2)] {
+        for _ in 0..n {
+            assert_eq!(e.write_at(now, 0x40000 + 4 * hq2::PUC_COLOR, 32, 0), Write::Done);
+        }
+    }
+    assert_eq!(count(e, t0 + CMD_FIFO_DRAIN_NS - 1), 5);
+    assert_eq!(count(e, t0 + CMD_FIFO_DRAIN_NS), 4, "the first word left one interval after the first store");
+
+    assert_eq!(e.write_at(t0, 0x6a05c, 32, 6), Write::Done);
+    let mut ev = Vec::new();
+    let mut store = |e: &mut Gr2Engine<Ram>| {
+        ev.clear();
+        e.drain_events(&mut ev, 100);
+        assert_eq!(e.try_store(0x40000 + 4 * hq2::PUC_COLOR, 32, 0), Write::Done);
+        ev.clear();
+        e.drain_events(&mut ev, 100);
+        (e.irq_levels(), ev.contains(&Event::Irq))
+    };
+    assert_eq!(store(e), (0, false), "count 5 of 6: low");
+    assert_eq!(store(e), (1, true), "count 6: the line is up and try_store announced it");
+}
