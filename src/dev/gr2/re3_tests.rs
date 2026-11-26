@@ -12,23 +12,23 @@ fn bare_re3() -> Box<Re3> {
 /// Draw state a textport-style client sets up: full scissor, all planes, COPY.
 fn setup(r: &mut Re3) {
     for (reg, v) in [
-        (REG_FUNC, ROP_COPY),
-        (REG_PIXMASK, 0x00ff_ffff),
-        (REG_XMIN, (0)),
-        (REG_XMAX, (FB_W as u32 - 1)),
-        (REG_YMIN, 0),
-        (REG_YMAX, FB_H as u32 - 1),
+        (RE3_LOGIC_OP, ROP_COPY),
+        (RE3_COLOR_PLANE_MASK, 0x00ff_ffff),
+        (RE3_CLIP_X_LO, (0)),
+        (RE3_CLIP_X_HI, (FB_W as u32 - 1)),
+        (RE3_CLIP_Y_LO, 0),
+        (RE3_CLIP_Y_HI, FB_H as u32 - 1),
     ] {
         r.write_reg(reg, v);
     }
 }
 
 fn flat(r: &mut Re3, x: u32, y: u32, n: u32, ci: u32) {
-    r.write_reg(REG_R, ci << 11);
-    r.write_reg(REG_X, x);
-    r.write_reg(REG_Y, y);
-    r.write_reg(REG_NUMPIX, n);
-    r.write_reg(REG_IR, IR_FLAT);
+    r.write_reg(RE3_RED_START, ci << 11);
+    r.write_reg(RE3_CUR_X, x);
+    r.write_reg(RE3_CUR_Y, y);
+    r.write_reg(RE3_SPAN_LEN, n);
+    r.write_reg(RE3_DRAW_TRIGGER, DRAW_FLAT_5);
 }
 
 fn px(r: &Re3, x: usize, y: usize) -> u32 {
@@ -51,8 +51,8 @@ fn flat_span_draws_numpix_pixels() {
 fn scissor_clips_span() {
     let mut r = bare_re3();
     setup(&mut r);
-    r.write_reg(REG_XMIN, 10);
-    r.write_reg(REG_XMAX, 12);
+    r.write_reg(RE3_CLIP_X_LO, 10);
+    r.write_reg(RE3_CLIP_X_HI, 12);
     flat(&mut r, 5, 0, 20, 1);
     let drawn: Vec<usize> = (0..30).filter(|&x| px(&r, x, 0) != 0).collect();
     assert_eq!(drawn, vec![10, 11, 12]);
@@ -62,9 +62,9 @@ fn scissor_clips_span() {
 fn pattern_masks_span_msb_first() {
     let mut r = bare_re3();
     setup(&mut r);
-    r.write_reg(REG_ENABPAT, 1);
-    r.write_reg(REG_PATH, 0b1010_0000_0000_0001);
-    r.write_reg(REG_PATL, 0);
+    r.write_reg(RE3_PATTERN_ON, 1);
+    r.write_reg(RE3_PATTERN_HI, 0b1010_0000_0000_0001);
+    r.write_reg(RE3_PATTERN_LO, 0);
     flat(&mut r, 0, 0, 16, 9);
     let drawn: Vec<usize> = (0..16).filter(|&x| px(&r, x, 0) != 0).collect();
     assert_eq!(drawn, vec![0, 2, 15]);
@@ -75,7 +75,7 @@ fn pixmask_limits_written_bits() {
     let mut r = bare_re3();
     setup(&mut r);
     r.vram[0] = 0x00ab_cdef;
-    r.write_reg(REG_PIXMASK, 0x0000_00ff);
+    r.write_reg(RE3_COLOR_PLANE_MASK, 0x0000_00ff);
     flat(&mut r, 0, 0, 1, 0x12);
     assert_eq!(px(&r, 0, 0), 0x00ab_cd12);
 }
@@ -94,7 +94,7 @@ fn rop_xor() {
     let mut r = bare_re3();
     setup(&mut r);
     r.vram[0] = 0x0f;
-    r.write_reg(REG_FUNC, 6);
+    r.write_reg(RE3_LOGIC_OP, 6);
     flat(&mut r, 0, 0, 1, 0xff);
     assert_eq!(px(&r, 0, 0), 0xf0);
 }
@@ -105,9 +105,9 @@ fn wid_test_rejects_other_windows() {
     setup(&mut r);
     r.vram[0] = 0x3000_0000; // cid 3
     r.vram[1] = 0x5000_0000; // cid 5
-    r.write_reg(REG_ENABWID, 1);
-    r.write_reg(REG_FBOPTION, 1); // 4 WID planes
-    r.write_reg(REG_CURWID, 3);
+    r.write_reg(RE3_WID_TEST_ON, 1);
+    r.write_reg(RE3_FB_OPTIONS, 1); // 4 WID planes
+    r.write_reg(RE3_WINDOW_ID, 3);
     flat(&mut r, 0, 0, 2, 0x7);
     assert_eq!(px(&r, 0, 0), 0x3000_0007);
     assert_eq!(px(&r, 1, 0), 0x5000_0000);
@@ -117,13 +117,13 @@ fn wid_test_rejects_other_windows() {
 fn shaded_span_steps_colour() {
     let mut r = bare_re3();
     setup(&mut r);
-    r.write_reg(REG_X, 0);
-    r.write_reg(REG_Y, 0);
-    r.write_reg(REG_DX, 1 << 14);
-    r.write_reg(REG_R, 10 << 11);
-    r.write_reg(REG_DR, 1 << 11);
-    r.write_reg(REG_NUMPIX, 4);
-    r.write_reg(REG_IR, IR_SHADED);
+    r.write_reg(RE3_CUR_X, 0);
+    r.write_reg(RE3_CUR_Y, 0);
+    r.write_reg(RE3_X_STEP, 1 << 14);
+    r.write_reg(RE3_RED_START, 10 << 11);
+    r.write_reg(RE3_RED_STEP, 1 << 11);
+    r.write_reg(RE3_SPAN_LEN, 4);
+    r.write_reg(RE3_DRAW_TRIGGER, DRAW_SMOOTH);
     let got: Vec<u32> = (0..4).map(|x| px(&r, x, 0)).collect();
     assert_eq!(got, vec![10, 11, 12, 13]);
 }
@@ -149,23 +149,23 @@ fn copy_rect_handles_overlap_both_ways() {
 fn writebuf_then_readbuf_stream() {
     let mut r = bare_re3();
     setup(&mut r);
-    r.write_reg(REG_X, 4);
-    r.write_reg(REG_Y, 3);
-    r.write_reg(REG_DX, 1 << 14);
-    r.write_reg(REG_NUMPIX, 3);
-    r.write_reg(REG_IR, IR_WRITEBUF);
+    r.write_reg(RE3_CUR_X, 4);
+    r.write_reg(RE3_CUR_Y, 3);
+    r.write_reg(RE3_X_STEP, 1 << 14);
+    r.write_reg(RE3_SPAN_LEN, 3);
+    r.write_reg(RE3_DRAW_TRIGGER, DRAW_HOST_WRITE);
     for v in [0x11, 0x22, 0x33] {
-        r.write_reg(REG_RWDATA, v);
+        r.write_reg(RE3_HOST_DATA, v);
     }
     assert_eq!((px(&r, 4, 3), px(&r, 5, 3), px(&r, 6, 3)), (0x11, 0x22, 0x33));
     assert_eq!(r.ctx.stream, STREAM_IDLE);
 
-    r.write_reg(REG_X, 4);
-    r.write_reg(REG_NUMPIX, 3);
-    r.write_reg(REG_IR, IR_READBUF);
+    r.write_reg(RE3_CUR_X, 4);
+    r.write_reg(RE3_SPAN_LEN, 3);
+    r.write_reg(RE3_DRAW_TRIGGER, DRAW_HOST_READ);
     let mut got = vec![];
     for _ in 0..3 {
-        got.push(r.ctx.reg[REG_RWDATA]);
+        got.push(r.ctx.reg[RE3_HOST_DATA]);
         r.read_buffer();
     }
     assert_eq!(got, vec![0x11, 0x22, 0x33]);
@@ -206,24 +206,24 @@ fn re3_reg(reg: usize) -> u32 {
 #[test]
 fn cpu_register_window_draws_and_reads_back() {
     let g = &live_gr2(Gr2Variant::Xz);
-    w32(g, re3_reg(REG_FUNC), ROP_COPY);
-    w32(g, re3_reg(REG_PIXMASK), 0xffffff);
-    w32(g, re3_reg(REG_XMAX), 1279);
-    w32(g, re3_reg(REG_YMAX), 1023);
-    w32(g, re3_reg(REG_R), 0x5 << 11);
-    w32(g, re3_reg(REG_YX), (20 << 12) | (30));
-    w32(g, re3_reg(REG_NUMPIX), 2);
-    w32(g, re3_reg(REG_IR), IR_FLAT);
+    w32(g, re3_reg(RE3_LOGIC_OP), ROP_COPY);
+    w32(g, re3_reg(RE3_COLOR_PLANE_MASK), 0xffffff);
+    w32(g, re3_reg(RE3_CLIP_X_HI), 1279);
+    w32(g, re3_reg(RE3_CLIP_Y_HI), 1023);
+    w32(g, re3_reg(RE3_RED_START), 0x5 << 11);
+    w32(g, re3_reg(RE3_XY_PACKED), (20 << 12) | (30));
+    w32(g, re3_reg(RE3_SPAN_LEN), 2);
+    w32(g, re3_reg(RE3_DRAW_TRIGGER), DRAW_FLAT_5);
     g.wait_idle();
     assert_eq!(g.vram()[20 * FB_W + 30], 5);
     assert_eq!(g.vram()[20 * FB_W + 31], 5);
 
-    // READBUF streamed through CPU RWDATA reads.
-    w32(g, re3_reg(REG_RWMODE), RWMODE_FB);
-    w32(g, re3_reg(REG_DX), 1 << 14);
-    w32(g, re3_reg(REG_YX), (20 << 12) | (29));
-    w32(g, re3_reg(REG_NUMPIX), 3);
-    w32(g, re3_reg(REG_IR), IR_READBUF);
-    let got: Vec<u32> = (0..3).map(|_| r32(g, re3_reg(REG_RWDATA))).collect();
+    // HOST_READ streamed through CPU HOST_DATA reads.
+    w32(g, re3_reg(RE3_HOST_PLANE), HPLANE_COLOR);
+    w32(g, re3_reg(RE3_X_STEP), 1 << 14);
+    w32(g, re3_reg(RE3_XY_PACKED), (20 << 12) | (29));
+    w32(g, re3_reg(RE3_SPAN_LEN), 3);
+    w32(g, re3_reg(RE3_DRAW_TRIGGER), DRAW_HOST_READ);
+    let got: Vec<u32> = (0..3).map(|_| r32(g, re3_reg(RE3_HOST_DATA))).collect();
     assert_eq!(got, vec![0, 5, 5]);
 }

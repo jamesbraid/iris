@@ -37,29 +37,29 @@
 use super::f;
 use crate::dev::gl::light::{norm, Light, Lighting, MAX_LIGHTS, SPEC_N, SPOT_N};
 
-pub const T_LIGHT_PARAM: u32 = 0x080;
+pub const T_LIGHT_KEYED: u32 = 0x080;
 pub const T_MODEL_PARAM: u32 = 0x085;
-pub const T_SPEC_TABLE: u32 = 0x074;
-pub const T_SPOT_TABLE: u32 = 0x086;
-pub const T_AMBIENT_SUM: u32 = 0x075;
+pub const T_SPEC_POWER_TABLE: u32 = 0x074;
+pub const T_SPOT_POWER_TABLE: u32 = 0x086;
+pub const T_SCENE_AMBIENT: u32 = 0x075;
 pub const T_MAT_FIRST: u32 = 0x076;
 pub const T_MAT_LAST: u32 = 0x07d;
-pub const T_LIGHT_AMBIENT: u32 = 0x0e5;
-pub const T_LIGHT_DIFFUSE: u32 = 0x101;
-pub const T_LIGHT_SPECULAR: u32 = 0x102;
+pub const T_LIGHT_AMB_RGB: u32 = 0x0e5;
+pub const T_LIGHT_DIF_RGB: u32 = 0x101;
+pub const T_LIGHT_SPC_RGB: u32 = 0x102;
 /// IRIS GL light colour (LCOLOR): diffuse and specular of the selected light.
 pub const T_IRIS_LCOLOR: u32 = 0x07e;
-pub const T_LIGHT_POSITION: u32 = 0x07f;
-pub const T_SPOT_DIRECTION: u32 = 0x084;
-pub const T_ATTENUATION: u32 = 0x109;
-pub const T_COLOR_MATERIAL: u32 = 0x081;
+pub const T_LIGHT_POS_EYE: u32 = 0x07f;
+pub const T_SPOT_AXIS: u32 = 0x084;
+pub const T_LIGHT_FALLOFF: u32 = 0x109;
+pub const T_MATERIAL_TRACK: u32 = 0x081;
 pub const T_MATERIAL_COMMIT: u32 = 0x083;
-pub const T_LIGHTING: u32 = 0x10e;
-pub const T_TWO_SIDED: u32 = 0x0d4;
-pub const T_NORMALIZE: u32 = 0x0e3;
-pub const T_NORMALIZE_B: u32 = 0x082;
+pub const T_LIGHT_ENABLE: u32 = 0x10e;
+pub const T_TWO_SIDE_ON: u32 = 0x0d4;
+pub const T_NORM_ON: u32 = 0x0e3;
+pub const T_NORM_ON_ALT: u32 = 0x082;
 pub const T_FOG_ON: u32 = 0x027;
-pub const T_FOG: u32 = 0x028;
+pub const T_FOG_PARAMS: u32 = 0x028;
 /// Scale libglcore applies to the EXP fog density.
 const FOG_EXP_SCALE: f32 = 0.180_464_26;
 
@@ -91,13 +91,13 @@ fn refold(lt: &mut Lighting) {
 /// Words a lighting/fog port takes (None: not a lighting port).
 pub fn port_words(tok: u32) -> Option<u32> {
     Some(match tok {
-        T_LIGHT_PARAM | T_MODEL_PARAM => 2,
-        T_AMBIENT_SUM | T_LIGHT_AMBIENT | T_LIGHT_DIFFUSE | T_LIGHT_SPECULAR | T_SPOT_DIRECTION
-        | T_ATTENUATION | T_COLOR_MATERIAL | T_IRIS_LCOLOR => 3,
-        0x07a | 0x07b | T_LIGHT_POSITION => 4,
+        T_LIGHT_KEYED | T_MODEL_PARAM => 2,
+        T_SCENE_AMBIENT | T_LIGHT_AMB_RGB | T_LIGHT_DIF_RGB | T_LIGHT_SPC_RGB | T_SPOT_AXIS
+        | T_LIGHT_FALLOFF | T_MATERIAL_TRACK | T_IRIS_LCOLOR => 3,
+        0x07a | 0x07b | T_LIGHT_POS_EYE => 4,
         T_MAT_FIRST..=T_MAT_LAST => 3,
-        T_FOG => 6,
-        T_SPEC_TABLE | T_SPOT_TABLE => 1,
+        T_FOG_PARAMS => 6,
+        T_SPEC_POWER_TABLE | T_SPOT_POWER_TABLE => 1,
         _ => return None,
     })
 }
@@ -105,9 +105,9 @@ pub fn port_words(tok: u32) -> Option<u32> {
 /// Single-word lighting commands. Returns false if not one.
 pub fn command(lt: &mut Lighting, tok: u32, a: &[u32]) -> bool {
     match tok {
-        T_LIGHTING => lt.on = a[1] & 1,
-        T_TWO_SIDED => lt.two_sided = a[1] & 1,
-        T_NORMALIZE | T_NORMALIZE_B => lt.normalize = a[0] & 1,
+        T_LIGHT_ENABLE => lt.on = a[1] & 1,
+        T_TWO_SIDE_ON => lt.two_sided = a[1] & 1,
+        T_NORM_ON | T_NORM_ON_ALT => lt.normalize = a[0] & 1,
         T_FOG_ON => lt.fog_on = a[0] & 1,
         T_MATERIAL_COMMIT => {}
         _ => return false,
@@ -141,13 +141,13 @@ impl Loader {
     pub fn port(&mut self, lt: &mut Lighting, tok: u32, b: &[u32]) {
         let v3 = |b: &[u32]| [f(b[0]), f(b[1]), f(b[2])];
         match tok {
-            T_LIGHT_PARAM => self.param(lt, f(b[0]), f(b[1])),
+            T_LIGHT_KEYED => self.param(lt, f(b[0]), f(b[1])),
             T_MODEL_PARAM => {
                 if f(b[0]) as i32 == 6 {
                     lt.local_viewer = (f(b[1]) != 0.0) as u32;
                 }
             }
-            T_AMBIENT_SUM => lt.amb_sum = v3(b),
+            T_SCENE_AMBIENT => lt.amb_sum = v3(b),
             T_MAT_FIRST..=T_MAT_LAST => {
                 let face = ((tok - T_MAT_FIRST) & 1) as usize;
                 let m = &mut lt.mat[face];
@@ -158,15 +158,15 @@ impl Loader {
                     _ => m.specular = v3(b),
                 }
             }
-            T_LIGHT_AMBIENT | T_LIGHT_DIFFUSE | T_LIGHT_SPECULAR | T_LIGHT_POSITION | T_SPOT_DIRECTION
-            | T_ATTENUATION | T_IRIS_LCOLOR => {
+            T_LIGHT_AMB_RGB | T_LIGHT_DIF_RGB | T_LIGHT_SPC_RGB | T_LIGHT_POS_EYE | T_SPOT_AXIS
+            | T_LIGHT_FALLOFF | T_IRIS_LCOLOR => {
                 if let Some(l) = light_mut(lt, self.cur) {
                     match tok {
-                        T_LIGHT_AMBIENT => l.ambient = v3(b),
-                        T_LIGHT_DIFFUSE => l.diffuse = v3(b),
-                        T_LIGHT_SPECULAR => l.specular = v3(b),
-                        T_LIGHT_POSITION => l.pos = [f(b[0]), f(b[1]), f(b[2]), f(b[3])],
-                        T_SPOT_DIRECTION => l.spot_dir = norm(v3(b)),
+                        T_LIGHT_AMB_RGB => l.ambient = v3(b),
+                        T_LIGHT_DIF_RGB => l.diffuse = v3(b),
+                        T_LIGHT_SPC_RGB => l.specular = v3(b),
+                        T_LIGHT_POS_EYE => l.pos = [f(b[0]), f(b[1]), f(b[2]), f(b[3])],
+                        T_SPOT_AXIS => l.spot_dir = norm(v3(b)),
                         T_IRIS_LCOLOR => {
                             l.diffuse = v3(b);
                             l.specular = v3(b);
@@ -175,14 +175,14 @@ impl Loader {
                     }
                 }
             }
-            T_COLOR_MATERIAL => {
+            T_MATERIAL_TRACK => {
                 lt.cmat_param = b[0];
                 lt.cmat_face = b[1];
                 lt.cmat_on = b[2] & 1;
             }
             // Mode (an integer), then linear: end, 1 / (end - start);
             // EXP/EXP2: the density as libglcore scales it.
-            T_FOG => {
+            T_FOG_PARAMS => {
                 lt.fog_mode = b[0];
                 let a = f(b[1]);
                 // EXP2: density scale constant not yet confirmed (unverified).
@@ -190,13 +190,13 @@ impl Loader {
                 lt.fog_b = f(b[2]);
                 lt.fog_color = v3(&b[3..]);
             }
-            T_SPEC_TABLE | T_SPOT_TABLE => {
+            T_SPEC_POWER_TABLE | T_SPOT_POWER_TABLE => {
                 let (slot, pos) = (self.table_slot, self.table_pos as usize);
                 self.table_pos += 1;
                 let v = f(b[0]);
-                if tok == T_SPEC_TABLE && (0..2).contains(&slot) && pos < SPEC_N {
+                if tok == T_SPEC_POWER_TABLE && (0..2).contains(&slot) && pos < SPEC_N {
                     lt.mat[slot as usize].spec[pos] = v;
-                } else if tok == T_SPOT_TABLE && pos < SPOT_N {
+                } else if tok == T_SPOT_POWER_TABLE && pos < SPOT_N {
                     if let Some(l) = light_mut(lt, slot - 2) {
                         l.spot[pos] = v;
                     }
@@ -265,14 +265,14 @@ mod tests {
         let mut ld: Loader = unsafe { std::mem::zeroed() };
         lt.init();
         ld.init(&mut lt);
-        ld.port(&mut lt, T_LIGHT_PARAM, &[fw(4.0), fw(0.0)]);
-        ld.port(&mut lt, T_LIGHT_PARAM, &[fw(10.0), fw(1.0)]);
-        ld.port(&mut lt, T_LIGHT_PARAM, &[fw(5.0), fw(0.0)]);
+        ld.port(&mut lt, T_LIGHT_KEYED, &[fw(4.0), fw(0.0)]);
+        ld.port(&mut lt, T_LIGHT_KEYED, &[fw(10.0), fw(1.0)]);
+        ld.port(&mut lt, T_LIGHT_KEYED, &[fw(5.0), fw(0.0)]);
         ld.port(&mut lt, T_IRIS_LCOLOR, &[fw(1.0), fw(1.0), fw(1.0)]);
-        ld.port(&mut lt, T_LIGHT_POSITION, &[fw(0.0), fw(1.0), fw(0.0), fw(0.0)]);
+        ld.port(&mut lt, T_LIGHT_POS_EYE, &[fw(0.0), fw(1.0), fw(0.0), fw(0.0)]);
         ld.port(&mut lt, 0x07a, &[fw(0.46), fw(0.66), fw(0.795), fw(1.0)]);
         ld.port(&mut lt, 0x078, &[fw(0.0), fw(0.1), fw(0.2)]);
-        ld.port(&mut lt, T_AMBIENT_SUM, &[fw(0.4), fw(0.4), fw(0.4)]);
+        ld.port(&mut lt, T_SCENE_AMBIENT, &[fw(0.4), fw(0.4), fw(0.4)]);
         assert_eq!(lt.lights[0].specular, [1.0; 3]);
         let (c, _) = lt.light_vertex([0.0, 0.0, -5.0, 1.0], [0.0, 1.0, 0.0], [1.0; 4]);
         let want = [0.46, 0.66 + 0.04, 0.795 + 0.08];

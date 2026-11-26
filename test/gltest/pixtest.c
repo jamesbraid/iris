@@ -108,9 +108,9 @@ static const struct { const char *name; const char *why; int gr2_only; } xfails[
     { "stencil/draw/shift-offset-mask",
       "libGLcore EXPRESS's stencil Fetch masks the depth word with 0xF; z20 s4 keeps the stencil above Z (bits 23:20; inferred from its depth reads)", 1 },
     { "ci8/read/UNSIGNED_SHORT/swap",
-      "libGLcore EXPRESS's Pack1 read (READ_RECT through the mailbox) ignores GL_PACK_SWAP_BYTES", 1 },
+      "libGLcore EXPRESS's Pack1 read (READ_BOX through the mailbox) ignores GL_PACK_SWAP_BYTES", 1 },
     { "ci12/read/UNSIGNED_SHORT/swap",
-      "libGLcore EXPRESS's Pack1 read (READ_RECT through the mailbox) ignores GL_PACK_SWAP_BYTES", 1 },
+      "libGLcore EXPRESS's Pack1 read (READ_BOX through the mailbox) ignores GL_PACK_SWAP_BYTES", 1 },
     { "stencil/copy",
       "libGLcore EXPRESS's stencil Fetch masks the depth word with 0xF; z20 s4 keeps the stencil above Z (bits 23:20; inferred from its depth reads)", 1 },
 };
@@ -1001,7 +1001,7 @@ map:
 
 /* ---- cases: colour index images into RGBA (I_TO_* maps) ------------------------------ */
 
-static void t_index(void)
+static void check_index(void)
 {
     static const int shifts[] = { 0, 1, -1, 0 };
     static const int offsets[] = { 0, 0, 0, 5 };
@@ -1611,7 +1611,7 @@ static void bitmap_case(int lsb, int align, int rowlen, int skipx, int skipy, co
     end();
 }
 
-static void t_bitmap(void)
+static void check_bitmap(void)
 {
     bitmap_case(0, 4, 0, 0, 0, "");
     bitmap_case(1, 4, 0, 0, 0, "/lsb");
@@ -2857,12 +2857,12 @@ int main(int argc, char **argv)
     t_read();
     t_read_xfer();
     t_draw();
-    t_index();
+    check_index();
     t_zoom();
     t_copy();
     t_depth_stencil();
     t_depth_colour();
-    t_bitmap();
+    check_bitmap();
     t_buffers();
     t_tex();
     t_texsub();

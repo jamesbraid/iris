@@ -66,19 +66,19 @@ pub const HQ_TOKEN_GEDMA: u32 = 0x1_0000;
 /// Pseudo FIFO index queued when the CPU writes `unstall`: the microcode
 /// restarts, and its reset path takes one DATA word (the start argument).
 pub const HQ_TOKEN_UNSTALL: u32 = 0x1_0001;
-/// Context switch (GE_HQMSAV, 0x1f0): context id, then 2 DATA words.
-pub const GE_HQMSAV: u32 = 496;
+/// Context switch (GE_CTX_SWITCH, 0x1f0): context id, then 2 DATA words.
+pub const GE_CTX_SWITCH: u32 = 496;
 /// Context save / restore through HQ2_GEDMA (the kernel's context save and restore).
-pub const GE_CX_SAVE_MAIN: u32 = 0x1e1;
-pub const GE_CX_RESTORE_MAIN: u32 = 0x1e2;
-pub const GE_CX_SAVE_EXT: u32 = 0x1e3;
-pub const GE_CX_RESTORE_EXT: u32 = 0x1e4;
+pub const GE_DUMP_CTX: u32 = 0x1e1;
+pub const GE_LOAD_CTX: u32 = 0x1e2;
+pub const GE_DUMP_CTX_EXTRA: u32 = 0x1e3;
+pub const GE_LOAD_CTX_EXTRA: u32 = 0x1e4;
 /// shram words the microcode fills in for Gr2PcxSwap: main context size in
-/// words (0 = nothing to save), the owner (GE_HQMSAV id) of that state, and
+/// words (0 = nothing to save), the owner (GE_CTX_SWITCH id) of that state, and
 /// the extended context size.
-pub const SHRAM_CX_SIZE_MAIN: usize = 0x302;
-pub const SHRAM_CX_OWNER: usize = 0x303;
-pub const SHRAM_CX_SIZE_EXT: usize = 0x304;
+pub const SHRAM_CTX_WORDS: usize = 0x302;
+pub const SHRAM_CTX_HOLDER: usize = 0x303;
+pub const SHRAM_CTX_EXTRA_WORDS: usize = 0x304;
 /// Words of one saved GL context (the image streamed through HQ2_GEDMA).
 pub const CX_WORDS: usize = gl::CX_WORDS;
 /// Undocumented kernel-to-microcode requests used by Gr2PcxSwap (one word
@@ -92,120 +92,120 @@ pub const HQ_GL_FIN3: u32 = 0x155;
 /// index (X - 0x2000) / 4).
 /// glFinish / SwapBuffers: the readback trigger (0x228C); the client then spins
 /// on version bit 0 (FIN3) and acks at the FIN3 port.
-pub const GL_FINISH: u32 = 0xa3;
+pub const CMD_READBACK_KICK: u32 = 0xa3;
 /// glFlush / SwapBuffers: the swap sync (block offset 0x2018).
-pub const GL_FLUSH: u32 = 0x006;
+pub const CMD_SWAP_WAIT: u32 = 0x006;
 /// SwapBuffers: block offset 0x279C = swap interval, then ioctl 1005.
-pub const GL_SWAP_BUFFERS: u32 = 0x1e7;
+pub const CMD_SWAP_INTERVAL: u32 = 0x1e7;
 
 // ── 2D (Xsgi DDX) commands, GL microcode ───────────────────────────────────
-pub const HQ2_2D_BEGIN: u32 = 0x12c; // 0x404b0, sent first by Xsgi's init (1 word)
-pub const HQ2_2D_SOLID_RECT: u32 = 304; // stream: 4 DATA words per box
-pub const HQ2_2D_COLOR_AUX: u32 = 309; // aux-plane write mask
+pub const X2D_SESSION_START: u32 = 0x12c; // 0x404b0, sent first by Xsgi's init (1 word)
+pub const X2D_FILL_BOXES: u32 = 304; // stream: 4 DATA words per box
+pub const X2D_AUX_PLANE_MASK: u32 = 309; // aux-plane write mask
 /// Colour for CLEAR bits of glyphs/mono images/stipples when drawn opaque
 /// (its documented name is FG_COLOR; the DDX writes the GC background here).
-pub const HQ2_2D_COLOR_OFF: u32 = 311;
+pub const X2D_BIT_ZERO_COLOR: u32 = 311;
 /// Colour for SET bits of glyphs/mono images/stipples (its documented name is
 /// BG_COLOR; the DDX writes the text foreground here).
-pub const HQ2_2D_COLOR_ON: u32 = 312;
-pub const HQ2_2D_MODE: u32 = 331; // visual/plane select (| 0x1000)
-pub const HQ2_2D_ROP: u32 = 332; // fg; DATA planemask, alu, flag
-pub const HQ2_2D_CID_WRITE: u32 = 336; // (cid << 8) | 0xF000, 0 = off
+pub const X2D_BIT_ONE_COLOR: u32 = 312;
+pub const X2D_PLANE_SELECT: u32 = 331; // visual/plane select (| 0x1000)
+pub const X2D_FG_ALU: u32 = 332; // fg; DATA planemask, alu, flag
+pub const X2D_CID_FIELD: u32 = 336; // (cid << 8) | 0xF000, 0 = off
 /// Pixel format and alignment for the next image transfer: [format (2 =
-/// 8-bit, 1 = 16-bit, 0 = 32-bit per pixel, as TILE_SETUP), first pixel's
+/// 8-bit, 1 = 16-bit, 0 = 32-bit per pixel, as TILE_BEGIN), first pixel's
 /// slot in the first word of each row] (image reads and draws).
-pub const HQ2_2D_BUF_SELECT: u32 = 337;
+pub const X2D_PIXEL_LAYOUT: u32 = 337;
 /// Screen-to-host readback: words per row; DATA x, y (X-style, top-down),
 /// width, rows. The microcode packs the rows into shram from word
-/// READ_IMAGE_SHRAM (format and alignment from BUF_SELECT, MSB = first
+/// READ_IMAGE_SHRAM (format and alignment from PIXEL_LAYOUT, MSB = first
 /// pixel) and raises FIN3 (image read).
-pub const HQ2_2D_READ_IMAGE: u32 = 344;
-/// First shram word of the READ_IMAGE result (Xsgi reads base + 0x1B000).
+pub const X2D_IMAGE_TO_SHRAM: u32 = 344;
+/// First shram word of the IMAGE_TO_SHRAM result (Xsgi reads base + 0x1B000).
 pub const READ_IMAGE_SHRAM: usize = 0x6C00;
-pub const HQ2_2D_END_PRIMITIVE: u32 = 490;
+pub const X2D_PRIM_TERMINATOR: u32 = 490;
 /// Tile setup: size; DATA width, height, format (2), 0xD022 (tile fill).
-pub const HQ2_2D_TILE_SETUP: u32 = 314;
+pub const X2D_TILE_BEGIN: u32 = 314;
 /// Tile data chunks (64/32/16/8-word loaders): words append to the tile.
-pub const HQ2_2D_TILE_DATA_FIRST: u32 = 315;
-pub const HQ2_2D_TILE_DATA_LAST: u32 = 318;
+pub const X2D_TILE_CHUNK_FIRST: u32 = 315;
+pub const X2D_TILE_CHUNK_LAST: u32 = 318;
 /// Tiled fill: DATA origin x, origin y, then boxes (x1, y1, x2, y2).
-pub const HQ2_2D_TILE_RECT: u32 = 321;
+pub const X2D_TILE_FILL: u32 = 321;
 /// Same, used when the tile width is not a whole number of words (tile fill).
-pub const HQ2_2D_TILE_RECT_ODD: u32 = 322;
+pub const X2D_TILE_FILL_RAGGED: u32 = 322;
 /// 1-bpp images: x; DATA y, width, rows; then a fixed data block.
-pub const HQ2_2D_MONO_IMAGE_8: u32 = 349;
-pub const HQ2_2D_MONO_IMAGE_16: u32 = 350;
-pub const HQ2_2D_MONO_IMAGE_32: u32 = 351;
-pub const HQ2_2D_MONO_IMAGE_64: u32 = 352;
+pub const X2D_BITMAP_BLOCK_A: u32 = 349;
+pub const X2D_BITMAP_BLOCK_B: u32 = 350;
+pub const X2D_BITMAP_BLOCK_C: u32 = 351;
+pub const X2D_BITMAP_BLOCK_D: u32 = 352;
 /// Host-to-screen image (image draw): x; DATA y, width, rows, words/row,
 /// format, left skip; then rows*words/row pixel words, padded with
 /// 0xDEADBEEF to the chunk size. Streamed.
-pub const HQ2_2D_DRAW_IMAGE: u32 = 342;
-pub const HQ2_2D_DRAW_IMAGE_SMALL: u32 = 343;
+pub const X2D_PUT_IMAGE: u32 = 342;
+pub const X2D_PUT_IMAGE_SHORT: u32 = 343;
 /// Host-to-screen pixel DMA (the kernel's pixel DMA start):
 /// fifo[0x147] = x; then 6 words through FIFO index 0: y, width (pixels),
 /// height, words per row, flag, 0; then height * words_per_row pixel words
 /// through HQ2_GEDMA (VDMA). The kernel waits for FIN2 after the transfer.
-pub const HQ2_DMA_WRITE_PIXELS: u32 = 327;
+pub const PIXDMA_TO_SCREEN: u32 = 327;
 /// GL-microcode pixel DMA (IRIS GL lrectwrite):
 /// 0x0B5 at pixel zoom 1, 0x0B8 zoomed. Same kernel protocol and header as
 /// 0x147, drawn in the current GL context (window-relative, GL y up).
-pub const HQ2_GL_DMA_WRITE: u32 = 0x0b5;
-pub const HQ2_GL_DMA_WRITE_ZOOM: u32 = 0x0b8;
+pub const GLDMA_TO_WINDOW: u32 = 0x0b5;
+pub const GLDMA_TO_WINDOW_ZOOM: u32 = 0x0b8;
 /// Pixel DMA reads: the same kernel ioctl and
 /// header as the writes, but the VDMA reads height * words/row words from
 /// HQ2_GEDMA; FIN2 when done. 0x152 = Xsgi's image reads (screen, X-style
-/// y = top row, format from BUF_SELECT); 0x0AC = GL lrectread /
+/// y = top row, format from PIXEL_LAYOUT); 0x0AC = GL lrectread /
 /// glReadPixels (window-relative, y = bottom row, source from 0x10A).
-pub const HQ2_2D_DMA_READ_PIXELS: u32 = 0x152;
-pub const HQ2_GL_DMA_READ: u32 = 0x0ac;
+pub const PIXDMA_FROM_SCREEN: u32 = 0x152;
+pub const GLDMA_FROM_WINDOW: u32 = 0x0ac;
 
 /// Pixel rectangles streamed by the kernel's pixel DMA:
 /// x on the token; y, width, height, words/row, flag, 0 on GE_DATA; then
 /// the pixel words through HQ2_GEDMA; FIN2 when done.
 fn is_pixel_dma(cmd: u32) -> bool {
-    matches!(cmd, HQ2_DMA_WRITE_PIXELS | HQ2_GL_DMA_WRITE | HQ2_GL_DMA_WRITE_ZOOM)
+    matches!(cmd, PIXDMA_TO_SCREEN | GLDMA_TO_WINDOW | GLDMA_TO_WINDOW_ZOOM)
 }
 /// Screen-to-screen copy: pitch; DATA chunk, srcX, srcY, w, h, dstX, dstY
 /// (X-style y). Layout unverified against a trace.
-pub const HQ2_2D_COPY_RECT: u32 = 340;
+pub const X2D_SCREEN_COPY: u32 = 340;
 /// Glyphs (TE/CW text): x; DATA y, width, rows; then 8/16/32/64 data words.
-pub const HQ2_2D_GLYPH_8: u32 = 323;
-pub const HQ2_2D_GLYPH_64: u32 = 326;
+pub const X2D_GLYPH_NARROW: u32 = 323;
+pub const X2D_GLYPH_WIDE: u32 = 326;
 /// Fill spans: stream of (x, y, width) triples, padded with (1280, 1024, 1).
-pub const HQ2_2D_POLY_SPAN: u32 = 305;
+pub const X2D_SPAN_LIST: u32 = 305;
 /// Line segments: 0; then a stream of (x1, y1, x2, y2) quads until the next
-/// command (END_PRIMITIVE); padding quads have x1 = x2 = 1280 (line and
+/// command (PRIM_TERMINATOR); padding quads have x1 = x2 = 1280 (line and
 /// segment draws; 4Dwm's move/resize frame is 16 of them).
-pub const HQ2_2D_LINE_SEG: u32 = 301;
+pub const X2D_LINE_QUADS: u32 = 301;
 /// Line mode word (line draws write 0xA).
-pub const HQ2_2D_LINE_MODE: u32 = 328;
+pub const X2D_LINE_STYLE: u32 = 328;
 /// Line clip box: x1; DATA x2, y1, y2 (inclusive).
-pub const HQ2_2D_LINE_CLIP: u32 = 330;
+pub const X2D_LINE_BOUNDS: u32 = 330;
 /// Polyline: stream of (x, y) points (0x165 on some configurations).
-pub const HQ2_2D_POLYLINE: u32 = 302;
-pub const HQ2_2D_POLYLINE_ALT: u32 = 357;
+pub const X2D_PATH_POINTS: u32 = 302;
+pub const X2D_PATH_POINTS_ALT: u32 = 357;
 /// Segments: stream of (x1, y1, x2, y2), padded with (1280, 1024) pairs.
-pub const HQ2_2D_SEGMENTS: u32 = 345;
+pub const X2D_SEGMENT_LIST: u32 = 345;
 /// Points (point draws, XDrawPoints): 0; stream of (x, y), padded with
-/// (1280, 1024) pairs, clipped to LINE_CLIP.
-pub const HQ2_2D_POLYPOINT: u32 = 353;
+/// (1280, 1024) pairs, clipped to LINE_BOUNDS.
+pub const X2D_DOT_LIST: u32 = 353;
 /// Stipple opaque flag (1 = zero bits get bg).
-pub const HQ2_2D_STIPPLE_AUX: u32 = 313;
+pub const X2D_STIPPLE_OPAQUE: u32 = 313;
 /// Stippled box: 0; DATA origin x, x1, origin y, y1, x2, y2.
-pub const HQ2_2D_STIPPLE_RECT: u32 = 348;
-/// Stippled boxes from Xsgi's rectangle fill, same 7 words as STIPPLE_RECT,
-/// stipple loaded through TILE_SETUP (format 3) + TILE_DATA. 319 is used for
+pub const X2D_STIPPLED_BOX: u32 = 348;
+/// Stippled boxes from Xsgi's rectangle fill, same 7 words as STIPPLED_BOX,
+/// stipple loaded through TILE_BEGIN (format 3) + TILE_CHUNK. 319 is used for
 /// power-of-two stipple widths, 320 for the rest.
-pub const HQ2_2D_STIPPLE_BOX_POW2: u32 = 319;
-pub const HQ2_2D_STIPPLE_BOX: u32 = 320;
+pub const X2D_STIPFILL_POW2: u32 = 319;
+pub const X2D_STIPFILL_OTHER: u32 = 320;
 /// Stippled spans (span fill): 0; stream of (x, y, w, pattern)
 /// quads, y top-down. The pattern is pre-rotated so its MSB is pixel x and
 /// repeats every 32 pixels. 346 for stipples narrower than 32 / multi-word,
-/// 347 for 32-wide stipples. COLOR_ON = set bits, STIPPLE_AUX 1 = opaque
-/// with COLOR_OFF.
-pub const HQ2_2D_STIPPLED_SPAN_A: u32 = 346;
-pub const HQ2_2D_STIPPLED_SPAN_B: u32 = 347;
+/// 347 for 32-wide stipples. BIT_ONE_COLOR = set bits, STIPPLE_OPAQUE 1 = opaque
+/// with BIT_ZERO_COLOR.
+pub const X2D_STIPPLE_SPANS_NARROW: u32 = 346;
+pub const X2D_STIPPLE_SPANS_32: u32 = 347;
 /// Off-screen sentinel coordinates the DDX pads streams with.
 const PAD_X: u32 = 1280;
 const PAD_Y: u32 = 1024;
@@ -220,7 +220,7 @@ pub(super) const PIX_WORDS: usize = 64;
 /// 1474), padded to a multiple of 8 words.
 const TILE_WORDS: usize = 0x1308;
 
-/// 2D drawing state set by the MODE/ROP/COLOR_AUX/... commands.
+/// 2D drawing state set by the MODE/ROP/AUX_PLANE_MASK/... commands.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct State2d {
@@ -270,14 +270,14 @@ pub enum ReadDecode {
 /// Where a screen-to-host read goes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ReadDest {
-    /// shram from this word (READ_IMAGE: READ_IMAGE_SHRAM; GL READ_RECT:
+    /// shram from this word (IMAGE_TO_SHRAM: READ_IMAGE_SHRAM; GL READ_BOX:
     /// the mailbox), then FIN3.
     Shram(usize),
     /// Pixel DMA read: the HQ2_GEDMA read port, then FIN2.
     Gedma,
 }
 
-/// A screen-to-host read (READ_IMAGE, 0x152, 0x0AC), as the sink needs it.
+/// A screen-to-host read (IMAGE_TO_SHRAM, 0x152, 0x0AC), as the sink needs it.
 #[derive(Clone, Copy)]
 pub struct ReadImage {
     /// Left x and GL row of the top line (y = 0 at the bottom); rows go
@@ -388,23 +388,23 @@ pub fn token_name(index: u32) -> Option<&'static str> {
         PUC_PNT2I => "PUC_PNT2I", PUC_RECTI2D => "PUC_RECTI2D", PUC_CMOV2I => "PUC_CMOV2I",
         PUC_LINE2I => "PUC_LINE2I", PUC_DRAWCHAR => "PUC_DRAWCHAR", PUC_RECTCOPY => "PUC_RECTCOPY",
         PUC_DATA => "DATA", HQ_TOKEN_GEDMA => "GEDMA", HQ_TOKEN_UNSTALL => "UNSTALL",
-        HQ2_DMA_WRITE_PIXELS => "DMA_WRITE_PIXELS",
+        PIXDMA_TO_SCREEN => "PIXDMA_TO_SCREEN",
         HQ_PCX_1E0 => "PCX_1E0", HQ_PCX_1E6 => "PCX_1E6", HQ_GL_FIN3 => "2D_SYNC",
-        GL_FINISH => "GL_FINISH", GL_FLUSH => "GL_FLUSH", GL_SWAP_BUFFERS => "GL_SWAP_BUFFERS",
-        HQ2_2D_BEGIN => "2D_BEGIN", HQ2_2D_LINE_SEG => "2D_LINE_SEG", 303 => "2D_POINTS",
-        HQ2_2D_SOLID_RECT => "2D_SOLID_RECT", 305 => "2D_POLY_SPAN", 307 => "2D_LINE",
-        HQ2_2D_COLOR_AUX => "2D_COLOR_AUX", HQ2_2D_COLOR_OFF => "2D_COLOR_OFF", HQ2_2D_COLOR_ON => "2D_COLOR_ON",
-        313 => "2D_STIPPLE_AUX", HQ2_2D_TILE_SETUP => "2D_TILE_SETUP", 315..=318 => "2D_TILE_DATA",
-        HQ2_2D_STIPPLE_BOX_POW2 | HQ2_2D_STIPPLE_BOX => "2D_STIPPLE_BOX", HQ2_2D_TILE_RECT | HQ2_2D_TILE_RECT_ODD => "2D_TILE_RECT",
-        HQ2_2D_POLYLINE => "2D_POLYLINE", HQ2_2D_POLYLINE_ALT => "2D_POLYLINE", HQ2_2D_SEGMENTS => "2D_SEGMENTS", HQ2_2D_POLYPOINT => "2D_POLYPOINT",
-        323 => "2D_GLYPH_8", 324 => "2D_GLYPH_16", 325 => "2D_GLYPH_32", 326 => "2D_GLYPH_64",
-        HQ2_2D_LINE_MODE => "2D_LINE_MODE", HQ2_2D_LINE_CLIP => "2D_LINE_CLIP", HQ2_2D_MODE => "2D_MODE", HQ2_2D_ROP => "2D_ROP",
-        HQ2_2D_CID_WRITE => "2D_CID_WRITE", HQ2_2D_BUF_SELECT => "2D_BUF_SELECT",
-        HQ2_2D_DMA_READ_PIXELS => "2D_DMA_READ_PIXELS", HQ2_GL_DMA_READ => "GL_DMA_READ",
-        340 => "2D_COPY_RECT", 342 => "2D_DRAW_IMAGE", 343 => "2D_DRAW_IMAGE_SMALL",
-        HQ2_2D_READ_IMAGE => "2D_READ_IMAGE", 346 | 347 => "2D_STIPPLED_SPAN", HQ2_2D_STIPPLE_RECT => "2D_STIPPLE_RECT",
-        349 => "2D_MONO_IMAGE_8", 350 => "2D_MONO_IMAGE_16", 351 => "2D_MONO_IMAGE_32",
-        352 => "2D_MONO_IMAGE_64", 354 => "2D_FAST_LINE_AUX", HQ2_2D_END_PRIMITIVE => "2D_END_PRIMITIVE",
+        CMD_READBACK_KICK => "CMD_READBACK_KICK", CMD_SWAP_WAIT => "CMD_SWAP_WAIT", CMD_SWAP_INTERVAL => "CMD_SWAP_INTERVAL",
+        X2D_SESSION_START => "2D_SESSION_START", X2D_LINE_QUADS => "2D_LINE_QUADS", 303 => "2D_POINTS",
+        X2D_FILL_BOXES => "2D_FILL_BOXES", 305 => "2D_SPAN_LIST", 307 => "2D_LINE",
+        X2D_AUX_PLANE_MASK => "2D_AUX_PLANE_MASK", X2D_BIT_ZERO_COLOR => "2D_BIT_ZERO_COLOR", X2D_BIT_ONE_COLOR => "2D_BIT_ONE_COLOR",
+        313 => "2D_STIPPLE_OPAQUE", X2D_TILE_BEGIN => "2D_TILE_BEGIN", 315..=318 => "2D_TILE_CHUNK",
+        X2D_STIPFILL_POW2 | X2D_STIPFILL_OTHER => "2D_STIPPLE_FILL", X2D_TILE_FILL | X2D_TILE_FILL_RAGGED => "2D_TILE_FILL",
+        X2D_PATH_POINTS => "2D_PATH_POINTS", X2D_PATH_POINTS_ALT => "2D_PATH_POINTS", X2D_SEGMENT_LIST => "2D_SEGMENT_LIST", X2D_DOT_LIST => "2D_DOT_LIST",
+        323 => "2D_GLYPH_12W", 324 => "2D_GLYPH_20W", 325 => "2D_GLYPH_36W", 326 => "2D_GLYPH_68W",
+        X2D_LINE_STYLE => "2D_LINE_STYLE", X2D_LINE_BOUNDS => "2D_LINE_BOUNDS", X2D_PLANE_SELECT => "2D_PLANE_SELECT", X2D_FG_ALU => "2D_FG_ALU",
+        X2D_CID_FIELD => "2D_CID_FIELD", X2D_PIXEL_LAYOUT => "2D_PIXEL_LAYOUT",
+        PIXDMA_FROM_SCREEN => "PIXDMA_FROM_SCREEN", GLDMA_FROM_WINDOW => "GLDMA_FROM_WINDOW",
+        340 => "2D_SCREEN_COPY", 342 => "2D_PUT_IMAGE", 343 => "2D_PUT_IMAGE_SHORT",
+        X2D_IMAGE_TO_SHRAM => "2D_IMAGE_TO_SHRAM", 346 | 347 => "2D_STIPPLE_SPANS", X2D_STIPPLED_BOX => "2D_STIPPLED_BOX",
+        349 => "2D_BITMAP_8W", 350 => "2D_BITMAP_12W", 351 => "2D_BITMAP_20W",
+        352 => "2D_BITMAP_36W", 354 => "X_INIT_BLOCK", X2D_PRIM_TERMINATOR => "2D_PRIM_TERMINATOR",
         0 => "GE_DATA", 1 => "GE_INIT", 10 => "GE_COLOR", 11 => "GE_FINISH0", 12 => "GE_PNT2I",
         13 => "GE_SBOXI", 14 => "GE_CMOV2I", 15 => "GE_DRAWCHAR", 20 => "GE_READPIXELS",
         21 => "GE_WRITEPIXELS", 22 => "GE_LOADRE", 26 => "GE_PIXWRITEMASK", 29 => "GE_READBLOCK",
@@ -416,8 +416,8 @@ pub fn token_name(index: u32) -> Option<&'static str> {
         86 => "GE_VERTEX3I", 87 => "GE_VERTEX3F", 90 => "GE_MOVE2I", 92 => "GE_DRAW2I",
         94 => "GE_RDRAW2I", 96 => "GE_PATTERN", 101 => "GE_SBOXF", 102 => "GE_SBOXFI",
         105 => "GE_SBOX", 108 => "GE_SCRMASK", 109 => "GE_RASTEROP",
-        481 => "GE_CX_SAVE_MAIN", 482 => "GE_CX_RESTORE_MAIN", 483 => "GE_CX_SAVE_EXT",
-        484 => "GE_CX_RESTORE_EXT", 496 => "GE_HQMSAV", 511 => "DIAG_CTXSW",
+        481 => "GE_DUMP_CTX", 482 => "GE_LOAD_CTX", 483 => "GE_DUMP_CTX_EXTRA",
+        484 => "GE_LOAD_CTX_EXTRA", 496 => "GE_CTX_SWITCH", 511 => "DIAG_CTXSW",
         _ => return None,
     })
 }
@@ -426,24 +426,24 @@ pub fn token_name(index: u32) -> Option<&'static str> {
 /// EXPRESS emitters.
 pub fn gl_token_name(tok: u32) -> Option<&'static str> {
     Some(match tok {
-        0x003 => "GL_PIXWRITEMASK", 0x004 => "GL_MAKECURRENT", 0x006 => "GL_FLUSH",
-        0x00a => "GL_DEPTH_MASK", 0x00e => "GL_STENCIL_CONFIG", 0x00f => "GL_STENCIL_MODE",
+        0x003 => "GL_PIXWRITEMASK", 0x004 => "GL_BIND_CONTEXT", 0x006 => "CMD_SWAP_WAIT",
+        0x00a => "GL_DEPTH_WRITE", 0x00e => "GL_STENCIL_BITS", 0x00f => "GL_STENCIL_ON",
         0x014 => "GL_DEPTH_TEST", 0x01a => "GL_LOGIC_OP", 0x01e => "GL_POLYGON_STIPPLE_OFF",
-        0x01f => "GL_POLYGON_STIPPLE", 0x024 => "GL_DEPTH_FUNC", 0x026 => "GL_BLEND_MODE",
-        0x02b => "GL_FRAGMENT", 0x0a1 => "GL_CLEAR_STENCIL", 0x0bd => "GL_READ_DONE",
-        0x0e9 => "GL_GET_COLOR", 0x0ea => "GL_GET_NORMAL", 0x107 => "GL_GET_RASTERPOS",
-        0x105 => "GL_RASTER_POS", 0x18c..=0x18e => "GL_BITMAP", 0x0fe => "GL_INDEX",
+        0x01f => "GL_POLYGON_STIPPLE", 0x024 => "GL_DEPTH_FUNC", 0x026 => "GL_BLEND_FAST",
+        0x02b => "GL_SOFT_FRAGMENT", 0x0a1 => "GL_CLEAR_STENCIL", 0x0bd => "GL_PEEK_ACK",
+        0x0e9 => "GL_PEEK_COLOR", 0x0ea => "GL_PEEK_NORMAL", 0x107 => "GL_PEEK_RASTER_COLOR",
+        0x105 => "GL_SET_RASTER_POS", 0x18c..=0x18e => "GL_BITMAP", 0x0fe => "GL_INDEX",
         0x010 => "GL_STENCIL_WMASK", 0x011 => "GL_DITHER", 0x013 => "GL_SHADE_MODEL",
         0x017 => "GL_LINE_WIDTH", 0x018 => "GL_LINE_STIPPLE", 0x01b => "GL_CULL_A", 0x01c => "GL_CULL_B",
-        0x021 => "GL_POINT_SMOOTH", 0x022 => "GL_LINE_SMOOTH", 0x025 => "GL_BLEND_FACTOR",
-        0x028 => "GL_FOG", 0x037 => "GL_MODELVIEW", 0x038 => "GL_PROJECTION", 0x039 => "GL_NORMAL_MATRIX",
+        0x021 => "GL_POINT_SMOOTH", 0x022 => "GL_LINE_SMOOTH", 0x025 => "GL_BLEND_CODES",
+        0x028 => "GL_FOG", 0x037 => "GL_MODELVIEW", 0x038 => "GL_PROJECTION", 0x039 => "GL_LOAD_NORMAL_MAT",
         0x03a => "GL_TEXTURE_MATRIX", 0x03b => "GL_VIEWPORT", 0x03c => "GL_SCISSOR",
         0x046 => "GL_BEGIN_TSTRIP_TFAN", 0x047 => "GL_VTX_TSTRIP", 0x04a => "GL_END_TSTRIP_TFAN",
         0x04c => "GL_BEGIN_QSTRIP", 0x04d => "GL_VTX_QSTRIP", 0x051 => "GL_END_QSTRIP",
         0x056 => "GL_VTX_LSTRIP", 0x057 => "GL_END_LINES", 0x058 => "GL_BEGIN_LLOOP",
-        0x059 => "GL_VTX_LLOOP", 0x05a => "GL_END_LLOOP", 0x063 => "VERTEX", 0x065 => "GL_VTX_OUTSIDE",
+        0x059 => "GL_VTX_LLOOP", 0x05a => "GL_END_LLOOP", 0x063 => "VERTEX", 0x065 => "GL_VTX_CLOSE_POLY",
         0x074 => "GL_SPEC_LUT", 0x076..=0x07d => "GL_MATERIAL", 0x07f..=0x085 => "GL_LIGHT",
-        0x0a0 => "GL_CLEAR_COLOR_DEPTH", 0x0a3 => "GL_FINISH", 0x0d4 => "GL_LIGHTPATH", 0x0e2 => "GL_POLYGON_MODE",
+        0x0a0 => "GL_CLEAR_RGBA_Z", 0x0a3 => "CMD_READBACK_KICK", 0x0d4 => "GL_LIGHTPATH", 0x0e2 => "GL_POLYGON_MODE",
         0x0e3 => "GL_NORMALIZE", 0x0e4 => "GL_POLYGON_OFFSET", 0x0e6 => "GL_CONTEXT_FLUSH",
         0x0eb => "GL_VTX_LINES", 0x0ed => "GL_VTX_TFAN",
         0x0f0 => "GL_BEGIN_TRIANGLES", 0x0f1 => "GL_END_TRIANGLES", 0x0f2 => "GL_VTX_TRIANGLES",
@@ -453,13 +453,13 @@ pub fn gl_token_name(tok: u32) -> Option<&'static str> {
         0x10a => "GL_READ_BUFFER", 0x10b => "GL_COLOR_WRITEMASK", 0x10d => "GL_NORMAL",
         0x10e => "GL_LIGHTPATH", 0x11d => "GL_BEGIN_POINTS", 0x123 => "GL_VTX_POINTS",
         0x168 => "GL_END_POINTS", 0x17c => "GL_BEGIN_LINES", 0x182 => "COLOR",
-        0x1e5 => "CX_RESTORE_1E5", 0x1e7 => "GL_SWAP_BUFFERS",
+        0x1e5 => "GL_WIN_BOX", 0x1e7 => "CMD_SWAP_INTERVAL",
         _ => return None,
     })
 }
 
 /// Trace label for any FIFO index: a documented name, or the GL token with
-/// its HQ2 modifier bits (ITOF, conversion, LOADV, USEV) decoded.
+/// its HQ2 modifier bits (IDX_INT_SOURCE, conversion, IDX_VERTEX_ROUTINE, IDX_VERTEX_CONSUME) decoded.
 pub fn index_label(index: u32) -> String {
     // GL names first: the IrisGL-era GE_* names for low indices
     // do not apply to the OpenGL microcode and are only used above 0x12B
@@ -472,13 +472,13 @@ pub fn index_label(index: u32) -> String {
     }
     let tok = index & 0x1ff;
     let mut mods: Vec<&str> = Vec::new();
-    if index & 0x4000 != 0 { mods.push("ITOF"); }
+    if index & 0x4000 != 0 { mods.push("IDX_INT_SOURCE"); }
     match (index >> 11) & 7 {
         1 => mods.push("V3"), 2 => mods.push("V2"), 3 => mods.push("C3"), 4 => mods.push("C4"),
         5 => mods.push("CP"), 6 => mods.push("C1"), 7 => mods.push("CONV7"), _ => {}
     }
-    if index & 0x400 != 0 { mods.push("LOADV"); }
-    if index & 0x200 != 0 { mods.push("USEV"); }
+    if index & 0x400 != 0 { mods.push("IDX_VERTEX_ROUTINE"); }
+    if index & 0x200 != 0 { mods.push("IDX_VERTEX_CONSUME"); }
     let base = gl_token_name(tok).or_else(|| token_name(tok).filter(|_| tok >= 0x12c || tok == 0))
         .map(str::to_string).unwrap_or_else(|| format!("tok{tok:#x}"));
     if mods.is_empty() { base } else { format!("{}:{base}", mods.join("|")) }
@@ -490,7 +490,7 @@ const MAX_ARGS: usize = 72;
 /// `need` value for an open (variable-length, unknown) command.
 const OPEN: u32 = u32::MAX;
 /// `need` value for a streaming command: DATA words are consumed as they
-/// arrive (e.g. 4 per box for SOLID_RECT) until the next command.
+/// arrive (e.g. 4 per box for FILL_BOXES) until the next command.
 const STREAM: u32 = u32::MAX - 1;
 const FIFO_WORDS: usize = 0x8000;
 /// The longest side a tile is kept at (its words are 0x1308 at most).
@@ -591,7 +591,7 @@ pub trait Re3Sink {
     /// completes a request the host is waiting on.
     fn finish(&mut self, flag: usize);
     /// Screen-to-host read: once all drawing is done, pack the rectangle
-    /// into shram and raise FIN3 (READ_IMAGE), or feed it to the HQ2_GEDMA
+    /// into shram and raise FIN3 (IMAGE_TO_SHRAM), or feed it to the HQ2_GEDMA
     /// read port and raise FIN2 (pixel DMA reads).
     fn read_image(&mut self, req: &ReadImage, dest: ReadDest);
     /// Emulator-private RE3 operation (re3::RE3_OP_*).
@@ -624,20 +624,20 @@ pub struct Hq2Engine {
     stream_words: u32,
     stream_items: u32,
     s2d: State2d,
-    /// Tile for TILE_RECT: geometry from TILE_SETUP, words from TILE_DATA.
+    /// Tile for TILE_FILL: geometry from TILE_BEGIN, words from TILE_CHUNK.
     tile_w: u32,
     tile_h: u32,
     tile_len: u32,
-    /// Tile pixel format from TILE_SETUP: 2 = 8-bit pixels, 3 = 1-bit stipple.
+    /// Tile pixel format from TILE_BEGIN: 2 = 8-bit pixels, 3 = 1-bit stipple.
     tile_fmt: u32,
     tile: [u32; TILE_WORDS],
     stipple_opaque: u32,
-    /// Line clip box (inclusive), set by LINE_CLIP; full screen after BEGIN.
+    /// Line clip box (inclusive), set by LINE_BOUNDS; full screen after BEGIN.
     line_clip: [i32; 4],
     /// Previous polyline point, and whether one is pending.
     line_prev: [i32; 2],
     line_have_prev: u32,
-    /// DRAW_IMAGE: header, current row buffer, rows done.
+    /// PUT_IMAGE: header, current row buffer, rows done.
     img_hdr: [u32; 7],
     img_row: [u32; IMG_ROW_WORDS],
     img_rows_done: u32,
@@ -645,9 +645,9 @@ pub struct Hq2Engine {
     warned: [u64; FIFO_WORDS / 64],
     /// OpenGL (GE7 geometry) state.
     gl: gl::GlState,
-    /// GL context switch bookkeeping and restore stream (GE_HQMSAV).
+    /// GL context switch bookkeeping and restore stream (GE_CTX_SWITCH).
     gl_ctx: gl::GlCx,
-    /// GE_CX_RESTORE_EXT words still to consume (u32::MAX: count not yet in).
+    /// GE_LOAD_CTX_EXTRA words still to consume (u32::MAX: count not yet in).
     cx_ext_left: u32,
     /// FIFO pixel writes (0x0B1 start, 0x071 data, 0x0B2 place, 0x0B3
     /// end): words collected for the current chunk (up to 48 pixels).
@@ -664,41 +664,41 @@ impl Hq2Engine {
             PUC_RECTI2D | PUC_LINE2I => 4,
             PUC_DRAWCHAR => 25,
             PUC_RECTCOPY => 8,
-            GE_HQMSAV => 3,
-            GE_CX_SAVE_MAIN | GE_CX_SAVE_EXT => 1,
+            GE_CTX_SWITCH => 3,
+            GE_DUMP_CTX | GE_DUMP_CTX_EXTRA => 1,
             // Restore main: the token carries the word count; the image
             // follows on HQ2_GEDMA. Restore ext: token, DATA count, image.
-            GE_CX_RESTORE_MAIN | GE_CX_RESTORE_EXT => STREAM,
-            HQ_GL_FIN3 | GL_FINISH | GL_FLUSH => 1,
+            GE_LOAD_CTX | GE_LOAD_CTX_EXTRA => STREAM,
+            HQ_GL_FIN3 | CMD_READBACK_KICK | CMD_SWAP_WAIT => 1,
             HQ_PCX_1E0 | HQ_PCX_1E6 => 1,
-            HQ2_2D_BEGIN | HQ2_2D_COLOR_AUX | HQ2_2D_COLOR_OFF | HQ2_2D_COLOR_ON | HQ2_2D_MODE
-            | HQ2_2D_CID_WRITE | HQ2_2D_END_PRIMITIVE => 1,
-            HQ2_2D_BUF_SELECT => 2,
-            HQ2_2D_READ_IMAGE => 5,
+            X2D_SESSION_START | X2D_AUX_PLANE_MASK | X2D_BIT_ZERO_COLOR | X2D_BIT_ONE_COLOR | X2D_PLANE_SELECT
+            | X2D_CID_FIELD | X2D_PRIM_TERMINATOR => 1,
+            X2D_PIXEL_LAYOUT => 2,
+            X2D_IMAGE_TO_SHRAM => 5,
             // Token x, then y, width, height, words/row, flag, 0 on GE_DATA.
-            HQ2_2D_DMA_READ_PIXELS | HQ2_GL_DMA_READ => 7,
-            HQ2_2D_ROP => 4,
-            HQ2_2D_TILE_SETUP => 5,
-            HQ2_2D_MONO_IMAGE_8 => 8,
-            HQ2_2D_MONO_IMAGE_16 => 12,
-            HQ2_2D_MONO_IMAGE_32 => 20,
-            HQ2_2D_MONO_IMAGE_64 => 36,
-            HQ2_2D_GLYPH_8 => 12,
+            PIXDMA_FROM_SCREEN | GLDMA_FROM_WINDOW => 7,
+            X2D_FG_ALU => 4,
+            X2D_TILE_BEGIN => 5,
+            X2D_BITMAP_BLOCK_A => 8,
+            X2D_BITMAP_BLOCK_B => 12,
+            X2D_BITMAP_BLOCK_C => 20,
+            X2D_BITMAP_BLOCK_D => 36,
+            X2D_GLYPH_NARROW => 12,
             324 => 20,
             325 => 36,
-            HQ2_2D_GLYPH_64 => 68,
-            HQ2_2D_LINE_MODE | HQ2_2D_STIPPLE_AUX => 1,
-            HQ2_2D_LINE_CLIP => 4,
-            HQ2_2D_STIPPLE_RECT | HQ2_2D_STIPPLE_BOX_POW2 | HQ2_2D_STIPPLE_BOX => 7,
-            HQ2_2D_STIPPLED_SPAN_A | HQ2_2D_STIPPLED_SPAN_B => STREAM,
-            HQ2_2D_POLY_SPAN | HQ2_2D_POLYLINE | HQ2_2D_POLYLINE_ALT | HQ2_2D_SEGMENTS | HQ2_2D_LINE_SEG
-            | HQ2_2D_POLYPOINT => STREAM,
-            HQ2_2D_SOLID_RECT => STREAM,
-            HQ2_2D_TILE_RECT | HQ2_2D_TILE_RECT_ODD => 7,
-            HQ2_2D_DRAW_IMAGE | HQ2_2D_DRAW_IMAGE_SMALL | HQ2_DMA_WRITE_PIXELS
-            | HQ2_GL_DMA_WRITE | HQ2_GL_DMA_WRITE_ZOOM => STREAM,
-            HQ2_2D_COPY_RECT => 8,
-            HQ2_2D_TILE_DATA_FIRST..=HQ2_2D_TILE_DATA_LAST => STREAM,
+            X2D_GLYPH_WIDE => 68,
+            X2D_LINE_STYLE | X2D_STIPPLE_OPAQUE => 1,
+            X2D_LINE_BOUNDS => 4,
+            X2D_STIPPLED_BOX | X2D_STIPFILL_POW2 | X2D_STIPFILL_OTHER => 7,
+            X2D_STIPPLE_SPANS_NARROW | X2D_STIPPLE_SPANS_32 => STREAM,
+            X2D_SPAN_LIST | X2D_PATH_POINTS | X2D_PATH_POINTS_ALT | X2D_SEGMENT_LIST | X2D_LINE_QUADS
+            | X2D_DOT_LIST => STREAM,
+            X2D_FILL_BOXES => STREAM,
+            X2D_TILE_FILL | X2D_TILE_FILL_RAGGED => 7,
+            X2D_PUT_IMAGE | X2D_PUT_IMAGE_SHORT | PIXDMA_TO_SCREEN
+            | GLDMA_TO_WINDOW | GLDMA_TO_WINDOW_ZOOM => STREAM,
+            X2D_SCREEN_COPY => 8,
+            X2D_TILE_CHUNK_FIRST..=X2D_TILE_CHUNK_LAST => STREAM,
             _ => Self::gl_arg_count(cmd).unwrap_or(OPEN),
         }
     }
@@ -723,7 +723,7 @@ impl Hq2Engine {
         }
         // FIFO index 0 (GE_DATA) is a data port too: the kernel's pixel-DMA
         // trigger streams its arguments there.
-        // Any index whose token bits are PUC_DATA is a data port: the ITOF
+        // Any index whose token bits are PUC_DATA is a data port: the IDX_INT_SOURCE
         // variant (0x41DF, integer DATA) carries e.g. software fragments.
         if index == PUC_DATA || index == HQ_TOKEN_GEDMA || index == 0
             || (index < FIFO_WORDS as u32 && index & 0x1ff == PUC_DATA) {
@@ -803,24 +803,24 @@ impl Hq2Engine {
                 self.stream_words = 0;
                 self.stream_items = 0;
                 // Tile data loaders carry a tile word in the command word too.
-                if (HQ2_2D_TILE_DATA_FIRST..=HQ2_2D_TILE_DATA_LAST).contains(&index) {
+                if (X2D_TILE_CHUNK_FIRST..=X2D_TILE_CHUNK_LAST).contains(&index) {
                     self.tile_push(val);
                 }
-                if index == HQ2_2D_POLYLINE || index == HQ2_2D_POLYLINE_ALT {
+                if index == X2D_PATH_POINTS || index == X2D_PATH_POINTS_ALT {
                     self.line_have_prev = 0;
                 }
-                if index == HQ2_2D_DRAW_IMAGE || index == HQ2_2D_DRAW_IMAGE_SMALL || is_pixel_dma(index) {
+                if index == X2D_PUT_IMAGE || index == X2D_PUT_IMAGE_SHORT || is_pixel_dma(index) {
                     self.img_hdr[0] = val;
                     self.img_rows_done = 0;
                 }
-                if index == GE_CX_RESTORE_MAIN {
+                if index == GE_LOAD_CTX {
                     self.gl_cx_restore_begin(val);
                     if val == 0 {
                         self.need = 0;
                         out.finish(FIN2);
                     }
                 }
-                if index == GE_CX_RESTORE_EXT {
+                if index == GE_LOAD_CTX_EXTRA {
                     // The word count arrives as the first DATA word.
                     self.cx_ext_left = u32::MAX;
                 }
@@ -841,7 +841,7 @@ impl Hq2Engine {
 
     /// One DATA word for the active streaming command.
     fn stream_word(&mut self, val: u32, out: &mut dyn Re3Sink, done: &mut Option<&mut dyn FnMut(String)>) {
-        if self.cmd == GE_CX_RESTORE_MAIN {
+        if self.cmd == GE_LOAD_CTX {
             if self.gl_cx_restore_word(val) {
                 self.need = 0;
                 out.finish(FIN2);
@@ -852,12 +852,12 @@ impl Hq2Engine {
                         2 => "REJECTED: bad magic: previous context's state stays live".to_string(),
                         _ => "REJECTED: GlState size differs: previous context's state stays live".to_string(),
                     };
-                    f(format!("GE_CX_RESTORE_MAIN {} words {} -> FIN2", self.args[0], why));
+                    f(format!("GE_LOAD_CTX {} words {} -> FIN2", self.args[0], why));
                 }
             }
             return;
         }
-        if self.cmd == GE_CX_RESTORE_EXT {
+        if self.cmd == GE_LOAD_CTX_EXTRA {
             // The HLE reports no extended context (shram 0x304 = 0); if the
             // kernel restores one anyway, consume its words and ack.
             if self.cx_ext_left == u32::MAX {
@@ -871,18 +871,18 @@ impl Hq2Engine {
             }
             return;
         }
-        if (HQ2_2D_TILE_DATA_FIRST..=HQ2_2D_TILE_DATA_LAST).contains(&self.cmd) {
+        if (X2D_TILE_CHUNK_FIRST..=X2D_TILE_CHUNK_LAST).contains(&self.cmd) {
             self.tile_push(val);
             return;
         }
-        if self.cmd == HQ2_2D_DRAW_IMAGE || self.cmd == HQ2_2D_DRAW_IMAGE_SMALL || is_pixel_dma(self.cmd) {
+        if self.cmd == X2D_PUT_IMAGE || self.cmd == X2D_PUT_IMAGE_SHORT || is_pixel_dma(self.cmd) {
             self.image_word(val, out, done);
             return;
         }
         let group = match self.cmd {
-            HQ2_2D_POLY_SPAN => 3,
-            HQ2_2D_POLYLINE | HQ2_2D_POLYLINE_ALT | HQ2_2D_POLYPOINT => 2,
-            HQ2_2D_SEGMENTS | HQ2_2D_LINE_SEG | HQ2_2D_STIPPLED_SPAN_A | HQ2_2D_STIPPLED_SPAN_B => 4,
+            X2D_SPAN_LIST => 3,
+            X2D_PATH_POINTS | X2D_PATH_POINTS_ALT | X2D_DOT_LIST => 2,
+            X2D_SEGMENT_LIST | X2D_LINE_QUADS | X2D_STIPPLE_SPANS_NARROW | X2D_STIPPLE_SPANS_32 => 4,
             _ => 0,
         };
         if group != 0 {
@@ -893,13 +893,13 @@ impl Hq2Engine {
                 self.stream_words = 0;
                 self.stream_items += 1;
                 let a = self.args;
-                let stippled = matches!(self.cmd, HQ2_2D_STIPPLED_SPAN_A | HQ2_2D_STIPPLED_SPAN_B);
+                let stippled = matches!(self.cmd, X2D_STIPPLE_SPANS_NARROW | X2D_STIPPLE_SPANS_32);
                 let fg = if stippled { self.s2d.color_on } else { self.s2d.fg };
                 if self.stream_items == 1 {
                     self.setup2d(fg, out);
                 }
                 match self.cmd {
-                    HQ2_2D_POLY_SPAN => {
+                    X2D_SPAN_LIST => {
                         if a[1] < PAD_X && a[2] < PAD_Y {
                             let (x, y, w) = (a[1] as i32, a[2] as i32, a[3] as i32);
                             let (x1, x2) = (x.max(0), x.saturating_add(w).min(re3::FB_W as i32));
@@ -908,29 +908,29 @@ impl Hq2Engine {
                             }
                         }
                     }
-                    HQ2_2D_STIPPLED_SPAN_A | HQ2_2D_STIPPLED_SPAN_B => {
+                    X2D_STIPPLE_SPANS_NARROW | X2D_STIPPLE_SPANS_32 => {
                         self.stippled_span(a[1] as i32, a[2] as i32, a[3] as i32, a[4], out);
                         if let Some(f) = done.as_mut() {
-                            f(format!("2D_STIPPLED_SPAN ({}, {}) w={} pattern={:#010x} opaque={} on={:#x} off={:#x}",
+                            f(format!("2D_STIPPLE_SPANS ({}, {}) w={} pattern={:#010x} opaque={} on={:#x} off={:#x}",
                                 a[1] as i32, a[2] as i32, a[3] as i32, a[4], self.stipple_opaque, self.s2d.color_on, self.s2d.color_off));
                         }
                     }
-                    HQ2_2D_POLYPOINT => {
+                    X2D_DOT_LIST => {
                         if !(a[1] == PAD_X && a[2] == PAD_Y) {
                             let p = [a[1] as i32, a[2] as i32];
                             self.line2d(p, p, true, out);
                         }
                     }
-                    HQ2_2D_SEGMENTS | HQ2_2D_LINE_SEG => {
-                        // Padding: (1280, 1024) pairs (SEGMENTS) or x1 = x2
-                        // = 1280 with y 0 (LINE_SEG, 4Dwm frames).
+                    X2D_SEGMENT_LIST | X2D_LINE_QUADS => {
+                        // Padding: (1280, 1024) pairs (SEGMENT_LIST) or x1 = x2
+                        // = 1280 with y 0 (LINE_QUADS, 4Dwm frames).
                         let pad = (a[1] == PAD_X && a[2] == PAD_Y) || (a[1] == PAD_X && a[3] == PAD_X);
                         if !pad {
-                            // SEGMENTS draws both endpoints; LINE_SEG is the
+                            // SEGMENT_LIST draws both endpoints; LINE_QUADS is the
                             // CapNotLast form and stops before (x2, y2)
                             // (Xsgi's segment draw picks it by cap style and swaps
                             // reversed segments with +1 to keep the pixels).
-                            let last = self.cmd == HQ2_2D_SEGMENTS;
+                            let last = self.cmd == X2D_SEGMENT_LIST;
                             self.line2d([a[1] as i32, a[2] as i32], [a[3] as i32, a[4] as i32], last, out);
                         }
                         if let Some(f) = done.as_mut() {
@@ -961,24 +961,24 @@ impl Hq2Engine {
         let k = self.stream_words as usize;
         self.args[1 + k] = val;
         self.stream_words += 1;
-        if self.cmd == HQ2_2D_SOLID_RECT && self.stream_words == 4 {
+        if self.cmd == X2D_FILL_BOXES && self.stream_words == 4 {
             self.stream_words = 0;
             self.stream_items += 1;
             let b = [self.args[1], self.args[2], self.args[3], self.args[4]].map(|v| v as i32);
             self.rect2d(b[0], b[1], b[2], b[3], out);
             if let Some(f) = done.as_mut() {
                 let s = self.s2d;
-                f(format!("2D_SOLID_RECT box {} ({}, {})-({}, {}) mode={:#x} fg={:#x} pm={:#x} aux={:#x} alu={} cid={:#x}",
+                f(format!("2D_FILL_BOXES box {} ({}, {})-({}, {}) mode={:#x} fg={:#x} pm={:#x} aux={:#x} alu={} cid={:#x}",
                     self.stream_items, b[0], b[1], b[2], b[3], s.mode, s.fg, s.planemask, s.aux_mask, s.alu, s.cid_write));
             }
         }
     }
 
     fn end_stream(&mut self, done: &mut Option<&mut dyn FnMut(String)>) {
-        if self.cmd == HQ2_2D_POLYLINE || self.cmd == HQ2_2D_POLYLINE_ALT {
+        if self.cmd == X2D_PATH_POINTS || self.cmd == X2D_PATH_POINTS_ALT {
             self.line_have_prev = 0;
         }
-        let leftover = if self.cmd == HQ2_2D_DRAW_IMAGE || self.cmd == HQ2_2D_DRAW_IMAGE_SMALL {
+        let leftover = if self.cmd == X2D_PUT_IMAGE || self.cmd == X2D_PUT_IMAGE_SHORT {
             self.img_rows_done < self.img_hdr[3]
         } else { self.stream_words != 0 };
         if leftover {
@@ -992,7 +992,7 @@ impl Hq2Engine {
     }
 
     /// 2D solid rectangle: X box (x2/y2 exclusive, y down from the top of
-    /// the screen) into the planes selected by MODE / CID_WRITE.
+    /// the screen) into the planes selected by MODE / CID_FIELD.
     fn rect2d(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, out: &mut dyn Re3Sink) {
         let (x1, x2) = (x1.max(0), x2.min(re3::FB_W as i32));
         let (y1, y2) = (y1.max(0), y2.min(SCREEN_H));
@@ -1007,7 +1007,7 @@ impl Hq2Engine {
     }
 
     /// Set the value the next spans write, for the active plane group:
-    /// CID (from CID_WRITE, fixed), 4-bit overlay (MODE 8), 2-bit overlay or
+    /// CID (from CID_FIELD, fixed), 4-bit overlay (MODE 8), 2-bit overlay or
     /// popup (MODE 0xB), or the colour planes. Used once per primitive by
     /// `setup2d` and again for every colour run of tiles/images/stipples.
     fn value2d(&self, v: u32, out: &mut dyn Re3Sink) {
@@ -1016,13 +1016,13 @@ impl Hq2Engine {
             return;
         }
         match s.mode & 0xff {
-            8 => out.reg(re3::REG_UAUXDATA, v & 0xf),
-            0xb => out.reg(re3::REG_UAUXDATA, if s.aux_mask & 0xc != 0 { (v << 2) & 0xc } else { v & 3 }),
+            8 => out.reg(re3::RE3_AUX_VALUE, v & 0xf),
+            0xb => out.reg(re3::RE3_AUX_VALUE, if s.aux_mask & 0xc != 0 { (v << 2) & 0xc } else { v & 3 }),
             _ => self.color2d(v, out),
         }
     }
 
-    /// Set the RE3 colour for a GC pixel (fg, COLOR_ON / OFF; colour planes:
+    /// Set the RE3 colour for a GC pixel (fg, BIT_ONE_COLOR / OFF; colour planes:
     /// R in bits 7:0). In 12-bit mode (MODE 2) the pixel is the X visual's
     /// 12-bit value (R 3:0, G 7:4, B 11:8): the DDX passes GC pixels
     /// unconverted (Xsgi's point draw), so widen it here (inferred).
@@ -1046,12 +1046,12 @@ impl Hq2Engine {
 
     /// RE3 colour registers from an 8:8:8 value (R in bits 7:0).
     fn rgb2d(&self, pixel: u32, out: &mut dyn Re3Sink) {
-        out.reg(re3::REG_R, (pixel & 0xff) << 11);
-        out.reg(re3::REG_G, ((pixel >> 8) & 0xff) << 11);
-        out.reg(re3::REG_B, ((pixel >> 16) & 0xff) << 11);
+        out.reg(re3::RE3_RED_START, (pixel & 0xff) << 11);
+        out.reg(re3::RE3_GREEN_START, ((pixel >> 8) & 0xff) << 11);
+        out.reg(re3::RE3_BLUE_START, ((pixel >> 16) & 0xff) << 11);
     }
 
-    /// 1-bpp bitmap (MONO_IMAGE_* and GLYPH_*), transparent: fg where a bit
+    /// 1-bpp bitmap (X2D_BITMAP_BLOCK_* and X2D_GLYPH_*), transparent: fg where a bit
     /// is 1. Header x; y, width, rows; `words` data words follow. Rows are
     /// MSB-leftmost; width <= 16 packs two 16-bit rows per word (first row
     /// high), <= 32 one row per word, wider two words per row.
@@ -1087,7 +1087,7 @@ impl Hq2Engine {
         }
     }
 
-    /// One DRAW_IMAGE data word: 6 header words after x, then pixel rows;
+    /// One PUT_IMAGE data word: 6 header words after x, then pixel rows;
     /// anything after the last row (0xDEADBEEF padding) is ignored.
     fn image_word(&mut self, val: u32, out: &mut dyn Re3Sink, done: &mut Option<&mut dyn FnMut(String)>) {
         let k = self.stream_words as usize;
@@ -1103,7 +1103,7 @@ impl Hq2Engine {
                     self.img_hdr[5] = match per_word { 4 => 2, 2 => 1, _ => 0 };
                     self.img_hdr[6] = 0;
                 }
-                if self.cmd == HQ2_DMA_WRITE_PIXELS || !is_pixel_dma(self.cmd) {
+                if self.cmd == PIXDMA_TO_SCREEN || !is_pixel_dma(self.cmd) {
                     let fg = self.s2d.fg;
                     self.setup2d(fg, out);
                 }
@@ -1121,9 +1121,9 @@ impl Hq2Engine {
         }
         if i + 1 == wpr {
             let row = self.img_rows_done;
-            if self.cmd == HQ2_GL_DMA_WRITE || self.cmd == HQ2_GL_DMA_WRITE_ZOOM {
+            if self.cmd == GLDMA_TO_WINDOW || self.cmd == GLDMA_TO_WINDOW_ZOOM {
                 let words = self.img_row;
-                let zoom = if self.cmd == HQ2_GL_DMA_WRITE_ZOOM { gl::PixZoom::Both } else { gl::PixZoom::None };
+                let zoom = if self.cmd == GLDMA_TO_WINDOW_ZOOM { gl::PixZoom::Both } else { gl::PixZoom::None };
                 self.gl_pixel_row(x as i32, y as i32, row, w, rows, fmt, &words[..wpr.min(IMG_ROW_WORDS)], zoom, out);
             } else {
                 self.image_row(x as i32, (y as i32).wrapping_add(row as i32), w, fmt, skip, wpr.min(IMG_ROW_WORDS), out);
@@ -1229,11 +1229,11 @@ impl Hq2Engine {
         }
     }
 
-    /// Stippled box (STIPPLE_RECT): 1-bit tile anchored at the origin; bits
-    /// set draw fg, clear bits draw bg when STIPPLE_AUX is 1 (opaque).
+    /// Stippled box (X2D_STIPPLED_BOX): 1-bit tile anchored at the origin; bits
+    /// set draw fg, clear bits draw bg when STIPPLE_OPAQUE is 1 (opaque).
     /// One stippled span: `w` pixels from (x, y) (y top-down); `pat` MSB is
     /// pixel x and repeats every 32 pixels. The colour currently loaded is
-    /// COLOR_ON (setup2d at the start of the stream).
+    /// BIT_ONE_COLOR (setup2d at the start of the stream).
     fn stippled_span(&mut self, x: i32, y: i32, w: i32, pat: u32, out: &mut dyn Re3Sink) {
         if y < 0 || y >= SCREEN_H || w <= 0 || x >= re3::FB_W as i32 {
             return;
@@ -1308,7 +1308,7 @@ impl Hq2Engine {
         if x1 >= x2 || y1 >= y2 {
             return;
         }
-        // Pixel format (TILE_SETUP word 3, tile fill): 2 = 8-bit (4 per
+        // Pixel format (TILE_BEGIN word 3, tile fill): 2 = 8-bit (4 per
         // word), 1 = 16-bit (2 per word), 0 = 24/32-bit (1 per word); MSB
         // first; rows are ceil(width * bpp / 32) words.
         let per_word: i32 = match self.tile_fmt { 2 => 4, 1 => 2, _ => 1 };
@@ -1341,26 +1341,26 @@ impl Hq2Engine {
     }
 
     /// RE3 state for a 2D primitive: raster op, colour and the plane group
-    /// selected by MODE / CID_WRITE.
+    /// selected by MODE / CID_FIELD.
     fn setup2d(&mut self, fg: u32, out: &mut dyn Re3Sink) {
         let s = self.s2d;
-        out.reg(re3::REG_FUNC, s.alu & 0xf);
+        out.reg(re3::RE3_LOGIC_OP, s.alu & 0xf);
         self.color2d(fg, out);
-        out.reg(re3::REG_NOPUP, 1);
+        out.reg(re3::RE3_SKIP_POPUP, 1);
         if s.cid_write & 0xf000 != 0 {
             // CID planes (bits 31:28) only.
-            out.reg(re3::REG_WIDDATA, (s.cid_write >> 8) & 0xf);
-            out.reg(re3::REG_UAUXDATA, 0);
-            out.reg(re3::REG_AUXMASK, 0xf0);
-            out.reg(re3::REG_PIXMASK, 0);
+            out.reg(re3::RE3_WID_VALUE, (s.cid_write >> 8) & 0xf);
+            out.reg(re3::RE3_AUX_VALUE, 0);
+            out.reg(re3::RE3_AUX_PLANE_MASK, 0xf0);
+            out.reg(re3::RE3_COLOR_PLANE_MASK, 0);
         } else {
             match s.mode & 0xff {
                 // 4-bit overlay (MODE 8) and 2-bit overlay / popup (MODE 0xB):
-                // mask COLOR_AUX, value set by value2d (popup value shifted
+                // mask AUX_PLANE_MASK, value set by value2d (popup value shifted
                 // up, inferred).
                 8 | 0xb => {
-                    out.reg(re3::REG_AUXMASK, s.aux_mask & 0xf);
-                    out.reg(re3::REG_PIXMASK, 0);
+                    out.reg(re3::RE3_AUX_PLANE_MASK, s.aux_mask & 0xf);
+                    out.reg(re3::RE3_COLOR_PLANE_MASK, 0);
                     self.value2d(fg, out);
                 }
                 // 12-bit RGB (MODE 2, 12-bit TrueColor windows): the RE3
@@ -1378,17 +1378,17 @@ impl Hq2Engine {
                     } else {
                         pm << 12
                     };
-                    out.reg(re3::REG_UAUXDATA, 0);
-                    out.reg(re3::REG_AUXMASK, 0);
-                    out.reg(re3::REG_PIXMASK, mask);
+                    out.reg(re3::RE3_AUX_VALUE, 0);
+                    out.reg(re3::RE3_AUX_PLANE_MASK, 0);
+                    out.reg(re3::RE3_COLOR_PLANE_MASK, mask);
                     out.op(re3::RE3_OP_PIXFMT, re3::PIXFMT_RGB12 as u64);
-                    out.reg(re3::REG_ENABDITH, 0);
+                    out.reg(re3::RE3_DITHER_ON, 0);
                 }
                 // Colour planes.
                 _ => {
-                    out.reg(re3::REG_UAUXDATA, 0);
-                    out.reg(re3::REG_AUXMASK, 0);
-                    out.reg(re3::REG_PIXMASK, s.planemask & 0x00ff_ffff);
+                    out.reg(re3::RE3_AUX_VALUE, 0);
+                    out.reg(re3::RE3_AUX_PLANE_MASK, 0);
+                    out.reg(re3::RE3_COLOR_PLANE_MASK, s.planemask & 0x00ff_ffff);
                     out.op(re3::RE3_OP_PIXFMT, 0);
                 }
             }
@@ -1415,7 +1415,7 @@ impl Hq2Engine {
         match cmd {
             PUC_INIT => format!("{name} arg={}", i(0)),
             HQ_TOKEN_UNSTALL => format!("microcode start arg={} -> FIN2", i(0)),
-            GE_HQMSAV => {
+            GE_CTX_SWITCH => {
                 let prev = self.gl_ctx.prev_owner;
                 let live = if prev == u32::MAX { "none".to_string() } else { format!("{prev:#x}") };
                 // State 1 = the kernel believes this context's state is still
@@ -1425,27 +1425,27 @@ impl Hq2Engine {
                 format!("{name} ctx={:#x} state={} mode={} (live was {live}){leak} -> FIN2", i(0), i(1), i(2))
             }
             HQ_PCX_1E0 | HQ_PCX_1E6 => format!("{name} {} -> FIN2", i(0)),
-            HQ_GL_FIN3 | GL_FINISH => format!("{name} {} -> FIN3", i(0)),
-            HQ2_2D_ROP => format!("{name} fg={:#x} planemask={:#x} alu={} flag={:#x}", a[0], a[1], i(2), a[3]),
-            HQ2_2D_TILE_SETUP => format!("{name} size={:#x} {}x{} format={} {:#x}", a[0], i(1), i(2), i(3), a[4]),
-            HQ2_2D_COPY_RECT => format!("{name} pitch={} chunk={} src=({}, {}) {}x{} dst=({}, {})",
+            HQ_GL_FIN3 | CMD_READBACK_KICK => format!("{name} {} -> FIN3", i(0)),
+            X2D_FG_ALU => format!("{name} fg={:#x} planemask={:#x} alu={} flag={:#x}", a[0], a[1], i(2), a[3]),
+            X2D_TILE_BEGIN => format!("{name} size={:#x} {}x{} format={} {:#x}", a[0], i(1), i(2), i(3), a[4]),
+            X2D_SCREEN_COPY => format!("{name} pitch={} chunk={} src=({}, {}) {}x{} dst=({}, {})",
                 i(0), i(1), i(2), i(3), i(4), i(5), i(6), i(7)),
-            HQ2_2D_MONO_IMAGE_8..=HQ2_2D_MONO_IMAGE_64 | HQ2_2D_GLYPH_8..=HQ2_2D_GLYPH_64 =>
+            X2D_BITMAP_BLOCK_A..=X2D_BITMAP_BLOCK_D | X2D_GLYPH_NARROW..=X2D_GLYPH_WIDE =>
                 format!("{name} at ({}, {}) {}x{} on={:#x}", i(0), i(1), i(2), i(3), self.s2d.color_on),
-            HQ2_2D_LINE_CLIP => format!("{name} x {}..{} y {}..{}", i(0), i(1), i(2), i(3)),
-            HQ2_2D_LINE_MODE | HQ2_2D_STIPPLE_AUX => format!("{name} {:#x}", a[0]),
-            HQ2_2D_TILE_RECT | HQ2_2D_TILE_RECT_ODD => format!("{name} ({}, {})-({}, {}) origin ({}, {}) tile {}x{} format={} ({} words)",
+            X2D_LINE_BOUNDS => format!("{name} x {}..{} y {}..{}", i(0), i(1), i(2), i(3)),
+            X2D_LINE_STYLE | X2D_STIPPLE_OPAQUE => format!("{name} {:#x}", a[0]),
+            X2D_TILE_FILL | X2D_TILE_FILL_RAGGED => format!("{name} ({}, {})-({}, {}) origin ({}, {}) tile {}x{} format={} ({} words)",
                 i(2), i(4), i(5), i(6), i(1), i(3), self.tile_w, self.tile_h, self.tile_fmt, self.tile_len),
-            HQ2_2D_STIPPLE_RECT | HQ2_2D_STIPPLE_BOX_POW2 | HQ2_2D_STIPPLE_BOX => format!("{name} ({}, {})-({}, {}) origin ({}, {}) stipple {}x{} opaque={} fg={:#x} bg={:#x}",
+            X2D_STIPPLED_BOX | X2D_STIPFILL_POW2 | X2D_STIPFILL_OTHER => format!("{name} ({}, {})-({}, {}) origin ({}, {}) stipple {}x{} opaque={} fg={:#x} bg={:#x}",
                 i(2), i(4), i(5), i(6), i(1), i(3), self.tile_w, self.tile_h, self.stipple_opaque, self.s2d.color_on, self.s2d.color_off),
-            HQ2_2D_MODE | HQ2_2D_COLOR_AUX | HQ2_2D_COLOR_OFF | HQ2_2D_COLOR_ON | HQ2_2D_CID_WRITE
-            | HQ2_2D_BEGIN | HQ2_2D_END_PRIMITIVE => format!("{name} {:#x}", a[0]),
-            HQ2_2D_BUF_SELECT => format!("{name} format={} offset={}", i(0), i(1)),
-            HQ2_2D_DMA_READ_PIXELS => format!("{name} ({}, {}) {}x{} words/row={} flag={} format={} offset={} mode={:#x} -> GEDMA, FIN2",
+            X2D_PLANE_SELECT | X2D_AUX_PLANE_MASK | X2D_BIT_ZERO_COLOR | X2D_BIT_ONE_COLOR | X2D_CID_FIELD
+            | X2D_SESSION_START | X2D_PRIM_TERMINATOR => format!("{name} {:#x}", a[0]),
+            X2D_PIXEL_LAYOUT => format!("{name} format={} offset={}", i(0), i(1)),
+            PIXDMA_FROM_SCREEN => format!("{name} ({}, {}) {}x{} words/row={} flag={} format={} offset={} mode={:#x} -> GEDMA, FIN2",
                 i(0), i(1), i(2), i(3), i(4), i(5), self.s2d.buf_select, self.s2d.buf_offset, self.s2d.mode),
-            HQ2_GL_DMA_READ => format!("{name} ({}, {}) {}x{} words/row={} flag={} {} -> GEDMA, FIN2",
+            GLDMA_FROM_WINDOW => format!("{name} ({}, {}) {}x{} words/row={} flag={} {} -> GEDMA, FIN2",
                 i(0), i(1), i(2), i(3), i(4), i(5), self.gl_read_desc()),
-            HQ2_2D_READ_IMAGE => format!("{name} ({}, {}) {}x{} words/row={} format={} offset={} mode={:#x} -> shram[{:#x}], FIN3",
+            X2D_IMAGE_TO_SHRAM => format!("{name} ({}, {}) {}x{} words/row={} format={} offset={} mode={:#x} -> shram[{:#x}], FIN3",
                 i(1), i(2), i(3), i(4), i(0), self.s2d.buf_select, self.s2d.buf_offset, self.s2d.mode, READ_IMAGE_SHRAM),
             PUC_COLOR => format!("{name} ci={}", i(0)),
             PUC_PNT2I | PUC_CMOV2I => format!("{name} ({}, {})", i(0), i(1)),
@@ -1480,59 +1480,59 @@ impl Hq2Engine {
         match cmd {
             PUC_INIT => self.init(out),
             PUC_COLOR => {
-                out.reg(re3::REG_R, (a[0] & 0xfff) << 11);
-                out.reg(re3::REG_G, 0);
-                out.reg(re3::REG_B, 0);
+                out.reg(re3::RE3_RED_START, (a[0] & 0xfff) << 11);
+                out.reg(re3::RE3_GREEN_START, 0);
+                out.reg(re3::RE3_BLUE_START, 0);
             }
             PUC_FINISH => {}
             // Context switch (Gr2PcxSwap): swap the HLE's GL state; the
             // kernel waits for FIN2.
-            GE_HQMSAV => {
+            GE_CTX_SWITCH => {
                 self.gl_switch_context(a[0], a[1], out);
                 out.finish(FIN2);
             }
-            // Save main: hand out the image taken at GE_HQMSAV; the kernel
+            // Save main: hand out the image taken at GE_CTX_SWITCH; the kernel
             // reads it from HQ2_GEDMA after FIN2. Save ext: nothing to save.
-            GE_CX_SAVE_MAIN => {
+            GE_DUMP_CTX => {
                 self.gl_cx_save(out);
                 out.finish(FIN2);
             }
-            GE_CX_SAVE_EXT => {
+            GE_DUMP_CTX_EXTRA => {
                 out.gedma_out(&[]);
                 out.finish(FIN2);
             }
             HQ_PCX_1E0 | HQ_PCX_1E6 => out.finish(FIN2),
-            HQ_GL_FIN3 | GL_FINISH => out.finish(FIN3),
+            HQ_GL_FIN3 | CMD_READBACK_KICK => out.finish(FIN3),
             // Nothing is buffered beyond the FIFO.
-            GL_FLUSH => {}
+            CMD_SWAP_WAIT => {}
             // First word of the DDX's hardware init: make sure the raster
             // engine is in a known full-screen state for 2D drawing.
-            HQ2_2D_BEGIN => {
+            X2D_SESSION_START => {
                 for (reg, val) in [
-                    (re3::REG_XMIN, (0)),
-                    (re3::REG_XMAX, (re3::FB_W as u32 - 1)),
-                    (re3::REG_YMIN, 0),
-                    (re3::REG_YMAX, re3::FB_H as u32 - 1),
-                    (re3::REG_ENABPAT, 0),
-                    (re3::REG_ENABWID, 0),
-                    (re3::REG_RWMODE, re3::RWMODE_FB),
+                    (re3::RE3_CLIP_X_LO, (0)),
+                    (re3::RE3_CLIP_X_HI, (re3::FB_W as u32 - 1)),
+                    (re3::RE3_CLIP_Y_LO, 0),
+                    (re3::RE3_CLIP_Y_HI, re3::FB_H as u32 - 1),
+                    (re3::RE3_PATTERN_ON, 0),
+                    (re3::RE3_WID_TEST_ON, 0),
+                    (re3::RE3_HOST_PLANE, re3::HPLANE_COLOR),
                 ] {
                     out.reg(reg, val);
                 }
                 self.pattern_on = 0;
                 self.line_clip = [0, re3::FB_W as i32 - 1, 0, SCREEN_H - 1];
             }
-            HQ2_2D_END_PRIMITIVE => {}
-            HQ2_2D_MODE => self.s2d.mode = a[0],
-            HQ2_2D_COLOR_AUX => self.s2d.aux_mask = a[0],
-            HQ2_2D_COLOR_OFF => self.s2d.color_off = a[0],
-            HQ2_2D_COLOR_ON => self.s2d.color_on = a[0],
-            HQ2_2D_CID_WRITE => self.s2d.cid_write = a[0],
-            HQ2_2D_BUF_SELECT => {
+            X2D_PRIM_TERMINATOR => {}
+            X2D_PLANE_SELECT => self.s2d.mode = a[0],
+            X2D_AUX_PLANE_MASK => self.s2d.aux_mask = a[0],
+            X2D_BIT_ZERO_COLOR => self.s2d.color_off = a[0],
+            X2D_BIT_ONE_COLOR => self.s2d.color_on = a[0],
+            X2D_CID_FIELD => self.s2d.cid_write = a[0],
+            X2D_PIXEL_LAYOUT => {
                 self.s2d.buf_select = a[0];
                 self.s2d.buf_offset = a[1];
             }
-            HQ2_2D_READ_IMAGE => {
+            X2D_IMAGE_TO_SHRAM => {
                 let req = ReadImage {
                     x: a[1] as i32,
                     top: SCREEN_H.wrapping_sub(1).wrapping_sub(a[2] as i32),
@@ -1545,7 +1545,7 @@ impl Hq2Engine {
                 };
                 out.read_image(&req, ReadDest::Shram(READ_IMAGE_SHRAM));
             }
-            HQ2_2D_DMA_READ_PIXELS => {
+            PIXDMA_FROM_SCREEN => {
                 let req = ReadImage {
                     x: a[0] as i32,
                     top: SCREEN_H.wrapping_sub(1).wrapping_sub(a[1] as i32),
@@ -1558,24 +1558,24 @@ impl Hq2Engine {
                 };
                 out.read_image(&req, ReadDest::Gedma);
             }
-            HQ2_GL_DMA_READ => self.gl_dma_read(&a, out),
-            HQ2_2D_TILE_SETUP => {
+            GLDMA_FROM_WINDOW => self.gl_dma_read(&a, out),
+            X2D_TILE_BEGIN => {
                 // A tile that is not in the tile store reads zeros; its sides are bounded so index sums are.
                 self.tile_w = a[1].min(TILE_SIDE_MAX);
                 self.tile_h = a[2].min(TILE_SIDE_MAX);
                 self.tile_fmt = a[3];
                 self.tile_len = 0;
             }
-            HQ2_2D_MONO_IMAGE_8..=HQ2_2D_MONO_IMAGE_64 => {
-                self.mono_image(4 << (cmd - HQ2_2D_MONO_IMAGE_8), out)
+            X2D_BITMAP_BLOCK_A..=X2D_BITMAP_BLOCK_D => {
+                self.mono_image(4 << (cmd - X2D_BITMAP_BLOCK_A), out)
             }
-            HQ2_2D_GLYPH_8..=HQ2_2D_GLYPH_64 => self.mono_image(8 << (cmd - HQ2_2D_GLYPH_8), out),
-            HQ2_2D_LINE_MODE => {}
-            HQ2_2D_LINE_CLIP => self.line_clip = [a[0] as i32, a[1] as i32, a[2] as i32, a[3] as i32],
-            HQ2_2D_STIPPLE_AUX => self.stipple_opaque = a[0] & 1,
+            X2D_GLYPH_NARROW..=X2D_GLYPH_WIDE => self.mono_image(8 << (cmd - X2D_GLYPH_NARROW), out),
+            X2D_LINE_STYLE => {}
+            X2D_LINE_BOUNDS => self.line_clip = [a[0] as i32, a[1] as i32, a[2] as i32, a[3] as i32],
+            X2D_STIPPLE_OPAQUE => self.stipple_opaque = a[0] & 1,
             // One box per command: 0; DATA origin x, x1, origin y, y1, x2, y2
-            // (same interleaved order as STIPPLE_RECT; tile fill).
-            HQ2_2D_TILE_RECT | HQ2_2D_TILE_RECT_ODD => {
+            // (same interleaved order as STIPPLED_BOX; tile fill).
+            X2D_TILE_FILL | X2D_TILE_FILL_RAGGED => {
                 let (ox, oy) = (a[1] as i32, a[3] as i32);
                 if self.tile_fmt == 3 {
                     self.stipple_rect(ox, oy, [a[2] as i32, a[4] as i32, a[5] as i32, a[6] as i32], out);
@@ -1583,18 +1583,18 @@ impl Hq2Engine {
                     self.tile_rect(ox, oy, [a[2] as i32, a[4] as i32, a[5] as i32, a[6] as i32], out);
                 }
             }
-            HQ2_2D_STIPPLE_RECT | HQ2_2D_STIPPLE_BOX_POW2 | HQ2_2D_STIPPLE_BOX => {
+            X2D_STIPPLED_BOX | X2D_STIPFILL_POW2 | X2D_STIPFILL_OTHER => {
                 let (ox, oy) = (a[1] as i32, a[3] as i32);
                 self.stipple_rect(ox, oy, [a[2] as i32, a[4] as i32, a[5] as i32, a[6] as i32], out);
             }
-            HQ2_2D_COPY_RECT => {
+            X2D_SCREEN_COPY => {
                 // X-style y (top-down); RE3 copy takes GL bottom-row y.
                 let (sx, sy, w, h, dx, dy) = (a[2] as i32, a[3] as i32, a[4] as i32, a[5] as i32, a[6] as i32, a[7] as i32);
                 let fg = self.s2d.fg;
                 self.setup2d(fg, out);
                 out.copy(sx, SCREEN_H.wrapping_sub(sy).wrapping_sub(h), w, h, dx, SCREEN_H.wrapping_sub(dy).wrapping_sub(h), 0);
             }
-            HQ2_2D_ROP => {
+            X2D_FG_ALU => {
                 self.s2d.fg = a[0];
                 self.s2d.planemask = a[1];
                 self.s2d.alu = a[2];
@@ -1645,30 +1645,30 @@ impl Hq2Engine {
         self.cy = 0;
         self.pattern_on = 0;
         for (reg, val) in [
-            (re3::REG_FUNC, re3::ROP_COPY),
-            (re3::REG_ENABRGB, 0),
-            (re3::REG_NOPUP, 0),
-            (re3::REG_PUPDATA, 0),
-            (re3::REG_PIXMASK, 0x00ff_ffff),
-            (re3::REG_AUXMASK, 0),
-            (re3::REG_WIDDATA, 0),
-            (re3::REG_UAUXDATA, 0),
-            (re3::REG_RWMODE, re3::RWMODE_FB),
-            (re3::REG_ENABPAT, 0),
-            (re3::REG_ALIGNPAT, 0),
-            (re3::REG_ENABWID, 0),
-            (re3::REG_XMIN, (0)),
-            (re3::REG_XMAX, (re3::FB_W as u32 - 1)),
-            (re3::REG_YMIN, 0),
-            (re3::REG_YMAX, re3::FB_H as u32 - 1),
-            (re3::REG_DX, 0),
-            (re3::REG_DY, 0),
-            (re3::REG_DR, 0),
-            (re3::REG_DG, 0),
-            (re3::REG_DB, 0),
-            (re3::REG_R, 0),
-            (re3::REG_G, 0),
-            (re3::REG_B, 0),
+            (re3::RE3_LOGIC_OP, re3::ROP_COPY),
+            (re3::RE3_COLOR_WRITE_ON, 0),
+            (re3::RE3_SKIP_POPUP, 0),
+            (re3::RE3_POPUP_VALUE, 0),
+            (re3::RE3_COLOR_PLANE_MASK, 0x00ff_ffff),
+            (re3::RE3_AUX_PLANE_MASK, 0),
+            (re3::RE3_WID_VALUE, 0),
+            (re3::RE3_AUX_VALUE, 0),
+            (re3::RE3_HOST_PLANE, re3::HPLANE_COLOR),
+            (re3::RE3_PATTERN_ON, 0),
+            (re3::RE3_PATTERN_ANCHOR, 0),
+            (re3::RE3_WID_TEST_ON, 0),
+            (re3::RE3_CLIP_X_LO, (0)),
+            (re3::RE3_CLIP_X_HI, (re3::FB_W as u32 - 1)),
+            (re3::RE3_CLIP_Y_LO, 0),
+            (re3::RE3_CLIP_Y_HI, re3::FB_H as u32 - 1),
+            (re3::RE3_X_STEP, 0),
+            (re3::RE3_Y_STEP, 0),
+            (re3::RE3_RED_STEP, 0),
+            (re3::RE3_GREEN_STEP, 0),
+            (re3::RE3_BLUE_STEP, 0),
+            (re3::RE3_RED_START, 0),
+            (re3::RE3_GREEN_START, 0),
+            (re3::RE3_BLUE_START, 0),
         ] {
             out.reg(reg, val);
         }
@@ -1691,17 +1691,17 @@ impl Hq2Engine {
         }
         let want_pat = pattern.is_some() as u32;
         if want_pat != self.pattern_on {
-            out.reg(re3::REG_ENABPAT, want_pat);
+            out.reg(re3::RE3_PATTERN_ON, want_pat);
             self.pattern_on = want_pat;
         }
         if pattern.is_some() {
-            out.reg(re3::REG_PATH, pat >> 16);
-            out.reg(re3::REG_PATL, pat & 0xffff);
+            out.reg(re3::RE3_PATTERN_HI, pat >> 16);
+            out.reg(re3::RE3_PATTERN_LO, pat & 0xffff);
         }
-        out.reg(re3::REG_X, x as u32);
-        out.reg(re3::REG_Y, y as u32);
-        out.reg(re3::REG_NUMPIX, n as u32);
-        out.reg(re3::REG_IR, re3::IR_FLAT);
+        out.reg(re3::RE3_CUR_X, x as u32);
+        out.reg(re3::RE3_CUR_Y, y as u32);
+        out.reg(re3::RE3_SPAN_LEN, n as u32);
+        out.reg(re3::RE3_DRAW_TRIGGER, re3::DRAW_FLAT_5);
     }
 
     /// PUC_DRAWCHAR: xsize; ysize, mode, xorig, yorig, xmove, ymove,

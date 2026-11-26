@@ -4,7 +4,7 @@
 //! with the interpreter, the other with shaders compiled on first use
 //! (`MODE_SYNC`). Every step picks a random pipeline configuration (each
 //! key field uniformly, plus masks, scissor, WID, pattern bits, stencil and
-//! Z data) and draws a few random SHADED, FLAT and FLAT4 spans through the
+//! Z data) and draws a few random SMOOTH, FLAT_5 and FLAT_20 spans through the
 //! ordinary register path; after each step the two must agree word for
 //! word: VRAM, the Z buffer and the span iterators. The test then asserts
 //! that the JIT drew every span and that every value of every key field
@@ -103,20 +103,20 @@ impl Pair {
     fn configure(&mut self) {
         let rng = &mut self.rng;
         let mut regs: Vec<(usize, u32)> = vec![
-            (REG_FUNC, rng.below(16) as u32),
-            (REG_PIXMASK, if rng.chance(0.5) { 0x00ff_ffff } else { rng.u32() }),
-            (REG_AUXMASK, rng.u32()),
-            (REG_NOPUP, rng.below(2) as u32),
-            (REG_UAUXDATA, rng.u32()),
-            (REG_WIDDATA, rng.u32()),
-            (REG_PUPDATA, rng.u32()),
-            (REG_ENABPAT, rng.below(2) as u32),
-            (REG_ALIGNPAT, rng.below(2) as u32),
-            (REG_ENABDITH, rng.below(2) as u32),
-            (REG_ENABWID, rng.below(2) as u32),
-            (REG_CURWID, rng.u32()),
-            (REG_FBOPTION, rng.u32()),
-            (REG_DEPTHFN, rng.u32()),
+            (RE3_LOGIC_OP, rng.below(16) as u32),
+            (RE3_COLOR_PLANE_MASK, if rng.chance(0.5) { 0x00ff_ffff } else { rng.u32() }),
+            (RE3_AUX_PLANE_MASK, rng.u32()),
+            (RE3_SKIP_POPUP, rng.below(2) as u32),
+            (RE3_AUX_VALUE, rng.u32()),
+            (RE3_WID_VALUE, rng.u32()),
+            (RE3_POPUP_VALUE, rng.u32()),
+            (RE3_PATTERN_ON, rng.below(2) as u32),
+            (RE3_PATTERN_ANCHOR, rng.below(2) as u32),
+            (RE3_DITHER_ON, rng.below(2) as u32),
+            (RE3_WID_TEST_ON, rng.below(2) as u32),
+            (RE3_WINDOW_ID, rng.u32()),
+            (RE3_FB_OPTIONS, rng.u32()),
+            (RE3_Z_COMPARE, rng.u32()),
         ];
         // Scissor: mostly the screen, sometimes a window, sometimes empty.
         let (xmin, xmax, ymin, ymax) = match rng.below(3) {
@@ -128,7 +128,7 @@ impl Pair {
             }
             _ => (rng.u32(), rng.u32(), rng.u32(), rng.u32()),
         };
-        regs.extend([(REG_XMIN, xmin), (REG_XMAX, xmax), (REG_YMIN, ymin), (REG_YMAX, ymax)]);
+        regs.extend([(RE3_CLIP_X_LO, xmin), (RE3_CLIP_X_HI, xmax), (RE3_CLIP_Y_LO, ymin), (RE3_CLIP_Y_HI, ymax)]);
         let pixfmt = rng.below(8) as u32;
         // zctl: enable, func, Z write mask (often all, sometimes partial).
         let zm = if rng.chance(0.6) { 0x00ff_ffff } else { rng.u32() & 0x00ff_ffff };
@@ -154,7 +154,7 @@ impl Pair {
     /// One random span of a random instruction; returns its key.
     fn span(&mut self) -> SpanKey {
         let rng = &mut self.rng;
-        let ir = [IR_SHADED, IR_FLAT, IR_FLAT4][rng.below(3) as usize];
+        let draw_op = [DRAW_SMOOTH, DRAW_FLAT_5, DRAW_FLAT_20][rng.below(3) as usize];
         let horizontal = rng.chance(0.7);
         let (dx, dy) = if horizontal {
             (1u32 << 14, 0)
@@ -168,30 +168,30 @@ impl Pair {
         let x = pos(rng, 1340);
         let y = pos(rng, 1060);
         let regs = [
-            (REG_PATL, rng.u32()),
-            (REG_PATH, rng.u32()),
-            (REG_XYFRAC, rng.u32()),
-            (REG_DX, dx),
-            (REG_DY, dy),
-            (REG_R, rng.u32()),
-            (REG_G, rng.u32()),
-            (REG_B, rng.u32()),
-            (REG_DR, rng.range(-0x4000, 0x4000) as i32 as u32),
-            (REG_DG, rng.range(-0x4000, 0x4000) as i32 as u32),
-            (REG_DB, if rng.chance(0.2) { rng.u32() } else { rng.range(-0x4000, 0x4000) as i32 as u32 }),
-            (REG_Z, rng.u32()),
-            (REG_DZI, rng.range(-0x40, 0x40) as i32 as u32),
-            (REG_DZF, rng.u32()),
-            (REG_X, x),
-            (REG_Y, y),
-            (REG_NUMPIX, n),
+            (RE3_PATTERN_LO, rng.u32()),
+            (RE3_PATTERN_HI, rng.u32()),
+            (RE3_SUBPIXEL, rng.u32()),
+            (RE3_X_STEP, dx),
+            (RE3_Y_STEP, dy),
+            (RE3_RED_START, rng.u32()),
+            (RE3_GREEN_START, rng.u32()),
+            (RE3_BLUE_START, rng.u32()),
+            (RE3_RED_STEP, rng.range(-0x4000, 0x4000) as i32 as u32),
+            (RE3_GREEN_STEP, rng.range(-0x4000, 0x4000) as i32 as u32),
+            (RE3_BLUE_STEP, if rng.chance(0.2) { rng.u32() } else { rng.range(-0x4000, 0x4000) as i32 as u32 }),
+            (RE3_Z_START, rng.u32()),
+            (RE3_Z_STEP_INT, rng.range(-0x40, 0x40) as i32 as u32),
+            (RE3_Z_STEP_FRAC, rng.u32()),
+            (RE3_CUR_X, x),
+            (RE3_CUR_Y, y),
+            (RE3_SPAN_LEN, n),
         ];
         for (r, v) in regs {
             self.reg(r, v);
         }
-        let prim = Prim::of_ir(ir).unwrap();
+        let prim = Prim::of_draw_op(draw_op).unwrap();
         let key = re3_jit::key_of(&self.jit, prim);
-        self.reg(REG_IR, ir);
+        self.reg(RE3_DRAW_TRIGGER, draw_op);
         self.spans += 1;
         key
     }
@@ -298,7 +298,7 @@ fn state_changes_drop_the_memoised_shader() {
     let mut p = Pair::new(seed(2));
     p.configure();
     for rop in [3u32, 6, 3, 3, 0xa] {
-        p.reg(REG_FUNC, rop);
+        p.reg(RE3_LOGIC_OP, rop);
         let k = p.span();
         assert_eq!(k.rop as u32, rop);
         p.assert_same(0, &k);
@@ -317,37 +317,37 @@ fn state_changes_drop_the_memoised_shader() {
 #[ignore]
 fn bench_interpreter_vs_jit() {
     let cases: [(&str, u32, u32, u32, u32); 5] = [
-        ("flat fill", IR_FLAT, 0, 0, 0),
-        ("smooth", IR_SHADED, 0, 0, 0),
-        ("smooth + z", IR_SHADED, 0, 1 | 7 << 1 | 0xff_ffff << 8, 0),
-        ("smooth + z + blend", IR_SHADED, 0, 1 | 7 << 1 | 0xff_ffff << 8, 1 | 4 << 1 | 5 << 4),
-        ("smooth 12-bit dither", IR_SHADED, PIXFMT_RGB12, 0, 0),
+        ("flat fill", DRAW_FLAT_5, 0, 0, 0),
+        ("smooth", DRAW_SMOOTH, 0, 0, 0),
+        ("smooth + z", DRAW_SMOOTH, 0, 1 | 7 << 1 | 0xff_ffff << 8, 0),
+        ("smooth + z + blend", DRAW_SMOOTH, 0, 1 | 7 << 1 | 0xff_ffff << 8, 1 | 4 << 1 | 5 << 4),
+        ("smooth 12-bit dither", DRAW_SMOOTH, PIXFMT_RGB12, 0, 0),
     ];
-    for (name, ir, pixfmt, zctl, blend) in cases {
+    for (name, draw_op, pixfmt, zctl, blend) in cases {
         let mut t = [0f64; 2];
         for (i, mode) in [MODE_OFF, MODE_SYNC].into_iter().enumerate() {
             let mut r = new_re3(mode);
-            for (reg, v) in [(REG_FUNC, ROP_COPY), (REG_PIXMASK, 0x00ff_ffff), (REG_XMAX, FB_W as u32 - 1), (REG_YMAX, FB_H as u32 - 1),
-                (REG_DX, 1 << 14), (REG_DR, 0x40), (REG_DG, 0x20), (REG_DB, 0x10), (REG_DZI, 1)] {
+            for (reg, v) in [(RE3_LOGIC_OP, ROP_COPY), (RE3_COLOR_PLANE_MASK, 0x00ff_ffff), (RE3_CLIP_X_HI, FB_W as u32 - 1), (RE3_CLIP_Y_HI, FB_H as u32 - 1),
+                (RE3_X_STEP, 1 << 14), (RE3_RED_STEP, 0x40), (RE3_GREEN_STEP, 0x20), (RE3_BLUE_STEP, 0x10), (RE3_Z_STEP_INT, 1)] {
                 r.write_reg(reg, v);
             }
             r.set_pixfmt(pixfmt);
             r.set_zctl(zctl);
             r.set_blend(blend);
-            r.write_reg(REG_ENABDITH, (pixfmt == PIXFMT_RGB12) as u32);
+            r.write_reg(RE3_DITHER_ON, (pixfmt == PIXFMT_RGB12) as u32);
             // Warm the shader up.
-            r.write_reg(REG_NUMPIX, 8);
-            r.write_reg(REG_IR, ir);
+            r.write_reg(RE3_SPAN_LEN, 8);
+            r.write_reg(RE3_DRAW_TRIGGER, draw_op);
             let start = std::time::Instant::now();
             let mut px = 0u64;
             for y in (0..20).flat_map(|_| 0..FB_H as u32) {
                 for x0 in [0u32, 400, 800] {
-                    r.write_reg(REG_X, x0);
-                    r.write_reg(REG_Y, y);
-                    r.write_reg(REG_R, 0x1000);
-                    r.write_reg(REG_Z, y * 100);
-                    r.write_reg(REG_NUMPIX, 400);
-                    r.write_reg(REG_IR, ir);
+                    r.write_reg(RE3_CUR_X, x0);
+                    r.write_reg(RE3_CUR_Y, y);
+                    r.write_reg(RE3_RED_START, 0x1000);
+                    r.write_reg(RE3_Z_START, y * 100);
+                    r.write_reg(RE3_SPAN_LEN, 400);
+                    r.write_reg(RE3_DRAW_TRIGGER, draw_op);
                     px += 400;
                 }
             }

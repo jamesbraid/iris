@@ -14,7 +14,7 @@ were written for IMPACT, and these points matter on GR2. Results as of
 | vissweep | 7 of 7 visuals pass |
 
 The hardware facts these runs settled are in ignore/gr2: HQ2.h (pixel
-section, 0x0A7, 0x0BA, 0x70A0, READ_RECT) and GR2.h (blend equations).
+section, 0x0A7, 0x0BA, 0x70A0, READ_BOX) and GR2.h (blend equations).
 
 ## Visuals
 
@@ -54,7 +54,7 @@ itself.
 
 - IRIX `grep` has no `\|`. Filter with a plain word, or use `egrep`.
 - GL software paths make it look like the board is wrong when it isn't.
-  Look at the fragment colour libGLcore sends (trace `GL_FRAGMENT`) before
+  Look at the fragment colour libGLcore sends (trace `GL_SOFT_FRAGMENT`) before
   touching the HLE. Colour-index fragments carry the index (+0.5) as a
   float in the first word.
 - The guest's /tmp is cleared on boot: stage the tests again after every

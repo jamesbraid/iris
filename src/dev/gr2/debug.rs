@@ -5,8 +5,8 @@
 //! Trace lines look like
 //!   `  12.345678 HQ  #000123 fifo[0x198 PUC_DRAWCHAR] = 0x00000008`
 //!   `  12.345690 HQ  #000147 exec PUC_DRAWCHAR 8x16 mode=1 ...`
-//!   `  12.345702 RE3 #004410 hq  NUMPIX = 0x8`
-//!   `  12.345705 RE3 #004411 hq  IR = 0x2  -> FLAT x=100 y=200 n=8 ...`
+//!   `  12.345702 RE3 #004410 hq  SPAN_LEN = 0x8`
+//!   `  12.345705 RE3 #004411 hq  DRAW_TRIGGER = 0x2  -> FLAT_5 x=100 y=200 n=8 ...`
 //! with the time in seconds since the trace started. Written from the HQ2 and
 //! RE3 threads, so tracing slows the pipeline; that's fine for debugging.
 
@@ -16,7 +16,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use super::hq2::{index_label, HQ_TOKEN_GEDMA};
-use super::re3::{self, describe_ir, REG_NAMES, RE3_SRC_HQ};
+use super::re3::{self, describe_draw_op, REG_NAMES, RE3_SRC_HQ};
 use super::{gr2comp, vc1, Gr2, TP_PROBE_ID};
 
 pub const TRACE_HQ: u32 = 1;
@@ -153,7 +153,7 @@ impl Gr2 {
         t.line(format_args!("HQ  #{seq:06} exec {desc}"));
     }
 
-    /// One RE3 FIFO entry, before it is applied (so `IR` decodes the
+    /// One RE3 FIFO entry, before it is applied (so `DRAW_TRIGGER` decodes the
     /// register state the primitive will use).
     pub(super) fn trace_re3(&self, addr: u32, val: u64, regs: &[u32; 64]) {
         let mut t = self.trace.lock();
@@ -169,13 +169,13 @@ impl Gr2 {
                 let f = |s: u32| (val >> s) as u16 as i16;
                 t.line(format_args!("RE3 #{seq:06} op  COPYRECT dst=({}, {})  [GL y, bottom-up]", f(0), f(16)));
             }
-            re3::RE3_OP_READ_ADVANCE => t.line(format_args!("RE3 #{seq:06} op  READBUF advance")),
+            re3::RE3_OP_READ_ADVANCE => t.line(format_args!("RE3 #{seq:06} op  HOST_READ advance")),
             re3::RE3_OP_PIXFMT => t.line(format_args!("RE3 #{seq:06} op  PIXFMT {}", match val { 1 => "RGB12", 2 => "CI12", 3 => "CI8", 4 => "RGB8", 5 => "RGB4", _ => "native" })),
             re3::RE3_OP_ZCTL => t.line(format_args!("RE3 #{seq:06} op  ZCTL test={} func={} zmask={:#08x}", val & 1, (val >> 1) & 7, (val >> 8) & 0xff_ffff)),
             re3::RE3_OP_STENCIL => t.line(format_args!("RE3 #{seq:06} op  STENCIL on={} func={} ref={} mask={:#x} wmask={:#x} ops fail={} zfail={} zpass={}",
                 val & 1, (val >> 1) & 7, (val >> 4) & 0xff, (val >> 12) & 0xff, (val >> 20) & 0xff, (val >> 28) & 0xf, (val >> 32) & 0xf, (val >> 36) & 0xf)),
-            re3::RE3_OP_BLEND => t.line(format_args!("RE3 #{seq:06} op  BLEND on={} src={} dst={}", val & 1, (val >> 1) & 7, (val >> 4) & 7)),
-            re3::RE3_OP_ALPHA => t.line(format_args!("RE3 #{seq:06} op  ALPHA start={:.3} step={:.5}", (val as u32) as f32 / 2048.0, ((val >> 32) as u32 as i32) as f32 / 2048.0)),
+            re3::RE3_OP_SET_BLENDER => t.line(format_args!("RE3 #{seq:06} op  BLEND on={} src={} dst={}", val & 1, (val >> 1) & 7, (val >> 4) & 7)),
+            re3::RE3_OP_SET_ALPHA => t.line(format_args!("RE3 #{seq:06} op  ALPHA start={:.3} step={:.5}", (val as u32) as f32 / 2048.0, ((val >> 32) as u32 as i32) as f32 / 2048.0)),
             re3::RE3_OP_ZFILL_A => t.line(format_args!("RE3 #{seq:06} op  ZFILL rect ({}, {})-({}, {})", val & 0xffff, (val >> 16) & 0xffff, (val >> 32) & 0xffff, val >> 48)),
             re3::RE3_OP_ZFILL_B => t.line(format_args!("RE3 #{seq:06} op  ZFILL value={:#010x} mask={:#010x}", val as u32, val >> 32)),
             _ => {
@@ -183,11 +183,11 @@ impl Gr2 {
                 let reg = (addr & !RE3_SRC_HQ) as usize & 63;
                 let v = val as u32;
                 let extra = match reg {
-                    re3::REG_IR => format!("  -> {}", describe_ir(regs, v)),
-                    re3::REG_X | re3::REG_XMIN | re3::REG_XMAX => format!("  (x={})", v),
-                    re3::REG_YX => format!("  (x={} y={})", v & 0xfff, (v >> 12) & 0x7ff),
-                    re3::REG_R | re3::REG_G | re3::REG_B => format!("  ({})", v >> 11),
-                    re3::REG_RWMODE => format!("  ({})", re3::rwmode_name(v)),
+                    re3::RE3_DRAW_TRIGGER => format!("  -> {}", describe_draw_op(regs, v)),
+                    re3::RE3_CUR_X | re3::RE3_CLIP_X_LO | re3::RE3_CLIP_X_HI => format!("  (x={})", v),
+                    re3::RE3_XY_PACKED => format!("  (x={} y={})", v & 0xfff, (v >> 12) & 0x7ff),
+                    re3::RE3_RED_START | re3::RE3_GREEN_START | re3::RE3_BLUE_START => format!("  ({})", v >> 11),
+                    re3::RE3_HOST_PLANE => format!("  ({})", re3::rwmode_name(v)),
                     _ => String::new(),
                 };
                 t.line(format_args!("RE3 #{seq:06} {src} {} = {v:#x}{extra}", REG_NAMES[reg]));
@@ -518,10 +518,10 @@ impl Gr2 {
                     writeln!(w, "{line}")?;
                 }
                 let g = |n: usize| c.reg[n];
-                writeln!(w, "  decoded: X={} Y={} scissor x {}..{} y {}..{} rwmode={} ir={}",
-                    ((g(re3::REG_X)) as i32), g(re3::REG_Y),
-                    ((g(re3::REG_XMIN)) as i32), ((g(re3::REG_XMAX)) as i32), g(re3::REG_YMIN), g(re3::REG_YMAX),
-                    re3::rwmode_name(g(re3::REG_RWMODE)), re3::ir_name(g(re3::REG_IR)))?;
+                writeln!(w, "  decoded: X={} Y={} scissor x {}..{} y {}..{} rwmode={} draw_op={}",
+                    ((g(re3::RE3_CUR_X)) as i32), g(re3::RE3_CUR_Y),
+                    ((g(re3::RE3_CLIP_X_LO)) as i32), ((g(re3::RE3_CLIP_X_HI)) as i32), g(re3::RE3_CLIP_Y_LO), g(re3::RE3_CLIP_Y_HI),
+                    re3::rwmode_name(g(re3::RE3_HOST_PLANE)), re3::draw_op_name(g(re3::RE3_DRAW_TRIGGER)))?;
             }
             "pix" => {
                 // re3 pix x y [w] [h]   RE3 coordinates: linear x, y = 0 at the bottom
@@ -603,8 +603,8 @@ fn region_detail(off: u32) -> String {
             let tag = match w {
                 0x7fff => " TP_PROBE_ID",
                 0x7ff8 => " (info+0x32)",
-                0x302 => " CX_SIZE_MAIN",
-                0x304 => " CX_SIZE_EXT",
+                0x302 => " CTX_WORDS",
+                0x304 => " CTX_EXTRA_WORDS",
                 0x4822..=0x4825 => " READBACK",
                 _ => "",
             };

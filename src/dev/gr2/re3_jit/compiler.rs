@@ -96,7 +96,7 @@ impl Compiler {
         self.ctx.set_disasm(disasm);
         if let Err(err) = self.module.define_function(id, &mut self.ctx) {
             eprintln!("GR2 JIT: define_function failed for {key}: {err}");
-            eprintln!("--- Cranelift IR ---\n{}", self.ctx.func.display());
+            eprintln!("--- Cranelift intermediate form ---\n{}", self.ctx.func.display());
             self.module.clear_context(&mut self.ctx);
             return None;
         }
@@ -130,7 +130,7 @@ const ITERS: [usize; 7] = [
 const IX: usize = 0;
 const IY: usize = 1;
 const IZ: usize = 2;
-const IR: usize = 3;
+const IRED: usize = 3;
 const IG: usize = 4;
 const IB: usize = 5;
 const IA: usize = 6;
@@ -151,7 +151,7 @@ struct Span {
     mask: Value,
     /// (PATH << 16) | PATL.
     pat: Value,
-    /// CURWID's compared bits.
+    /// WINDOW_ID's compared bits.
     wid: Value,
     /// Z write mask; stencil reference & mask, mask, write mask.
     zmask: Value,
@@ -357,55 +357,55 @@ impl<'a> E<'a> {
         let k = self.k;
         let zero = self.i32c(0);
         // step_iterators.
-        let dx = self.sext_reg(re3::REG_DX, 16);
-        let dy = self.sext_reg(re3::REG_DY, 16);
-        let dzi = self.sext_reg(re3::REG_DZI, 24);
+        let dx = self.sext_reg(re3::RE3_X_STEP, 16);
+        let dy = self.sext_reg(re3::RE3_Y_STEP, 16);
+        let dzi = self.sext_reg(re3::RE3_Z_STEP_INT, 24);
         let dzi = self.b.ins().ishl_imm_s(dzi, 14);
-        let dzf = self.reg(re3::REG_DZF);
+        let dzf = self.reg(re3::RE3_Z_STEP_FRAC);
         let dzf = self.b.ins().uextend(I64, dzf);
         let dz = self.b.ins().bor(dzi, dzf);
-        let dr = self.sext_reg(re3::REG_DR, 24);
-        let dg = self.sext_reg(re3::REG_DG, 20);
-        let db = self.sext_reg(re3::REG_DB, 20);
+        let dr = self.sext_reg(re3::RE3_RED_STEP, 24);
+        let dg = self.sext_reg(re3::RE3_GREEN_STEP, 20);
+        let db = self.sext_reg(re3::RE3_BLUE_STEP, 20);
         let da = self.ld(I64, off!(ctx.da));
         // clip: the scissor registers are 12-bit, so never negative.
-        let xmin = self.reg(re3::REG_XMIN);
-        let xmax = self.reg(re3::REG_XMAX);
-        let ymin = self.reg(re3::REG_YMIN);
-        let ymax = self.reg(re3::REG_YMAX);
+        let xmin = self.reg(re3::RE3_CLIP_X_LO);
+        let xmax = self.reg(re3::RE3_CLIP_X_HI);
+        let ymin = self.reg(re3::RE3_CLIP_Y_LO);
+        let ymax = self.reg(re3::RE3_CLIP_Y_HI);
         let wmax = self.i32c(FB_W as i64 - 1);
         let hmax = self.i32c(FB_H as i64 - 1);
         let xhi = self.b.ins().smin(xmax, wmax);
         let yhi = self.b.ins().smin(ymax, hmax);
         // aux_and_mask.
-        let widd = self.reg(re3::REG_WIDDATA);
+        let widd = self.reg(re3::RE3_WID_VALUE);
         let widd = self.b.ins().ishl_imm_s(widd, 28);
-        let uaux = self.reg(re3::REG_UAUXDATA);
+        let uaux = self.reg(re3::RE3_AUX_VALUE);
         let np = self.b.ins().ishl_imm_s(uaux, 24);
         let np = self.b.ins().bor(widd, np);
         let u3 = self.b.ins().band_imm_s(uaux, 3);
         let u3 = self.b.ins().ishl_imm_s(u3, 26);
-        let pup = self.reg(re3::REG_PUPDATA);
+        let pup = self.reg(re3::RE3_POPUP_VALUE);
         let pup = self.b.ins().ishl_imm_s(pup, 24);
         let p = self.b.ins().bor(widd, u3);
         let p = self.b.ins().bor(p, pup);
-        let nopup = self.reg(re3::REG_NOPUP);
+        let nopup = self.reg(re3::RE3_SKIP_POPUP);
         let aux = self.b.ins().select(nopup, np, p);
-        let am = self.reg(re3::REG_AUXMASK);
+        let am = self.reg(re3::RE3_AUX_PLANE_MASK);
         let am = self.b.ins().band_imm_s(am, 0xff);
         let am = self.b.ins().ishl_imm_s(am, 24);
-        let pm = self.reg(re3::REG_PIXMASK);
+        let pm = self.reg(re3::RE3_COLOR_PLANE_MASK);
         let mask = self.b.ins().bor(am, pm);
         let pat = if k.pat != Pat::Off {
-            let h = self.reg(re3::REG_PATH);
+            let h = self.reg(re3::RE3_PATTERN_HI);
             let h = self.b.ins().ishl_imm_s(h, 16);
-            let l = self.reg(re3::REG_PATL);
+            let l = self.reg(re3::RE3_PATTERN_LO);
             self.b.ins().bor(h, l)
         } else {
             zero
         };
         let wid = if k.wid != Wid::Off {
-            let c = self.reg(re3::REG_CURWID);
+            let c = self.reg(re3::RE3_WINDOW_ID);
             self.b.ins().band_imm_s(c, k.wid.mask() as i64)
         } else {
             zero
@@ -442,7 +442,7 @@ impl<'a> E<'a> {
             if sh == 0 {
                 zero
             } else {
-                let pm = self.reg(re3::REG_PIXMASK);
+                let pm = self.reg(re3::RE3_COLOR_PLANE_MASK);
                 let lo = self.b.ins().band_imm_s(pm, m);
                 let none = self.b.ins().icmp_imm_s(IntCC::Equal, lo, 0);
                 let shv = self.i32c(sh);
@@ -489,7 +489,7 @@ impl<'a> E<'a> {
         if pos {
             v.extend([IX, IY]);
         }
-        v.push(IR);
+        v.push(IRED);
         if !k.fmt.ci() {
             v.extend([IG, IB]);
         }
@@ -704,7 +704,7 @@ impl<'a> E<'a> {
 
     /// `color`: the iterators as pixel bits at (x, y).
     fn color(&mut self, it: &[Variable; 7], x: Value, y: Value) -> Value {
-        let r = self.get(it[IR]);
+        let r = self.get(it[IRED]);
         match self.k.fmt {
             Fmt::Ci12 => {
                 let i = self.chan(r, 0xfff);
@@ -727,7 +727,7 @@ impl<'a> E<'a> {
     /// The three colour iterators as 8-bit channels.
     fn rgb8(&mut self, it: &[Variable; 7]) -> [Value; 3] {
         let mut out = [self.i32c(0); 3];
-        for (k, i) in [IR, IG, IB].iter().enumerate() {
+        for (k, i) in [IRED, IG, IB].iter().enumerate() {
             let v = self.get(it[*i]);
             out[k] = self.chan(v, 255);
         }
@@ -913,7 +913,7 @@ impl<'a> E<'a> {
 
     // ── spans ────────────────────────────────────────────────────────────
 
-    /// One SHADED pixel at (x, y), the n-th of the span, its word at `addr`.
+    /// One SMOOTH pixel at (x, y), the n-th of the span, its word at `addr`.
     fn shaded_pixel(&mut self, s: &Span, it: &[Variable; 7], x: Value, y: Value, n: Value, addr: Value, skip: Block) {
         if self.k.pat != Pat::Off {
             self.pattern(s, x, n, skip);
@@ -1011,7 +1011,7 @@ impl<'a> E<'a> {
         let per_pixel = self.k.fmt == Fmt::Rgb12 && self.k.dither;
         let (lo, hi) = self.row_range(&s, x0, y, count, done);
         let live = self.live(false);
-        let live: Vec<usize> = live.into_iter().filter(|i| matches!(*i, IR | IG | IB)).collect();
+        let live: Vec<usize> = live.into_iter().filter(|i| matches!(*i, IRED | IG | IB)).collect();
         // Colour steps before pixel lo, and pixels until the next one.
         let k0 = self.b.ins().udiv_imm_s(lo, run as i64);
         let done_px = self.b.ins().imul_imm_s(k0, run as i64);

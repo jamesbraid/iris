@@ -1,7 +1,7 @@
 # GR2 GL window clipping comes from 0x1E5, per context
 
 GL windows are clipped by the kernel's 0x1E5 packet (window, wid, obscured,
-pieces, up to 4 rectangles; format in HQ2.h "0x1E5 HQ2_GL_WINDOW").
+pieces, up to 4 rectangles; format at the window-box token, 0x1E5 (T_WIN_BOX)).
 
 Gotchas found the hard way:
 
@@ -15,7 +15,7 @@ Gotchas found the hard way:
   arranged has no 0x1E5 at all: the clip is already in the context's saved
   state. To see one, capture across a window move plus a few frames.
 - `pieces > 4`: no rectangles; the HLE turns on the RE3 WID test (window-id
-  planes painted by Xsgi's 2D_CID_WRITE).
+  planes painted by Xsgi's 2D_CID_FIELD).
 - `obscured = 1, pieces = 0`: the one rectangle the kernel sends is the
   window's bounding box, not its visible region. WID test too, bounded by
   the box. Treating it as a visible rectangle let twilight's root-window

@@ -574,7 +574,7 @@ static void t_transform(void)
 }
 
 /* Colour and coloring: fog, shading, lighting, materials. */
-static void t_lighting(void)
+static void check_lighting(void)
 {
     int l;
     static const GLenum faces[2] = { GL_FRONT, GL_BACK };
@@ -946,7 +946,7 @@ static void t_texture(void)
 }
 
 /* Per-fragment operations and framebuffer control. */
-static void t_fragment(void)
+static void check_fragment(void)
 {
     if (begin("frag/SCISSOR_BOX")) {
         glScissor(4, 6, 50, 40);
@@ -1382,10 +1382,10 @@ int main(int argc, char **argv)
     t_enables();
     t_current();
     t_transform();
-    t_lighting();
+    check_lighting();
     t_raster();
     t_texture();
-    t_fragment();
+    check_fragment();
     t_pixels();
     t_eval();
     t_misc();

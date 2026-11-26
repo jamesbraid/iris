@@ -71,15 +71,15 @@ staged and pushed in batches.
 
 The GL side (`gl.rs`, `gl_light.rs`) keeps the GL state, assembles primitives,
 transforms and clips them through the shared GL core (`src/dev/gl/`), and emits
-RE3 spans. Iris blends in its RE3 span routine (`RE3_OP_BLEND`, `RE3_OP_ALPHA`). Where the real board blends is not documented. The board has no alpha test. The guest's GL library rasterizes alpha-tested primitives on the CPU and sends the surviving fragments, which Iris draws through `gl_fragment`.
+RE3 spans. Iris blends in its RE3 span routine (`RE3_OP_SET_BLENDER`, `RE3_OP_SET_ALPHA`). Where the real board blends is not documented. The board has no alpha test. The guest's GL library rasterizes alpha-tested primitives on the CPU and sends the surviving fragments, which Iris draws through `gl_fragment`.
 
-The RE3 thread (`re3_loop`) applies register writes in order. An IR write runs
-`Re3::execute` (`re3.rs`). The span kinds are SHADED (`draw_shaded_span`) and
-FLAT or FLAT4 (`draw_flat_span`), which step the colour at an Iris-chosen interval (5 pixels for FLAT, 20 for FLAT4).
+The RE3 thread (`re3_loop`) applies register writes in order. A DRAW_TRIGGER write runs
+`Re3::execute` (`re3.rs`). The span kinds are SMOOTH (`draw_shaded_span`) and
+FLAT_5 or FLAT_20 (`draw_flat_span`), which step the colour at an Iris-chosen interval (5 pixels for FLAT_5, 20 for FLAT_20).
 
 ## 2D drawing
 
-The `HQ2_2D_*` commands (`gr2/hq2.rs`) run on the GR2-HQ2 thread, which turns
+The `X2D_*` commands (`gr2/hq2.rs`) run on the GR2-HQ2 thread, which turns
 them into RE3 span writes. GR2-RE3 draws the spans. What the real board does
 with these commands is not publicly documented.
 
@@ -114,9 +114,9 @@ default build: `gr2-jit` is a separate feature. The mode comes from `IRIS_GR2_JI
 (`off`, `sync` or `async`; `0`, `1` and `on` also work). It defaults to `async`, and `off` in unit tests.
 `IRIS_NO_JIT` forces it off.
 
-- The key is `SpanKey` (`re3_jit/key.rs`). It names the instruction (SHADED, FLAT
-  or FLAT4), the pixel format and dither, the raster op, the pattern mode, the WID
-  test, and for SHADED spans the depth, stencil and blend. Fields that cannot change
+- The key is `SpanKey` (`re3_jit/key.rs`). It names the instruction (SMOOTH, FLAT_5
+  or FLAT_20), the pixel format and dither, the raster op, the pattern mode, the WID
+  test, and for SMOOTH spans the depth, stencil and blend. Fields that cannot change
   the result are zeroed, so equivalent configurations share one shader.
 - `run` looks the key up. A hit calls the shader, which takes the `Re3` as its only
   argument and reads its registers and iterators at fixed offsets. A miss runs the

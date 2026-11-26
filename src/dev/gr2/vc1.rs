@@ -5,7 +5,7 @@
 //! and `sysctl`.
 
 pub const VC1_CMD0: u32 = 0x00;
-pub const VC1_CMD1: u32 = 0x04;
+pub const VC1_FIRST_CONTROL: u32 = 0x04;
 pub const VC1_SRAM: u32 = 0x08;
 pub const VC1_TESTREG: u32 = 0x0c;
 pub const VC1_ADDRLO: u32 = 0x10;
@@ -51,7 +51,7 @@ impl Vc1 {
                 self.regs[(a + 1) & 0xff] = val as u8;
                 self.addr = self.addr.wrapping_add(2);
             }
-            VC1_CMD1 => self.cmd1 = val as u8,
+            VC1_FIRST_CONTROL => self.cmd1 = val as u8,
             VC1_SRAM => {
                 let a = self.addr as usize;
                 self.sram[a] = (val >> 8) as u8;
@@ -73,7 +73,7 @@ impl Vc1 {
                 self.addr = self.addr.wrapping_add(2);
                 v
             }
-            VC1_CMD1 => self.cmd1 as u32,
+            VC1_FIRST_CONTROL => self.cmd1 as u32,
             VC1_SRAM => {
                 let a = self.addr as usize;
                 let v = self.sram16(a) as u32;
@@ -106,12 +106,12 @@ impl Vc1 {
     /// host's timing-table offsets. The offsets are inferred from the PROM and
     /// kernel cursor code.
     pub fn cursor_pos(&self) -> (i32, i32) {
-        const X_ADJ: i32 = 250;
-        const Y_ADJ: i32 = 35;
+        const ACTIVE_LEFT_OFFSET: i32 = 250;
+        const ACTIVE_TOP_OFFSET: i32 = 35;
         let xl = self.reg16(CUR_XL) as i32;
         let yl = self.reg16(CUR_YL) as i32;
-        let x = if self.reg16(VID_EP) == 0x800 { xl - X_ADJ } else { xl };
-        (x, yl - Y_ADJ)
+        let x = if self.reg16(VID_EP) == 0x800 { xl - ACTIVE_LEFT_OFFSET } else { xl };
+        (x, yl - ACTIVE_TOP_OFFSET)
     }
 
     /// 2-bit cursor pixel at glyph position (cx, cy), 32x32. Plane 0 lives at

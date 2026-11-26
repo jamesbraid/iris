@@ -22,7 +22,7 @@ pub const OUT_STRIDE: usize = 2048;
 const CURSOR_CLUT_BASE: usize = 0x1c00;
 
 // XMAP5 mode word fields.
-const PD_RGB: u32 = 1;
+const PD_DIRECT_COLOR: u32 = 1;
 const PD_BLACKOUT: u32 = 3;
 
 /// Compose one 1280x1024 frame into `out` (stride `OUT_STRIDE`).
@@ -106,7 +106,7 @@ pub fn pixel_rgb(p: u32, mode: u32, xm: &Xmap5) -> u32 {
     let buf = (if bank1 { p >> shift } else { p }) & 0xfff;
 
     match pd_mode {
-        PD_RGB => match pix_mode {
+        PD_DIRECT_COLOR => match pix_mode {
             7 | 6 => {
                 // 24-bit: R in bits 7:0, G 15:8, B 23:16 (MAME RE2 layout).
                 ((p & 0xff) << 16) | (p & 0xff00) | ((p >> 16) & 0xff)
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn rgb8_layout_matches_x_visual() {
         let xm: Box<Xmap5> = unsafe { Box::new_zeroed().assume_init() };
-        let mode = (2 << 24) | (PD_RGB << 16);
+        let mode = (2 << 24) | (PD_DIRECT_COLOR << 16);
         assert_eq!(pixel_rgb(0xe0, mode, &xm), 0x00ff_0000, "red");
         assert_eq!(pixel_rgb(0x07, mode, &xm), 0x0000_ff00, "green");
         assert_eq!(pixel_rgb(0x18, mode, &xm), 0x0000_00ff, "blue");
@@ -175,7 +175,7 @@ mod tests {
         let p = 0x0056_3412;
         assert_eq!(pixel_rgb(p, ci8(2), &xm), 0x12, "8-bit bank 0: bits 7:0");
         assert_eq!(pixel_rgb(p, ci8(3), &xm), 0x34, "8-bit bank 1: bits 15:8");
-        let rgb12 = |pix_mode: u32| (pix_mode << 24) | (PD_RGB << 16);
+        let rgb12 = |pix_mode: u32| (pix_mode << 24) | (PD_DIRECT_COLOR << 16);
         assert_eq!(pixel_rgb(0x000f_000f, rgb12(4), &xm), 0x00ff_0000, "12-bit bank 0: red");
         assert_eq!(pixel_rgb(0x000f_000f, rgb12(5), &xm), 0x0000_ff00, "12-bit bank 1: green");
     }

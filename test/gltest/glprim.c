@@ -185,8 +185,8 @@ static int got_rgba[4], got_z, got_s, got_dbl;
      colour GL_RGBA/UNSIGNED_BYTE        kernel pixel DMA (0x0AC), rows swapped
      colour GL_ABGR_EXT/UNSIGNED_BYTE    kernel pixel DMA (0x0AC), as is
      depth  UNSIGNED_INT                 kernel pixel DMA (0x0AC), buffer_mode 2
-     unaligned buffer / odd stride       PIO READ_RECT (0x0AD) via the mailbox
-     GL_FLOAT, stencil                   slow path, one READ_RECT per pixel
+     unaligned buffer / odd stride       PIO READ_BOX (0x0AD) via the mailbox
+     GL_FLOAT, stencil                   slow path, one READ_BOX per pixel
    --readfmt/--readtype/--readunaligned choose among them. */
 #define MAX_READS 8
 static char reads[MAX_READS][8];

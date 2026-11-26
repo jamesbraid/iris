@@ -129,11 +129,11 @@ fn the_read_port_comes_out_in_a_batch_through_the_c_abi() {
     let h = new();
     // A context-save request makes the HQ2 queue an image on the read port.
     for id in [0x74, 0xe8] {
-        wr(h, 0x40000 + 4 * hq2::GE_HQMSAV, id);
+        wr(h, 0x40000 + 4 * hq2::GE_CTX_SWITCH, id);
         wr(h, 0x40000 + 4 * hq2::PUC_DATA, 0);
         wr(h, 0x40000 + 4 * hq2::PUC_DATA, 0);
     }
-    wr(h, 0x40000 + 4 * hq2::GE_CX_SAVE_MAIN, 0);
+    wr(h, 0x40000 + 4 * hq2::GE_DUMP_CTX, 0);
     let mut words = [0u32; 8];
     let mut got = 0;
     for _ in 0..1000 {

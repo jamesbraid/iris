@@ -4,7 +4,7 @@
  *   toktest [STEP...]     (no steps: all of them, in this order)
  *
  * Each step draws into a 256 x 256 RGBA window and prints its name, then
- * calls glFinish, so the trace splits at the GL_FINISH readbacks:
+ * calls glFinish, so the trace splits at the CMD_READBACK_KICK readbacks:
  *   points-smooth   GL_POINT_SMOOTH points, then plain ones
  *   tex             a 16 x 16 RGBA texture on a quad
  *   tex-sub         glTexSubImage2D into it

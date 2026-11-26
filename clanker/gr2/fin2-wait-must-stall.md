@@ -21,7 +21,7 @@ the HQ2 idle and no FIN2 the read returns at once and the kernel times out,
 as on hardware. The stall gives up after 2 s of host time WITHOUT
 PROGRESS (FIN2_STALL_LIMIT; progress = the HQ2 or RE3 FIFO consumer moved,
 `GFifo::consumed`), in case the pipeline can never finish (RE3 held by a
-CPU-driven RWDATA readback). Not counted from the ack (the DMA in between
+CPU-driven HOST_DATA readback). Not counted from the ack (the DMA in between
 can take long on a busy host; that failed this test on a GitHub CI runner),
 and not a fixed cap from the first poll either: see gltest below. Sample "HQ2 working" BEFORE reading the register (the HQ2
 raises FIN2 before it consumes the entry and drops hq_busy); sampling after
@@ -31,7 +31,7 @@ lost the race in about one run in three. Test:
 Related: fin3-must-track-pending-finish.md (the opposite problem: a stale
 FIN3 seen too early).
 
-The same wait covers the context switch (Gr2PcxSwap: GE_HQMSAV, 0x1E0 /
+The same wait covers the context switch (Gr2PcxSwap: GE_CTX_SWITCH, 0x1E0 /
 0x1E6, save / restore; 1,000,000 x us_delay(1)). With our deep FIFO a GL
 client can queue far more work than hardware's 512 words allow: `gltest
 --bench N` is N full-screen 800x600 quads (a few FIFO words, 480k pixels

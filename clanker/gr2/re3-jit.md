@@ -1,6 +1,6 @@
 # The RE3 span JIT (`gr2-jit`)
 
-`src/dev/gr2/re3_jit` compiles RE3 SHADED / FLAT / FLAT4 spans. Its
+`src/dev/gr2/re3_jit` compiles RE3 SMOOTH / FLAT_5 / FLAT_20 spans. Its
 pattern follows `gr4-jit` (clanker/mgras/gr4-jit.md: key, store, compiler
 thread, sweep test). These are the GR2-specific gotchas.
 
@@ -16,8 +16,8 @@ is not safe unless the emitter changes too.
 
 A memoised shader is only dropped when key-shaping state changes:
 
-- the registers in `re3_jit::shapes_key` (FUNC, ALIGNPAT, ENABPAT,
-  ENABDITH, ENABWID, DEPTHFN, FBOPTION);
+- the registers in `re3_jit::shapes_key` (FUNC, PATTERN_ANCHOR, PATTERN_ON,
+  DITHER_ON, WID_TEST_ON, Z_COMPARE, FB_OPTIONS);
 - the `Re3::set_pixfmt / set_zctl / set_stencil / set_blend` setters.
 
 Rules for adding state:
@@ -43,12 +43,12 @@ shaders. `Gr2::new` sets `IRIS_GR2_JIT`'s mode.
   the XOR op, the dither threshold or stencil DECR each made it fail at
   once (checked when it landed).
 - Final iterators are written in closed form: start + steps × step
-  (FLAT: steps = count / run). Stepping only adds, and both sides wrap.
+  (FLAT_5: steps = count / run). Stepping only adds, and both sides wrap.
   The loops step only the iterators a pixel reads.
-- Row spans (DX = 0x4000, DY = 0) and every FLAT span are clipped to the
+- Row spans (DX = 0x4000, DY = 0) and every FLAT_5 span are clipped to the
   scissor once. Their x is `X + n` exactly, because load_iterators puts the
-  subpixel fraction in y when |DX| = 1.0. FLAT positions are always
-  `x0 + i`, whatever DX says. Other SHADED spans clip per pixel.
+  subpixel fraction in y when |DX| = 1.0. FLAT_5 positions are always
+  `x0 + i`, whatever DX says. Other SMOOTH spans clip per pixel.
 
 ## A faster RE3 can make the board slower
 
@@ -80,13 +80,13 @@ time; the float setup was about 6%.
 
 - **Batching.** It stages entries and pushes them as one unit
   (`GFifo::try_push_slice`: one lock, one tail release, one wake check).
-  It flushes at each IR write (span end), when the stage is full, before
+  It flushes at each DRAW_TRIGGER write (span end), when the stage is full, before
   anything that waits on RE3 (finish, reads, GEDMA) and when HQ2 runs out
   of work.
 - **Skipping unchanged writes.** It keeps a shadow of the registers it has
   sent and skips writes that would leave a register unchanged. The
   exceptions always go through:
-  - IR and RWDATA (RWDATA is also written by RE3);
+  - DRAW_TRIGGER and HOST_DATA (HOST_DATA is also written by RE3);
   - the RGB / YX fan-outs, which drop the shadow of R, G, B / X, Y;
   - anything after a CPU write to the RE3 window, which bumps
     `re3_cpu_writes` and makes the shadow forget everything.

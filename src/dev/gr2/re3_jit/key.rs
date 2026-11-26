@@ -1,18 +1,18 @@
 //! The span key: everything an RE3 span shader is monomorphised on.
 //!
 //! A key names a span's whole pixel pipeline: which instruction walks the
-//! pixels (SHADED, FLAT or FLAT4), the frame-buffer pixel format the colour
+//! pixels (SMOOTH, FLAT_5 or FLAT_20), the frame-buffer pixel format the colour
 //! is packed into (RE3_OP_PIXFMT) and whether 12-bit RGB is dithered, the
-//! raster op, the pattern mode, the window-ID test, and for SHADED spans the
+//! raster op, the pattern mode, the window-ID test, and for SMOOTH spans the
 //! depth and stencil tests and the emulator's blend (RE3_OP_ZCTL,
-//! RE3_OP_STENCIL, RE3_OP_BLEND). Everything the pipeline only reads —
+//! RE3_OP_STENCIL, RE3_OP_SET_BLENDER). Everything the pipeline only reads —
 //! colours and their steps, the pattern bits, masks, scissor, the current
 //! WID, the stencil reference and masks, the Z write mask — the shader reads
 //! from the RE3 registers and context as it starts (`compiler`).
 //!
 //! Keys are normalised: a field that cannot affect the result in the rest
 //! of the configuration is zeroed (dither outside 12-bit RGB, depth,
-//! stencil and blending on FLAT spans, blending of colour indices, factor
+//! stencil and blending on FLAT_5 spans, blending of colour indices, factor
 //! codes that act alike), so two configurations that draw the same share a
 //! shader. The packed form is mixed radix, as for `gr4-jit`.
 
@@ -22,12 +22,12 @@ use std::fmt;
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Prim {
-    /// IR_SHADED: every iterator steps per pixel; Z, stencil and blend.
+    /// DRAW_SMOOTH: every iterator steps per pixel; Z, stencil and blend.
     #[default]
     Shaded = 0,
-    /// IR_FLAT: consecutive pixels, colour stepping every 5.
+    /// DRAW_FLAT_5: consecutive pixels, colour stepping every 5.
     Flat = 1,
-    /// IR_FLAT4: the same, stepping every 20.
+    /// DRAW_FLAT_20: the same, stepping every 20.
     Flat4 = 2,
 }
 
@@ -35,16 +35,16 @@ impl Prim {
     pub const ALL: [Prim; 3] = [Prim::Shaded, Prim::Flat, Prim::Flat4];
 
     /// The RE3 instruction, if it is one a shader covers.
-    pub fn of_ir(ir: u32) -> Option<Prim> {
-        match ir {
-            super::super::re3::IR_SHADED => Some(Prim::Shaded),
-            super::super::re3::IR_FLAT => Some(Prim::Flat),
-            super::super::re3::IR_FLAT4 => Some(Prim::Flat4),
+    pub fn of_draw_op(draw_op: u32) -> Option<Prim> {
+        match draw_op {
+            super::super::re3::DRAW_SMOOTH => Some(Prim::Shaded),
+            super::super::re3::DRAW_FLAT_5 => Some(Prim::Flat),
+            super::super::re3::DRAW_FLAT_20 => Some(Prim::Flat4),
             _ => None,
         }
     }
 
-    /// Pixels per colour step of a FLAT span.
+    /// Pixels per colour step of a FLAT_5 span.
     pub fn flat_run(self) -> u32 {
         match self {
             Prim::Flat4 => 20,
@@ -80,7 +80,7 @@ impl Fmt {
     }
 }
 
-/// The pattern (ENABPAT, ALIGNPAT): off, bit `31 - n % 32` for the n-th
+/// The pattern (PATTERN_ON, PATTERN_ANCHOR): off, bit `31 - n % 32` for the n-th
 /// pixel of the span, or bit `31 - x % 32` for column x.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -95,7 +95,7 @@ impl Pat {
     pub const ALL: [Pat; 3] = [Pat::Off, Pat::Span, Pat::Aligned];
 }
 
-/// The window-ID test (ENABWID; FBOPTION bit 0 and DEPTHFN bit 3 pick the
+/// The window-ID test (WID_TEST_ON; FB_OPTIONS bit 0 and Z_COMPARE bit 3 pick the
 /// compared bits): off, WID bits 1:0, 3:0, or 3:1.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -132,7 +132,7 @@ pub struct Stencil {
     pub zpass: u8,
 }
 
-/// Blend factors (RE3_OP_BLEND codes 0 ZERO, 1 ONE, 2 the other side's
+/// Blend factors (RE3_OP_SET_BLENDER codes 0 ZERO, 1 ONE, 2 the other side's
 /// colour, 3 one minus it, 4 SRC_ALPHA, 5 ONE_MINUS_SRC_ALPHA; higher codes
 /// act as ONE and fold into 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -147,13 +147,13 @@ pub struct Blend {
 pub struct SpanKey {
     pub prim: Prim,
     pub fmt: Fmt,
-    /// 12-bit RGB dithered through the 4x4 Bayer matrix (ENABDITH).
+    /// 12-bit RGB dithered through the 4x4 Bayer matrix (DITHER_ON).
     pub dither: bool,
     /// FUNC, X11 / GL logic op numbering (3 = COPY).
     pub rop: u8,
     pub pat: Pat,
     pub wid: Wid,
-    /// Depth test compare function, when enabled (SHADED).
+    /// Depth test compare function, when enabled (SMOOTH).
     pub z: Option<u8>,
     pub stencil: Option<Stencil>,
     pub blend: Option<Blend>,

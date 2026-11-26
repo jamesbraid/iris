@@ -1,9 +1,9 @@
 //! The RE3 span JIT (`gr2-jit`): GR2 span pipelines compiled to native code
 //! with Cranelift, on the pattern of the IMPACT raster JIT (`mgras::rss_jit`).
 //!
-//! On GR2 the HQ2/GE7 side walks primitives and RE3 draws spans: SHADED
+//! On GR2 the HQ2/GE7 side walks primitives and RE3 draws spans: SMOOTH
 //! (every iterator steps per pixel, with depth, stencil and the emulator's
-//! blend) and FLAT / FLAT4 (consecutive pixels, colour stepping every 5 or
+//! blend) and FLAT_5 / FLAT_20 (consecutive pixels, colour stepping every 5 or
 //! 20). The interpreter in `re3.rs` decides, pixel by pixel, from the
 //! registers, what each stage does. A shader decides it once: the state that
 //! shapes the pipeline is reduced to a `SpanKey` (instruction, pixel format
@@ -110,7 +110,7 @@ impl JitState {
 pub fn shapes_key(r: usize) -> bool {
     matches!(
         r,
-        re3::REG_FUNC | re3::REG_ALIGNPAT | re3::REG_ENABPAT | re3::REG_ENABDITH | re3::REG_ENABWID | re3::REG_DEPTHFN | re3::REG_FBOPTION
+        re3::RE3_LOGIC_OP | re3::RE3_PATTERN_ANCHOR | re3::RE3_PATTERN_ON | re3::RE3_DITHER_ON | re3::RE3_WID_TEST_ON | re3::RE3_Z_COMPARE | re3::RE3_FB_OPTIONS
     )
 }
 
@@ -118,16 +118,16 @@ pub fn shapes_key(r: usize) -> bool {
 pub fn key_of(re3: &Re3, prim: Prim) -> SpanKey {
     let c = &re3.ctx;
     let r = &c.reg;
-    let wid = if r[re3::REG_ENABWID] == 0 {
+    let wid = if r[re3::RE3_WID_TEST_ON] == 0 {
         Wid::Off
-    } else if r[re3::REG_FBOPTION] & 1 != 0 {
-        if r[re3::REG_DEPTHFN] & 8 != 0 { Wid::Three } else { Wid::Four }
+    } else if r[re3::RE3_FB_OPTIONS] & 1 != 0 {
+        if r[re3::RE3_Z_COMPARE] & 8 != 0 { Wid::Three } else { Wid::Four }
     } else {
         Wid::Two
     };
-    let pat = if r[re3::REG_ENABPAT] == 0 {
+    let pat = if r[re3::RE3_PATTERN_ON] == 0 {
         Pat::Off
-    } else if r[re3::REG_ALIGNPAT] != 0 {
+    } else if r[re3::RE3_PATTERN_ANCHOR] != 0 {
         Pat::Aligned
     } else {
         Pat::Span
@@ -136,8 +136,8 @@ pub fn key_of(re3: &Re3, prim: Prim) -> SpanKey {
     SpanKey {
         prim,
         fmt: Fmt::of(c.pixfmt),
-        dither: r[re3::REG_ENABDITH] != 0,
-        rop: (r[re3::REG_FUNC] & 0xf) as u8,
+        dither: r[re3::RE3_DITHER_ON] != 0,
+        rop: (r[re3::RE3_LOGIC_OP] & 0xf) as u8,
         pat,
         wid,
         z: (c.zctl & 1 != 0).then_some(((c.zctl >> 1) & 7) as u8),
@@ -154,13 +154,13 @@ pub fn key_of(re3: &Re3, prim: Prim) -> SpanKey {
 
 // ── dispatch ─────────────────────────────────────────────────────────────────
 
-/// Draw the span `ir` starts (iterators loaded) with its shader. False when
+/// Draw the span `draw_op` starts (iterators loaded) with its shader. False when
 /// there is none (yet): the caller draws with the interpreter.
-pub fn run(re3: &mut Re3, ir: u32) -> bool {
+pub fn run(re3: &mut Re3, draw_op: u32) -> bool {
     if re3.jit.mode == MODE_OFF {
         return false;
     }
-    let Some(prim) = Prim::of_ir(ir) else {
+    let Some(prim) = Prim::of_draw_op(draw_op) else {
         return false;
     };
     let st = &mut re3.jit;
