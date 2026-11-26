@@ -9,7 +9,7 @@ Pipeline (gl.rs):
 - `GlState::vb` (32 slots): strips / fans / tmeshes cycle through the first
   8, never overwriting what `pv` (last three, swaptmesh swaps two) or
   `vfirst` still refer to; polygons fill the buffer and are drawn whole
-  when LOADV|0x065 ends them (chunked from vertex 0 past 32 vertices).
+  when IDX_VERTEX_ROUTINE|0x065 ends them (chunked from vertex 0 past 32 vertices).
 - `gl_poly(indices)`: trivial accept / reject by outcodes; otherwise
   Sutherland-Hodgman on index lists, new vertices in a scratch area
   addressed after the buffer.

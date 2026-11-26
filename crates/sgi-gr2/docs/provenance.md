@@ -99,5 +99,5 @@ only where a published document carries it; the rest were replaced with a descri
 Removed because no published source was found: about 60 kernel, X server and GL library function, field and
 routine names, two clock-table labels, and a vendor header's name and section titles. Where a comment gave a
 structure offset or a field path, it now says "block offset" or describes the state in plain words. The
-register, token and field constants in code (`HQ2_*`, `PUC_*`, `T_*` and so on) are kept as names; the table
-above ("Kept with only the headers behind them") says what each family rests on.
+register, token and field constants in code carry names written for this crate; their values are unchanged,
+and the table above ("Kept with only the headers behind them") says what each family of values rests on.

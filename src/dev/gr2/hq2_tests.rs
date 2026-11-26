@@ -248,7 +248,7 @@ fn trace_captures_annotated_hq_and_re3_traffic() {
     let _ = std::fs::remove_file(&path);
     assert!(text.contains("fifo[0x195 PUC_RECTI2D] = 0x0000000a"), "{text}");
     assert!(text.contains("exec PUC_RECTI2D (10, 20)-(12, 21)"), "{text}");
-    assert!(text.contains("hq  IR = 0x2  -> FLAT x=10 y=20 n=3 rgb=(7,0,0)"), "{text}");
+    assert!(text.contains("hq  DRAW_TRIGGER = 0x2  -> FLAT_5 x=10 y=20 n=3 rgb=(7,0,0)"), "{text}");
     // CPU register traffic outside the FIFOs, by name.
     assert!(text.contains("wr hq.gepc = 0x00000000"), "{text}");
     assert!(text.contains("wr hq.unstall"), "{text}");
@@ -260,7 +260,7 @@ fn trace_captures_annotated_hq_and_re3_traffic() {
     g.cmd_re3(&["regs"], &mut sink).unwrap();
     g.cmd_re3(&["pix", "10", "20", "4", "2"], &mut sink).unwrap();
     let out = String::from_utf8(sink).unwrap();
-    assert!(out.contains("NUMPIX"), "{out}");
+    assert!(out.contains("SPAN_LEN"), "{out}");
 }
 
 /// The kernel's microcode-ready check polls hq.version bit 1 (FIN2) after clearing fin2
@@ -288,7 +288,7 @@ fn fin2_handshakes_for_gr2start_and_context_switch() {
     // Gr2PcxSwap: fin2=0, fifo[0x1f0]=ctx, DATA state, DATA mode.
     w32(g, 0x6a04c, 0);
     assert!(!fin2(g), "clearing fin2 must be visible");
-    cmd(g, hq2::GE_HQMSAV, 0x74);
+    cmd(g, hq2::GE_CTX_SWITCH, 0x74);
     data(g, 0);
     assert!(!fin2(g), "FIN2 before the request is complete");
     data(g, 2);
@@ -363,9 +363,9 @@ fn xsgi_fin3_handshake_and_open_commands() {
     {
         let text = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert!(text.contains("exec 2D_ROP fg=0x0 planemask=0xffffff alu=3 flag=0x0"), "{text}");
-        assert!(text.contains("exec 2D_FAST_LINE_AUX [0x0, 0xffff, 0x0, 0x0, 0x0, 0x0] (6 words, not implemented)"), "{text}");
-        assert!(text.contains("exec 2D_END_PRIMITIVE 0x0"), "{text}");
+        assert!(text.contains("exec 2D_FG_ALU fg=0x0 planemask=0xffffff alu=3 flag=0x0"), "{text}");
+        assert!(text.contains("exec X_INIT_BLOCK [0x0, 0xffff, 0x0, 0x0, 0x0, 0x0] (6 words, not implemented)"), "{text}");
+        assert!(text.contains("exec 2D_PRIM_TERMINATOR 0x0"), "{text}");
         assert!(text.contains("exec 2D_SYNC 0 -> FIN3"), "{text}");
     }
 }
@@ -384,46 +384,46 @@ fn ddx_init_hw_and_solid_rects() {
         }
     }
     let box_ = |g: &Gr2, b: [u32; 4]| {
-        cmd(g, HQ2_2D_SOLID_RECT, 0);
+        cmd(g, X2D_FILL_BOXES, 0);
         for v in b {
             data(g, v);
         }
     };
     // Xsgi's init: overlay clear, colour clear, CID clear.
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 8);
-    cmd(g, HQ2_2D_COLOR_AUX, 0xf);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 8);
+    cmd(g, X2D_AUX_PLANE_MASK, 0xf);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0, 3, 1] { data(g, v); }
     box_(g, [0, 0, 1280, 1024]);
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
-    cmd(g, HQ2_2D_MODE, 4);
-    cmd(g, HQ2_2D_COLOR_AUX, 0);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
+    cmd(g, X2D_PLANE_SELECT, 4);
+    cmd(g, X2D_AUX_PLANE_MASK, 0);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xffffff, 3, 0] { data(g, v); }
     box_(g, [0, 0, 1280, 1024]);
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
-    cmd(g, HQ2_2D_CID_WRITE, 0xf000);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
+    cmd(g, X2D_CID_FIELD, 0xf000);
     box_(g, [0, 0, 1280, 1024]);
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
-    cmd(g, HQ2_2D_CID_WRITE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
+    cmd(g, X2D_CID_FIELD, 0);
     g.wait_idle();
     assert!(g.vram()[..8].iter().all(|&p| p == 0), "{:08x?}", &g.vram()[..8]);
 
     // Colour box (10,20)-(13,22): X rows 20..21, columns 10..12.
-    cmd(g, HQ2_2D_MODE, 0x1004);
-    cmd(g, HQ2_2D_COLOR_AUX, 0);
-    cmd(g, HQ2_2D_ROP, 0x00aa_bbcc);
+    cmd(g, X2D_PLANE_SELECT, 0x1004);
+    cmd(g, X2D_AUX_PLANE_MASK, 0);
+    cmd(g, X2D_FG_ALU, 0x00aa_bbcc);
     for v in [0xffffff, 3, 0] { data(g, v); }
     box_(g, [10, 20, 13, 22]);
     // Overlay box in the same stream? No: new MODE first, as the DDX does.
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
-    cmd(g, HQ2_2D_MODE, 0x1008);
-    cmd(g, HQ2_2D_COLOR_AUX, 0xf);
-    cmd(g, HQ2_2D_ROP, 5);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1008);
+    cmd(g, X2D_AUX_PLANE_MASK, 0xf);
+    cmd(g, X2D_FG_ALU, 5);
     for v in [0, 3, 1] { data(g, v); }
     box_(g, [11, 21, 12, 22]);
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
     g.wait_idle();
 
     let px = |x: usize, y_x11: usize| g.vram()[(1023 - y_x11) * FB_W + x];
@@ -477,18 +477,18 @@ fn fbdump_writes_planes_and_screen() {
 }
 
 /// 4Dwm minimized-window icon (IRIX 6.5.22 trace): an 85x67 8-bit tile,
-/// 22 words per row, 1474 words (+ padding), drawn with TILE_RECT_ODD. A
+/// 22 words per row, 1474 words (+ padding), drawn with TILE_FILL_RAGGED. A
 /// 1024-word tile store lost every row past 46.
 #[test]
 fn ddx_tile_large_icon() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_COLOR_AUX, 0);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_AUX_PLANE_MASK, 0);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_TILE_SETUP, 0x40);
+    cmd(g, X2D_TILE_BEGIN, 0x40);
     for v in [85, 67, 2, 0xd022] { data(g, v); }
     // Pixel (x, y) = y + 1 for x < 84; x = 84 (last pixel of the row) = 0xEE.
     let mut words = Vec::new();
@@ -504,9 +504,9 @@ fn ddx_tile_large_icon() {
         }
     }
     words.resize(1480, 0);
-    cmd(g, HQ2_2D_TILE_DATA_FIRST, words[0]);
+    cmd(g, X2D_TILE_CHUNK_FIRST, words[0]);
     for &v in &words[1..] { data(g, v); }
-    cmd(g, HQ2_2D_TILE_RECT_ODD, 0);
+    cmd(g, X2D_TILE_FILL_RAGGED, 0);
     for v in [40, 210, 16, 16, 295, 83] { data(g, v); }
     g.wait_idle();
     let px = |x: usize, y_x11: usize| g.vram()[(1023 - y_x11) * FB_W + x] & 0xff;
@@ -521,17 +521,17 @@ fn ddx_tile_large_icon() {
 fn ddx_tile_root_and_mono_glyphs() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_COLOR_AUX, 0);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_AUX_PLANE_MASK, 0);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] { data(g, v); }
     // Tile: setup, one 8-word data chunk (4x4 of CI 0x10), fill the screen.
-    cmd(g, HQ2_2D_TILE_SETUP, 0x40);
+    cmd(g, X2D_TILE_BEGIN, 0x40);
     for v in [4, 4, 2, 0xd022] { data(g, v); }
     cmd(g, 318, 0x1010_1010);
     for v in [0x1010_1010, 0x1010_1010, 0x1010_1010, 0, 0, 0, 0] { data(g, v); }
-    cmd(g, HQ2_2D_TILE_RECT, 0);
+    cmd(g, X2D_TILE_FILL, 0);
     for v in [0, 0, 0, 0, 1280, 1024] { data(g, v); }
     cmd(g, HQ_GL_FIN3, 0);
     g.wait_idle();
@@ -540,12 +540,12 @@ fn ddx_tile_root_and_mono_glyphs() {
     assert_eq!(px(1279, 1023), 0x10);
     assert_eq!(px(640, 512), 0x10);
 
-    // Glyph: MONO_IMAGE_16 at (0x217, 0x114), 16x16, fg 0x12 (from the trace;
+    // Glyph: BITMAP_12W at (0x217, 0x114), 16x16, fg 0x12 (from the trace;
     // Xsgi's mono image draw writes ROP fg and 0x138 with the same pixel).
-    cmd(g, HQ2_2D_ROP, 0x12);
+    cmd(g, X2D_FG_ALU, 0x12);
     for v in [0xff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_COLOR_ON, 0x12);
-    cmd(g, HQ2_2D_MONO_IMAGE_16, 0x217);
+    cmd(g, X2D_BIT_ONE_COLOR, 0x12);
+    cmd(g, X2D_BITMAP_BLOCK_B, 0x217);
     for v in [0x114, 0x10, 0x10, 0x03fc079e, 0x1f0f3e0f, 0x3e1f7c1f, 0x7c3efcfc,
               0xffe0fc00, 0xf800f800, 0xfc0c7c38, 0x3ff00fc0] {
         data(g, v);
@@ -561,23 +561,23 @@ fn ddx_tile_root_and_mono_glyphs() {
     assert_eq!(px(0x217, 0x114), 0x10);
 }
 
-/// DRAW_IMAGE as Xsgi's image draw sends it (8-bit pixels, padding words), and
-/// COPY_RECT in X coordinates.
+/// PUT_IMAGE as Xsgi's image draw sends it (8-bit pixels, padding words), and
+/// SCREEN_COPY in X coordinates.
 #[test]
 fn ddx_draw_image_and_copy_rect() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] { data(g, v); }
     // 6x2 image at (100, 50), skip 1: rows are 2 words (pixels 1..6 used).
-    cmd(g, HQ2_2D_DRAW_IMAGE, 100);
+    cmd(g, X2D_PUT_IMAGE, 100);
     for v in [50, 6, 2, 2, 2, 1] { data(g, v); }
     for v in [0x00010203u32, 0x04050600, 0x00111213, 0x14151600, 0xdeadbeef, 0xdeadbeef] {
         data(g, v);
     }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
     g.wait_idle();
     let px = |x: usize, y_x11: usize| g.vram()[(1023 - y_x11) * FB_W + x] & 0xff_ffff;
     let row0: Vec<u32> = (100..106).map(|x| px(x, 50)).collect();
@@ -587,7 +587,7 @@ fn ddx_draw_image_and_copy_rect() {
     assert_eq!(px(106, 50), 0, "padding words are not drawn");
 
     // Copy that image 10 px right, 20 px down.
-    cmd(g, HQ2_2D_COPY_RECT, 0);
+    cmd(g, X2D_SCREEN_COPY, 0);
     for v in [0, 100, 50, 6, 2, 110, 70] { data(g, v); }
     g.wait_idle();
     let copied: Vec<u32> = (110..116).map(|x| px(x, 71)).collect();
@@ -600,16 +600,16 @@ fn ddx_draw_image_and_copy_rect() {
 fn ddx_glyphs_lines_spans_stipples() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_COLOR_AUX, 0);
-    cmd(g, HQ2_2D_ROP, 7);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_AUX_PLANE_MASK, 0);
+    cmd(g, X2D_FG_ALU, 7);
     for v in [0xff, 3, 0] { data(g, v); }
     let px = |x: i32, y: i32| g.vram()[(1023 - y) as usize * FB_W + x as usize] & 0xff_ffff;
 
-    // GLYPH_8 from an xterm trace: 16-wide cell, 15 rows, 8 data words.
-    cmd(g, HQ2_2D_COLOR_ON, 7);
-    cmd(g, HQ2_2D_GLYPH_8, 0x27);
+    // GLYPH_12W from an xterm trace: 16-wide cell, 15 rows, 8 data words.
+    cmd(g, X2D_BIT_ONE_COLOR, 7);
+    cmd(g, X2D_GLYPH_NARROW, 0x27);
     for v in [0xa7, 0x10, 0xf, 0x387c, 0x10421042, 0x10421042, 0x107c1048,
               0x10441042, 0x38420000, 0, 0] {
         data(g, v);
@@ -620,25 +620,25 @@ fn ddx_glyphs_lines_spans_stipples() {
     assert_eq!(row1, vec![2, 3, 4, 9, 10, 11, 12, 13]);
     assert!((0..16).all(|x| px(0x27 + x, 0xa7) == 0), "row 0 is blank");
 
-    // POLY_SPAN: (x, y, w) triples, padded with (1280, 1024, 1).
-    cmd(g, HQ2_2D_POLY_SPAN, 0);
+    // SPAN_LIST: (x, y, w) triples, padded with (1280, 1024, 1).
+    cmd(g, X2D_SPAN_LIST, 0);
     for v in [0x15, 0x300, 9, 0x16, 0x301, 8, 1280, 1024, 1] { data(g, v); }
     // Polyline from a trace: (0x11,0x3ee)->(0x11,0x3e0)->(0x22,0x3e0).
-    cmd(g, HQ2_2D_LINE_CLIP, 0);
+    cmd(g, X2D_LINE_BOUNDS, 0);
     for v in [0x7ff, 0, 0x3ff] { data(g, v); }
-    cmd(g, HQ2_2D_POLYLINE, 0);
+    cmd(g, X2D_PATH_POINTS, 0);
     for v in [0x11, 0x3ee, 0x11, 0x3e0, 0x22, 0x3e0] { data(g, v); }
     // Segments with sentinel padding.
-    cmd(g, HQ2_2D_SEGMENTS, 0);
+    cmd(g, X2D_SEGMENT_LIST, 0);
     for v in [0x100, 0x80, 0x110, 0x80, 1280, 1024, 1280, 1024] { data(g, v); }
     // Points (xlock pop's 2x2 sparks), clipped to x <= 0x1ff, padded.
-    cmd(g, HQ2_2D_LINE_CLIP, 0);
+    cmd(g, X2D_LINE_BOUNDS, 0);
     for v in [0x1ff, 0, 0x3ff] { data(g, v); }
-    cmd(g, HQ2_2D_POLYPOINT, 0);
+    cmd(g, X2D_DOT_LIST, 0);
     for v in [0x30, 0x40, 0x31, 0x40, 0x20c, 0x1a5, 1280, 1024] { data(g, v); }
-    cmd(g, HQ2_2D_LINE_CLIP, 0);
+    cmd(g, X2D_LINE_BOUNDS, 0);
     for v in [0x7ff, 0, 0x3ff] { data(g, v); }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
     g.wait_idle();
     assert_eq!((px(0x30, 0x40), px(0x31, 0x40), px(0x32, 0x40)), (7, 7, 0), "points");
     assert_eq!(px(0x20c, 0x1a5), 0, "point outside the clip");
@@ -653,16 +653,16 @@ fn ddx_glyphs_lines_spans_stipples() {
     assert_eq!(px(0x111, 0x80), 0);
 
     // Opaque 50% stipple (tile format 3, 32x2 of 0xaaaaaaaa/0x55555555).
-    cmd(g, HQ2_2D_TILE_SETUP, 8);
+    cmd(g, X2D_TILE_BEGIN, 8);
     for v in [32, 2, 3, 0xd022] { data(g, v); }
     cmd(g, 318, 0xaaaa_aaaa);
     data(g, 0x5555_5555);
-    cmd(g, HQ2_2D_ROP, 0x13);
+    cmd(g, X2D_FG_ALU, 0x13);
     for v in [0xff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_COLOR_ON, 0x13);
-    cmd(g, HQ2_2D_COLOR_OFF, 0x14);
-    cmd(g, HQ2_2D_STIPPLE_AUX, 1);
-    cmd(g, HQ2_2D_STIPPLE_RECT, 0);
+    cmd(g, X2D_BIT_ONE_COLOR, 0x13);
+    cmd(g, X2D_BIT_ZERO_COLOR, 0x14);
+    cmd(g, X2D_STIPPLE_OPAQUE, 1);
+    cmd(g, X2D_STIPPLED_BOX, 0);
     for v in [0, 200, 0, 300, 204, 302] { data(g, v); }
     g.wait_idle();
     let row: Vec<u32> = (200..204).map(|x| px(x, 300)).collect();
@@ -690,21 +690,21 @@ fn ddx_glyphs_lines_spans_stipples() {
 fn xterm_image_text_uses_color_on() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_COLOR_AUX, 0);
-    cmd(g, HQ2_2D_ROP, 0x23);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_AUX_PLANE_MASK, 0);
+    cmd(g, X2D_FG_ALU, 0x23);
     for v in [0xff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_SOLID_RECT, 0);
+    cmd(g, X2D_FILL_BOXES, 0);
     for v in [39, 167, 119, 182] { data(g, v); }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_COLOR_AUX, 0);
-    cmd(g, HQ2_2D_ROP, 0x23);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_AUX_PLANE_MASK, 0);
+    cmd(g, X2D_FG_ALU, 0x23);
     for v in [0xff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_COLOR_ON, 0x34);
-    cmd(g, HQ2_2D_COLOR_OFF, 0x23);
-    cmd(g, HQ2_2D_GLYPH_8, 0x27);
+    cmd(g, X2D_BIT_ONE_COLOR, 0x34);
+    cmd(g, X2D_BIT_ZERO_COLOR, 0x23);
+    cmd(g, X2D_GLYPH_NARROW, 0x27);
     for v in [0xa7, 0x10, 0xf, 0x387c, 0x10421042, 0x10421042, 0x107c1048,
               0x10441042, 0x38420000, 0, 0] {
         data(g, v);
@@ -715,32 +715,32 @@ fn xterm_image_text_uses_color_on() {
     assert_eq!(px(0x27 + 5, 0xa8), 0x23, "clear bit keeps the box colour");
 }
 
-/// 4Dwm menu text (trace): tile fills in the 2-bit overlay. TILE_RECT words
+/// 4Dwm menu text (trace): tile fills in the 2-bit overlay. TILE_FILL words
 /// are interleaved (origin x, x1, origin y, y1, x2, y2), and tile pixels must
 /// land in the aux planes, not the colour planes.
 #[test]
 fn overlay_tile_rect_menu_text() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, HQ2_2D_BEGIN, 0);
+    cmd(g, X2D_SESSION_START, 0);
     // Menu body: overlay value 1 over (32,32)-(178,256).
-    cmd(g, HQ2_2D_MODE, 0xb);
-    cmd(g, HQ2_2D_COLOR_AUX, 3);
-    cmd(g, HQ2_2D_ROP, 1);
+    cmd(g, X2D_PLANE_SELECT, 0xb);
+    cmd(g, X2D_AUX_PLANE_MASK, 3);
+    cmd(g, X2D_FG_ALU, 1);
     for v in [0, 3, 1] { data(g, v); }
-    cmd(g, HQ2_2D_SOLID_RECT, 0);
+    cmd(g, X2D_FILL_BOXES, 0);
     for v in [32, 32, 178, 256] { data(g, v); }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
     // Text: 16x16 8-bit tile of alternating 1/2 columns (row-invariant).
-    cmd(g, HQ2_2D_MODE, 0x100b);
-    cmd(g, HQ2_2D_COLOR_AUX, 3);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x100b);
+    cmd(g, X2D_AUX_PLANE_MASK, 3);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0, 3, 1] { data(g, v); }
-    cmd(g, HQ2_2D_TILE_SETUP, 0x40);
+    cmd(g, X2D_TILE_BEGIN, 0x40);
     for v in [16, 16, 2, 0xd022] { data(g, v); }
     cmd(g, 315, 0x0102_0102);
     for _ in 1..64 { data(g, 0x0102_0102); }
-    cmd(g, HQ2_2D_TILE_RECT, 0);
+    cmd(g, X2D_TILE_FILL, 0);
     for v in [0x20, 0x2e, 0x20, 0x29, 0x34, 0x2a] { data(g, v); }
     g.wait_idle();
     let aux = |x: i32, y: i32| (g.vram()[(1023 - y) as usize * FB_W + x as usize] >> 24) & 0xf;
@@ -760,12 +760,12 @@ fn overlay_tile_rect_menu_text() {
 fn kernel_pixel_dma_write_sets_fin2() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] { data(g, v); }
     w32(g, 0x6a04c, 0); // fin2 = 0
-    cmd(g, HQ2_DMA_WRITE_PIXELS, 38);
+    cmd(g, PIXDMA_TO_SCREEN, 38);
     for v in [730, 8, 2, 2, 0, 0] {
         w32(g, 0x40000, v); // FIFO index 0
     }
@@ -788,27 +788,27 @@ fn kernel_pixel_dma_write_sets_fin2() {
 }
 
 /// Screen-to-host readback as Xsgi's image read drives it (6.5.22 xdm
-/// hang): 0x6b000 = 0; BUF_SELECT [format, offset]; READ_IMAGE words/row;
+/// hang): 0x6b000 = 0; PIXEL_LAYOUT [format, offset]; IMAGE_TO_SHRAM words/row;
 /// DATA x, y, w, rows; poll FIN3; read packed rows from shram 0x6C00.
 #[test]
 fn ddx_read_image_packs_shram_and_sets_fin3() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_DRAW_IMAGE, 100);
+    cmd(g, X2D_PUT_IMAGE, 100);
     for v in [50, 6, 2, 2, 2, 0] { data(g, v); }
     for v in [0x01020304u32, 0x05060000, 0x11121314, 0x15160000, 0xdeadbeef, 0xdeadbeef] {
         data(g, v);
     }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
     // 8-bit, first pixel in byte 1: rows are ceil((1 + 6) / 4) = 2 words.
     w32(g, 0x6b000, 0);
-    cmd(g, HQ2_2D_BUF_SELECT, 2);
+    cmd(g, X2D_PIXEL_LAYOUT, 2);
     data(g, 1);
-    cmd(g, HQ2_2D_READ_IMAGE, 2);
+    cmd(g, X2D_IMAGE_TO_SHRAM, 2);
     for v in [100, 50, 6, 2] { data(g, v); }
     let t = std::time::Instant::now();
     while r32(g, 0x6a040) & 1 == 0 {
@@ -818,21 +818,21 @@ fn ddx_read_image_packs_shram_and_sets_fin3() {
     assert_eq!(sh, vec![0x0001_0203, 0x0405_0600, 0x0011_1213, 0x1415_1600]);
 }
 
-/// Icon halftones (6.5.22 login): STIPPLED_SPAN streams (x, y, w, pattern)
-/// with the pattern MSB at pixel x; transparent unless STIPPLE_AUX = 1.
+/// Icon halftones (6.5.22 login): STIPPLE_SPANS streams (x, y, w, pattern)
+/// with the pattern MSB at pixel x; transparent unless STIPPLE_OPAQUE = 1.
 #[test]
 fn ddx_stippled_spans() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_COLOR_ON, 7);
-    cmd(g, HQ2_2D_STIPPLE_AUX, 0);
-    cmd(g, HQ2_2D_STIPPLED_SPAN_B, 0);
+    cmd(g, X2D_BIT_ONE_COLOR, 7);
+    cmd(g, X2D_STIPPLE_OPAQUE, 0);
+    cmd(g, X2D_STIPPLE_SPANS_32, 0);
     for v in [0x182, 0x108, 4, 0xaaaaaaaa, 0x180, 0x109, 40, 0x55555555] { data(g, v); }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
     g.wait_idle();
     let px = |x: usize, y: usize| g.vram()[(1023 - y) * FB_W + x] & 0xff_ffff;
     let r0: Vec<u32> = (0x182..0x187).map(|x| px(x, 0x108)).collect();
@@ -842,37 +842,37 @@ fn ddx_stippled_spans() {
     assert_eq!((px(0x180 + 32, 0x109), px(0x181 + 32, 0x109)), (0, 7));
     assert_eq!(px(0x180 + 40, 0x109), 0);
 
-    // Opaque: clear bits get COLOR_OFF.
-    cmd(g, HQ2_2D_COLOR_OFF, 3);
-    cmd(g, HQ2_2D_STIPPLE_AUX, 1);
-    cmd(g, HQ2_2D_STIPPLED_SPAN_A, 0);
+    // Opaque: clear bits get BIT_ZERO_COLOR.
+    cmd(g, X2D_BIT_ZERO_COLOR, 3);
+    cmd(g, X2D_STIPPLE_OPAQUE, 1);
+    cmd(g, X2D_STIPPLE_SPANS_NARROW, 0);
     for v in [10, 20, 4, 0xa0000000] { data(g, v); }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
     g.wait_idle();
     let r: Vec<u32> = (10..15).map(|x| px(x, 20)).collect();
     assert_eq!(r, vec![7, 3, 7, 3, 0]);
 }
 
-/// 4Dwm move frame (6.5.22 trace): one LINE_SEG streams every side of the
-/// rectangle, padded with x = 1280 quads, then END_PRIMITIVE.
+/// 4Dwm move frame (6.5.22 trace): one LINE_QUADS streams every side of the
+/// rectangle, padded with x = 1280 quads, then PRIM_TERMINATOR.
 #[test]
 fn ddx_line_seg_streams_whole_frame() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x100b);
-    cmd(g, HQ2_2D_COLOR_AUX, 3);
-    cmd(g, HQ2_2D_ROP, 1);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x100b);
+    cmd(g, X2D_AUX_PLANE_MASK, 3);
+    cmd(g, X2D_FG_ALU, 1);
     for v in [0, 3, 1] { data(g, v); }
-    cmd(g, HQ2_2D_LINE_MODE, 0xa);
-    cmd(g, HQ2_2D_LINE_CLIP, 0);
+    cmd(g, X2D_LINE_STYLE, 0xa);
+    cmd(g, X2D_LINE_BOUNDS, 0);
     for v in [0x4ff, 0, 0x3ff] { data(g, v); }
-    cmd(g, HQ2_2D_LINE_SEG, 0);
+    cmd(g, X2D_LINE_QUADS, 0);
     for v in [150, 71, 844, 71, 844, 71, 844, 725, 844, 725, 150, 725, 150, 725, 150, 71,
               1280, 0, 1280, 0] {
         data(g, v);
     }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
     g.wait_idle();
     let aux = |x: usize, y: usize| (g.vram()[(1023 - y) * FB_W + x] >> 24) & 3;
     assert_eq!(aux(500, 71), 1, "top");
@@ -887,12 +887,12 @@ fn ddx_line_seg_streams_whole_frame() {
 /// = 0, spin on version bit 0, ack at the FIN3 port. The 6.5.22 screen saver
 /// hung here.
 #[test]
-fn gl_finish_sets_fin3() {
+fn readback_kick_sets_fin3() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
     w32(g, 0x6b000, 0);
-    cmd(g, GL_FLUSH, 0);
-    cmd(g, GL_FINISH, 0);
+    cmd(g, CMD_SWAP_WAIT, 0);
+    cmd(g, CMD_READBACK_KICK, 0);
     let t = std::time::Instant::now();
     while r32(g, 0x6a040) & 1 == 0 {
         assert!(t.elapsed() < std::time::Duration::from_secs(2), "FIN3 never set");
@@ -965,8 +965,8 @@ fn gl_smooth_triangle_interpolates() {
     assert!(g_ > 230 && r < 25 && b < 25, "near green vertex: {:?}", (r, g_, b));
     let (r, g_, b) = c(px(200, 120));
     assert!((70..100).contains(&r) && (70..100).contains(&g_) && (70..100).contains(&b), "centroid: {:?}", (r, g_, b));
-    // Colour iterators are left at zero for later FLAT spans.
-    assert_eq!(g.re3_reg(super::re3::REG_DR), 0);
+    // Colour iterators are left at zero for later FLAT_5 spans.
+    assert_eq!(g.re3_reg(super::re3::RE3_RED_STEP), 0);
 }
 
 /// Window + ortho setup shared by the GL state tests (400x300 at 64, 660).
@@ -986,14 +986,14 @@ fn gl_px(g: &Gr2, x: i32, y: i32) -> u32 {
 }
 
 /// Triangle (80,60) (320,60) (200,240), CCW in window space; colours from
-/// the ITOF (integer, 0..255) colour port as glColor3ub sends them.
+/// the IDX_INT_SOURCE (integer, 0..255) colour port as glColor3ub sends them.
 fn gl_ccw_triangle_ub(g: &Gr2) {
     let fl = |v: f32| v.to_bits();
     cmd(g, 0x0f0, 0);
     cmd(g, 0x4f2, 0);
     for (c, v) in [([255u32, 0, 0], [80.0f32, 60.]), ([0, 255, 0], [320., 60.]), ([0, 0, 255], [200., 240.])] {
         for x in c { cmd(g, 0x5982, x); }
-        for x in v { cmd(g, 0x1263, fl(x)); } // V2|USEV vertex
+        for x in v { cmd(g, 0x1263, fl(x)); } // V2|IDX_VERTEX_CONSUME vertex
     }
     cmd(g, 0x0f1, 0);
     cmd(g, 0x465, 0);
@@ -1005,7 +1005,7 @@ fn gl_integer_colours_and_culling() {
     let g = &live_gr2(Gr2Variant::Xz);
     gl_setup_window(g);
     gl_ccw_triangle_ub(g);
-    assert_eq!(gl_px(g, 200, 120), 0xff << 16, "ITOF 255 = full intensity (flat: blue)");
+    assert_eq!(gl_px(g, 200, 120), 0xff << 16, "IDX_INT_SOURCE 255 = full intensity (flat: blue)");
     // Cull back faces: a CCW triangle is front-facing, still drawn.
     let fl = |v: f32| v.to_bits();
     cmd(g, 0x104, fl(0.0));
@@ -1131,7 +1131,7 @@ fn gl_rgb12_dither() {
     for v in [0.0f32, 0.0, 1.0] { data(g, fl(v)); }
     g.wait_idle();
     assert_eq!(red_levels(g).into_iter().collect::<Vec<_>>(), vec![7, 8], "dither mixes adjacent levels");
-    assert_eq!(g.re3_reg(super::re3::REG_ENABDITH), 0, "2D sees dithering off afterwards");
+    assert_eq!(g.re3_reg(super::re3::RE3_DITHER_ON), 0, "2D sees dithering off afterwards");
 }
 
 /// Polygon stipple is window-aligned: row (y - window y0) mod 32 from the
@@ -1229,7 +1229,7 @@ fn gl_depth_test_less() {
 }
 
 /// Software spans (blast trace): 0x029 = x + 6144, dx, y + 6144, dy, z, dz;
-/// then one packed colour (ITOF|CP, 0xAABBGGRR) per pixel on 0x02A. IRIS GL
+/// then one packed colour (IDX_INT_SOURCE|CP, 0xAABBGGRR) per pixel on 0x02A. IRIS GL
 /// turns on SRC_ALPHA blending with 0x026 alone, so alpha-0 pixels vanish.
 #[test]
 fn gl_software_span_packed() {
@@ -1254,7 +1254,7 @@ fn gl_software_span_packed() {
 }
 
 /// Per-context GL state through kernel memory, the way Gr2PcxSwap drives it
-/// (IRIX 6.5.22, amesh after blast): GE_HQMSAV (0x1F0) = context id; DATA
+/// (IRIX 6.5.22, amesh after blast): GE_CTX_SWITCH (0x1F0) = context id; DATA
 /// state (0 = new), mode. The microcode reports the outgoing context's image
 /// size in shram word 0x302 and its owner in 0x303; 0x1E1 hands the image
 /// out on HQ2_GEDMA reads; 0x1E2 = word count takes it back on HQ2_GEDMA
@@ -1297,7 +1297,7 @@ fn gl_context_switch_through_kernel_memory() {
     // New context B (0xe8): A's image is offered for saving.
     switch(g, 0xe8, 0);
     let words = r32(g, 0xc08);
-    assert_eq!(words as usize, hq2::CX_WORDS, "CX_SIZE_MAIN = image words");
+    assert_eq!(words as usize, hq2::CX_WORDS, "SHRAM_CTX_WORDS = image words");
     eprintln!("GL context image: {words} words ({} bytes)", words * 4);
     assert_eq!(r32(g, 0xc0c), 0x74, "owner of the image = A");
     cmd(g, 0x1e1, 0);
@@ -1448,7 +1448,7 @@ fn gl_clip_to_visible_pieces() {
 }
 
 /// More pieces than 0x1E5 carries: the RE3 WID test clips against the CID
-/// planes Xsgi painted (2D_CID_WRITE).
+/// planes Xsgi painted (2D_CID_FIELD).
 #[test]
 fn gl_clip_by_wid() {
     use super::hq2::*;
@@ -1456,16 +1456,16 @@ fn gl_clip_by_wid() {
     gl_setup_window(g);
     let fl = |v: f32| v.to_bits();
     // Xsgi: CID 5 over X rows 0..1023, columns 0..263 (window x 0..199).
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 4);
-    cmd(g, HQ2_2D_COLOR_AUX, 0);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 4);
+    cmd(g, X2D_AUX_PLANE_MASK, 0);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xffffff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_CID_WRITE, (5 << 8) | 0xf000);
-    cmd(g, HQ2_2D_SOLID_RECT, 0);
+    cmd(g, X2D_CID_FIELD, (5 << 8) | 0xf000);
+    cmd(g, X2D_FILL_BOXES, 0);
     for v in [0, 0, 264, 1024] { data(g, v); }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
-    cmd(g, HQ2_2D_CID_WRITE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
+    cmd(g, X2D_CID_FIELD, 0);
     gl_window_clip(g, 5, 0, 7, &[]);
     cmd(g, 0x104, fl(1.0));
     for v in [0.0f32, 0.0, 1.0] { data(g, fl(v)); }
@@ -1608,8 +1608,8 @@ fn gl_blend_src_alpha() {
     assert_eq!(gl_px(g, 60, 60), 0xff, "unblended red");
 }
 
-/// Software fragments (GL_ALPHA_TEST path): ITOF token 0x2B = x + 6144;
-/// ITOF DATA (0x41DF) y + 6144, z; DATA r, g, b, a. Plus a colour readback.
+/// Software fragments (GL_ALPHA_TEST path): IDX_INT_SOURCE token 0x2B = x + 6144;
+/// IDX_INT_SOURCE DATA (0x41DF) y + 6144, z; DATA r, g, b, a. Plus a colour readback.
 #[test]
 fn gl_software_fragment_and_readback() {
     let g = &live_gr2(Gr2Variant::Xz);
@@ -1754,9 +1754,9 @@ fn gr2_replay_file() {
         w32(g, dac + 8, 0xff);
     }
     // Traces usually start mid-session: give 2D a full scissor (as
-    // Xsgi's init 2D_BEGIN does) and drop 2D_SYNC, whose FIN3 would wait for
+    // Xsgi's init 2D_SESSION_START does) and drop 2D_SYNC, whose FIN3 would wait for
     // a CPU acknowledge that the replay cannot give.
-    cmd(g, hq2::HQ2_2D_BEGIN, 0);
+    cmd(g, hq2::X2D_SESSION_START, 0);
     let text: String = std::fs::read_to_string(&path)
         .expect("read GR2_REPLAY")
         .lines()
@@ -1788,9 +1788,9 @@ fn pll_programming_is_decoded() {
     assert!(s.contains("107.352 MHz (the 60 Hz table)"), "{s}");
 }
 
-/// showmap (IRIX 6.5.22 trace): a 12-bit colour-index window (MAKECURRENT
-/// 10) draws each CLUT entry as a rectangle: color(i) on ITOF|C1 0x030, then
-/// 0x044 / LOADV|0x1AE, four ITOF|V3 vertices on 0x045, 0x042 / LOADV|0x065.
+/// showmap (IRIX 6.5.22 trace): a 12-bit colour-index window (BIND_CONTEXT
+/// 10) draws each CLUT entry as a rectangle: color(i) on IDX_INT_SOURCE|C1 0x030, then
+/// 0x044 / IDX_VERTEX_ROUTINE|0x1AE, four IDX_INT_SOURCE|V3 vertices on 0x045, 0x042 / IDX_VERTEX_ROUTINE|0x065.
 /// The index lands unclamped; writemask 0xFFF keeps it to bank 0.
 #[test]
 fn iris_ci12_rect() {
@@ -1873,22 +1873,22 @@ fn iris_glyph16_at_cmov() {
 }
 
 /// xterm's hollow cursor (IRIX 6.5.22 trace): XDrawRectangle through
-/// Xsgi's segment draw with CapNotLast = LINE_SEG, reversed edges swapped with +1,
+/// Xsgi's segment draw with CapNotLast = LINE_QUADS, reversed edges swapped with +1,
 /// then a (0, 0)-(0, 0) segment. Every pixel once, nothing past the corners.
 #[test]
 fn ddx_line_seg_cap_not_last() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, hq2::HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_ROP, 2);
+    cmd(g, hq2::X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_FG_ALU, 2);
     for v in [0xff, 3, 0] { data(g, v); }
     let px = |x: i32, y: i32| g.vram()[(1023 - y) as usize * FB_W + x as usize] & 0xff;
-    cmd(g, HQ2_2D_LINE_SEG, 0);
+    cmd(g, X2D_LINE_QUADS, 0);
     for v in [103, 497, 110, 497, 110, 497, 110, 511, 104, 511, 111, 511, 103, 498, 103, 512, 0, 0, 0, 0] {
         data(g, v);
     }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
     g.wait_idle();
     assert!((103..=110).all(|x| px(x, 497) == 2 && px(x, 511) == 2), "top and bottom");
     assert!((497..=511).all(|y| px(103, y) == 2 && px(110, y) == 2), "sides");
@@ -1906,16 +1906,16 @@ fn gl_clip_obscured_no_pieces_uses_wid() {
     let g = &live_gr2(Gr2Variant::Xz);
     gl_setup_window(g);
     let fl = |v: f32| v.to_bits();
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 4);
-    cmd(g, HQ2_2D_COLOR_AUX, 0);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 4);
+    cmd(g, X2D_AUX_PLANE_MASK, 0);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xffffff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_CID_WRITE, (1 << 8) | 0xf000);
-    cmd(g, HQ2_2D_SOLID_RECT, 0);
+    cmd(g, X2D_CID_FIELD, (1 << 8) | 0xf000);
+    cmd(g, X2D_FILL_BOXES, 0);
     for v in [0, 0, 264, 1024] { data(g, v); }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
-    cmd(g, HQ2_2D_CID_WRITE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
+    cmd(g, X2D_CID_FIELD, 0);
     // Window (64, 660) 400x300 as in gl_setup_window, obscured, 0 pieces,
     // bounding box in the first pair.
     cmd(g, 0x1e5, 64);
@@ -2188,13 +2188,13 @@ fn gl_quad_gouraud_and_flat_provoking() {
 fn kernel_pixel_dma_fin2_poll_waits_for_hq() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] { data(g, v); }
     let (rows, wpr) = (400u32, 320u32); // 1280 8-bit pixels per row
     w32(g, 0x6a04c, 0); // fin2 = 0
-    cmd(g, HQ2_DMA_WRITE_PIXELS, 0);
+    cmd(g, PIXDMA_TO_SCREEN, 0);
     for v in [100, wpr * 4, rows, wpr, 0, 0] {
         w32(g, 0x40000, v);
     }
@@ -2352,7 +2352,7 @@ fn gl_clip_pieces_are_xor() {
     assert_eq!(px(250, 600), 0, "covered corner: never drawn");
 }
 
-/// GL lines are one RE3 SHADED primitive stepping DX / DY from a subpixel
+/// GL lines are one RE3 SMOOTH primitive stepping DX / DY from a subpixel
 /// start (not a horizontal span): a smooth diagonal line gets its colour
 /// iterated, keeps to the right pixels, and is clipped by the window's
 /// pieces through RE3's scissor (XOR: C-shaped atlantis packet).
@@ -2381,7 +2381,7 @@ fn gl_line_is_one_re3_primitive() {
     assert_eq!(gl_px(g, 110, 60), 0, "last point not drawn");
 }
 
-/// Y-major line drawn downwards: DY = -1.0, DX = slope, XYFRAC holds the x
+/// Y-major line drawn downwards: DY = -1.0, DX = slope, SUBPIXEL holds the x
 /// start fraction in 1/16 pixel. From (25.5, 110.5) to (20.5, 10.5): the
 /// pixel at row y is x = floor(25.5 - 0.05 * (110 - y)).
 #[test]
@@ -2408,7 +2408,7 @@ fn gl_line_steep_downwards() {
 }
 
 /// Kernel pixel-DMA read as Xsgi's image read drives it for large
-/// rectangles (XGetImage, readximage.log): BUF_SELECT; fin2 = 0; 0x152 x;
+/// rectangles (XGetImage, readximage.log): PIXEL_LAYOUT; fin2 = 0; 0x152 x;
 /// GE_DATA y, width, rows, words/row, flag, 0; the VDMA then reads the
 /// packed rows (top first, X-style y) from HQ2_GEDMA and waits for FIN2.
 /// Before IRIS knew 0x152 the reads got zeros, FIN2 never came and the
@@ -2417,20 +2417,20 @@ fn gl_line_steep_downwards() {
 fn ddx_dma_read_pixels_streams_gedma_and_sets_fin2() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_DRAW_IMAGE, 100);
+    cmd(g, X2D_PUT_IMAGE, 100);
     for v in [50, 6, 2, 2, 2, 0] { data(g, v); }
     for v in [0x01020304u32, 0x05060000, 0x11121314, 0x15160000, 0xdeadbeef, 0xdeadbeef] {
         data(g, v);
     }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
-    cmd(g, HQ2_2D_BUF_SELECT, 2);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
+    cmd(g, X2D_PIXEL_LAYOUT, 2);
     data(g, 0);
     w32(g, 0x6a04c, 0);
-    cmd(g, HQ2_2D_DMA_READ_PIXELS, 100);
+    cmd(g, PIXDMA_FROM_SCREEN, 100);
     for v in [50, 6, 2, 2, 0, 0] { cmd(g, 0, v); }
     // No wait: read the way the VDMA does, right after the header.
     let words: Vec<u32> = (0..4).map(|_| r32(g, 0x6a068)).collect();
@@ -2449,7 +2449,7 @@ fn gedma_read_with_hq_idle_is_an_overrun() {
 
 fn gl_dma_read(g: &Gr2, x: u32, y: u32, w: u32, rows: u32) -> Vec<u32> {
     w32(g, 0x6a04c, 0);
-    cmd(g, super::hq2::HQ2_GL_DMA_READ, x);
+    cmd(g, super::hq2::GLDMA_FROM_WINDOW, x);
     for v in [y, w, rows, w, 0, 0] { cmd(g, 0, v); }
     let words = (0..w * rows).map(|_| r32(g, 0x6a068)).collect();
     assert_eq!(r32(g, 0x6a040) & 2, 2, "FIN2 after the transfer");
@@ -2471,7 +2471,7 @@ fn gl_dma_read_rgb24_top_row_first() {
     assert_eq!(gl_dma_read(g, 10, 148, 2, 4), vec![blue, blue, blue, blue, red, red, red, red]);
 }
 
-/// Double-buffered 12-bit RGB (MAKECURRENT 2): GL_BACK draws with the write
+/// Double-buffered 12-bit RGB (BIND_CONTEXT 2): GL_BACK draws with the write
 /// masks 0xFFF000 / 0x000FFF, so in swap state 0 the back buffer is bank 1.
 /// A back read (0x10A = 0, 1) returns it with the nibbles widened; a front
 /// read returns bank 0.
@@ -2509,15 +2509,15 @@ fn ddx_dma_read_rgb12_takes_the_flagged_bank() {
     for v in [0x00ff_f000, 0x00ff_f000] { cmd(g, 0x10b, v); }
     gl_quad3(g, [0., 0., 1.], [[0., 0., 0.], [400., 0., 0.], [400., 300., 0.], [0., 300., 0.]]);
     let read = |buffer: u32| {
-        cmd(g, HQ2_2D_BEGIN, 0);
-        cmd(g, HQ2_2D_MODE, 0x1002);
-        cmd(g, HQ2_2D_ROP, 0);
+        cmd(g, X2D_SESSION_START, 0);
+        cmd(g, X2D_PLANE_SELECT, 0x1002);
+        cmd(g, X2D_FG_ALU, 0);
         for v in [0xff_ffff, 3, buffer * 8] { data(g, v); }
-        cmd(g, HQ2_2D_BUF_SELECT, 0);
+        cmd(g, X2D_PIXEL_LAYOUT, 0);
         data(g, 0);
         w32(g, 0x6a04c, 0);
         // Screen x 100, X-style y 1023 - 700 (inside the window).
-        cmd(g, HQ2_2D_DMA_READ_PIXELS, 100);
+        cmd(g, PIXDMA_FROM_SCREEN, 100);
         for v in [1023 - 700, 1, 1, 1, 0, 0] { cmd(g, 0, v); }
         let w = r32(g, 0x6a068);
         (w & 0xf) | ((w & 0xf00) >> 4) | ((w & 0xf0000) >> 8)
@@ -2528,9 +2528,9 @@ fn ddx_dma_read_rgb12_takes_the_flagged_bank() {
 
 fn ddx_12bit_setup(g: &Gr2, planemask: u32, buffer: u32) {
     use super::hq2::*;
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1002);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1002);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [planemask, 3, buffer.wrapping_mul(8)] { data(g, v); }
 }
 
@@ -2545,11 +2545,11 @@ fn ddx_12bit_fill_goes_to_the_flagged_bank() {
     // Solid rect, X-style y: (10, 1023 - 20) .. (13, 1023 - 20).
     let rect = |g: &Gr2, fg: u32, pm: u32, buffer: u32| {
         ddx_12bit_setup(g, pm, buffer);
-        cmd(g, HQ2_2D_ROP, fg);
+        cmd(g, X2D_FG_ALU, fg);
         for v in [pm, 3, buffer.wrapping_mul(8)] { data(g, v); }
-        cmd(g, HQ2_2D_SOLID_RECT, 0);
+        cmd(g, X2D_FILL_BOXES, 0);
         for v in [10, 1023 - 20, 14, 1023 - 19] { data(g, v); }
-        cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+        cmd(g, X2D_PRIM_TERMINATOR, 0);
         g.wait_idle();
     };
     rect(g, 0x00f, 0xff_ffff, 0);
@@ -2570,10 +2570,10 @@ fn ddx_12bit_image_word_is_widened_pixel() {
     let g = &live_gr2(Gr2Variant::Xz);
     ddx_12bit_setup(g, 0xfff, 0);
     let widen = |x: u32| ((x & 0xf) << 4) | ((x & 0xf0) << 8) | ((x & 0xf00) << 12);
-    cmd(g, HQ2_2D_DRAW_IMAGE, 100);
+    cmd(g, X2D_PUT_IMAGE, 100);
     for v in [50, 2, 1, 2, 0, 0] { data(g, v); }
     for v in [widen(0x123), widen(0xabc)] { data(g, v); }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
     g.wait_idle();
     assert_eq!(pixel(g, 100, 1023 - 50), 0x123);
     assert_eq!(pixel(g, 101, 1023 - 50), 0xabc);
@@ -2587,17 +2587,17 @@ fn gl_24bit_after_ddx_12bit_draw() {
     let g = &live_gr2(Gr2Variant::Xz);
     gl_setup_window(g);
     ddx_12bit_setup(g, 0xfff, 0);
-    cmd(g, HQ2_2D_SOLID_RECT, 0);
+    cmd(g, X2D_FILL_BOXES, 0);
     for v in [0, 0, 2, 2] { data(g, v); }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
     gl_quad3(g, [1., 0.5, 0.25], [[0., 0., 0.], [400., 0., 0.], [400., 300., 0.], [0., 300., 0.]]);
     g.wait_idle();
     assert_eq!(gl_px(g, 20, 20), 0x40_80ff);
 }
 
 /// glIndexi in a colour-index window (gr_osview, IRIX 6.5.22, grosview.log):
-/// ITOF|C1|0x0FE (0x70FE) carries the index before each Begin; vertices
-/// (V2|USEV 0x1263) carry no colour. Ignoring 0x0FE drew every bar in the
+/// IDX_INT_SOURCE|C1|0x0FE (0x70FE) carries the index before each Begin; vertices
+/// (V2|IDX_VERTEX_CONSUME 0x1263) carry no colour. Ignoring 0x0FE drew every bar in the
 /// default colour (index 255): a black window.
 #[test]
 fn gl_index_sets_ci_colour() {
@@ -2677,7 +2677,7 @@ fn gl_index_clear_fills_window_with_index() {
     assert_eq!(gl_px(g, 399, 299) & 0xff, 46);
 }
 
-/// MAKECURRENT 9 = 8-bit colour index (gr_osview). The index lands in the
+/// BIND_CONTEXT 9 = 8-bit colour index (gr_osview). The index lands in the
 /// low byte (and the byte above, for the other 8-bit buffer's mask), blending
 /// is off in CI, and a 0x0AC read returns the index, not RGB.
 #[test]
@@ -2693,12 +2693,12 @@ fn gl_ci8_draw_and_read() {
     for v in [0, 0] { cmd(g, 0x10a, v); }
     // 4 pixels per word (8-bit), MSB first.
     w32(g, 0x6a04c, 0);
-    cmd(g, super::hq2::HQ2_GL_DMA_READ, 20);
+    cmd(g, super::hq2::GLDMA_FROM_WINDOW, 20);
     for v in [20, 4, 1, 1, 0, 0] { cmd(g, 0, v); }
     assert_eq!(r32(g, 0x6a068), 0x2a2a_2a2a);
 }
 
-/// MAKECURRENT 1 = 8-bit 3:3:2 TrueColor (R 7:5, B 4:3, G 2:0).
+/// BIND_CONTEXT 1 = 8-bit 3:3:2 TrueColor (R 7:5, B 4:3, G 2:0).
 #[test]
 fn gl_rgb8_packs_332() {
     let g = &live_gr2(Gr2Variant::Xz);
@@ -3002,7 +3002,7 @@ fn gl_copy_pixels_with_zoom() {
     assert_eq!(gl_px(g, 10, 20), 0xff, "source kept");
 }
 
-/// Colour-index clear with depth (ITOF|C1|0x0A0, pixtest --ci 8): integer
+/// Colour-index clear with depth (IDX_INT_SOURCE|C1|0x0A0, pixtest --ci 8): integer
 /// index 3; DATA 0, 0, 0, depth, ~0.
 #[test]
 fn gl_clear_index_and_depth() {
@@ -3016,7 +3016,7 @@ fn gl_clear_index_and_depth() {
     assert_eq!(gl_px(g, 399, 299) & 0xff, 3);
 }
 
-/// A z20 s4 visual (0x00E = 4): a depth read (0x10A = 2, 0; READ_RECT)
+/// A z20 s4 visual (0x00E = 4): a depth read (0x10A = 2, 0; READ_BOX)
 /// returns Z in bits 19:0 with the stencil above it in 23:20. libglcore's
 /// depth reads drop everything above Z (Z write mask 0x0FFFFF).
 #[test]
@@ -3067,7 +3067,7 @@ fn gl_rgb4_clear_and_read() {
 }
 
 /// A software fragment on a colour-index visual (pixtest --ci 12, FLOAT
-/// indices): ITOF 0x02B x + 6144; ITOF DATA y + 6144, z; C1 DATA the index
+/// indices): IDX_INT_SOURCE 0x02B x + 6144; IDX_INT_SOURCE DATA y + 6144, z; C1 DATA the index
 /// (f32, libglcore adds 0.5); DATA 0, 0, 0. The index wraps to the visual.
 #[test]
 fn gl_fragment_colour_index() {
@@ -3128,7 +3128,7 @@ fn bench_gl_smooth_triangles() {
 /// IRIS GL drawmode(OVERDRAW) (Blender's toolbox, IRIX 5.3): MakeCurrent
 /// 11, colour planes masked off (0x005 = 0), aux write mask 0x003 = 3 (the
 /// 2-bit overlay, aux bits 1:0), then sboxfi / sboxi (0x4053 / 0x4052,
-/// ITOF) in colour indices set by 0x7030. Only the overlay bits change;
+/// IDX_INT_SOURCE) in colour indices set by 0x7030. Only the overlay bits change;
 /// sbox draws the outline alone.
 #[test]
 fn iris_overdraw_boxes_into_the_overlay_planes() {
@@ -3158,7 +3158,7 @@ fn iris_overdraw_boxes_into_the_overlay_planes() {
     assert_eq!(aux(35, 20), 1, "outline top");
     assert_eq!(aux(35, 15), 0, "outline only, not filled");
     assert_eq!(aux(25, 15), 0, "between the boxes");
-    assert_eq!(g.re3_reg(super::re3::REG_AUXMASK), 0, "aux mask reset for 2D");
+    assert_eq!(g.re3_reg(super::re3::RE3_AUX_PLANE_MASK), 0, "aux mask reset for 2D");
 }
 
 /// IRIS GL readsource (0x008 = plane, absolute bank) picks the bank a
@@ -3211,12 +3211,12 @@ fn gr2_frame_hash(variant: Gr2Variant, gpu: bool) -> String {
         w32(g, dac, 4);
         w32(g, dac + 8, 0xff);
     }
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_COLOR_AUX, 0);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_AUX_PLANE_MASK, 0);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_TILE_SETUP, 0x40);
+    cmd(g, X2D_TILE_BEGIN, 0x40);
     for v in [85, 67, 2, 0xd022] { data(g, v); }
     let mut words = Vec::new();
     for y in 0..67u32 {
@@ -3231,9 +3231,9 @@ fn gr2_frame_hash(variant: Gr2Variant, gpu: bool) -> String {
         }
     }
     words.resize(1480, 0);
-    cmd(g, HQ2_2D_TILE_DATA_FIRST, words[0]);
+    cmd(g, X2D_TILE_CHUNK_FIRST, words[0]);
     for &v in &words[1..] { data(g, v); }
-    cmd(g, HQ2_2D_TILE_RECT_ODD, 0);
+    cmd(g, X2D_TILE_FILL_RAGGED, 0);
     for v in [40, 210, 16, 16, 295, 83] { data(g, v); }
     g.wait_idle();
     let r = g.regs();
@@ -3311,7 +3311,7 @@ fn what_would_wait_matches_what_does_and_a_stall_names_its_end() {
     assert!(busy_read(0x6a040));
     assert_eq!(g.stall_deadline(), Some(5 + 2_000_000_000), "the poll gives up two seconds after its first stall");
     // A queued RE3 write: its registers read busy until it runs.
-    assert_eq!(g.reg_write(0x6c200 + 4 * re3::REG_FUNC as u32, 3), BUS_OK);
+    assert_eq!(g.reg_write(0x6c200 + 4 * re3::RE3_LOGIC_OP as u32, 3), BUS_OK);
     assert!(waits(0x6c200, false) && busy_read(0x6c200));
     // A full queue refuses a store, and says so before one is made.
     let mut n = 0;
@@ -3347,13 +3347,13 @@ fn a_box_far_off_the_screen_is_clipped_not_walked() {
 fn a_line_longer_than_a_coordinate_can_span_is_dropped() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, hq2::HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_ROP, 2);
+    cmd(g, hq2::X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_FG_ALU, 2);
     for v in [0xff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_LINE_SEG, 0);
+    cmd(g, X2D_LINE_QUADS, 0);
     for v in [0, 0, 0x7fff_ffff, 0x7fff_ffff, 200, 300, 210, 300, 0, 0, 0, 0] { data(g, v); }
-    cmd(g, HQ2_2D_END_PRIMITIVE, 0);
+    cmd(g, X2D_PRIM_TERMINATOR, 0);
     g.wait_idle();
     assert_eq!(g.panic_message(), None);
     let px = |x: i32, y: i32| g.vram()[(1023 - y) as usize * FB_W + x as usize] & 0xff;
@@ -3367,21 +3367,21 @@ fn a_line_longer_than_a_coordinate_can_span_is_dropped() {
 fn a_pixel_read_of_an_absurd_size_is_refused() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, hq2::HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, hq2::X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_BUF_SELECT, 2);
+    cmd(g, X2D_PIXEL_LAYOUT, 2);
     data(g, 0);
     w32(g, 0x6a04c, 0);
-    cmd(g, HQ2_2D_DMA_READ_PIXELS, 100);
+    cmd(g, PIXDMA_FROM_SCREEN, 100);
     for v in [50, 6, 0x7fff_ffff, 0x7fff_ffff, 0, 0] { cmd(g, 0, v); }
     g.wait_idle();
     assert_eq!(g.panic_message(), None);
     assert_eq!(r32(g, 0x6a040) & 2, 0, "no FIN2: the request was refused");
     // The board still reads.
     w32(g, 0x6a04c, 0);
-    cmd(g, HQ2_2D_DMA_READ_PIXELS, 100);
+    cmd(g, PIXDMA_FROM_SCREEN, 100);
     for v in [50, 6, 1, 2, 0, 0] { cmd(g, 0, v); }
     let words: Vec<u32> = (0..2).map(|_| r32(g, 0x6a068)).collect();
     assert_eq!(words.len(), 2);
@@ -3393,11 +3393,11 @@ fn a_pixel_read_of_an_absurd_size_is_refused() {
 fn a_pixel_read_of_many_empty_rows_is_refused_too() {
     use super::hq2::*;
     let g = &live_gr2(Gr2Variant::Xz);
-    cmd(g, hq2::HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_BUF_SELECT, 2);
+    cmd(g, hq2::X2D_SESSION_START, 0);
+    cmd(g, X2D_PIXEL_LAYOUT, 2);
     data(g, 0);
     let t = std::time::Instant::now();
-    cmd(g, HQ2_2D_READ_IMAGE, 0);
+    cmd(g, X2D_IMAGE_TO_SHRAM, 0);
     for v in [50, 6, 40, u32::MAX] { data(g, v); }
     g.wait_idle();
     assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
@@ -3412,14 +3412,14 @@ fn operands_at_the_ends_of_their_range_are_bounded() {
     let g = &live_gr2(Gr2Variant::Xz);
     let t = std::time::Instant::now();
     tp_init(g);
-    cmd(g, HQ2_2D_BEGIN, 0);
-    cmd(g, HQ2_2D_MODE, 0x1009);
-    cmd(g, HQ2_2D_ROP, 0);
+    cmd(g, X2D_SESSION_START, 0);
+    cmd(g, X2D_PLANE_SELECT, 0x1009);
+    cmd(g, X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] { data(g, v); }
-    cmd(g, HQ2_2D_BUF_SELECT, 2);
+    cmd(g, X2D_PIXEL_LAYOUT, 2);
     data(g, 0);
     // A screen-to-host read, a text-port copy and fills at the ends of the i32 range.
-    cmd(g, HQ2_2D_READ_IMAGE, 2);
+    cmd(g, X2D_IMAGE_TO_SHRAM, 2);
     for v in [0x7fff_fff0, 0x8000_0000, 40, 3] { data(g, v); }
     cmd(g, hq2::PUC_RECTCOPY, 0);
     for v in [0, 0, 0x8000_0000, 10, 10, 0, 0] { data(g, v); }
@@ -3429,11 +3429,11 @@ fn operands_at_the_ends_of_their_range_are_bounded() {
     cmd(g, hq2::PUC_RECTI2D, 0);
     for v in [0, 10, 0x7fff_ffff] { data(g, v); }
     // A copy of the largest rectangle, a tile of the largest sides and a stipple of the widest span.
-    cmd(g, HQ2_2D_COPY_RECT, 0);
+    cmd(g, X2D_SCREEN_COPY, 0);
     for v in [0, 0, 32767, 32767, 0, 0, 0] { data(g, v); }
-    cmd(g, HQ2_2D_TILE_SETUP, 0x40);
+    cmd(g, X2D_TILE_BEGIN, 0x40);
     for v in [u32::MAX, u32::MAX, 3, 0xd022] { data(g, v); }
-    cmd(g, HQ2_2D_TILE_RECT, 0);
+    cmd(g, X2D_TILE_FILL, 0);
     for v in [0x8000_0000, 0, 0x7fff_ffff, 0, 0x7fff_ffff, 0x7fff_ffff] { data(g, v); }
     // A GL window and scissor of the largest words, then a box.
     gl_setup_window(g);

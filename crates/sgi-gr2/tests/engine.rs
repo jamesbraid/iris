@@ -13,14 +13,14 @@ use support::*;
 fn scene(rig: &mut Rig) {
     rig.tp_init();
     rig.program_display();
-    rig.cmd(hq2::HQ2_2D_BEGIN, 0);
-    rig.cmd(hq2::HQ2_2D_MODE, 0x1009);
-    rig.cmd(hq2::HQ2_2D_COLOR_AUX, 0);
-    rig.cmd(hq2::HQ2_2D_ROP, 0);
+    rig.cmd(hq2::X2D_SESSION_START, 0);
+    rig.cmd(hq2::X2D_PLANE_SELECT, 0x1009);
+    rig.cmd(hq2::X2D_AUX_PLANE_MASK, 0);
+    rig.cmd(hq2::X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] {
         rig.data(v);
     }
-    rig.cmd(hq2::HQ2_2D_TILE_SETUP, 0x40);
+    rig.cmd(hq2::X2D_TILE_BEGIN, 0x40);
     for v in [85, 67, 2, 0xd022] {
         rig.data(v);
     }
@@ -37,11 +37,11 @@ fn scene(rig: &mut Rig) {
         }
     }
     words.resize(1480, 0);
-    rig.cmd(hq2::HQ2_2D_TILE_DATA_FIRST, words[0]);
+    rig.cmd(hq2::X2D_TILE_CHUNK_FIRST, words[0]);
     for &v in &words[1..] {
         rig.data(v);
     }
-    rig.cmd(hq2::HQ2_2D_TILE_RECT_ODD, 0);
+    rig.cmd(hq2::X2D_TILE_FILL_RAGGED, 0);
     for v in [40, 210, 16, 16, 295, 83] {
         rig.data(v);
     }
@@ -146,7 +146,7 @@ fn a_read_that_waits_on_queued_work_answers_busy_until_the_board_runs() {
     let mut rig = Rig::new(Gr2Variant::Xz);
     rig.e.quiesce(u64::MAX).unwrap();
     // Parked, a write to the RE3 window queues and nothing runs it.
-    let reg = 0x6c200 + 4 * re3::REG_FUNC as u32;
+    let reg = 0x6c200 + 4 * re3::RE3_LOGIC_OP as u32;
     assert_eq!(rig.e.write(reg, 32, 3), Write::Done);
     assert!(rig.e.access_waits(reg, 32, false));
     assert_eq!(rig.e.read(reg, 32), Read::Busy);
@@ -170,24 +170,24 @@ fn only_a_command_word_takes_the_fast_store_path() {
 #[test]
 fn the_read_port_hands_its_words_over_in_batches() {
     let mut rig = Rig::new(Gr2Variant::Xz);
-    rig.cmd(hq2::HQ2_2D_BEGIN, 0);
-    rig.cmd(hq2::HQ2_2D_MODE, 0x1009);
-    rig.cmd(hq2::HQ2_2D_ROP, 0);
+    rig.cmd(hq2::X2D_SESSION_START, 0);
+    rig.cmd(hq2::X2D_PLANE_SELECT, 0x1009);
+    rig.cmd(hq2::X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] {
         rig.data(v);
     }
-    rig.cmd(hq2::HQ2_2D_DRAW_IMAGE, 100);
+    rig.cmd(hq2::X2D_PUT_IMAGE, 100);
     for v in [50, 6, 2, 2, 2, 0] {
         rig.data(v);
     }
     for v in [0x0102_0304u32, 0x0506_0000, 0x1112_1314, 0x1516_0000, 0xdead_beef, 0xdead_beef] {
         rig.data(v);
     }
-    rig.cmd(hq2::HQ2_2D_END_PRIMITIVE, 0);
-    rig.cmd(hq2::HQ2_2D_BUF_SELECT, 2);
+    rig.cmd(hq2::X2D_PRIM_TERMINATOR, 0);
+    rig.cmd(hq2::X2D_PIXEL_LAYOUT, 2);
     rig.data(0);
     rig.w32(0x6a04c, 0);
-    rig.cmd(hq2::HQ2_2D_DMA_READ_PIXELS, 100);
+    rig.cmd(hq2::PIXDMA_FROM_SCREEN, 100);
     for v in [50, 6, 2, 2, 0, 0] {
         rig.cmd(0, v);
     }
@@ -213,15 +213,15 @@ fn the_read_port_hands_its_words_over_in_batches() {
 #[test]
 fn words_pushed_on_the_data_port_join_the_command_stream() {
     let mut rig = Rig::new(Gr2Variant::Xz);
-    rig.cmd(hq2::HQ2_2D_BEGIN, 0);
-    rig.cmd(hq2::HQ2_2D_MODE, 0x1009);
-    rig.cmd(hq2::HQ2_2D_ROP, 0);
+    rig.cmd(hq2::X2D_SESSION_START, 0);
+    rig.cmd(hq2::X2D_PLANE_SELECT, 0x1009);
+    rig.cmd(hq2::X2D_FG_ALU, 0);
     for v in [0xff, 3, 0] {
         rig.data(v);
     }
     let (rows, wpr) = (400u32, 320u32);
     rig.w32(0x6a04c, 0);
-    rig.cmd(hq2::HQ2_DMA_WRITE_PIXELS, 0);
+    rig.cmd(hq2::PIXDMA_TO_SCREEN, 0);
     for v in [100, wpr * 4, rows, wpr, 0, 0] {
         rig.w32(0x40000, v);
     }
@@ -270,7 +270,7 @@ fn a_held_fin2_poll_is_released_by_the_shells_time() {
 #[test]
 fn a_board_that_is_working_is_not_reported_stalled() {
     let mut rig = Rig::new(Gr2Variant::Xz);
-    rig.cmd(hq2::HQ2_2D_BEGIN, 0);
+    rig.cmd(hq2::X2D_SESSION_START, 0);
     rig.w32(0x6a04c, 0);
     for _ in 0..20_000 {
         rig.cmd(hq2::PUC_COLOR, 1);

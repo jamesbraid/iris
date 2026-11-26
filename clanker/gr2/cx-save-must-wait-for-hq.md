@@ -17,7 +17,7 @@ defaults instead of keeping the previous context's state (draws nothing
 until the next window / matrix tokens, rather than into someone else's
 window).
 
-Trace diagnostics: GE_HQMSAV lines show `(live was <ctx>)` and flag
+Trace diagnostics: GE_CTX_SWITCH lines show `(live was <ctx>)` and flag
 `LEAK?` for state 1 over another context's state; restores report
 `REJECTED: <reason>`. Test: `gl_context_save_read_waits_for_hq`.
 

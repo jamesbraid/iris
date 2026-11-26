@@ -1,7 +1,7 @@
 //! RE3 raster engine: register state, VRAM and generic (unoptimised) drawing.
 //!
 //! Register writes arrive through the RE3 FIFO, from the CPU (0x6c200..) or
-//! from the HQ2 thread. The RE3 thread applies them in order, and an `IR`
+//! from the HQ2 thread. The RE3 thread applies them in order, and a `DRAW_TRIGGER`
 //! write executes. Semantics follow MAME's RE2 model (`sgi_re2.cpp`), the RE3's
 //! predecessor.
 //!
@@ -13,70 +13,70 @@ pub const FB_W: usize = 1280;
 pub const FB_H: usize = 1024;
 
 // Buffered registers.
-pub const REG_ENABRGB: usize = 0x04;
-pub const REG_FUNC: usize = 0x06;
-pub const REG_NOPUP: usize = 0x08;
+pub const RE3_COLOR_WRITE_ON: usize = 0x04;
+pub const RE3_LOGIC_OP: usize = 0x06;
+pub const RE3_SKIP_POPUP: usize = 0x08;
 /// Subpixel start fraction (4 bits; see load_iterators).
-pub const REG_XYFRAC: usize = 0x09;
-pub const REG_RGB: usize = 0x0a;
-pub const REG_YX: usize = 0x0b;
-pub const REG_PUPDATA: usize = 0x0c;
-pub const REG_PATL: usize = 0x0d;
-pub const REG_PATH: usize = 0x0e;
-pub const REG_DZI: usize = 0x0f;
-pub const REG_DZF: usize = 0x10;
-pub const REG_DR: usize = 0x11;
-pub const REG_DG: usize = 0x12;
-pub const REG_DB: usize = 0x13;
-pub const REG_Z: usize = 0x14;
-pub const REG_R: usize = 0x15;
-pub const REG_G: usize = 0x16;
-pub const REG_B: usize = 0x17;
-pub const REG_STIP: usize = 0x18;
-pub const REG_STIPCOUNT: usize = 0x19;
-pub const REG_DX: usize = 0x1a;
-pub const REG_DY: usize = 0x1b;
-pub const REG_NUMPIX: usize = 0x1c;
-pub const REG_X: usize = 0x1d;
-pub const REG_Y: usize = 0x1e;
-pub const REG_IR: usize = 0x1f;
+pub const RE3_SUBPIXEL: usize = 0x09;
+pub const RE3_COLOR_PACKED: usize = 0x0a;
+pub const RE3_XY_PACKED: usize = 0x0b;
+pub const RE3_POPUP_VALUE: usize = 0x0c;
+pub const RE3_PATTERN_LO: usize = 0x0d;
+pub const RE3_PATTERN_HI: usize = 0x0e;
+pub const RE3_Z_STEP_INT: usize = 0x0f;
+pub const RE3_Z_STEP_FRAC: usize = 0x10;
+pub const RE3_RED_STEP: usize = 0x11;
+pub const RE3_GREEN_STEP: usize = 0x12;
+pub const RE3_BLUE_STEP: usize = 0x13;
+pub const RE3_Z_START: usize = 0x14;
+pub const RE3_RED_START: usize = 0x15;
+pub const RE3_GREEN_START: usize = 0x16;
+pub const RE3_BLUE_START: usize = 0x17;
+pub const RE3_STIPPLE_BITS: usize = 0x18;
+pub const RE3_STIPPLE_RUN: usize = 0x19;
+pub const RE3_X_STEP: usize = 0x1a;
+pub const RE3_Y_STEP: usize = 0x1b;
+pub const RE3_SPAN_LEN: usize = 0x1c;
+pub const RE3_CUR_X: usize = 0x1d;
+pub const RE3_CUR_Y: usize = 0x1e;
+pub const RE3_DRAW_TRIGGER: usize = 0x1f;
 // Unbuffered control registers.
-pub const REG_RWDATA: usize = 0x20;
-pub const REG_PIXMASK: usize = 0x21;
-pub const REG_AUXMASK: usize = 0x22;
-pub const REG_WIDDATA: usize = 0x23;
-pub const REG_UAUXDATA: usize = 0x24;
-pub const REG_RWMODE: usize = 0x25;
-pub const REG_ALIGNPAT: usize = 0x29;
-pub const REG_ENABPAT: usize = 0x2a;
-pub const REG_ENABDITH: usize = 0x2c;
-pub const REG_ENABWID: usize = 0x2d;
-pub const REG_CURWID: usize = 0x2e;
-pub const REG_DEPTHFN: usize = 0x2f;
-pub const REG_ENABLWID: usize = 0x31;
-pub const REG_FBOPTION: usize = 0x32;
-pub const REG_TOPSCAN: usize = 0x33;
-pub const REG_UPACMODE: usize = 0x38;
-pub const REG_YMIN: usize = 0x39;
-pub const REG_YMAX: usize = 0x3a;
-pub const REG_XMIN: usize = 0x3b;
-pub const REG_XMAX: usize = 0x3c;
+pub const RE3_HOST_DATA: usize = 0x20;
+pub const RE3_COLOR_PLANE_MASK: usize = 0x21;
+pub const RE3_AUX_PLANE_MASK: usize = 0x22;
+pub const RE3_WID_VALUE: usize = 0x23;
+pub const RE3_AUX_VALUE: usize = 0x24;
+pub const RE3_HOST_PLANE: usize = 0x25;
+pub const RE3_PATTERN_ANCHOR: usize = 0x29;
+pub const RE3_PATTERN_ON: usize = 0x2a;
+pub const RE3_DITHER_ON: usize = 0x2c;
+pub const RE3_WID_TEST_ON: usize = 0x2d;
+pub const RE3_WINDOW_ID: usize = 0x2e;
+pub const RE3_Z_COMPARE: usize = 0x2f;
+pub const RE3_LINE_WID_TEST_ON: usize = 0x31;
+pub const RE3_FB_OPTIONS: usize = 0x32;
+pub const RE3_TOP_SCAN: usize = 0x33;
+pub const RE3_UNPACK_MODE: usize = 0x38;
+pub const RE3_CLIP_Y_LO: usize = 0x39;
+pub const RE3_CLIP_Y_HI: usize = 0x3a;
+pub const RE3_CLIP_X_LO: usize = 0x3b;
+pub const RE3_CLIP_X_HI: usize = 0x3c;
 
-pub const IR_SHADED: u32 = 1;
-pub const IR_FLAT: u32 = 2;
-pub const IR_FLAT4: u32 = 3;
-pub const IR_TOPLINE: u32 = 4;
-pub const IR_BOTLINE: u32 = 5;
-pub const IR_READBUF: u32 = 6;
-pub const IR_WRITEBUF: u32 = 7;
+pub const DRAW_SMOOTH: u32 = 1;
+pub const DRAW_FLAT_5: u32 = 2;
+pub const DRAW_FLAT_20: u32 = 3;
+pub const DRAW_LINE_UPPER: u32 = 4;
+pub const DRAW_LINE_LOWER: u32 = 5;
+pub const DRAW_HOST_READ: u32 = 6;
+pub const DRAW_HOST_WRITE: u32 = 7;
 
-pub const RWMODE_FB: u32 = 0;
-pub const RWMODE_PUP: u32 = 1;
-pub const RWMODE_UAUX: u32 = 2;
-pub const RWMODE_ZB: u32 = 3;
-pub const RWMODE_WID: u32 = 4;
-pub const RWMODE_FB_P: u32 = 6;
-pub const RWMODE_ZB_P: u32 = 7;
+pub const HPLANE_COLOR: u32 = 0;
+pub const HPLANE_POPUP: u32 = 1;
+pub const HPLANE_AUX: u32 = 2;
+pub const HPLANE_Z: u32 = 3;
+pub const HPLANE_WID: u32 = 4;
+pub const HPLANE_COLOR_RAW: u32 = 6;
+pub const HPLANE_Z_RAW: u32 = 7;
 
 pub const ROP_COPY: u32 = 3;
 
@@ -92,62 +92,62 @@ pub const REGMASK: [u32; 64] = [
     0x00000003, 0x000007ff, 0x000007ff, 0x00000fff, 0x00000fff, 0x00000001, 0x00000001, 0x00000000,
 ];
 
-/// Register names (MAME `sgi_re2.cpp` regname[]), for the monitor and traces.
+/// Register names for the monitor and traces: this crate's own, and MAME's `sgi_re2.cpp` regname[] where unnamed.
 pub const REG_NAMES: [&str; 64] = [
-    "R00", "R01", "R02", "R03", "ENABRGB", "BIGENDIAN", "FUNC", "HADDR",
-    "NOPUP", "XYFRAC", "RGB", "YX", "PUPDATA", "PATL", "PATH", "DZI",
-    "DZF", "DR", "DG", "DB", "Z", "R", "G", "B",
-    "STIP", "STIPCOUNT", "DX", "DY", "NUMPIX", "X", "Y", "IR",
-    "RWDATA", "PIXMASK", "AUXMASK", "WIDDATA", "UAUXDATA", "RWMODE", "READBUF", "PIXTYPE",
-    "ASELECT", "ALIGNPAT", "ENABPAT", "ENABSTIP", "ENABDITH", "ENABWID", "CURWID", "DEPTHFN",
-    "REPSTIP", "ENABLWID", "FBOPTION", "TOPSCAN", "TESTMODE", "TESTDATA", "ZBOPTION", "XZOOM",
-    "UPACMODE", "YMIN", "YMAX", "XMIN", "XMAX", "COLORCMP", "MEGOPTION", "R3F",
+    "R00", "R01", "R02", "R03", "COLOR_WRITE_ON", "BIGENDIAN", "LOGIC_OP", "HADDR",
+    "SKIP_POPUP", "SUBPIXEL", "COLOR_PACKED", "XY_PACKED", "POPUP_VALUE", "PATTERN_LO", "PATTERN_HI", "Z_STEP_INT",
+    "Z_STEP_FRAC", "RED_STEP", "GREEN_STEP", "BLUE_STEP", "Z_START", "RED_START", "GREEN_START", "BLUE_START",
+    "STIPPLE_BITS", "STIPPLE_RUN", "X_STEP", "Y_STEP", "SPAN_LEN", "CUR_X", "CUR_Y", "DRAW_TRIGGER",
+    "HOST_DATA", "COLOR_PLANE_MASK", "AUX_PLANE_MASK", "WID_VALUE", "AUX_VALUE", "HOST_PLANE", "READBUF", "PIXTYPE",
+    "ASELECT", "PATTERN_ANCHOR", "PATTERN_ON", "ENABSTIP", "DITHER_ON", "WID_TEST_ON", "WINDOW_ID", "Z_COMPARE",
+    "REPSTIP", "LINE_WID_TEST_ON", "FB_OPTIONS", "TOP_SCAN", "TESTMODE", "TESTDATA", "ZBOPTION", "XZOOM",
+    "UNPACK_MODE", "CLIP_Y_LO", "CLIP_Y_HI", "CLIP_X_LO", "CLIP_X_HI", "COLORCMP", "MEGOPTION", "R3F",
 ];
 
-pub fn ir_name(ir: u32) -> &'static str {
-    match ir {
-        IR_SHADED => "SHADED",
-        IR_FLAT => "FLAT",
-        IR_FLAT4 => "FLAT4",
-        IR_TOPLINE => "TOPLINE",
-        IR_BOTLINE => "BOTLINE",
-        IR_READBUF => "READBUF",
-        IR_WRITEBUF => "WRITEBUF",
-        _ => "IR?",
+pub fn draw_op_name(draw_op: u32) -> &'static str {
+    match draw_op {
+        DRAW_SMOOTH => "SMOOTH",
+        DRAW_FLAT_5 => "FLAT_5",
+        DRAW_FLAT_20 => "FLAT_20",
+        DRAW_LINE_UPPER => "LINE_UPPER",
+        DRAW_LINE_LOWER => "LINE_LOWER",
+        DRAW_HOST_READ => "HOST_READ",
+        DRAW_HOST_WRITE => "HOST_WRITE",
+        _ => "DRAW?",
     }
 }
 
 pub fn rwmode_name(m: u32) -> &'static str {
     match m {
-        RWMODE_FB => "FB",
-        RWMODE_PUP => "PUP",
-        RWMODE_UAUX => "UAUX",
-        RWMODE_ZB => "ZB",
-        RWMODE_WID => "WID",
-        RWMODE_FB_P => "FB_P",
-        RWMODE_ZB_P => "ZB_P",
+        HPLANE_COLOR => "COLOR",
+        HPLANE_POPUP => "POPUP",
+        HPLANE_AUX => "AUX",
+        HPLANE_Z => "Z",
+        HPLANE_WID => "WID",
+        HPLANE_COLOR_RAW => "COLOR_RAW",
+        HPLANE_Z_RAW => "Z_RAW",
         _ => "?",
     }
 }
 
-/// One-line decode of the primitive an `IR` write is about to execute, from
+/// One-line decode of the primitive a `DRAW_TRIGGER` write is about to execute, from
 /// the register file as it stands (before `execute` loads the iterators).
-pub fn describe_ir(reg: &[u32; 64], ir: u32) -> String {
-    let x = reg[REG_X] as i32;
+pub fn describe_draw_op(reg: &[u32; 64], draw_op: u32) -> String {
+    let x = reg[RE3_CUR_X] as i32;
     let rgb = |r: u32| r >> 11;
     let mut s = format!("{} x={} y={} n={} rgb=({},{},{}) func={} rwmode={}",
-        ir_name(ir), x, reg[REG_Y], reg[REG_NUMPIX],
-        rgb(reg[REG_R]), rgb(reg[REG_G]), rgb(reg[REG_B]), reg[REG_FUNC], rwmode_name(reg[REG_RWMODE]));
-    if reg[REG_ENABPAT] != 0 {
-        s += &format!(" pat={:#010x}{}", (reg[REG_PATH] << 16) | reg[REG_PATL],
-            if reg[REG_ALIGNPAT] != 0 { "/aligned" } else { "" });
+        draw_op_name(draw_op), x, reg[RE3_CUR_Y], reg[RE3_SPAN_LEN],
+        rgb(reg[RE3_RED_START]), rgb(reg[RE3_GREEN_START]), rgb(reg[RE3_BLUE_START]), reg[RE3_LOGIC_OP], rwmode_name(reg[RE3_HOST_PLANE]));
+    if reg[RE3_PATTERN_ON] != 0 {
+        s += &format!(" pat={:#010x}{}", (reg[RE3_PATTERN_HI] << 16) | reg[RE3_PATTERN_LO],
+            if reg[RE3_PATTERN_ANCHOR] != 0 { "/aligned" } else { "" });
     }
-    if ir == IR_SHADED {
+    if draw_op == DRAW_SMOOTH {
         s += &format!(" dx={:#x} dy={:#x} drgb=({:#x},{:#x},{:#x}) z={:#x} dz={:#x}.{:#x}",
-            reg[REG_DX], reg[REG_DY], reg[REG_DR], reg[REG_DG], reg[REG_DB], reg[REG_Z], reg[REG_DZI], reg[REG_DZF]);
+            reg[RE3_X_STEP], reg[RE3_Y_STEP], reg[RE3_RED_STEP], reg[RE3_GREEN_STEP], reg[RE3_BLUE_STEP], reg[RE3_Z_START], reg[RE3_Z_STEP_INT], reg[RE3_Z_STEP_FRAC]);
     }
-    if reg[REG_ENABWID] != 0 {
-        s += &format!(" wid={}", reg[REG_CURWID]);
+    if reg[RE3_WID_TEST_ON] != 0 {
+        s += &format!(" wid={}", reg[RE3_WINDOW_ID]);
     }
     s
 }
@@ -168,11 +168,11 @@ pub const RE3_OP_COPY_B: u32 = 0xFFFF_1002;
 /// depth of the visual's buffers / 4 (17:16: 0 = 24-bit, no banks) and the
 /// read buffer's bank (18); bit 19 set (nonzero = GL copy). The source
 /// pixel is taken from the read bank and replicated into every bank, so
-/// PIXMASK picks the draw buffer, as for drawing.
+/// COLOR_PLANE_MASK picks the draw buffer, as for drawing.
 pub fn copy_mode(zx: u32, zy: u32, bits: u32, bank: u32) -> u32 {
     (zx & 0xff) | ((zy & 0xff) << 8) | (((bits / 4) & 3) << 16) | ((bank & 1) << 18) | 1 << 19
 }
-/// CPU consumed RWDATA during a READBUF stream; fetch the next pixel.
+/// CPU consumed HOST_DATA during a HOST_READ stream; fetch the next pixel.
 pub const RE3_OP_READ_ADVANCE: u32 = 0xFFFF_1003;
 /// A host-visible finish/readback boundary, queued so telemetry observes it
 /// in exact RE3 order.
@@ -202,7 +202,7 @@ pub const PIXFMT_RGB4: u32 = 5;
 /// Emulator-private depth control (the enables and write mask have no
 /// documented RE3 register): val = test enable (bit 0) | func (bits 3:1,
 /// GL order NEVER..ALWAYS) | Z write mask << 8 (24 bits). Depth is tested
-/// and written by SHADED spans (the only spans that iterate Z per pixel).
+/// and written by SMOOTH spans (the only spans that iterate Z per pixel).
 pub const RE3_OP_ZCTL: u32 = 0xFFFF_1005;
 /// Emulator-private stencil control: val = enable (bit 0) | func << 1 |
 /// ref << 4 (8 bits) | mask << 12 (8) | write mask << 20 (8) | fail << 28 |
@@ -227,12 +227,12 @@ pub const ZBUF_STENCIL_SHIFT: u32 = 24;
 /// Emulator-private blend control: val = enable (bit 0) | src factor << 1 |
 /// dst factor << 4 (libglcore's codes: 0 ZERO, 1 ONE,
 /// 2 DST_COLOR (src) / SRC_COLOR (dst), 3 ONE_MINUS of that, 4 SRC_ALPHA,
-/// 5 ONE_MINUS_SRC_ALPHA). Applied by SHADED spans; the destination is the
+/// 5 ONE_MINUS_SRC_ALPHA). Applied by SMOOTH spans; the destination is the
 /// frame-buffer colour expanded to 8 bits per channel (no alpha planes).
-pub const RE3_OP_BLEND: u32 = 0xFFFF_1009;
+pub const RE3_OP_SET_BLENDER: u32 = 0xFFFF_1009;
 /// Emulator-private source alpha iterator: val = start (8.11, bits 31:0) |
 /// per-pixel step (signed 8.11) << 32.
-pub const RE3_OP_ALPHA: u32 = 0xFFFF_100A;
+pub const RE3_OP_SET_ALPHA: u32 = 0xFFFF_100A;
 
 /// Stop the RE3 thread.
 pub const RE3_OP_EXIT: u32 = 0xFFFF_1FFF;
@@ -240,7 +240,7 @@ pub const RE3_OP_EXIT: u32 = 0xFFFF_1FFF;
 /// RE3 window), so traces can show where each write came from.
 pub const RE3_SRC_HQ: u32 = 0x100;
 
-/// Streaming state of READBUF/WRITEBUF.
+/// Streaming state of HOST_READ/HOST_WRITE.
 pub const STREAM_IDLE: u32 = 0;
 pub const STREAM_READ: u32 = 1;
 pub const STREAM_WRITE: u32 = 2;
@@ -267,7 +267,7 @@ pub struct Re3Context {
     pub stencil: u64,
     /// RE3_OP_ZFILL_A, until RE3_OP_ZFILL_B arrives.
     pub zfill_rect: u64,
-    /// RE3_OP_BLEND value; alpha iterator (8.11) and its per-pixel step.
+    /// RE3_OP_SET_BLENDER value; alpha iterator (8.11) and its per-pixel step.
     pub blend: u32,
     pub a: i64,
     pub da: i64,
@@ -354,16 +354,16 @@ impl Re3 {
 
         let mut signature = 0xcbf2_9ce4_8422_2325u64;
         for value in [
-            c.reg[REG_IR],
-            c.reg[REG_FUNC],
-            c.reg[REG_NOPUP],
-            c.reg[REG_ENABPAT],
-            c.reg[REG_ALIGNPAT],
-            c.reg[REG_ENABDITH],
-            c.reg[REG_ENABWID],
-            c.reg[REG_ENABLWID],
-            c.reg[REG_FBOPTION],
-            c.reg[REG_DEPTHFN],
+            c.reg[RE3_DRAW_TRIGGER],
+            c.reg[RE3_LOGIC_OP],
+            c.reg[RE3_SKIP_POPUP],
+            c.reg[RE3_PATTERN_ON],
+            c.reg[RE3_PATTERN_ANCHOR],
+            c.reg[RE3_DITHER_ON],
+            c.reg[RE3_WID_TEST_ON],
+            c.reg[RE3_LINE_WID_TEST_ON],
+            c.reg[RE3_FB_OPTIONS],
+            c.reg[RE3_Z_COMPARE],
             c.pixfmt,
             c.zctl & 0xff,
             (c.stencil & 0x000f_ffff_fff) as u32,
@@ -384,7 +384,7 @@ impl Re3 {
         s.max_batch = s.max_batch.max(self.telemetry.current_batch);
 
         let fb_reads_per_pixel = 1
-            + u64::from(c.reg[REG_ENABWID] != 0)
+            + u64::from(c.reg[RE3_WID_TEST_ON] != 0)
             + u64::from(c.blend & 1 != 0);
         s.framebuffer_read_words = s
             .framebuffer_read_words
@@ -407,24 +407,24 @@ impl Re3 {
         }
         self.ctx.reg[reg] = v;
         match reg {
-            REG_RGB => {
+            RE3_COLOR_PACKED => {
                 // 27-bit packed 9:9:9. Each 9-bit component lands in
                 // the integer part of the 8.11 R/G/B iterators.
-                self.ctx.reg[REG_R] = ((v >> 18) & 0x1ff) << 11;
-                self.ctx.reg[REG_G] = (((v >> 9) & 0x1ff) << 11) & REGMASK[REG_G];
-                self.ctx.reg[REG_B] = ((v & 0x1ff) << 11) & REGMASK[REG_B];
+                self.ctx.reg[RE3_RED_START] = ((v >> 18) & 0x1ff) << 11;
+                self.ctx.reg[RE3_GREEN_START] = (((v >> 9) & 0x1ff) << 11) & REGMASK[RE3_GREEN_START];
+                self.ctx.reg[RE3_BLUE_START] = ((v & 0x1ff) << 11) & REGMASK[RE3_BLUE_START];
                 false
             }
-            REG_YX => {
-                self.ctx.reg[REG_X] = v & 0xfff;
-                self.ctx.reg[REG_Y] = (v >> 12) & 0x7ff;
+            RE3_XY_PACKED => {
+                self.ctx.reg[RE3_CUR_X] = v & 0xfff;
+                self.ctx.reg[RE3_CUR_Y] = (v >> 12) & 0x7ff;
                 false
             }
-            REG_IR => {
+            RE3_DRAW_TRIGGER => {
                 self.execute();
                 true
             }
-            REG_RWDATA => {
+            RE3_HOST_DATA => {
                 if self.ctx.stream == STREAM_WRITE {
                     self.write_buffer();
                     true
@@ -437,7 +437,7 @@ impl Re3 {
     }
 
     /// The private operations that shape span pipelines (RE3_OP_PIXFMT,
-    /// RE3_OP_ZCTL, RE3_OP_STENCIL, RE3_OP_BLEND).
+    /// RE3_OP_ZCTL, RE3_OP_STENCIL, RE3_OP_SET_BLENDER).
     pub fn set_pixfmt(&mut self, v: u32) {
         #[cfg(feature = "gr2-jit")]
         if self.ctx.pixfmt != v {
@@ -476,58 +476,58 @@ impl Re3 {
 
     fn load_iterators(&mut self) {
         let c = &mut self.ctx;
-        c.x = (c.reg[REG_X] as i64) << 14;
-        c.y = (c.reg[REG_Y] as i64) << 14;
-        // XYFRAC (inferred): the minor axis's subpixel start in 1/16 pixel,
+        c.x = (c.reg[RE3_CUR_X] as i64) << 14;
+        c.y = (c.reg[RE3_CUR_Y] as i64) << 14;
+        // SUBPIXEL (inferred): the minor axis's subpixel start in 1/16 pixel,
         // the GE's vertex precision. The major axis steps whole pixels from
         // a pixel start (its step is +-1.0), so one 4-bit fraction suffices;
         // it becomes the top 4 bits of the minor iterator's 14-bit fraction.
-        let frac = ((c.reg[REG_XYFRAC] & 0xf) as i64) << 10;
-        let dx = (c.reg[REG_DX] as u16 as i16) as i32;
+        let frac = ((c.reg[RE3_SUBPIXEL] & 0xf) as i64) << 10;
+        let dx = (c.reg[RE3_X_STEP] as u16 as i16) as i32;
         if dx.abs() == 0x4000 {
             c.y |= frac;
         } else {
             c.x |= frac;
         }
-        c.z = ((c.reg[REG_Z] as i64) << 40) >> 26;
-        c.r = c.reg[REG_R] as i64;
-        c.g = c.reg[REG_G] as i64;
-        c.b = c.reg[REG_B] as i64;
-        c.numpix = c.reg[REG_NUMPIX];
+        c.z = ((c.reg[RE3_Z_START] as i64) << 40) >> 26;
+        c.r = c.reg[RE3_RED_START] as i64;
+        c.g = c.reg[RE3_GREEN_START] as i64;
+        c.b = c.reg[RE3_BLUE_START] as i64;
+        c.numpix = c.reg[RE3_SPAN_LEN];
     }
 
     fn step_iterators(&mut self) {
         let c = &mut self.ctx;
-        c.x += (c.reg[REG_DX] as u16 as i16) as i64;
-        c.y += (c.reg[REG_DY] as u16 as i16) as i64;
-        c.z += (((c.reg[REG_DZI] as i64) << 40) >> 26) | c.reg[REG_DZF] as i64;
-        c.r += sext(c.reg[REG_DR], 24);
-        c.g += sext(c.reg[REG_DG], 20);
-        c.b += sext(c.reg[REG_DB], 20);
+        c.x += (c.reg[RE3_X_STEP] as u16 as i16) as i64;
+        c.y += (c.reg[RE3_Y_STEP] as u16 as i16) as i64;
+        c.z += (((c.reg[RE3_Z_STEP_INT] as i64) << 40) >> 26) | c.reg[RE3_Z_STEP_FRAC] as i64;
+        c.r += sext(c.reg[RE3_RED_STEP], 24);
+        c.g += sext(c.reg[RE3_GREEN_STEP], 20);
+        c.b += sext(c.reg[RE3_BLUE_STEP], 20);
         c.a += c.da;
     }
 
     fn execute(&mut self) {
         self.load_iterators();
-        if matches!(self.ctx.reg[REG_IR], IR_SHADED | IR_FLAT | IR_FLAT4) {
+        if matches!(self.ctx.reg[RE3_DRAW_TRIGGER], DRAW_SMOOTH | DRAW_FLAT_5 | DRAW_FLAT_20) {
             self.record_span();
         }
         #[cfg(feature = "gr2-jit")]
-        if super::re3_jit::run(self, self.ctx.reg[REG_IR]) {
+        if super::re3_jit::run(self, self.ctx.reg[RE3_DRAW_TRIGGER]) {
             return;
         }
-        match self.ctx.reg[REG_IR] {
-            IR_SHADED => self.draw_shaded_span(),
-            IR_FLAT => self.draw_flat_span(5),
-            IR_FLAT4 => self.draw_flat_span(20),
-            IR_READBUF => {
+        match self.ctx.reg[RE3_DRAW_TRIGGER] {
+            DRAW_SMOOTH => self.draw_shaded_span(),
+            DRAW_FLAT_5 => self.draw_flat_span(5),
+            DRAW_FLAT_20 => self.draw_flat_span(20),
+            DRAW_HOST_READ => {
                 self.ctx.stream = STREAM_READ;
                 self.read_buffer();
             }
-            IR_WRITEBUF => {
+            DRAW_HOST_WRITE => {
                 self.ctx.stream = if self.ctx.numpix > 0 { STREAM_WRITE } else { STREAM_IDLE };
             }
-            // TOPLINE / BOTLINE (antialiased lines): not needed for the textport yet.
+            // LINE_UPPER / LINE_LOWER (antialiased lines): not needed for the textport yet.
             _ => {}
         }
     }
@@ -536,7 +536,7 @@ impl Re3 {
     /// (x, y). In colour-index mode G/B are zero and R carries the (up to
     /// 12-bit) index. 12-bit RGB packs 4:4:4 (R low, same convention as
     /// REX3 DRAWDEPTH 12) into both buffers, dithered 8 -> 4 bits with the
-    /// REX3 4x4 Bayer matrix when ENABDITH is set.
+    /// REX3 4x4 Bayer matrix when DITHER_ON is set.
     #[inline]
     fn color(&self, x: i32, y: i32) -> u32 {
         let c = &self.ctx;
@@ -552,8 +552,8 @@ impl Re3 {
         self.pack(ch(c.r) | (ch(c.g) << 8) | (ch(c.b) << 16), x, y)
     }
 
-    /// Colour for a SHADED span pixel at `off`, blended with the frame
-    /// buffer when RE3_OP_BLEND is on.
+    /// Colour for a SMOOTH span pixel at `off`, blended with the frame
+    /// buffer when RE3_OP_SET_BLENDER is on.
     #[inline]
     fn color_blended(&self, x: i32, y: i32, off: usize) -> u32 {
         let c = &self.ctx;
@@ -586,19 +586,19 @@ impl Re3 {
     }
 
     /// Frame-buffer colour at `off` as 8-bit R, G, B for blending. For 12-bit
-    /// RGB, the buffer being written (PIXMASK) is read and nibbles expanded.
+    /// RGB, the buffer being written (COLOR_PLANE_MASK) is read and nibbles expanded.
     fn dst_rgb8(&self, off: usize) -> [u32; 3] {
         let p = self.vram[off];
         if self.ctx.pixfmt == PIXFMT_RGB12 {
-            let buf = if self.ctx.reg[REG_PIXMASK] & 0xfff == 0 { (p >> 12) & 0xfff } else { p & 0xfff };
+            let buf = if self.ctx.reg[RE3_COLOR_PLANE_MASK] & 0xfff == 0 { (p >> 12) & 0xfff } else { p & 0xfff };
             return [(buf & 0xf) * 17, ((buf >> 4) & 0xf) * 17, ((buf >> 8) & 0xf) * 17];
         }
         if self.ctx.pixfmt == PIXFMT_RGB8 {
-            let v = if self.ctx.reg[REG_PIXMASK] & 0xff == 0 { (p >> 8) & 0xff } else { p & 0xff };
+            let v = if self.ctx.reg[RE3_COLOR_PLANE_MASK] & 0xff == 0 { (p >> 8) & 0xff } else { p & 0xff };
             return rgb332_to_888(v);
         }
         if self.ctx.pixfmt == PIXFMT_RGB4 {
-            let v = if self.ctx.reg[REG_PIXMASK] & 0xf == 0 { (p >> 4) & 0xf } else { p & 0xf };
+            let v = if self.ctx.reg[RE3_COLOR_PLANE_MASK] & 0xf == 0 { (p >> 4) & 0xf } else { p & 0xf };
             return rgb121_to_888(v);
         }
         [p & 0xff, (p >> 8) & 0xff, (p >> 16) & 0xff]
@@ -610,7 +610,7 @@ impl Re3 {
     fn pack(&self, rgb: u32, x: i32, y: i32) -> u32 {
         let c = &self.ctx;
         if c.pixfmt == PIXFMT_RGB12 {
-            let v = if c.reg[REG_ENABDITH] != 0 {
+            let v = if c.reg[RE3_DITHER_ON] != 0 {
                 crate::dev::bayer::rgb24_to_rgb12_dither(crate::dev::bayer::bayer_pack(rgb, x, y))
             } else {
                 crate::dev::bayer::rgb24_to_rgb12(rgb)
@@ -632,12 +632,12 @@ impl Re3 {
     #[inline]
     fn aux_and_mask(&self) -> (u32, u32) {
         let r = &self.ctx.reg;
-        let aux = if r[REG_NOPUP] != 0 {
-            (r[REG_WIDDATA] << 28) | (r[REG_UAUXDATA] << 24)
+        let aux = if r[RE3_SKIP_POPUP] != 0 {
+            (r[RE3_WID_VALUE] << 28) | (r[RE3_AUX_VALUE] << 24)
         } else {
-            (r[REG_WIDDATA] << 28) | ((r[REG_UAUXDATA] & 3) << 26) | (r[REG_PUPDATA] << 24)
+            (r[RE3_WID_VALUE] << 28) | ((r[RE3_AUX_VALUE] & 3) << 26) | (r[RE3_POPUP_VALUE] << 24)
         };
-        let mask = ((r[REG_AUXMASK] & 0xff) << 24) | r[REG_PIXMASK];
+        let mask = ((r[RE3_AUX_PLANE_MASK] & 0xff) << 24) | r[RE3_COLOR_PLANE_MASK];
         (aux, mask)
     }
 
@@ -645,39 +645,39 @@ impl Re3 {
     fn clip(&self, x: i32, y: i32) -> bool {
         let r = &self.ctx.reg;
         x >= 0 && y >= 0 && (x as usize) < FB_W && (y as usize) < FB_H
-            && x >= (r[REG_XMIN] as i32) && x <= (r[REG_XMAX] as i32)
-            && y >= r[REG_YMIN] as i32 && y <= r[REG_YMAX] as i32
+            && x >= (r[RE3_CLIP_X_LO] as i32) && x <= (r[RE3_CLIP_X_HI] as i32)
+            && y >= r[RE3_CLIP_Y_LO] as i32 && y <= r[RE3_CLIP_Y_HI] as i32
     }
 
     #[inline]
     fn pattern(&self, x: i32, n: u32) -> bool {
         let r = &self.ctx.reg;
-        if r[REG_ENABPAT] == 0 {
+        if r[RE3_PATTERN_ON] == 0 {
             return true;
         }
-        let idx = if r[REG_ALIGNPAT] != 0 { x as u32 } else { n } & 31;
-        let pat = (r[REG_PATH] << 16) | r[REG_PATL];
+        let idx = if r[RE3_PATTERN_ANCHOR] != 0 { x as u32 } else { n } & 31;
+        let pat = (r[RE3_PATTERN_HI] << 16) | r[RE3_PATTERN_LO];
         (pat >> (31 - idx)) & 1 != 0
     }
 
     #[inline]
-    fn wid_ok(&self, ir: u32, offset: usize) -> bool {
+    fn wid_ok(&self, draw_op: u32, offset: usize) -> bool {
         let r = &self.ctx.reg;
-        if r[REG_ENABWID] == 0 {
+        if r[RE3_WID_TEST_ON] == 0 {
             return true;
         }
-        if (ir == IR_TOPLINE || ir == IR_BOTLINE) && r[REG_ENABLWID] == 0 {
+        if (draw_op == DRAW_LINE_UPPER || draw_op == DRAW_LINE_LOWER) && r[RE3_LINE_WID_TEST_ON] == 0 {
             return true;
         }
         let wid = self.vram[offset] >> 28;
-        if r[REG_FBOPTION] & 1 != 0 {
-            if r[REG_DEPTHFN] & 8 != 0 {
-                (wid & 0xe) == (r[REG_CURWID] & 0xe)
+        if r[RE3_FB_OPTIONS] & 1 != 0 {
+            if r[RE3_Z_COMPARE] & 8 != 0 {
+                (wid & 0xe) == (r[RE3_WINDOW_ID] & 0xe)
             } else {
-                (wid & 0xf) == (r[REG_CURWID] & 0xf)
+                (wid & 0xf) == (r[RE3_WINDOW_ID] & 0xf)
             }
         } else {
-            (wid & 3) == (r[REG_CURWID] & 3)
+            (wid & 3) == (r[RE3_WINDOW_ID] & 3)
         }
     }
 
@@ -685,7 +685,7 @@ impl Re3 {
     #[inline]
     fn store(&mut self, offset: usize, src: u32, mask: u32) {
         let dst = self.vram[offset];
-        let v = rop(self.ctx.reg[REG_FUNC], src, dst);
+        let v = rop(self.ctx.reg[RE3_LOGIC_OP], src, dst);
         self.vram[offset] = (dst & !mask) | (v & mask);
     }
 
@@ -780,7 +780,7 @@ impl Re3 {
             let y = (self.ctx.y >> 14) as i32;
             if self.clip(x, y) && self.pattern(x, n) {
                 let off = y as usize * FB_W + x as usize;
-                if self.wid_ok(IR_SHADED, off) && self.zs_test(off) {
+                if self.wid_ok(DRAW_SMOOTH, off) && self.zs_test(off) {
                     let c = self.color_blended(x, y, off);
                     self.store(off, aux | c, mask);
                 }
@@ -798,13 +798,13 @@ impl Re3 {
         let y = (self.ctx.y >> 14) as i32;
         let count = self.ctx.numpix;
         // Dithering makes the colour depend on the pixel position.
-        let per_pixel = self.ctx.pixfmt == PIXFMT_RGB12 && self.ctx.reg[REG_ENABDITH] != 0;
+        let per_pixel = self.ctx.pixfmt == PIXFMT_RGB12 && self.ctx.reg[RE3_DITHER_ON] != 0;
         let mut c = self.color(x0, y);
         for i in 0..count {
             let x = x0 + i as i32;
             if self.clip(x, y) && self.pattern(x, i) {
                 let off = y as usize * FB_W + x as usize;
-                if self.wid_ok(IR_FLAT, off) {
+                if self.wid_ok(DRAW_FLAT_5, off) {
                     let c = if per_pixel { self.color(x, y) } else { c };
                     self.store(off, aux | c, mask);
                 }
@@ -817,45 +817,45 @@ impl Re3 {
         self.ctx.numpix = 0;
     }
 
-    /// Plane value at `offset` for the current RWMODE.
+    /// Plane value at `offset` for the current HOST_PLANE.
     fn plane_read(&self, offset: usize) -> u32 {
         let p = self.vram[offset];
-        match self.ctx.reg[REG_RWMODE] {
-            RWMODE_PUP => (p >> 24) & 0x3,
-            RWMODE_UAUX => (p >> 24) & 0xf,
-            RWMODE_WID => p >> 28,
-            RWMODE_ZB | RWMODE_ZB_P => self.zbuf[offset],
-            RWMODE_FB_P => p,
+        match self.ctx.reg[RE3_HOST_PLANE] {
+            HPLANE_POPUP => (p >> 24) & 0x3,
+            HPLANE_AUX => (p >> 24) & 0xf,
+            HPLANE_WID => p >> 28,
+            HPLANE_Z | HPLANE_Z_RAW => self.zbuf[offset],
+            HPLANE_COLOR_RAW => p,
             _ => p & 0x00ff_ffff,
         }
     }
 
     fn plane_write(&mut self, offset: usize, data: u32) {
         let r = &self.ctx.reg;
-        let aux_mask = r[REG_AUXMASK];
-        match r[REG_RWMODE] {
-            RWMODE_PUP => {
+        let aux_mask = r[RE3_AUX_PLANE_MASK];
+        match r[RE3_HOST_PLANE] {
+            HPLANE_POPUP => {
                 let m = (aux_mask & 0x3) << 24;
                 self.store(offset, (data & 0x3) << 24, m);
             }
-            RWMODE_UAUX => {
-                let m = (aux_mask & if r[REG_NOPUP] != 0 { 0xf } else { 0xc }) << 24;
+            HPLANE_AUX => {
+                let m = (aux_mask & if r[RE3_SKIP_POPUP] != 0 { 0xf } else { 0xc }) << 24;
                 self.store(offset, (data & 0xf) << 24, m);
             }
-            RWMODE_WID => {
+            HPLANE_WID => {
                 let m = ((aux_mask >> 4) & 0xf) << 28;
                 self.store(offset, (data & 0xf) << 28, m);
             }
-            RWMODE_ZB | RWMODE_ZB_P => self.zbuf[offset] = data & 0x00ff_ffff,
-            RWMODE_FB_P => self.vram[offset] = data,
+            HPLANE_Z | HPLANE_Z_RAW => self.zbuf[offset] = data & 0x00ff_ffff,
+            HPLANE_COLOR_RAW => self.vram[offset] = data,
             _ => {
-                let m = r[REG_PIXMASK];
+                let m = r[RE3_COLOR_PLANE_MASK];
                 self.store(offset, data & 0x00ff_ffff, m);
             }
         }
     }
 
-    /// READBUF: latch the next pixel into RWDATA, or finish the stream.
+    /// HOST_READ: latch the next pixel into HOST_DATA, or finish the stream.
     pub fn read_buffer(&mut self) {
         if self.ctx.numpix == 0 {
             self.ctx.stream = STREAM_IDLE;
@@ -864,14 +864,14 @@ impl Re3 {
         let x = (self.ctx.x >> 14) as i32;
         let y = (self.ctx.y >> 14) as i32;
         self.record_host_read(1);
-        if matches!(self.ctx.reg[REG_RWMODE], RWMODE_ZB | RWMODE_ZB_P) {
+        if matches!(self.ctx.reg[RE3_HOST_PLANE], HPLANE_Z | HPLANE_Z_RAW) {
             self.telemetry.snapshot.z_read_words =
                 self.telemetry.snapshot.z_read_words.saturating_add(1);
         } else {
             self.telemetry.snapshot.framebuffer_read_words =
                 self.telemetry.snapshot.framebuffer_read_words.saturating_add(1);
         }
-        self.ctx.reg[REG_RWDATA] = if x >= 0 && y >= 0 && (x as usize) < FB_W && (y as usize) < FB_H {
+        self.ctx.reg[RE3_HOST_DATA] = if x >= 0 && y >= 0 && (x as usize) < FB_W && (y as usize) < FB_H {
             self.plane_read(y as usize * FB_W + x as usize)
         } else {
             0
@@ -880,10 +880,10 @@ impl Re3 {
         self.ctx.numpix -= 1;
     }
 
-    /// WRITEBUF: consume RWDATA (unpacked per UPACMODE) into VRAM.
+    /// HOST_WRITE: consume HOST_DATA (unpacked per UNPACK_MODE) into VRAM.
     fn write_buffer(&mut self) {
-        let mode = self.ctx.reg[REG_UPACMODE];
-        let data = self.ctx.reg[REG_RWDATA];
+        let mode = self.ctx.reg[RE3_UNPACK_MODE];
+        let data = self.ctx.reg[RE3_HOST_DATA];
         for i in 0..=mode {
             if self.ctx.numpix == 0 {
                 break;
@@ -892,7 +892,7 @@ impl Re3 {
             let y = (self.ctx.y >> 14) as i32;
             if self.clip(x, y) {
                 let off = y as usize * FB_W + x as usize;
-                if self.wid_ok(IR_WRITEBUF, off) {
+                if self.wid_ok(DRAW_HOST_WRITE, off) {
                     self.plane_write(off, unpack(data, i, mode));
                 }
             }
@@ -952,7 +952,7 @@ impl Re3 {
                 }
             }
         }
-        let mask = ((self.ctx.reg[REG_AUXMASK] & 0xff) << 24) | self.ctx.reg[REG_PIXMASK];
+        let mask = ((self.ctx.reg[RE3_AUX_PLANE_MASK] & 0xff) << 24) | self.ctx.reg[RE3_COLOR_PLANE_MASK];
         for j in j0..j1 {
             for i in i0..i1 {
                 let (x, y) = (dx + i, dy + j);
@@ -960,7 +960,7 @@ impl Re3 {
                     continue;
                 }
                 let off = y as usize * FB_W + x as usize;
-                if self.wid_ok(IR_WRITEBUF, off) {
+                if self.wid_ok(DRAW_HOST_WRITE, off) {
                     self.store(off, src[(j / zy - cj0) as usize * sw + (i / zx - ci0) as usize], mask);
                 }
             }
@@ -968,7 +968,7 @@ impl Re3 {
     }
 
     /// Emulator-private screen-to-screen copy of the planes selected by
-    /// PIXMASK/AUXMASK. Linear coordinates, y bottom-up; overlap-safe.
+    /// COLOR_PLANE_MASK/AUX_PLANE_MASK. Linear coordinates, y bottom-up; overlap-safe.
     pub fn copy_rect(&mut self, sx: i32, sy: i32, w: i32, h: i32, dx: i32, dy: i32) {
         if w <= 0 || h <= 0 {
             return;
@@ -984,7 +984,7 @@ impl Re3 {
             .snapshot
             .framebuffer_write_words
             .saturating_add(pixels);
-        let mask = ((self.ctx.reg[REG_AUXMASK] & 0xff) << 24) | self.ctx.reg[REG_PIXMASK];
+        let mask = ((self.ctx.reg[RE3_AUX_PLANE_MASK] & 0xff) << 24) | self.ctx.reg[RE3_COLOR_PLANE_MASK];
         // Walk away from the overlap: bottom-up rows when moving down in
         // memory, right-to-left columns when moving right. Only rows and columns whose source and
         // destination are both on the screen can move anything, so only those are walked.
@@ -1037,7 +1037,7 @@ pub fn rop(func: u32, s: u32, d: u32) -> u32 {
     }
 }
 
-/// Extract pixel `n` of a packed RWDATA word (UPACMODE 0 = 32, 1 = 2x16, 3 = 4x8).
+/// Extract pixel `n` of a packed HOST_DATA word (UNPACK_MODE 0 = 32, 1 = 2x16, 3 = 4x8).
 #[inline]
 fn unpack(data: u32, n: u32, mode: u32) -> u32 {
     match mode {

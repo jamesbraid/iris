@@ -6,7 +6,7 @@ colours, but every `exec VERTEX` line has the same lit colour.
 
 Cause: IRIS GL `winopen` does not turn lighting / blending / fog off; it relies
 on a new GE context starting from the defaults. The kernel switches contexts
-with `GE_HQMSAV` (0x1F0: id; DATA state, mode) and saves / restores the GE
+with `GE_CTX_SWITCH` (0x1F0: id; DATA state, mode) and saves / restores the GE
 state through its own memory (0x1E1 / 0x1E2 via HQ2_GEDMA), sized by what the
 microcode reports in shram word 0x302. See HQ2.h "KERNEL TOKENS".
 
@@ -23,7 +23,7 @@ depend on this).
 Diagnosis tip: compare the colour sent (`0x6913` cpack, `0x182` colour) with
 the `color (...)` on the `exec VERTEX` line. Different = lighting or fog is on.
 
-GE_HQMSAV state 3 = detach (mode change or context exit, `Gr2DestroyDDRN`).
+GE_CTX_SWITCH state 3 = detach (mode change or context exit, `Gr2DestroyDDRN`).
 After it the GE has no owner: never report the detached id in shram 0x303
 again, or the kernel dereferences its freed RRM node and panics ("KERNEL
 FAULT", bad addr 0x4) at the next switch.

@@ -68,8 +68,8 @@ pub const SHRAM_WORDS: usize = 32768;
 /// shram word the PROM sets to 1 (UCODE_TP) once the textport microcode runs.
 pub const TP_PROBE_ID: usize = 0x7fff;
 
-pub const HQ_FIFO_DEPTH: usize = 65536;
-pub const RE3_FIFO_DEPTH: usize = 65536;
+pub const HQ_QUEUE_CAP: usize = 65536;
+pub const RE3_QUEUE_CAP: usize = 65536;
 /// Words the HQ2_GEDMA read port holds ahead of its reader (power of two).
 pub const GEDMA_OUT_WORDS: usize = 16384;
 /// The most words one pixel read may ask for: twice a 1280 by 1024 frame at a word a pixel.
@@ -182,8 +182,8 @@ pub struct Gr2 {
     pub(super) gedma_out_tail: AtomicU32,
     /// Shell time `gedma_push` began to wait for a reader (0: not waiting); it gives up a limit later.
     pub(super) gedma_stall_since: AtomicU64,
-    pub(super) hq_fifo: GFifo<HQ_FIFO_DEPTH>,
-    pub(super) re3_fifo: GFifo<RE3_FIFO_DEPTH>,
+    pub(super) hq_fifo: GFifo<HQ_QUEUE_CAP>,
+    pub(super) re3_fifo: GFifo<RE3_QUEUE_CAP>,
     /// Pending half of a two-entry COPY op (RE3 thread only).
     pub(super) copy_a: Cell<u64>,
 
@@ -808,7 +808,7 @@ impl Gr2 {
             0x6c1c0..0x6c200 if self.probe.aux_window == AuxWindow::Bytes => r.aux[((off - 0x6c1c0) >> 2) as usize] as u32,
             0x6c1c0..0x6c1e0 if self.probe.aux_window == AuxWindow::Legacy => r.ab1,
             RE3_REGS..RE3_REGS_END => return self.re3_read(((off - RE3_REGS) >> 2) as usize),
-            0x6c600..0x6c604 => return self.re3_read(re3::REG_RWDATA),
+            0x6c600..0x6c604 => return self.re3_read(re3::RE3_HOST_DATA),
             _ => {
                 // CLOCK, CC1 (must not echo the flat-panel probe), unused.
                 let n = self.undecoded_reads.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
@@ -944,7 +944,7 @@ impl Gr2 {
             // CC1 flat-panel probe writes 0x00/0x55/0xAA; reads never echo.
             0x6c1e0..0x6c200 if self.probe.aux_window == AuxWindow::Legacy => {}
             RE3_REGS..RE3_REGS_END => return self.re3_write(((off - RE3_REGS) >> 2) as usize, val),
-            0x6c600..0x6c604 => return self.re3_write(re3::REG_RWDATA, val),
+            0x6c600..0x6c604 => return self.re3_write(re3::RE3_HOST_DATA, val),
             _ => {
                 let n = self.undecoded_writes.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
                 if report_due(n) {
@@ -974,8 +974,8 @@ impl Gr2 {
         // thread is not touching its state.
         let re3 = unsafe { &*self.re3.get() };
         let v = re3.ctx.reg[reg & 63];
-        if reg == re3::REG_RWDATA && re3.ctx.stream == re3::STREAM_READ {
-            // Consuming RWDATA advances the READBUF stream to the next pixel.
+        if reg == re3::RE3_HOST_DATA && re3.ctx.stream == re3::STREAM_READ {
+            // Consuming HOST_DATA advances the HOST_READ stream to the next pixel.
             if !self.re3_fifo.try_push(re3::RE3_OP_READ_ADVANCE, 0) {
                 return BusRead32::busy();
             }
@@ -991,7 +991,7 @@ impl Gr2 {
         const STAGE: usize = 64;
         /// The RE3 FIFO as HQ2 writes it: entries are staged and pushed in
         /// order, as one unit, under one lock and with one wake check: at the
-        /// end of each span (the IR write), when the stage is full, before
+        /// end of each span (the DRAW_TRIGGER write), when the stage is full, before
         /// anything that waits on RE3 or must follow what is queued, and when
         /// HQ2 runs out of work. A span's dozen register writes each took the
         /// FIFO lock and a SeqCst fence (the wake check) before.
@@ -1001,7 +1001,7 @@ impl Gr2 {
         /// it (the span slopes, the colour of a flat polygon, Y along a run
         /// of pieces, ...) only costs FIFO entries. `shadow` holds what HQ2
         /// last sent where `known` has the bit; registers whose write does
-        /// more than store (IR, RWDATA, which RE3 also writes, and the RGB /
+        /// more than store (DRAW_TRIGGER, HOST_DATA, which RE3 also writes, and the RGB /
         /// YX fan-outs) always go, and a CPU write to RE3 forgets it all.
         struct Sink<'a> {
             g: &'a Gr2,
@@ -1061,9 +1061,9 @@ impl Gr2 {
                     self.known = 0;
                 }
                 match r {
-                    re3::REG_IR | re3::REG_RWDATA => {}
-                    re3::REG_RGB => self.known &= !(1 << re3::REG_R | 1 << re3::REG_G | 1 << re3::REG_B),
-                    re3::REG_YX => self.known &= !(1 << re3::REG_X | 1 << re3::REG_Y),
+                    re3::RE3_DRAW_TRIGGER | re3::RE3_HOST_DATA => {}
+                    re3::RE3_COLOR_PACKED => self.known &= !(1 << re3::RE3_RED_START | 1 << re3::RE3_GREEN_START | 1 << re3::RE3_BLUE_START),
+                    re3::RE3_XY_PACKED => self.known &= !(1 << re3::RE3_CUR_X | 1 << re3::RE3_CUR_Y),
                     _ => {
                         if self.known & (1 << r) != 0 && self.shadow[r] == v {
                             return;
@@ -1073,7 +1073,7 @@ impl Gr2 {
                     }
                 }
                 self.push(reg as u32 | re3::RE3_SRC_HQ, val as u64);
-                if r == re3::REG_IR {
+                if r == re3::RE3_DRAW_TRIGGER {
                     self.flush();
                 }
             }
@@ -1248,11 +1248,11 @@ impl Gr2 {
                         re3.set_stencil(val);
                         (false, false)
                     }
-                    re3::RE3_OP_BLEND => {
+                    re3::RE3_OP_SET_BLENDER => {
                         re3.set_blend(val as u32);
                         (false, false)
                     }
-                    re3::RE3_OP_ALPHA => {
+                    re3::RE3_OP_SET_ALPHA => {
                         re3.ctx.a = (val as u32) as i64;
                         re3.ctx.da = (val >> 32) as u32 as i32 as i64;
                         (false, false)
@@ -1365,5 +1365,5 @@ pub(super) const FIN2_STALL_LIMIT: std::time::Duration = std::time::Duration::fr
 
 /// FIFO tokens that raise FIN3 when executed (GL Finish, 2D sync).
 pub(super) fn is_fin3_token(idx: u32) -> bool {
-    idx == hq2::GL_FINISH || idx == hq2::HQ_GL_FIN3
+    idx == hq2::CMD_READBACK_KICK || idx == hq2::HQ_GL_FIN3
 }
