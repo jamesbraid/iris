@@ -312,7 +312,7 @@ pub(crate) fn node_specs(cfg: &MachineConfig) -> Result<Vec<NodeSpec>, String> {
 
 /// The IO9's devices around the node: the PXBOW and PICs, IOC4, ISP12160, BCM5701, the audio
 /// controller when asked for, and the V12. The clocked devices run on `timers`.
-pub(crate) fn build_io(cfg: &MachineConfig, nodes: &[NodeBoard<Bedrock, Flash>], l1s: &[Arc<L1>], timers: &Arc<TimerManager>, clock: &Clock) -> Result<BoardIo, String> {
+pub(crate) fn build_io(cfg: &MachineConfig, nodes: &[NodeBoard<Bedrock, Flash>], l1s: &[Arc<L1>], timers: &Arc<TimerManager>, clock: &Clock, gpu: &crate::sn::MachineGpu) -> Result<BoardIo, String> {
     let (bedrock, l1) = (&nodes[0].chip, &l1s[0]);
     let cpus = usize::from(cfg.machine.cpus());
     let chip = chip(cfg.cpu());
@@ -341,7 +341,7 @@ pub(crate) fn build_io(cfg: &MachineConfig, nodes: &[NodeBoard<Bedrock, Flash>],
         .then(|| {
             let widget = cfg.graphics.widget.unwrap_or(VPRO_WIDGET);
             check_vpro_widget(widget)?;
-            attach_vpro(cfg, bedrock, widget, bedrock.interrupt_sender(widget, Some(INBOUND_DEVICE)), &status, |vpro| {
+            attach_vpro(cfg, bedrock, widget, bedrock.interrupt_sender(widget, Some(INBOUND_DEVICE)), &status, gpu.share(cfg)?, |vpro| {
                 pxbow.attach_widget(widget, vpro).map_err(|e| format!("Tezro V12: {e:?}"))?;
                 Ok(pxbow.route(widget))
             })

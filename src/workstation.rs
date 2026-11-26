@@ -938,21 +938,6 @@ pub(crate) fn open_gpu(cfg: &crate::config::MachineConfig, faults: &std::sync::m
     }
 }
 
-/// As `open_gpu`, for a machine with no fatal-fault path of its own: a device loss is logged, and every board
-/// reports it from its next `check()`.
-pub(crate) fn open_gpu_unattended(cfg: &crate::config::MachineConfig) -> Result<Option<crate::SharedGpu>, String> {
-    if cfg.graphics.raster != crate::config::RasterUnit::Wgpu {
-        return Ok(None);
-    }
-    #[cfg(feature = "wgpu")]
-    {
-        let opts = crate::wgpu::GpuOptions { backend: cfg.graphics.gpu_backend.clone(), ..Default::default() };
-        crate::wgpu::Gpu::open(&opts).map(Some)
-    }
-    #[cfg(not(feature = "wgpu"))]
-    Err("graphics.raster = \"wgpu\" needs a build with the wgpu feature".into())
-}
-
 /// A board's handle on the machine's GPU (`Gpu::share`).
 pub(crate) fn share_gpu(gpu: &Option<crate::SharedGpu>) -> Option<crate::SharedGpu> {
     #[cfg(feature = "wgpu")]

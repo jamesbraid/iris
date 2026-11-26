@@ -337,8 +337,8 @@ pub(crate) fn node_specs(cfg: &MachineConfig) -> Result<Vec<NodeSpec>, String> {
 
 /// The I-brick on the first C-brick and the Onyx 3000's graphics brick behind it, and for C-bricks
 /// of several processors the holds their PROM's processor join needs.
-pub(crate) fn build_io(cfg: &MachineConfig, nodes: &[NodeBoard<Bedrock, Flash>], l1s: &[Arc<L1>], timers: &Arc<TimerManager>, clock: &Clock) -> Result<BoardIo, String> {
-    let mut io = build_bricks(cfg, nodes, l1s, timers, clock)?;
+pub(crate) fn build_io(cfg: &MachineConfig, nodes: &[NodeBoard<Bedrock, Flash>], l1s: &[Arc<L1>], timers: &Arc<TimerManager>, clock: &Clock, gpu: &crate::sn::MachineGpu) -> Result<BoardIo, String> {
+    let mut io = build_bricks(cfg, nodes, l1s, timers, clock, gpu)?;
     let processors = Population::populated_cpus(usize::from(cfg.machine.cpus()))?;
     if processors.count() > 1 {
         // One hold for each C-brick: the join is a node's own, between its two processor
@@ -364,7 +364,7 @@ pub(crate) fn build_io(cfg: &MachineConfig, nodes: &[NodeBoard<Bedrock, Flash>],
 /// The I-brick on the first C-brick, and the Onyx 3000's graphics board where [`placement`] puts it:
 /// a widget of the I-brick's XBridge on the first C-brick, or of an XBridge of its own (no PCI
 /// devices) on another's XIO connector. Its DMA and interrupts go through that C-brick's Bedrock.
-fn build_bricks(cfg: &MachineConfig, nodes: &[NodeBoard<Bedrock, Flash>], l1s: &[Arc<L1>], timers: &Arc<TimerManager>, clock: &Clock) -> Result<BoardIo, String> {
+fn build_bricks(cfg: &MachineConfig, nodes: &[NodeBoard<Bedrock, Flash>], l1s: &[Arc<L1>], timers: &Arc<TimerManager>, clock: &Clock, gpu: &crate::sn::MachineGpu) -> Result<BoardIo, String> {
     let xbridge = xbridge_on(&nodes[0].chip);
     // The status bar's activity bits and the monitor's `speed` and `ticks`,
     // with a display or without.
@@ -387,7 +387,7 @@ fn build_bricks(cfg: &MachineConfig, nodes: &[NodeBoard<Bedrock, Flash>], l1s: &
     // entries in the machine's lists.
     type Hook = Arc<dyn Fn() + Send + Sync>;
     let (link_reset, power_on, fit): (Hook, Hook, Box<dyn FnOnce(&mut BoardIo)>) = if cfg.graphics_board().is_vpro() {
-        let vpro = attach_vpro(cfg, bedrock, widget, bedrock.interrupt_sender(widget, None), &status, |vpro| Ok(bridge.attach_widget(widget, vpro)))?;
+        let vpro = attach_vpro(cfg, bedrock, widget, bedrock.interrupt_sender(widget, None), &status, gpu.share(cfg)?, |vpro| Ok(bridge.attach_widget(widget, vpro)))?;
         eprintln!("iris: {} at widget {widget} of {brick}", cfg.graphics_board().label());
         // A link reset of the V12's port resets the board behind it.
         let (weak, reset) = (Arc::downgrade(&vpro), vpro.clone());
@@ -409,7 +409,7 @@ fn build_bricks(cfg: &MachineConfig, nodes: &[NodeBoard<Bedrock, Flash>], l1s: &
             .graphics_board()
             .kona()
             .ok_or_else(|| format!("graphics.board \"{}\" is not a board of the Onyx 3000", cfg.graphics_board().as_str()))?;
-        let pipe = attach_ir3(bedrock, &bridge, cfg, KonaConfig::new(product, rm_count)?, &status, widget)?;
+        let pipe = attach_ir3(bedrock, &bridge, cfg, KonaConfig::new(product, rm_count)?, &status, gpu.share(cfg)?, widget)?;
         eprintln!("iris: {} on the G-brick at widget {widget} of {brick}", product.spec().label);
         // A link reset of the pipe's port resets the widget's Crosstalk registers, not the board.
         let (weak, reset) = (Arc::downgrade(&pipe), pipe.clone());
@@ -462,13 +462,14 @@ fn attach_ir3(
     cfg: &MachineConfig,
     kona: KonaConfig,
     status: &Arc<crate::status::MachineStatus>,
+    gpu: Option<crate::SharedGpu>,
     widget: u8,
 ) -> Result<Arc<Kona>, String> {
     let kona = kona.with_host_widget(HOST_WIDGET)?.with_widget(widget)?.with_pool(cfg.graphics.threads, cfg.graphics.tile);
     let flash = cfg.graphics.flash.as_deref().map(|p| crate::dev::kona::flash_file(Path::new(p))).transpose()?;
     // Its interrupt packets are the chip's inbound writes from that widget, to
     // the address the driver programmed.
-    let pipe = Kona::new(kona, bedrock.inbound(widget), bedrock.inbound(widget), status.clone(), flash)?;
+    let pipe = Kona::with_gpu(kona, bedrock.inbound(widget), bedrock.inbound(widget), status.clone(), flash, gpu)?;
     bedrock.io.connect_widget(widget, xbridge.attach_widget(widget, pipe.clone()));
     Ok(pipe)
 }

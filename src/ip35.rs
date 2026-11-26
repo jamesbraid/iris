@@ -203,6 +203,7 @@ pub(crate) fn attach_vpro(
     widget: u8,
     packets: PacketSender,
     status: &Arc<crate::status::MachineStatus>,
+    gpu: Option<crate::SharedGpu>,
     attach: impl FnOnce(Arc<Odyssey>) -> Result<Arc<dyn BusDevice>, String>,
 ) -> Result<Arc<Odyssey>, String> {
     let vpro = Odyssey::new_widget_relative(
@@ -212,7 +213,7 @@ pub(crate) fn attach_vpro(
         bedrock.inbound(widget),
         status.clone(),
         (cfg.graphics.threads, cfg.graphics.tile),
-        crate::workstation::share_gpu(&crate::workstation::open_gpu_unattended(cfg)?),
+        gpu,
     )?;
     bedrock.io.connect_widget(widget, attach(vpro.clone())?);
     Ok(vpro)
@@ -250,7 +251,7 @@ pub fn memory_map(extent: &RamExtent) -> crate::memory_map::MemoryMap {
 pub(crate) fn machine(
     cfg: &MachineConfig,
     node_specs: fn(&MachineConfig) -> Result<Vec<NodeSpec>, String>,
-    build_io: fn(&MachineConfig, &[NodeBoard<Bedrock, Flash>], &[Arc<L1>], &Arc<TimerManager>, &Clock) -> Result<BoardIo, String>,
+    build_io: fn(&MachineConfig, &[NodeBoard<Bedrock, Flash>], &[Arc<L1>], &Arc<TimerManager>, &Clock, &crate::sn::MachineGpu) -> Result<BoardIo, String>,
 ) -> Result<Machine<Bedrock, Flash>, String> {
     cfg.validate()?;
     let name = cfg.machine.profile.product_name().unwrap_or_default();
@@ -281,7 +282,8 @@ pub(crate) fn machine(
     for n in &nodes {
         n.chip.decode.set_world(world.clone());
     }
-    let io = build_io(cfg, &nodes, &l1s, &timers, &clock)?;
+    let gpu = crate::sn::MachineGpu::new();
+    let io = build_io(cfg, &nodes, &l1s, &timers, &clock, &gpu)?;
     let count = nodes.len();
     // Every processor reaches every node's memory at its number.
     let maps: Vec<_> = nodes.iter().map(|n| crate::ip35::memory_map(&n.chip.md.ram_extent())).collect();
@@ -353,7 +355,7 @@ pub(crate) fn machine(
         specs[0].module.part.label(),
     );
     let memory = nodes.iter().map(|n| n.chip.decode.physical().clone() as Arc<dyn Device>).collect();
-    Machine::new(cfg, nodes, l1s, node_cpus, io, memory, timers, (events, receiver), |bedrock| {
+    Machine::new(cfg, nodes, l1s, node_cpus, io, memory, timers, (events, receiver), gpu.take_faults(), |bedrock| {
         // A timer or the other chip can still reach this one's processor.
         bedrock.clear_cpu_interrupts();
         bedrock.decode.physical().release_devices();

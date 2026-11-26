@@ -711,6 +711,41 @@ pub struct Nat {
     pub frames: Arc<AtomicU64>,
 }
 
+/// The GPU a machine's graphics boards draw on (`[graphics] raster = "wgpu"`), opened when the first board
+/// asks and shared by all of them, and the channel a device loss reaches the machine by.
+pub struct MachineGpu {
+    opened: Mutex<Option<Option<crate::SharedGpu>>>,
+    faults: std::sync::mpsc::Sender<MachineFatal>,
+    receiver: Mutex<Option<std::sync::mpsc::Receiver<MachineFatal>>>,
+}
+
+impl MachineGpu {
+    pub fn new() -> MachineGpu {
+        let (faults, receiver) = std::sync::mpsc::channel();
+        MachineGpu { opened: Mutex::new(None), faults, receiver: Mutex::new(Some(receiver)) }
+    }
+
+    /// A board's handle on the machine's GPU: None unless `cfg` asks for one.
+    pub fn share(&self, cfg: &MachineConfig) -> Result<Option<crate::SharedGpu>, String> {
+        let mut opened = self.opened.lock();
+        if opened.is_none() {
+            *opened = Some(crate::workstation::open_gpu(cfg, &self.faults)?);
+        }
+        Ok(crate::workstation::share_gpu(opened.as_ref().expect("opened above")))
+    }
+
+    /// The channel device losses arrive on, for the machine to hand its controller (once).
+    pub(crate) fn take_faults(&self) -> std::sync::mpsc::Receiver<MachineFatal> {
+        self.receiver.lock().take().expect("the fault channel is taken once")
+    }
+}
+
+impl Default for MachineGpu {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// What a board's I/O hands the machine once it is built on the first node.
 pub struct BoardIo {
     /// The devices with threads or timers: started in order, stopped in reverse.
@@ -765,6 +800,9 @@ pub struct Machine<C: Device + Resettable + 'static, F: Device + Resettable + 's
     nvram: String,
     nat: Option<Nat>,
     pub(crate) events: Option<MachineEventQueue>,
+    /// A graphics GPU failure, until the controller takes the receiver, and the first one it latched.
+    fatal_rx: Option<std::sync::mpsc::Receiver<MachineFatal>>,
+    fatal_fault: Option<MachineFatal>,
     resets: crate::traits::MachineEvents,
     slot: Option<MachineSlot>,
     lifecycle: GuestState,
@@ -783,6 +821,7 @@ impl<C: Device + Resettable + 'static, F: Device + Resettable + 'static> Machine
         memory: Vec<Arc<dyn Device>>,
         timers: Arc<TimerManager>,
         (resets, events): (crate::traits::MachineEvents, MachineEventQueue),
+        faults: std::sync::mpsc::Receiver<MachineFatal>,
         release: fn(&C),
     ) -> Result<Self, String> {
         let cpus: Vec<Arc<dyn CpuDevice>> = node_cpus.iter().flatten().cloned().collect();
@@ -838,6 +877,8 @@ impl<C: Device + Resettable + 'static, F: Device + Resettable + 'static> Machine
             nvram: cfg.nvram.clone(),
             nat,
             events: Some(events),
+            fatal_rx: Some(faults),
+            fatal_fault: None,
             resets,
             slot: None,
             lifecycle: GuestState::Idle,
@@ -943,7 +984,14 @@ impl<C: Device + Resettable + 'static, F: Device + Resettable + 'static> Worksta
     fn register_system_controller(&mut self) {
         let slot = self.machine_slot();
         let events = self.events.take().expect("the system controller is registered once");
-        register_system_controller(&self.monitor, slot, Some(events));
+        register_system_controller(&self.monitor, slot.clone(), Some(events));
+        crate::workstation::register_fatal_controller(slot, self.fatal_rx.take());
+    }
+    fn fatal_fault(&self) -> Option<MachineFatal> {
+        self.fatal_fault.clone()
+    }
+    fn latch_fatal_fault(&mut self, fault: MachineFatal) -> bool {
+        self.fatal_fault.is_none() && self.fatal_fault.replace(fault).is_none()
     }
     fn monitor(&self) -> &Arc<Monitor> {
         &self.monitor

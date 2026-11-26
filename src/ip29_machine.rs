@@ -121,6 +121,7 @@ pub(crate) fn build_io(
     clock: &Clock,
     timers: &Arc<TimerManager>,
     events: &MachineEvents,
+    _gpu: &crate::sn::MachineGpu,
 ) -> Result<BoardIo, String> {
     let hub = &nodes[0].chip;
     let controller = Origin200Controller::new(hub, timers, cfg.ip27_section().expect("an IP27 profile").controller_store.as_deref().map(Path::new))?;

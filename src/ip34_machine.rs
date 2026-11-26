@@ -60,7 +60,7 @@ pub(crate) fn node_specs(cfg: &MachineConfig) -> Result<Vec<NodeSpec>, String> {
 }
 
 /// The Fuel's I/O around its node: the XBridge, the VPro in the graphics slot, and the base I/O.
-pub(crate) fn build_io(cfg: &MachineConfig, nodes: &[NodeBoard<Bedrock, Flash>], l1s: &[Arc<L1>], timers: &Arc<TimerManager>, clock: &Clock) -> Result<BoardIo, String> {
+pub(crate) fn build_io(cfg: &MachineConfig, nodes: &[NodeBoard<Bedrock, Flash>], l1s: &[Arc<L1>], timers: &Arc<TimerManager>, clock: &Clock, gpu: &crate::sn::MachineGpu) -> Result<BoardIo, String> {
     let bedrock = &nodes[0].chip;
     let xbridge = xbridge_on(bedrock);
     // The status bar's activity bits, shared with the base I/O's devices.
@@ -70,7 +70,7 @@ pub(crate) fn build_io(cfg: &MachineConfig, nodes: &[NodeBoard<Bedrock, Flash>],
     status.set_scsi_wide(true);
     let graphics = cfg.graphics_board();
     let vpro = (graphics != GraphicsBoard::None)
-        .then(|| attach_vpro(cfg, bedrock, WIDGET_VPRO, bedrock.interrupt_sender(WIDGET_VPRO, None), &status, |vpro| Ok(xbridge.attach_widget(WIDGET_VPRO, vpro))))
+        .then(|| attach_vpro(cfg, bedrock, WIDGET_VPRO, bedrock.interrupt_sender(WIDGET_VPRO, None), &status, gpu.share(cfg)?, |vpro| Ok(xbridge.attach_widget(WIDGET_VPRO, vpro))))
         .transpose()?;
     eprintln!("iris: {}", if vpro.is_some() { graphics.label() } else { "no graphics" });
     let mut io = build_baseio(cfg, &l1s[0], &xbridge, clock, timers, heartbeat, vpro.clone())?;

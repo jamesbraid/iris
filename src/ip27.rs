@@ -199,7 +199,7 @@ impl NodeBoard<Hub, NodeFlash> {
 pub fn machine(
     cfg: &MachineConfig,
     node_specs: fn(&MachineConfig) -> Result<Vec<NodeSpec>, String>,
-    build_io: fn(&MachineConfig, &[NodeBoard<Hub, NodeFlash>], &Clock, &Arc<TimerManager>, &MachineEvents) -> Result<BoardIo, String>,
+    build_io: fn(&MachineConfig, &[NodeBoard<Hub, NodeFlash>], &Clock, &Arc<TimerManager>, &MachineEvents, &crate::sn::MachineGpu) -> Result<BoardIo, String>,
 ) -> Result<Machine<Hub, NodeFlash>, String> {
     cfg.validate()?;
     let prom = prom_image::resolve(cfg.machine.profile, &cfg.prom, node_flash::SIZE)
@@ -214,7 +214,8 @@ pub fn machine(
         nodes.push(node);
     }
     let (tx, rx) = MachineEvents::channel(16);
-    let io = build_io(cfg, &nodes, &clock, &timers, &tx)?;
+    let gpu = crate::sn::MachineGpu::new();
+    let io = build_io(cfg, &nodes, &clock, &timers, &tx, &gpu)?;
     let maps: Vec<_> = specs.iter().map(|s| memory_map(s.hub.banks_mb)).collect();
     let memory = Arc::new(crate::sn::machine_memory(&maps, crate::dev::hub::NODE_SHIFT));
 
@@ -277,7 +278,7 @@ pub fn machine(
         specs[0].module.part.label(),
     );
     let memory = nodes.iter().map(|n| n.chip.decode.physical().clone() as Arc<dyn Device>).collect();
-    Machine::new(cfg, nodes, Vec::new(), node_cpus, io, memory, timers, (tx, rx), |hub| {
+    Machine::new(cfg, nodes, Vec::new(), node_cpus, io, memory, timers, (tx, rx), gpu.take_faults(), |hub| {
         // Another Hub can still reach this one's processor.
         hub.pi.clear_cpu_interrupts();
         hub.decode.physical().release_devices();

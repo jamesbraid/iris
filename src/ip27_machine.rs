@@ -316,12 +316,13 @@ pub(crate) fn build_io(
     clock: &Clock,
     timers: &Arc<TimerManager>,
     events: &MachineEvents,
+    gpu: &crate::sn::MachineGpu,
 ) -> Result<BoardIo, String> {
     let controller = controller(nodes, timers, cfg)?;
     // The status bar's activity bits, shared with the Bridge's devices.
     let heartbeat = Arc::new(AtomicU64::new(0));
     let mut io = if cfg.machine.profile == MachineProfile::Onyx2Ip27 {
-        onyx2(cfg, nodes, timers, controller.clone(), heartbeat.clone())?
+        onyx2(cfg, nodes, timers, controller.clone(), heartbeat.clone(), gpu)?
     } else {
         origin2000(cfg, nodes, timers, controller.clone(), heartbeat.clone())?
     };
@@ -372,6 +373,7 @@ fn onyx2(
     timers: &Arc<TimerManager>,
     controller: Arc<ModuleManagement>,
     heartbeat: Arc<AtomicU64>,
+    gpu: &crate::sn::MachineGpu,
 ) -> Result<BoardIo, String> {
     const BASEIO_WIDGET: u8 = 15;
     const GRAPHICS_WIDGET: u8 = 8;
@@ -393,7 +395,7 @@ fn onyx2(
                 .with_widget(GRAPHICS_WIDGET)?
                 .with_pool(cfg.graphics.threads, cfg.graphics.tile);
             let flash = cfg.graphics.flash.as_deref().map(|p| crate::dev::kona::flash_file(Path::new(p))).transpose()?;
-            let pipe = Kona::new(kona_cfg, pipe_hosts.clone(), pipe_hosts.clone(), status.clone(), flash)?;
+            let pipe = Kona::with_gpu(kona_cfg, pipe_hosts.clone(), pipe_hosts.clone(), status.clone(), flash, gpu.share(cfg)?)?;
             let _ = pipe_hosts.widget.set(pipe.dma_widget_handle());
             // The driver's adaptor reset link-resets the pipe's widget before it pulses the board's
             // reset; the widget loses its Crosstalk interface registers.
