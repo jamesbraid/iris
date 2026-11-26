@@ -3340,9 +3340,16 @@ impl Rss {
                 let (i, _, _) = b.locate(fx as u32, fy as u32);
                 // Ascending, a run to the end of the tile; else one pixel.
                 let run = if dx > 0 { (TILE_W - fx as usize % TILE_W).min((to - k) as usize) } else { 1 };
-                for (w, &v) in self.mem.words[i..i + run].iter_mut().zip(&vals[(k - from) as usize..]) {
-                    let v = v & keep;
-                    *w = (*w & !WORD_MASK) | ((*w as u32 & !mask) | (v & mask)) as u64;
+                let (words, vals) = (&mut self.mem.words[i..i + run], &vals[(k - from) as usize..]);
+                // No plane of the old pixel is kept: the low 36 bits are the new colour.
+                if *mask & keep == u32::MAX {
+                    for (w, &v) in words.iter_mut().zip(vals) {
+                        *w = (*w & !WORD_MASK) | v as u64;
+                    }
+                } else {
+                    for (w, &v) in words.iter_mut().zip(vals) {
+                        *w = (*w & !WORD_MASK) | ((*w as u32 & !mask) | (v & keep & mask)) as u64;
+                    }
                 }
                 k += run as i32;
             }
