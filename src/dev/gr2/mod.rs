@@ -33,6 +33,8 @@ pub mod hq2;
 pub mod re3;
 #[cfg(feature = "gr2-jit")]
 pub mod re3_jit;
+#[cfg(feature = "wgpu")]
+mod scanout;
 mod snapshot;
 pub mod vc1;
 pub mod xmap5;
@@ -52,6 +54,8 @@ mod re3_jit_tests;
 use std::io::Write as IoWrite;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::thread;
 
 use crate::cpu::mips_core::CyclesPtr;
@@ -78,6 +82,11 @@ impl crate::gfx_display::GfxDisplay for Gr2 {
     fn screen(&self) -> &Mutex<Rex3Screen> { self.head.screen() }
     fn request_screenshot(&self) { self.head.request_screenshot(); }
     fn screenshot_pending(&self) -> bool { self.head.screenshot_pending() }
+    #[cfg(feature = "wgpu")]
+    fn gpu(&self) -> Option<Arc<crate::wgpu::Gpu>> {
+        // SAFETY: the scan-out is set once at construction and read-only here.
+        unsafe { &*self.scanout.get() }.as_ref().map(|s| s.gpu())
+    }
     fn request_frame(&self) { self.head.request_frame(); }
     fn frame_pending(&self) -> bool { self.head.frame_pending() }
     fn set_capture(&self, on: bool) { self.head.set_capture(on); }
@@ -251,7 +260,7 @@ impl Saveable for Gr2 {
                 (d.readmask, d.blinkmask, d.cmd, d.test) = (c[0], c[1], c[2], c[3]);
             }
         }
-        self.head.damage();
+        self.damage();
         Ok(())
     }
 }

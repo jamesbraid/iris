@@ -15,6 +15,8 @@ use std::thread;
 
 use parking_lot::Mutex;
 
+use super::Gr2Variant;
+
 use crate::gfifo::GFifo;
 use crate::traits::{BusRead32, BUS_BUSY, BUS_OK};
 
@@ -195,6 +197,9 @@ pub struct Gr2 {
     /// Pending half of a two-entry COPY op (RE3 thread only).
     pub(super) copy_a: Cell<u64>,
 
+    /// Something visible changed since the last `take_dirty`: for a shell that composes on request. The
+    /// refresh thread is told through `head.damage()` as well (`damage`).
+    pub(super) dirty: AtomicBool,
     pub(super) running: AtomicBool,
     pub(super) hq_busy: AtomicBool,
     pub(super) re3_busy: AtomicBool,
@@ -350,6 +355,7 @@ impl Gr2 {
             addr_of_mut!((*p).variant).write(variant);
             addr_of_mut!((*p).probe).write(probe);
             addr_of_mut!((*p).copy_a).write(Cell::new(0));
+            addr_of_mut!((*p).dirty).write(AtomicBool::new(true));
             addr_of_mut!((*p).running).write(AtomicBool::new(false));
             addr_of_mut!((*p).hq_busy).write(AtomicBool::new(false));
             addr_of_mut!((*p).re3_busy).write(AtomicBool::new(false));
@@ -735,6 +741,12 @@ impl Gr2 {
         }
     }
 
+    /// The picture may differ: for the shell's flag and for the refresh thread.
+    pub(super) fn damage(&self) {
+        self.dirty.store(true, Ordering::Release);
+        self.head.damage();
+    }
+
     /// Whether something visible changed since the last `take_dirty`.
     pub fn dirty_pending(&self) -> bool {
         self.dirty.load(Ordering::Acquire)
@@ -887,7 +899,7 @@ impl Gr2 {
             } else {
                 r.xmap[((off - XMAP) >> 5) as usize].write(xmap5::XMAP_CLUT, val);
             }
-            self.head.damage();
+            self.damage();
             if self.tracing(debug::TRACE_CPU) {
                 self.trace_cpu(true, off, val);
             }
@@ -950,23 +962,23 @@ impl Gr2 {
             0x6c000..0x6c010 => r.bdvers_w[((off - BDVERS) >> 2) as usize] = val,
             0x6c040..0x6c060 => {
                 r.vc1.write(off & 0x1c, val);
-                self.head.damage();
+                self.damage();
             }
             0x6c0a0..0x6c100 => {
                 r.dac[((off - DAC) >> 5) as usize].write(off & 0x1c, val as u8);
-                self.head.damage();
+                self.damage();
             }
             0x6c100..0x6c1a0 => {
                 let x = &mut r.xmap[((off - XMAP) >> 5) as usize];
                 if off & 0x1c == xmap5::XMAP_CLUT { x.write_clut_packed(val) } else { x.write(off & 0x1c, val) }
-                self.head.damage();
+                self.damage();
             }
             0x6c1c0..0x6c200 if self.probe.aux_window == AuxWindow::Bytes => r.aux[((off - 0x6c1c0) >> 2) as usize] = val as u8,
             0x6c1a0..0x6c1c0 => {
                 for x in r.xmap.iter_mut() {
                     if off & 0x1c == xmap5::XMAP_CLUT { x.write_clut_packed(val) } else { x.write(off & 0x1c, val) }
                 }
-                self.head.damage();
+                self.damage();
             }
             0x6c1c0..0x6c1e0 if self.probe.aux_window == AuxWindow::Legacy => r.ab1 = val,
             // Pixel-clock load, revision 4 and up: record the programmed bytes
@@ -1319,7 +1331,7 @@ impl Gr2 {
                     self.publish_re3_telemetry(re3);
                 }
                 if drew {
-                    self.head.damage();
+                    self.damage();
                 }
                 self.re3_fifo.consume();
                 backoff.reset();
@@ -1367,7 +1379,7 @@ impl Gr2 {
         self.gedma_out_head.store(0, Ordering::Release);
         self.gedma_out_tail.store(0, Ordering::Release);
         self.copy_a.set(0);
-        self.head.damage();
+        self.damage();
     }
 
 

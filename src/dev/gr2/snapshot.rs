@@ -366,7 +366,7 @@ impl Gr2 {
         }
         self.gedma_out_head
             .store(state.gedma.len() as u32, Ordering::Release);
-        self.head.damage();
+        self.damage();
         Ok(())
     }
 }
