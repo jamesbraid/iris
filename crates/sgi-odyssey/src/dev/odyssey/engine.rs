@@ -470,14 +470,15 @@ impl VproEngine {
         if !self.settle_scanout() {
             return None;
         }
-        let r = &mut self.reader;
-        r.attach(&self.locks.shared);
-        r.force = true;
-        r.update_to(None);
-        r.force = false;
-        // The reader composes 0xAABBGGRR; this API hands out 0x00RRGGBB.
-        let rgb = |p: &u32| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16) & 0xff;
-        (r.frame_width != 0).then(|| (r.frame_width, r.frame_height, r.frame.iter().map(rgb).collect()))
+        compose_cpu(&mut self.reader, &self.locks.shared)
+    }
+
+    /// A CPU compose on a reader of its own, which needs no other call into the engine, so the
+    /// caller may run it beside them. None with the GPU unit, whose compose needs the board.
+    pub fn composer(&self) -> Option<Composer> {
+        let mut reader = ScanoutReader::default();
+        reader.screen_order = true;
+        (!self.gpu).then(|| Composer { reader, shared: self.locks.shared.clone() })
     }
 
     /// The picture lines that may have changed since the last call, as runs `(first, end)`; every line
@@ -506,17 +507,7 @@ impl VproEngine {
         if !self.settle_scanout() {
             return None;
         }
-        let r = &mut self.reader;
-        r.attach(&self.locks.shared);
-        let (w, h) = r.size();
-        let (first, end) = (first.min(h), end.min(h));
-        if first < end && out.len() >= w as usize * h as usize && r.compose_rows(first, end) {
-            // The reader composes 0xAABBGGRR; this API hands out 0x00RRGGBB.
-            let rgb = |p: &u32| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16) & 0xff;
-            let range = first as usize * w as usize..end as usize * w as usize;
-            out[range.clone()].iter_mut().zip(&r.frame[range]).for_each(|(o, p)| *o = rgb(p));
-        }
-        (w != 0).then_some((w, h))
+        compose_rows_cpu(&mut self.reader, &self.locks.shared, first, end, out)
     }
 
     /// As `scanout` with the colour maps' ten bits a channel, x2b10g10r10 (XB30, red low), whose top eight bits
@@ -600,6 +591,58 @@ impl VproEngine {
         }
         true
     }
+}
+
+/// `VproEngine::composer`'s handle: `scanout` and `scanout_rows` as the engine's, while the engine is
+/// in use. A panic faults the board, as one in an engine call does, and answers Err.
+pub struct Composer {
+    reader: ScanoutReader,
+    shared: Arc<DisplayShared>,
+}
+
+impl Composer {
+    pub fn scanout(&mut self) -> Result<Option<(u32, u32, Vec<u32>)>, ()> {
+        self.guarded(compose_cpu)
+    }
+
+    pub fn scanout_rows(&mut self, first: u32, end: u32, out: &mut [u32]) -> Result<Option<(u32, u32)>, ()> {
+        self.guarded(|r, s| compose_rows_cpu(r, s, first, end, out))
+    }
+
+    fn guarded<T>(&mut self, f: impl FnOnce(&mut ScanoutReader, &Arc<DisplayShared>) -> T) -> Result<T, ()> {
+        let (r, s) = (&mut self.reader, &self.shared);
+        let run = || {
+            hit(Point::Frame);
+            f(r, s)
+        };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).map_err(|p| {
+            let why = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned());
+            fail_gpu(&self.shared.gpu_fault, "panic in the CPU compose", why.as_deref().unwrap_or("unknown panic"));
+        })
+    }
+}
+
+fn compose_rows_cpu(r: &mut ScanoutReader, shared: &Arc<DisplayShared>, first: u32, end: u32, out: &mut [u32]) -> Option<(u32, u32)> {
+    r.attach(shared);
+    let (w, h) = r.size();
+    let (first, end) = (first.min(h), end.min(h));
+    if first < end && out.len() >= w as usize * h as usize && r.compose_rows(first, end) {
+        // The reader composes 0xAABBGGRR; this API hands out 0x00RRGGBB.
+        let rgb = |p: &u32| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16) & 0xff;
+        let range = first as usize * w as usize..end as usize * w as usize;
+        out[range.clone()].iter_mut().zip(&r.frame[range]).for_each(|(o, p)| *o = rgb(p));
+    }
+    (w != 0).then_some((w, h))
+}
+
+fn compose_cpu(r: &mut ScanoutReader, shared: &Arc<DisplayShared>) -> Option<(u32, u32, Vec<u32>)> {
+    r.attach(shared);
+    r.force = true;
+    r.update_to(None);
+    r.force = false;
+    // The reader composes 0xAABBGGRR; this API hands out 0x00RRGGBB.
+    let rgb = |p: &u32| (p & 0xff) << 16 | (p & 0xff00) | (p >> 16) & 0xff;
+    (r.frame_width != 0).then(|| (r.frame_width, r.frame_height, r.frame.iter().map(rgb).collect()))
 }
 
 impl BoardEngine for VproEngine {

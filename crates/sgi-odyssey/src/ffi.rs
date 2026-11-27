@@ -11,7 +11,7 @@ use sgi_engine::{BoardEngine, GpuLoss, Rect};
 
 use crate::dev::odyssey::board::Params;
 use crate::dev::odyssey::dma::DmaCounts;
-use crate::dev::odyssey::engine::{memory_bytes_for, Config, Mode, VproEngine};
+use crate::dev::odyssey::engine::{memory_bytes_for, Composer, Config, Mode, VproEngine};
 use crate::wgpu::{Gpu, GpuOptions};
 
 /// The VPro configuration: the shared part, then the board's.
@@ -387,5 +387,73 @@ pub unsafe extern "C" fn sgi_odyssey_scanout(h: *mut IrisEngine, buf: *mut u32, 
             std::ptr::copy_nonoverlapping(pixels.as_ptr(), buf, pixels.len());
             IRIS_ENGINE_OK
         })
+    }
+}
+
+/// A compose handle (`VproEngine::composer`) for `sgi_odyssey_composer_scanout`, which may run while
+/// other calls use `h`. NULL with the GPU unit. Freed with `sgi_odyssey_composer_free`, before `h`.
+pub struct IrisVproComposer(Composer);
+
+/// # Safety
+/// `h` is a live VPro handle.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_odyssey_composer_new(h: *mut IrisEngine) -> *mut IrisVproComposer {
+    unsafe { call::<VproEngine, _>(h, Point::Pixel, std::ptr::null_mut(), |e| e.composer().map_or(std::ptr::null_mut(), |c| Box::into_raw(Box::new(IrisVproComposer(c))))) }
+}
+
+/// As `sgi_odyssey_scanout`, on `c`; FAULT if the compose panics, which faults the engine.
+///
+/// # Safety
+/// `c` is a live composer, used by one thread at a time; `buf`, `w` and `hgt` as for `sgi_odyssey_scanout`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_odyssey_composer_scanout(c: *mut IrisVproComposer, buf: *mut u32, cap: usize, w: *mut u32, hgt: *mut u32) -> c_int {
+    if c.is_null() || w.is_null() || hgt.is_null() || (buf.is_null() && cap != 0) {
+        return IRIS_ENGINE_ERROR;
+    }
+    let Ok(frame) = unsafe { &mut *c }.0.scanout() else {
+        return IRIS_ENGINE_FAULT;
+    };
+    let (fw, fh, pixels) = frame.unwrap_or((0, 0, Vec::new()));
+    unsafe {
+        *w = fw;
+        *hgt = fh;
+        if pixels.len() > cap {
+            return IRIS_ENGINE_ERROR;
+        }
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), buf, pixels.len());
+    }
+    IRIS_ENGINE_OK
+}
+
+/// As `sgi_odyssey_scanout_rows`, on `c`; FAULT if the compose panics, which faults the engine.
+///
+/// # Safety
+/// `c` is a live composer, used by one thread at a time; `buf`, `w` and `hgt` as for `sgi_odyssey_scanout_rows`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_odyssey_composer_scanout_rows(c: *mut IrisVproComposer, first: u32, end: u32, buf: *mut u32, cap: usize, w: *mut u32, hgt: *mut u32) -> c_int {
+    if c.is_null() || w.is_null() || hgt.is_null() || (buf.is_null() && cap != 0) {
+        return IRIS_ENGINE_ERROR;
+    }
+    let out = if cap == 0 { &mut [][..] } else { unsafe { std::slice::from_raw_parts_mut(buf, cap) } };
+    let Ok(size) = unsafe { &mut *c }.0.scanout_rows(first, end, out) else {
+        return IRIS_ENGINE_FAULT;
+    };
+    let (fw, fh) = size.unwrap_or((0, 0));
+    unsafe {
+        *w = fw;
+        *hgt = fh;
+    }
+    if fw as usize * fh as usize > cap {
+        return IRIS_ENGINE_ERROR;
+    }
+    IRIS_ENGINE_OK
+}
+
+/// # Safety
+/// `c` is NULL or a composer no other call is using.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_odyssey_composer_free(c: *mut IrisVproComposer) {
+    if !c.is_null() {
+        drop(unsafe { Box::from_raw(c) });
     }
 }

@@ -714,6 +714,41 @@ fn a_cpu_store_announced_with_cpu_wrote_reaches_a_gpu_scanout() {
     assert_ne!(after.2[at], 0, "the CPU's store is in the frame");
 }
 
+/// The composer's frame and rows are the engine's, made on another thread while the engine takes calls,
+/// for a pixel whose red and blue differ; a panic in it faults the engine.
+#[test]
+fn a_composer_shows_the_engines_frame_beside_the_engine() {
+    let bytes = memory_bytes("v12").unwrap() as usize;
+    let mut buf = vec![0u64; bytes / 8];
+    let ptr = buf.as_mut_ptr();
+    let lent = unsafe { Lent::new(ptr.cast(), bytes) }.unwrap();
+    let mut e = VproEngine::new(config("v12", Mode::Threaded), Some(lent), Shared(Arc::new(Ram::default())), None).unwrap();
+    program_scanout(&mut e);
+    e.quiesce(u64::MAX).unwrap();
+    let (x, y) = (100u64, 50u64);
+    let at = 0x2_0000 + (((y >> 4) * 80 + (x >> 4)) << 8 | (y & 15) << 4 | (x & 15)) * 16;
+    unsafe { ptr.add(at as usize / 8).cast::<[u64; 2]>().write([0x1020_3040_5060_7080; 2]) };
+    let mut c = e.composer().expect("a CPU engine has a composer");
+    let side = std::thread::spawn(move || {
+        let whole = c.scanout().unwrap().expect("a frame");
+        let mut rows = vec![0u32; 1280 * 1024];
+        assert_eq!(c.scanout_rows(48, 64, &mut rows).unwrap(), Some((1280, 1024)));
+        (whole, rows, c)
+    });
+    for t in 0..100 {
+        e.advance(t * 1_000_000);
+    }
+    let (theirs, rows, mut c) = side.join().unwrap();
+    let ours = e.scanout().expect("a frame");
+    let px = ours.2[(y * 1280 + x) as usize];
+    assert_ne!(px >> 16 & 0xff, px & 0xff, "red and blue differ: {px:#x}");
+    assert_eq!(theirs, ours);
+    assert!(rows[48 * 1280..64 * 1280] == ours.2[48 * 1280..64 * 1280], "the rows are the whole frame's");
+    sgi_engine::inject::arm(sgi_engine::inject::Point::Frame);
+    assert!(c.scanout().is_err(), "a panic answers Err");
+    assert!(e.fault().is_some_and(|f| f.contains("panic in the CPU compose")), "{:?}", e.fault());
+}
+
 /// Composes return at once while the board runs a held slice, showing the last submitted picture; the slice closing wakes
 /// the shell and moves the generation, and the next compose has the CPU's store. Needs a GPU adapter.
 #[test]

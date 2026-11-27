@@ -172,6 +172,26 @@ int sgi_odyssey_scanout_rows(IrisEngine *h, uint32_t first, uint32_t end,
                            uint32_t *buf, size_t cap, uint32_t *w,
                            uint32_t *hgt);
 
+/*
+ * A compose handle for sgi_odyssey_composer_scanout(), which may run while
+ * other calls use h. NULL with the GPU unit. Freed before h.
+ */
+typedef struct IrisVproComposer IrisVproComposer;
+
+IrisVproComposer *sgi_odyssey_composer_new(IrisEngine *h);
+
+/*
+ * As sgi_odyssey_scanout() and sgi_odyssey_scanout_rows(), on c, one thread
+ * at a time. FAULT on a panic, which faults the engine.
+ */
+int sgi_odyssey_composer_scanout(IrisVproComposer *c, uint32_t *buf,
+                                 size_t cap, uint32_t *w, uint32_t *hgt);
+int sgi_odyssey_composer_scanout_rows(IrisVproComposer *c, uint32_t first,
+                                      uint32_t end, uint32_t *buf, size_t cap,
+                                      uint32_t *w, uint32_t *hgt);
+
+void sgi_odyssey_composer_free(IrisVproComposer *c);
+
 #ifdef __cplusplus
 }
 #endif
