@@ -154,10 +154,11 @@ impl Head for Scan {
         }
     }
 
-    /// What the scan-out reads changes without a mark the display could
-    /// test for less than `compose` does.
+    /// What the scan-out reads changes without a mark the display could test for less than `compose`
+    /// does, so every frame is looked at while a window, a request or a capturing client reads one.
+    /// Headless, the GPU scan-out would otherwise compose and read back sixty times a second for nobody.
     fn changed(&self) -> bool {
-        true
+        self.display.head.watched()
     }
 
     fn compose(&self, screen: &mut Rex3Screen, want: Want) -> Composed {

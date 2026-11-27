@@ -1079,3 +1079,20 @@ fn an_idle_display_composes_no_frames() {
     assert!(Odyssey::frame(&h, &display), "a store shows on the next frame");
     h.raster.stop();
 }
+
+/// With nothing showing or reading its frames the display looks at none (`--ci` with no window), and a
+/// capturing client or a frame request brings the looking back.
+#[test]
+fn a_display_nobody_reads_reports_no_change() {
+    use crate::display::Head;
+    let (h, _st, display) = display_rig();
+    let scan = crate::dev::odyssey::display::Scan { state: h.clone(), display: display.clone() };
+    assert!(!scan.changed(), "nobody reads a frame");
+    display.head.set_capture(true);
+    assert!(scan.changed(), "a client that captures every frame");
+    display.head.set_capture(false);
+    assert!(!scan.changed(), "and not after it leaves");
+    display.head.request_frame();
+    assert!(scan.changed(), "a request wants the next frame");
+    h.raster.stop();
+}
