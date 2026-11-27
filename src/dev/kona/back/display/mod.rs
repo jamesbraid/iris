@@ -340,6 +340,7 @@ impl Compositor {
             if want.gpu {
                 screen.width = w;
                 screen.height = h;
+                screen.prebuilt = true;
                 return Composed::Gpu { frame: sc.output().clone(), width: w as u32, height: h as u32 };
             }
             if let Err(e) = sc.read(&mut self.frame) {

@@ -186,7 +186,7 @@ mod resident_gate_tests {
                 assert!(rex.attach_resident_raster(probe(Ok(())).0).unwrap_err().contains("recording"));
                 rex.tap.store(0, Ordering::Release);
                 let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target")
+                let path = std::env::temp_dir()
                     .join(format!("resident-gate-trace-{}-{nonce}.log", std::process::id()));
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 rex.start_trace(path.to_str().unwrap(), 0).unwrap();
