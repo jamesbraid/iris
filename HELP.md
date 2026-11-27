@@ -493,8 +493,8 @@ variable is set to `d` (serial), all PROM and early-boot output goes to
 `/dev/ttyd1` → TCP port **8881**.
 
 Every machine names its serial ports `serialN`, N the IRIX `/dev/ttydN`. The Indy
-and Indigo2's `serial1` is SCC channel B, which is why it listens on 8881.
-`--list-slots` shows each port and what is attached. The L1 console of
+and Indigo2's `serial1` is SCC channel B, which is why it listens on 8881; the Onyx2's `serial3` and
+`serial4` are its MediaIO card's and have no listener by default. `--list-slots` shows each port and what is attached. The L1 console of
 the Fuel, Tezro, Origin 3200 and Onyx 3000 is not a serial port: `l1_port` and
 `l1_log` set its host end, and `machine.console = "l1"` names it as the console.
 

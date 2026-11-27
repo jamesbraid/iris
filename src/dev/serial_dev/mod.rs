@@ -242,6 +242,8 @@ pub fn ports(profile: crate::config::MachineProfile) -> &'static [(u8, Option<u1
     match profile {
         P::IndyIp24 | P::Indigo2Ip22 | P::Indigo2Ip28 => &[(1, Some(8881)), (2, Some(8880))],
         P::TezroIp53 => &[(3, Some(8880)), (4, Some(8881))],
+        // The MediaIO card's IOC3 ports are ttyd3 and ttyd4.
+        P::Onyx2Ip27 => &[(1, Some(8880)), (2, Some(8881)), (3, None), (4, None)],
         _ => &[(1, Some(8880)), (2, Some(8881))],
     }
 }
@@ -313,6 +315,10 @@ mod tests {
         let entry = "[[devices]]\ntype = \"serial\"\nat = \"serial2\"\nbackend = [\"unix:/run/a\", \"log:a.log\"]\n";
         assert_eq!(lines(&cfg(MachineProfile::IndyIp24, entry).unwrap()), [(2, "unix:/run/a log:a.log".into(), false), (1, "tcp:8881".into(), true)]);
         assert_eq!(lines(&cfg(MachineProfile::TezroIp53, "").unwrap()), [(3, "tcp:8880".into(), true), (4, "tcp:8881".into(), true)]);
+        let (onyx2, origin) = (cfg(MachineProfile::Onyx2Ip27, "").unwrap(), cfg(MachineProfile::Origin2000Ip27, "").unwrap());
+        assert_eq!((lines(&onyx2).len(), lines(&origin).len()), (2, 2), "the MediaIO's serial3 and serial4 have no listener");
+        let mio = entry.replace("serial2", "serial4");
+        assert!(cfg(MachineProfile::Onyx2Ip27, &mio).is_ok() && cfg(MachineProfile::Origin2000Ip27, &mio).is_err());
     }
 
     /// `machine.console` names a serial port or the L1; the old IOC names are refused with the ports to write.
