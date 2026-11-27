@@ -657,18 +657,27 @@ fn program_scanout(e: &mut VproEngine) {
 /// line; `scanout_rows` composes the lines asked for and leaves every other word alone.
 #[test]
 fn the_damage_names_the_lines_a_store_reached_and_scanout_rows_composes_only_those() {
-    let (mut e, _) = engine(Mode::Inline);
+    let bytes = memory_bytes("v12").unwrap() as usize;
+    let mut buf = vec![0u64; bytes / 8];
+    let ptr = buf.as_mut_ptr();
+    let lent = unsafe { Lent::new(ptr.cast(), bytes) }.unwrap();
+    let mut e = VproEngine::new(config("v12", Mode::Inline), Some(lent), Shared(Arc::new(Ram::default())), None).unwrap();
     program_scanout(&mut e);
     assert_eq!(e.take_damage(), vec![(0, 1024)], "the first look is every line");
     assert!(e.take_damage().is_empty(), "nothing changed");
     let (x, y) = (100u64, 50u64);
-    e.cpu_wrote(0x2_0000 + (((y >> 4) * 80 + (x >> 4)) << 8 | (y & 15) << 4 | (x & 15)) * 16, 16);
+    let at = 0x2_0000 + (((y >> 4) * 80 + (x >> 4)) << 8 | (y & 15) << 4 | (x & 15)) * 16;
+    unsafe { ptr.add(at as usize / 8).cast::<[u64; 2]>().write([0x1020_3040_5060_7080; 2]) };
+    e.cpu_wrote(at, 16);
     assert_eq!(e.take_damage(), vec![(48, 64)]);
     e.cpu_wrote(0x4000_0000, 16);
     assert!(e.take_damage().is_empty(), "memory outside the two buffers marks no line");
     let mut out = vec![0xdead_beefu32; 1280 * 1024];
     assert_eq!(e.scanout_rows(48, 64, &mut out), Some((1280, 1024)));
-    assert!(out[48 * 1280..64 * 1280].iter().all(|&p| p >> 24 == 0), "the lines asked for are composed");
+    let whole = e.scanout().expect("a frame").2;
+    let i = (y * 1280 + x) as usize;
+    assert_ne!(whole[i] & 0xff_ffff, 0, "the pixel shows a colour");
+    assert!(out[48 * 1280..64 * 1280] == whole[48 * 1280..64 * 1280], "the lines asked for are composed as a whole frame has them");
     assert!(out[..48 * 1280].iter().chain(&out[64 * 1280..]).all(|&p| p == 0xdead_beef), "the others are not touched");
     let mut short = vec![0xdead_beefu32; 16];
     assert_eq!(e.scanout_rows(0, 1, &mut short), Some((1280, 1024)));
