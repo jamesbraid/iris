@@ -25,7 +25,7 @@ package: vendor the dependencies and set `LIBCHDMAN_FORCE_SOURCE=1`, as
 Connect the monitor console (a second terminal):
 You have monitor console in the terminal or you can open extra ones telnetting to 127.0.0.1:8888
 
-Serial ports are on ports 8880 and 8881 (connect to 8881 for IRIX serial term); `serial_port_a` / `serial_port_b` change them
+Serial ports are on ports 8880 and 8881 (connect to 8881 for IRIX serial term); a `serial` device changes them (see [Serial ports](#serial-ports))
 
 `iris.toml` in the repository root is a fully commented example configuration;
 `iris-irix53.toml` and `iris-irix65.toml` are templates for installing each
@@ -483,35 +483,59 @@ seeq status          # Ethernet MAC / DMA state
 The Z85C30 SCC provides two RS-232 serial channels, both exposed as TCP
 sockets on localhost.  Connect with `telnet`, `nc`, or any raw TCP client.
 
-| TCP port | SCC channel | IRIX device  | Physical connector |
-|----------|-------------|------------- |--------------------|
-| `8880`   | Channel A   | `/dev/ttyd2` | DB-9 RS-232 port (rear panel) |
-| `8881`   | Channel B   | `/dev/ttyd1` | Mini-DIN serial / console fallback |
+| TCP port | Port      | SCC channel | IRIX device  | Physical connector |
+|----------|-----------|-------------|------------- |--------------------|
+| `8880`   | `serial2` | Channel A   | `/dev/ttyd2` | DB-9 RS-232 port (rear panel) |
+| `8881`   | `serial1` | Channel B   | `/dev/ttyd1` | Mini-DIN serial / console fallback |
 
 `/dev/ttyd1` is the Indy's primary serial console.  If the PROM `console`
 variable is set to `d` (serial), all PROM and early-boot output goes to
 `/dev/ttyd1` → TCP port **8881**.
 
-The ports are the defaults: `serial_port_a` and `serial_port_b` in the config
-(or `--serial-port-a` / `--serial-port-b`) move them, as `monitor_port` moves the
-monitor, so that two iris processes can run at once. Under `--ci` no serial
-port is served on TCP, so several `--ci` instances coexist.
+Every machine names its serial ports `serialN`, N the IRIX `/dev/ttydN`. The Indy
+and Indigo2's `serial1` is SCC channel B, which is why it listens on 8881.
+`--list-slots` shows each port and what is attached. The L1 console of
+the Fuel, Tezro, Origin 3200 and Onyx 3000 is not a serial port: `l1_port` and
+`l1_log` set its host end, and `machine.console = "l1"` names it as the console.
 
-Each serial line can also be served on a Unix socket:
-`serial_socket_a` / `serial_socket_b` (or `--serial-socket-a` /
-`--serial-socket-b`). The socket carries raw bytes with no telnet negotiation,
-takes one client at a time. iris removes the socket file when it exits, even
+The ports above are the defaults. A `serial` device at a port replaces them
+with the host ends it names, as `monitor_port` moves the monitor, so that two
+iris processes can run at once:
+
+```toml
+[[devices]]
+type = "serial"
+at = "serial2"
+backend = ["tcp:8890", "unix:/run/tty2.sock", "log:tty2.log"]
+```
+
+`backend` is one string or a list, each `KIND:ARGUMENT`: `tcp:PORT` serves the
+line on 127.0.0.1 in telnet character mode (0 takes any free port),
+`unix:PATH` on a Unix socket, `log:PATH` writes a transcript. A device with no
+`backend` leaves the port unplugged. On the command line the same entry is
+`--device serial@serial2,backend=tcp:8890`, with `backend=` repeated for each
+end. The Unix socket carries raw bytes with no telnet negotiation, takes one
+client at a time. iris removes the socket file when it exits, even
 through power-off, `quit` or a signal; after a crash the next start replaces
 the leftover, and it refuses a file that is not a socket. The guest never
 waits for a client: each TCP or socket client keeps up to 1 MiB it has not
 read, and past that loses the oldest output (a TCP client is told how many
-bytes went; `serial status` or `com0 status` counts them). `serial_log`
-writes the console's transcript and `serial_log_a` / `serial_log_b` the other
-line's (the Indy and Indigo2 console is channel B, the Octane's and O2's
-channel A). A log that already exists is added to; `serial_log_overwrite =
+bytes went; `serial status` or `com0 status` counts them). `machine.console`
+names the port that serves `--ci` and `serial_log` (`serial1`, `serial2`, or `l1`
+where there is one; default the machine's own); `serial_log` writes its
+transcript and a port's own `log:` end the other ports'. A log that already exists is added to; `serial_log_overwrite =
 true` (`--serial-log-overwrite`) starts every serial log afresh each run
-instead. With `ci`, a console that has a socket still feeds the control
-socket's `serial-read` and `wait-serial`, and either side may type.
+instead. Under `--ci` the console is the control socket's buffer instead of a
+TCP listener, and every other port's default end takes any free port, so parallel
+`--ci` runs on one host never collide; the startup line `iris: MACHINE serial port
+PATH on 127.0.0.1:PORT` and the monitor's `ports` give it. A port a `serial`
+device names keeps the port it asks for. With a `unix:` end the console still
+feeds the control socket's `serial-read` and `wait-serial`, and either side may type.
+
+The older `serial_port_a`, `serial_port_b`, `serial_socket_a`, `serial_socket_b`,
+`serial_log_a`, `serial_log_b` and `serial_port_c`/`_d` keys, and the
+`--serial-port-a` and `--serial-port-b` flags, are no longer read: iris says
+which `[[devices]]` entry to write instead.
 
 ```bash
 socat - UNIX-CONNECT:/tmp/octane-console.sock
@@ -536,9 +560,9 @@ serial device always names its port. Most machines have `serial1` and
 `serial2`; on the Indy and Indigo2, `serial1` is SCC channel B, the console,
 and `serial2` channel A. The Tezro's are `serial3` and `serial4`, the IOC4's
 first two ports (its `ttyd1` is the L1 console, and IRIX makes no devices for
-the IOC4's other two ports). `iris --list-slots` shows them. A port with a
-device serves no TCP or Unix socket; its serial log, if set, still records
-what the guest sends.
+the IOC4's other two ports). `iris --list-slots` shows them. A port with one of
+these devices serves no TCP or Unix socket; the console's `serial_log`, if set,
+still records what the guest sends.
 
 `hostserial` passes a host serial port through. The host port follows the
 guest: the rate, data bits, parity and stop bits the guest's driver
@@ -770,8 +794,7 @@ scsi_deferred_int = true        # needed by OpenBSD/NetBSD; see --no-scsi-deferr
 
 # gdb_port = 1234               # GDB RSP stub
 # monitor_port = 8888           # monitor console; give each iris run at once its own
-# serial_port_a = 8880          # serial channel A (ttyd2); likewise
-# serial_port_b = 8881          # serial channel B (ttyd1, the console); likewise
+# [[devices]] type = "serial" at = "serial2" backend = "tcp:8880"   # a serial port's host ends (see Serial ports)
 # keyboard = "ansi"             # host keyboard shape: "ansi", "iso" or "jis" (see Keyboard)
 # ci = false                    # CI control socket (see STORAGE.md)
 # ci_socket = "/tmp/iris.sock"  # default: iris.sock in $TMPDIR, else /tmp; Windows: "127.0.0.1:19851"
@@ -989,11 +1012,11 @@ as they do in a run.
 
 It checks that the file parses and has no unknown keys; that the settings agree
 (`machine.profile` with its processor, count, banks, graphics board and SCSI
-IDs, and the Unix serial sockets); that the PROM, every disk and CD image, the
+IDs); that the PROM, every disk and CD image, the
 `load_elf` file and the NFS, TFTP and rsh directories exist; that the directories
-for the serial logs, serial sockets and scratch volumes exist; and that
-`serial_port_a`, `serial_port_b`, `monitor_port` and `gdb_port` are different
-ports. Whether a port is free, or a file is a valid image, is only known when a
+for the serial logs, serial sockets and scratch volumes exist; and that the
+serial ports' TCP ports, `monitor_port` and `gdb_port` are different, and no
+two serial lines share a socket. Whether a port is free, or a file is a valid image, is only known when a
 machine starts.
 
 ---
@@ -1058,12 +1081,7 @@ Automation and debugging
   --vnc [ADDR]                VNC server on ADDR (host:port or port; default 127.0.0.1:5900)
   --vnc-password-file <FILE>  Ask VNC viewers for the password in FILE
   --validate                  Check the --config file and exit; 0 if iris would start
-  --serial-port-a <PORT>      Serial channel A TCP port (default 8880)
-  --serial-port-b <PORT>      Serial channel B TCP port (default 8881)
-  --serial-socket-a <PATH>    Also serve channel A on a Unix socket
-  --serial-socket-b <PATH>    Likewise channel B
-  --serial-log-a <FILE>       Log channel A when it is not the console
-  --serial-log-b <FILE>       Likewise channel B
+  --device serial@serial2,backend=tcp:8890   Serve a serial port; repeat backend= for tcp:, unix: and log: ends
   --gdb-port <PORT>           Start the GDB stub
   --jitv2-threads <N>         jitv2 compile-pool threads (default: one per guest CPU, at most 4,
                               capped by the host's usable CPUs)

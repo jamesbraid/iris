@@ -115,13 +115,13 @@ the 4 GiB layout of 1024, 1024 and four 512 MiB banks, which follows QEMU and
 matches a captured Tezro. One processor needs at least 512 MiB, two or four at least
 1 GiB.
 
-`[machine]` also selects the flash backing file, the console and
-the L1 port and log. The console options are `l1` (the default) and `ioc4_a`
-to `ioc4_d`, the IOC4's ports 0 to 3. IOC4 ports 0 and 1 listen on
-`serial_port_a` and `serial_port_b`, ports 2 and 3 on `tezro.serial_port_c`
-and `tezro.serial_port_d`. The setting only picks the host connection: the
-PROM writes to the L1 until `console ioc4` is run in its Command Monitor and
-the machine is reset, after which the menu appears on UART A (`ioc4_a`) only.
+`[machine]` also selects the flash backing file, the console and the L1 port
+and log. The console options are `l1` (the default), `serial3` and `serial4`,
+the IOC4's ports 0 and 1 as IRIX numbers them. Their host ends are `serial`
+devices (TCP 8880 and 8881 by default). The setting only picks the host
+connection: the PROM writes to the L1 until `console ioc4` is run in its
+Command Monitor and the machine is reset, after which the menu appears on UART
+A (`serial3`) only.
 The PROM keeps that choice in the flash, so set `flash` or it is lost on the
 next start. `nvram` names the 32 KiB DS1744 store; its clock
 reference is kept beside it with a `.clock` suffix.
@@ -325,8 +325,8 @@ hand. `reboot` returns to the PROM with all four processors found and the
 diagnostics passing.
 
 The two serial ports IRIX lists, `ttyd3` and `ttyd4`, are IOC4 ports 0 and 1,
-which listen on `serial_port_a` and `serial_port_b`. IRIX shows no device for
-ports 2 and 3.
+which are `serial3` and `serial4`. IRIX shows no device for
+ports 2 and 3, and iris gives them no host end.
 
 The IOC4's ATA channel is not modelled beyond the readback word the PROM
 probes. IRIX's `hinv` lists "Integral SCSI controller 2: Version IDE
