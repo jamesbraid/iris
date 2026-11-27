@@ -172,7 +172,8 @@ pub fn decode_vc2_totals(vc2_regs: &[u16; 32], ram: &[u16], visible_run: impl Fn
                 if w1 & 0x0080 == 0 {
                     let w2 = *ram.get(line)?;
                     line += 1;
-                    eol |= w2 & 0x8000 != 0;
+                    // A two-halfword entry ends the line only with both bit 15s set.
+                    eol &= w2 & 0x8000 != 0;
                     state_c = (w2 & 0x7F) as u8;
                 }
                 visible |= visible_run((w1 & 0x7F) as u8, state_c);
@@ -197,4 +198,31 @@ pub fn decode_vc2_totals(vc2_regs: &[u16; 32], ram: &[u16], visible_run: impl Fn
         frame += 2;
     }
     (h_total != 0 && v_total != 0 && visible_lines != 0).then_some(Vc2Totals { h_total, v_total, visible_lines, fields })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One 100-clock line of `entries`, then the frame table that plays it once.
+    fn totals(entries: &[u16]) -> Option<Vc2Totals> {
+        let mut regs = [0u16; 32];
+        regs[VC2_REG_VIDEO_ENTRY_PTR as usize] = 0;
+        let mut ram = vec![0u16; 0x40];
+        ram[0] = 0x10; // line table at 0x10
+        ram[1] = 1; // played once
+        ram[0x10..0x10 + entries.len()].copy_from_slice(entries);
+        decode_vc2_totals(&regs, &ram, |_, _| true)
+    }
+
+    // A two-halfword entry ends the line only when both halfwords have bit 15 set.
+    #[test]
+    fn a_two_halfword_entry_ends_the_line_on_both_bit_15s() {
+        let run = 25 << 8; // 50 clocks
+        let end = |first: u16, second: u16| totals(&[run | first, second, run | 0x8080]).map(|t| t.h_total);
+        assert_eq!(end(0x8000, 0x8000), Some(50), "both halfwords end the line");
+        assert_eq!(end(0x8000, 0x0000), Some(100), "the first alone does not");
+        assert_eq!(end(0x0000, 0x8000), Some(100), "the second alone does not");
+        assert_eq!(totals(&[run | 0x8080]).map(|t| t.h_total), Some(50), "a one-halfword entry ends on its own bit");
+    }
 }

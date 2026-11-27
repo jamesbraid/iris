@@ -730,8 +730,8 @@ mod tests {
                 left -= d;
                 let a = if visible { VC3_LINE_VISIBLE as u16 } else { 0 };
                 if left == 0 {
-                    // The last run has a second word, which ends the line.
-                    vc3.sram[at] = (d as u16) << 8 | a;
+                    // The last run has a second word; both bit 15s end the line.
+                    vc3.sram[at] = 0x8000 | (d as u16) << 8 | a;
                     vc3.sram[at + 1] = 0x8000 | 1 << 6;
                     at += 2;
                 } else {
