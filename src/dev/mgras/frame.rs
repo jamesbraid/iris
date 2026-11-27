@@ -1042,4 +1042,38 @@ mod tests {
             }
         }
     }
+
+    /// The snapshot as a window ID's BUF_SELECT bit or a pixel-pair mode shows the planes: buffer B for a selected
+    /// window ID, a pair's half for a pair mode, and the plain pixel of buffer A for neither.
+    #[test]
+    fn snapshot_applies_the_buffer_select_pass() {
+        use super::super::dcb::Dcb;
+        use super::super::pixmem::{Buffer, Kind};
+        let mut rss = Rss::new_boxed();
+        let drb = rss.reg(rss::reg::MGRAS_PP1_DRB_SIZE);
+        // Display row 3 is framebuffer row 1020 of the 1280x1024 screen the tables below name.
+        let (a, b) = (Buffer::new(0x240, Kind::Wide, drb), Buffer::new(0x241, Kind::Wide, drb));
+        rss.mem.put(&a, 5, 1020, 0x11_2233);
+        rss.mem.put(&b, 5, 1020, 0x44_5566);
+        let mut f = plain::boxed_zeroed::<Frame>();
+        let mut shown = |did: u16, mode: u32, select: u32| {
+            let mut dcb = plain::boxed_zeroed::<Dcb>();
+            dcb.xmap.set_modes(did as u32, mode, 0);
+            dcb.xmap.set_scanout(select, 0x240 | 0x241 << 10, 0);
+            dcb.vc3.regs[4] = 0;
+            (0..1024).for_each(|y| dcb.vc3.sram[y] = 0x4000);
+            (dcb.vc3.sram[1024], dcb.vc3.sram[0x4000], dcb.vc3.sram[0x4001]) = (0xFFFF, did, 0x7FF << 5);
+            f.snapshot(&rss, &dcb);
+            assert_eq!((f.width, f.height, f.did_main[3 * W + 5]), (1280, 1024, did as u8));
+            f.main[3 * W + 5]
+        };
+        assert_eq!(shown(1, 4, 0), 0x11_2233, "buffer A");
+        assert_eq!(shown(1, 4, 1 << 1), 0x44_5566, "buffer B for window ID 1");
+        assert_eq!(shown(1, 4, 1 << 2), 0x11_2233, "window ID 2 selected, not 1");
+        assert_eq!(shown(0, 4, 1), 0x44_5566, "buffer B for window ID 0");
+        assert_eq!(shown(17, 4, 1 << 17), 0x44_5566, "buffer B for window ID 17, past the low half of the bits");
+        assert_eq!(shown(17, 4, 1 << 1), 0x11_2233, "window ID 1 selected, not 17");
+        assert_eq!(shown(1, 5, 0), rss::Pair::P444.unpack(0x11_2233, false) & 0xFF_FFFF, "a 4:4:4 pair");
+        assert_ne!(rss::Pair::P444.unpack(0x11_2233, false) & 0xFF_FFFF, 0x11_2233);
+    }
 }

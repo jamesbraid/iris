@@ -4984,6 +4984,61 @@ mod tests {
         eprintln!("plain {plain} stored {stored} two-buffer {two} overlapping {overlap} depth {depth} fragment {fragment}");
         assert!(stored > 100 && two > 40 && overlap > 10 && depth > 10 && fragment > 10, "reach: plain {plain} stored {stored} two-buffer {two} overlapping {overlap} depth {depth} fragment {fragment}");
     }
+
+    /// Two engines, as `ImpactBack::with_engines(None, 2)` makes them.
+    fn engine_pair() -> [Box<Rss>; 2] {
+        [0, 1].map(|id| {
+            let mut r = Rss::new_boxed();
+            r.set_engine(id, 1);
+            r
+        })
+    }
+
+    fn pair_write(e: &mut [Box<Rss>; 2], r: u32, val: u32) {
+        for rss in e.iter_mut() {
+            rss.run_entry(Entry::Write { reg: r, val, exec: false });
+        }
+    }
+
+    fn pair_drb(e: &[Box<Rss>; 2]) -> [u32; 2] {
+        [e[0].reg(reg::MGRAS_PP1_DRB_SIZE), e[1].reg(reg::MGRAS_PP1_DRB_SIZE)]
+    }
+
+    /// The kernel selects engine 0, engine 1, then all (4) by writing 0x112 and writes the
+    /// engines' layout (drb_size) after each; the last, after 4, must reach both.
+    #[test]
+    fn a_write_after_the_kernels_select_all_reaches_both_engines() {
+        let mut e = engine_pair();
+        for (sel, val) in [(0, 0x111), (1, 0x222), (4, 0x25E)] {
+            pair_write(&mut e, reg::CONFIG, sel);
+            pair_write(&mut e, reg::MGRAS_PP1_DRB_SIZE, val);
+        }
+        assert_eq!(pair_drb(&e), [0x25E, 0x25E]);
+    }
+
+    #[test]
+    fn a_selected_engine_alone_takes_the_write() {
+        let mut e = engine_pair();
+        pair_write(&mut e, reg::CONFIG, 1);
+        pair_write(&mut e, reg::MGRAS_PP1_DRB_SIZE, 0x1E);
+        assert_eq!(pair_drb(&e), [0, 0x1E], "engine 1 selected");
+        pair_write(&mut e, reg::CONFIG, 0);
+        pair_write(&mut e, reg::MGRAS_PP1_DRB_SIZE, 0x3E);
+        assert_eq!(pair_drb(&e), [0x3E, 0x1E], "engine 0 selected");
+    }
+
+    /// The reset value and the X server's CONFIG (0xCAC, 0xCAD) reach both engines.
+    #[test]
+    fn the_reset_value_and_the_x_servers_config_reach_both_engines() {
+        for cfg in [None, Some(0xCAC), Some(0xCAD)] {
+            let mut e = engine_pair();
+            if let Some(c) = cfg {
+                pair_write(&mut e, reg::CONFIG, c);
+            }
+            pair_write(&mut e, reg::MGRAS_PP1_DRB_SIZE, 0x5E);
+            assert_eq!(pair_drb(&e), [0x5E, 0x5E], "CONFIG {cfg:x?}");
+        }
+    }
 }
 
 /// The armed transfer's shape, for the trace.
