@@ -3787,6 +3787,26 @@ mod tests {
     }
 
     #[test]
+    fn scan_regs_describe_the_picture_only_while_the_display_is_on() {
+        let g = gbe();
+        assert!(g.scan_regs().is_none());
+        for (off, v) in [
+            (CTRLSTAT, 0x300a_a000u32),
+            (DOTCLOCK, 0x0010_020f),
+            (VT_XY, 0),
+            (VT_HCMAP, 512 << 12),
+            (VT_VCMAP, 128 << 12),
+            (CRS_POS, (0xffa << 16) | 60),
+        ] {
+            g.write32((0x1600_0000 + off) as u64, v);
+        }
+        let r = g.scan_regs().expect("display on");
+        assert_eq!((r.width, r.height), (512, 128));
+        assert_eq!(r.cursor_xy(), (60, -6));
+        assert_eq!((r.modes.len(), r.cmap.len(), r.gmap.len(), r.glyph.len(), r.crs_cmap1.len()), (32, 6144, 256, 64, 3));
+    }
+
+    #[test]
     fn gbe_save_load_round_trip() {
         let src = gbe();
         src.write32(DOTCLOCK as u64, DOTCLOCK_RUN | 0x0123);

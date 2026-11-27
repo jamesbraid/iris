@@ -1608,3 +1608,69 @@ mod drop_tests {
         assert_eq!(phys.strong_count(), 0, "the bus outlives its machine");
     }
 }
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    use crate::display::{Composed, Head, Want};
+    use crate::dev::o2gfx::gbe_reg::*;
+
+    /// A 512 x 128, 8 bpp display of one tile at 0x100000, entry 5 of the colour map the colour of
+    /// the tile's first pixel (red low).
+    fn bus_showing_a_tile() -> Arc<Ip32Bus> {
+        let bus = Ip32Bus::new(32 << 20, vec![0u8; PROM_SIZE as usize]);
+        let (tile, list) = (0x0010_0000u32, 0x0020_0000u32);
+        bus.ram.write(list as usize, &((tile >> 16) as u16).to_be_bytes());
+        bus.ram.write(tile as usize, &[5]);
+        for (off, v) in [
+            (CTRLSTAT, 0x300a_a000u32),
+            (DOTCLOCK, 0x0010_020f),
+            (VT_XYMAX, 0x0042_9690),
+            (FRM_CONTROL_SHADOW, list | 1),
+            (VT_XY, 0),
+            (VT_HCMAP, 512 << 12),
+            (VT_VCMAP, 128 << 12),
+            (FRM_SIZE_TILE, 1 << 5),
+            (FRM_SIZE_PIXEL, 128 << 16),
+            (MODE, 0x403),
+            (CMAP + 4 * 5, 0x1122_3300),
+        ] {
+            bus.gbe.write32((0x1600_0000 + off) as u64, v);
+        }
+        bus
+    }
+
+    /// GBE scans RAM the CPU and the engine write with no mark, so a watched display looks at every
+    /// frame and finds what changed; nobody watching, it looks at none.
+    #[test]
+    fn a_watched_screen_is_scanned_for_changes_and_an_unwatched_one_is_not() {
+        let bus = bus_showing_a_tile();
+        let status = crate::status::MachineStatus::detached();
+        let display = O2Display::new(bus.clone(), status, Arc::new(AtomicBool::new(false)));
+        let mut screen = Rex3Screen::new();
+        let first = |s: &Rex3Screen| s.fb_rgb[0];
+        assert!(!display.changed(), "nobody looks");
+
+        // The first retrace takes the shadow registers live, as the refresh thread's does.
+        display.vblank_start(0, 0);
+        // A request wants the frame: the scan-out, in the renderers' format, opaque.
+        display.head.request_frame();
+        assert!(display.changed());
+        assert!(matches!(display.compose(&mut screen, Want::default()), Composed::Frame));
+        assert_eq!((screen.width, screen.height), (512, 128));
+        assert_eq!(first(&screen), 0xff33_2211);
+        assert!(matches!(display.compose(&mut screen, Want::default()), Composed::Unchanged), "nothing changed");
+
+        // A GBE register write changes the picture.
+        bus.gbe.write32((0x1600_0000 + CMAP + 4 * 5) as u64, 0x4455_6600);
+        assert!(matches!(display.compose(&mut screen, Want::default()), Composed::Frame));
+        assert_eq!(first(&screen), 0xff66_5544);
+
+        // A store into the frame buffer with no command and no mark is found by the scan.
+        bus.gbe.write32((0x1600_0000 + CMAP + 4 * 6) as u64, 0x7788_9900);
+        assert!(matches!(display.compose(&mut screen, Want::default()), Composed::Frame));
+        bus.ram.write(0x0010_0000, &[6]);
+        assert!(matches!(display.compose(&mut screen, Want::default()), Composed::Frame));
+        assert_eq!(first(&screen), 0xff99_8877, "the unmarked store is on the screen");
+    }
+}
