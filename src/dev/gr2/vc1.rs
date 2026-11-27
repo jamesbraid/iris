@@ -41,6 +41,20 @@ pub struct Vc1Totals {
     pub fields: u32,
 }
 
+/// What a write to a VC1 port can change of the picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    Nothing,
+    /// The cursor's glyph, position or visibility, so only the rows it covers.
+    Cursor,
+    /// Tables the compositor reads for every row.
+    All,
+}
+
+/// Cursor glyph size in bytes (two planes of 32 rows of 32 bits) and in rows.
+const GLYPH_BYTES: usize = 256;
+const CURSOR_ROWS: usize = 32;
+
 /// Plain data; all-zero is a valid power-on state.
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -77,6 +91,35 @@ impl Vc1 {
             VC1_SYSCTL => self.sysctl = val as u8,
             _ => {}
         }
+    }
+
+    /// What `write(reg, ..)` would change of the picture, from the state it would write into.
+    pub fn write_reach(&self, reg: u32) -> Reach {
+        match reg {
+            VC1_CMD0 => {
+                let a = (self.addr & 0xff) as usize;
+                // A pair of bytes at a lies inside the three cursor registers.
+                if (CUR_EP..=CUR_YL).contains(&a) { Reach::Cursor } else { Reach::All }
+            }
+            VC1_SRAM => {
+                // A glyph address of 0 is no cursor set yet: a table may be loaded there.
+                let (a, glyph) = (self.addr as usize, self.reg16(CUR_EP) as usize);
+                if glyph != 0 && a >= glyph && a + 2 <= glyph + GLYPH_BYTES { Reach::Cursor } else { Reach::All }
+            }
+            VC1_SYSCTL => Reach::Cursor,
+            _ => Reach::Nothing,
+        }
+    }
+
+    /// The display rows (first, end) the cursor covers while it is shown.
+    pub fn cursor_rows(&self) -> Option<(usize, usize)> {
+        if !self.cursor_visible() {
+            return None;
+        }
+        let top = self.cursor_pos().1;
+        let rows = 0..super::re3::FB_H as i32;
+        let (first, end) = (top.clamp(rows.start, rows.end) as usize, (top + CURSOR_ROWS as i32).clamp(rows.start, rows.end) as usize);
+        (first < end).then_some((first, end))
     }
 
     pub fn read(&mut self, reg: u32) -> u32 {

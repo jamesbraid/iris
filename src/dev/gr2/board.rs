@@ -30,7 +30,7 @@ use super::re3::{self, Re3};
 use super::rows::{DamagedRows, RowSet};
 #[cfg(feature = "wgpu")]
 use super::scanout;
-use super::vc1::Vc1;
+use super::vc1::{Reach, Vc1};
 use super::xmap5::{self, Xmap5};
 
 /// GIO gfx slot base and size (the board decodes a 4 MB slot).
@@ -751,6 +751,17 @@ impl Gr2 {
         self.head.damage();
     }
 
+    /// Display rows (first, end) changed, and nothing else.
+    fn damage_rows(&self, runs: &[Option<(usize, usize)>]) {
+        let mut set = RowSet::default();
+        for &(first, end) in runs.iter().flatten() {
+            set.mark_display(first, end);
+        }
+        self.rows.add(&mut set);
+        self.dirty.store(true, Ordering::Release);
+        self.head.damage();
+    }
+
     /// The RE3 drew: its rows only.
     fn damage_drawn(&self, re3: &mut Re3) {
         self.rows.add(&mut re3.rows);
@@ -979,8 +990,14 @@ impl Gr2 {
             }
             0x6c000..0x6c010 => r.bdvers_w[((off - BDVERS) >> 2) as usize] = val,
             0x6c040..0x6c060 => {
-                r.vc1.write(off & 0x1c, val);
-                self.damage();
+                let reg = off & 0x1c;
+                let (reach, was) = (r.vc1.write_reach(reg), r.vc1.cursor_rows());
+                r.vc1.write(reg, val);
+                match reach {
+                    Reach::Nothing => {}
+                    Reach::Cursor => self.damage_rows(&[was, r.vc1.cursor_rows()]),
+                    Reach::All => self.damage(),
+                }
             }
             0x6c0a0..0x6c100 => {
                 r.dac[((off - DAC) >> 5) as usize].write(off & 0x1c, val as u8);
