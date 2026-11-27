@@ -351,6 +351,74 @@ fn a_colour_map_data_store_names_every_row() {
     }
 }
 
+#[test]
+fn a_vc1_address_write_names_nothing() {
+    let mut rig = rig();
+    let mut v = Viewer::new(&mut rig);
+    rig.w32(VC1 + 0x10, 0x40);
+    rig.w32(VC1 + 0x14, 0x12);
+    rig.w32(VC1 + 4, 1);
+    assert_eq!(v.look(&mut rig, "addresses"), vec![]);
+}
+
+/// A cursor glyph whose every pixel is colour 1, at the glyph address 0x1000, with colour 1 white, the
+/// cursor at (x, y) and still off.
+fn load_cursor(rig: &mut Rig, x: u32, y: u32) {
+    for w in 0..64 {
+        vc1_sram(rig, 0x1000 + 2 * w, 0xffff);
+    }
+    vc1_reg(rig, 0x20, 0x1000);
+    vc1_reg(rig, 0x22, x);
+    vc1_reg(rig, 0x24, y + 35);
+    rig.w32(XMAP + 0x14, 0x1c);
+    rig.w32(XMAP + 0x10, 1);
+    for _ in 0..3 {
+        rig.w8(XMAP + 8, 0xff);
+    }
+}
+
+const CURSOR_ON: u32 = 0x30;
+
+#[test]
+fn the_cursor_names_its_old_and_new_rows() {
+    let mut rig = rig();
+    load_cursor(&mut rig, 200, 300);
+    let mut v = Viewer::new(&mut rig);
+    rig.w32(VC1 + 0x18, CURSOR_ON);
+    assert_eq!(v.look(&mut rig, "the cursor appears"), vec![(300, 332)]);
+    // A move down 100 rows: the rows it left and the rows it reached.
+    vc1_reg(&mut rig, 0x24, 400 + 35);
+    assert_eq!(v.look(&mut rig, "the cursor moves"), vec![(300, 332), (400, 432)]);
+    // A move along a row changes the same rows.
+    vc1_reg(&mut rig, 0x22, 500);
+    assert_eq!(v.look(&mut rig, "the cursor moves along"), vec![(400, 432)]);
+    // A new glyph and the cursor going away.
+    vc1_sram(&mut rig, 0x1000, 0);
+    assert_eq!(v.look(&mut rig, "the glyph changes"), vec![(400, 432)]);
+    rig.w32(VC1 + 0x18, 0);
+    assert_eq!(v.look(&mut rig, "the cursor hides"), vec![(400, 432)]);
+}
+
+#[test]
+fn a_table_stored_before_any_cursor_address_names_every_row() {
+    let mut rig = rig();
+    let mut v = Viewer::new(&mut rig);
+    // The glyph address is still 0, and SRAM 0 to 0x100 is where a table may go.
+    vc1_sram(&mut rig, 0x40, 0x1234);
+    assert_eq!(v.look(&mut rig, "a table in low SRAM"), vec![(0, 1024)]);
+}
+
+#[test]
+fn the_cursor_at_the_edge_names_the_rows_on_the_picture() {
+    let mut rig = rig();
+    load_cursor(&mut rig, 10, 1010);
+    let mut v = Viewer::new(&mut rig);
+    rig.w32(VC1 + 0x18, CURSOR_ON);
+    assert_eq!(v.look(&mut rig, "the cursor at the bottom"), vec![(1010, 1024)]);
+    vc1_reg(&mut rig, 0x24, 35u32.wrapping_sub(10));
+    assert_eq!(v.look(&mut rig, "the cursor above the top"), vec![(0, 22), (1010, 1024)]);
+}
+
 // ---- state that replaces the board ----
 
 #[test]
