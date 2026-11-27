@@ -3,7 +3,9 @@
 //! the same arithmetic. They need a GPU (or lavapipe) and skip without
 //! one.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytemuck::{Pod, Zeroable};
 
@@ -445,6 +447,43 @@ fn boards_on_one_shared_device_keep_their_own_order() {
     a.submit(a.encoder("a"));
     assert_eq!(a.read_vec(&ba, &[(0, 16)]).unwrap(), vec![7u8; 16]);
     assert_eq!(b.read_vec(&bb, &[(0, 16)]).unwrap(), vec![2u8; 16]);
+}
+
+/// A configure on one board's handle must not overlap a submission from another board on the same
+/// device (`quiet_submits`): wgpu fails the configure if one lands meanwhile.
+#[test]
+fn no_board_submits_while_one_board_holds_the_queue_still() {
+    use std::sync::atomic::AtomicUsize;
+    let Some((a, _)) = counted() else { return };
+    let b = a.share();
+    let n = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let t = {
+        let (n, stop) = (n.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                b.submit(b.encoder("b"));
+                n.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+    };
+    while n.load(Ordering::SeqCst) == 0 {
+        std::thread::yield_now();
+    }
+    let during = a.quiet_submits(|| {
+        // Let a submission that began before the gate finish and be counted, then watch.
+        std::thread::sleep(Duration::from_millis(50));
+        let before = n.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(100));
+        n.load(Ordering::SeqCst) - before
+    });
+    let after = n.load(Ordering::SeqCst);
+    while n.load(Ordering::SeqCst) == after {
+        std::thread::yield_now();
+    }
+    stop.store(true, Ordering::Relaxed);
+    t.join().unwrap();
+    assert_eq!(during, 0, "another board submitted while the queue was held still");
 }
 
 /// Readbacks borrow one staging buffer between them: ranges come back in the

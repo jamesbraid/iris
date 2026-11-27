@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 /// The window system's display connection, when iris opens a window.
 ///
@@ -120,6 +120,9 @@ pub struct Gpu {
     readback: Arc<Readback>,
     /// Writes waiting for the next submission (`write`).
     uploads: Mutex<Uploads>,
+    /// Held shared across each queue submission by every `Gpu` on the device,
+    /// and exclusively by whatever must see the queue still (`quiet_submits`).
+    submit_gate: Arc<RwLock<()>>,
 }
 
 /// The first error on a device, which stays, and the machine's reaction to
@@ -497,7 +500,7 @@ impl Gpu {
             timestamps: features.contains(wgpu::Features::TIMESTAMP_QUERY),
         };
         let uploads = Mutex::new(Uploads::new());
-        Ok(Arc::new(Gpu { instance, adapter, device, queue, caps, failure, readback: Arc::default(), uploads }))
+        Ok(Arc::new(Gpu { instance, adapter, device, queue, caps, failure, readback: Arc::default(), uploads, submit_gate: Arc::default() }))
     }
 
     /// The first asynchronous error, if any. Kernels that misbehave are
@@ -509,19 +512,27 @@ impl Gpu {
         Err(self.failure.error.lock().clone().unwrap_or_default())
     }
 
-    /// Configure `surface` for this device. wgpu waits for the queue to
-    /// drain first and fails the configure if another thread submitted
-    /// meanwhile, so the uploads lock that every submission takes is held
-    /// across it. A failure is the surface's, returned here: an uncaptured
-    /// one would stay in [`Gpu::check`] and fail every board on the device.
+    /// Run `f` with no submission to the queue in flight and none starting, from any `Gpu` on
+    /// the device: the queue's own lock is only held across one submit, and a configure that finds
+    /// another thread's submission fails.
+    pub fn quiet_submits<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _quiet = self.submit_gate.write();
+        f()
+    }
+
+    /// Configure `surface` for this device. wgpu waits for the queue to drain first and fails the
+    /// configure if another thread submitted meanwhile, so no `Gpu` on the device submits across
+    /// it (`quiet_submits`). A failure is the surface's, returned here: an uncaptured one would
+    /// stay in [`Gpu::check`] and fail every board on the device.
     pub fn configure_surface(&self, surface: &wgpu::Surface<'_>, config: &wgpu::SurfaceConfiguration) -> Result<(), String> {
-        let _submits = self.uploads.lock();
-        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        surface.configure(&self.device, config);
-        match pollster::block_on(scope.pop()) {
-            Some(e) => Err(format!("configure surface {}x{}: {e}", config.width, config.height)),
-            None => Ok(()),
-        }
+        self.quiet_submits(|| {
+            let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            surface.configure(&self.device, config);
+            match pollster::block_on(scope.pop()) {
+                Some(e) => Err(format!("configure surface {}x{}: {e}", config.width, config.height)),
+                None => Ok(()),
+            }
+        })
     }
 
     /// Record `msg` as the device's error, if it has none yet, and raise the
@@ -547,6 +558,7 @@ impl Gpu {
             failure: Arc::clone(&self.failure),
             readback: Arc::clone(&self.readback),
             uploads: Mutex::new(Uploads::new()),
+            submit_gate: Arc::clone(&self.submit_gate),
         })
     }
 
@@ -575,7 +587,10 @@ impl Gpu {
                 s.sent = true;
             }
         }
-        let index = self.queue.submit(up.into_iter().chain(encoder.map(|e| e.finish())));
+        let index = {
+            let _going = self.submit_gate.read();
+            self.queue.submit(up.into_iter().chain(encoder.map(|e| e.finish())))
+        };
         for s in &mut u.slots {
             if std::mem::take(&mut s.sent) {
                 let ready = Arc::clone(&s.ready);
