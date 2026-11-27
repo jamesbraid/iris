@@ -24,6 +24,7 @@ pub mod ip30;
 pub mod irq;
 pub mod locks;
 pub mod physical;
+pub mod retrace;
 pub mod snapshot;
 pub mod traits;
 

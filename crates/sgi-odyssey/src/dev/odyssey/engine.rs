@@ -42,7 +42,7 @@ use super::gpu_unit::{fail_gpu, Observation};
 use super::consts::{reset_pulse, ODSY_RESET_CONTROL};
 use super::mmio::{access_waits, command_store, fifo_port, level_word, BoardGuard, BoardLocks};
 use super::reader::{DisplayShared, ScanoutReader};
-use super::scanout::{mul_div, ScanoutMode, NS_PER_SECOND};
+use crate::retrace::RetraceClock;
 use super::state::ODYSSEY_SNAPSHOT_VERSION;
 use super::vram::{VramPtr, DIRTY_BLOCK_SHIFT};
 use crate::traits::{BusDevice, BusRead8, BUS_ERR, BUS_OK};
@@ -216,52 +216,6 @@ const FOREVER_NS: u64 = 31_536_000_000_000_000;
 /// Bytes of board memory a `vram` chunk holds.
 const PIECE_BYTES: u64 = 64 << 10;
 
-/// The retrace on the clock the shell's calls carry: no refresh thread paces it here. `deadline` (-1
-/// disarmed) is when the next one is due.
-#[derive(Default)]
-struct RetraceClock {
-    mode: ScanoutMode,
-    deadline: i64,
-    epoch: i64,
-    frames: u64,
-}
-
-impl RetraceClock {
-    /// Virtual time of retrace `n`, or -1 with no retrace: one at each field, so a two-field mode retraces
-    /// twice a frame.
-    fn retrace_time(&self, n: u64) -> i64 {
-        let hz = self.mode.clock_hz as u64 * self.mode.fields.max(1) as u64;
-        let fc = self.mode.frame_clocks;
-        if hz == 0 || fc == 0 {
-            return -1;
-        }
-        (self.epoch as u64)
-            .wrapping_add((n / hz).wrapping_mul(fc).wrapping_mul(NS_PER_SECOND))
-            .wrapping_add(mul_div((n % hz).wrapping_mul(fc), NS_PER_SECOND, hz)) as i64
-    }
-
-    /// Whether a retrace is due at `now_ns`; one that is counts and arms the next, so a caller that fell
-    /// behind gets each in turn.
-    fn next_retrace(&mut self, now_ns: i64) -> bool {
-        if self.deadline < 0 || now_ns < self.deadline {
-            return false;
-        }
-        self.frames += 1;
-        self.arm();
-        true
-    }
-
-    fn arm(&mut self) {
-        self.deadline = self.retrace_time(self.frames + 1).max(-1);
-    }
-
-    fn restart(&mut self, now_ns: i64) {
-        self.epoch = now_ns;
-        self.frames = 0;
-        self.arm();
-    }
-}
-
 /// The VPro engine.
 pub struct VproEngine {
     locks: BoardLocks,
@@ -373,7 +327,7 @@ impl VproEngine {
             locks,
             out,
             reader,
-            clock: RetraceClock { deadline: -1, ..Default::default() },
+            clock: RetraceClock::default(),
             mode: config.mode,
             gpu: has_gpu,
             lent: region.map(|r| r.1),
@@ -813,7 +767,7 @@ impl BoardEngine for VproEngine {
         r.attach(&self.locks.shared);
         let now = now_ns.min(i64::MAX as u64) as i64;
         r.sync(&self.locks.shared);
-        self.clock.mode = r.mode;
+        self.clock.set_mode(r.mode.clock_hz, r.mode.fields, r.mode.frame_clocks);
         // A restart at the write's own time when it had one, else this call's.
         if let Some(at) = r.restarted.take() {
             self.clock.restart(if at >= 0 { at } else { now });
@@ -821,7 +775,7 @@ impl BoardEngine for VproEngine {
         while self.clock.next_retrace(now) {
             r.retrace();
         }
-        let next_deadline = (self.clock.deadline >= 0).then_some(self.clock.deadline as u64);
+        let next_deadline = self.clock.deadline();
         let retired = self.credits.accepted.saturating_sub(self.locks.fifo.stores() as u64);
         let out = &self.out;
         self.credits.retire(retired, |source, retired| out.post(Event::Credits { source, retired }));
