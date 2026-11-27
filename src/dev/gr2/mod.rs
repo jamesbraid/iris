@@ -31,6 +31,7 @@ pub mod gr2comp;
 pub mod gr2disp;
 pub mod hq2;
 pub mod re3;
+pub mod rows;
 #[cfg(feature = "gr2-jit")]
 pub mod re3_jit;
 #[cfg(feature = "wgpu")]

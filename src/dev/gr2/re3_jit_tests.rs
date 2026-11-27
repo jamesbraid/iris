@@ -69,6 +69,8 @@ fn new_re3(mode: u32) -> Box<Re3> {
 struct Pair {
     interp: Box<Re3>,
     jit: Box<Re3>,
+    /// VRAM as of the last `assert_marked`.
+    shadow: Vec<u32>,
     rng: Rng,
     spans: u64,
 }
@@ -86,7 +88,8 @@ impl Pair {
             *a = rng.u32();
             *b = *a;
         }
-        Pair { interp, jit, rng, spans: 0 }
+        let shadow = interp.vram.to_vec();
+        Pair { interp, jit, shadow, rng, spans: 0 }
     }
 
     fn reg(&mut self, r: usize, v: u32) {
@@ -196,6 +199,18 @@ impl Pair {
         key
     }
 
+    /// Every row a span changed is marked in both RE3s.
+    fn assert_marked(&mut self, step: usize, key: &SpanKey) {
+        for (y, (now, was)) in self.interp.vram.chunks(FB_W).zip(self.shadow.chunks_mut(FB_W)).enumerate() {
+            if now != was {
+                assert!(self.interp.rows.has(y) && self.jit.rows.has(y), "step {step} {key}: row {y} changed and is not marked");
+                was.copy_from_slice(now);
+            }
+        }
+        self.interp.rows = Default::default();
+        self.jit.rows = Default::default();
+    }
+
     fn assert_same(&self, step: usize, key: &SpanKey) {
         let (a, b) = (&self.interp, &self.jit);
         if a.vram[..] != b.vram[..] {
@@ -281,6 +296,7 @@ fn spans_match_the_interpreter() {
             let k = p.span();
             cov.add(&k);
             p.assert_same(step, &k);
+            p.assert_marked(step, &k);
         }
     }
     assert_eq!(p.jit.jit.hits, p.spans, "every span drawn by a shader");

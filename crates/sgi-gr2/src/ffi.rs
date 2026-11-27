@@ -4,7 +4,8 @@
 
 use std::ffi::c_int;
 
-use sgi_engine::ffi::{build, call, host_parts, read_config, CMem, IrisEngine, IrisEngineConfig, IrisEngineHost, IRIS_ENGINE_ERROR, IRIS_ENGINE_OK};
+use sgi_engine::ffi::{build, call, host_parts, read_config, CMem, IrisEngine, IrisEngineConfig, IrisEngineHost, IRIS_ENGINE_ERROR, IRIS_ENGINE_FAULT, IRIS_ENGINE_OK};
+use sgi_engine::BoardEngine;
 use sgi_engine::inject::Point;
 
 use crate::dev::gr2::engine::{Config, Gr2Engine};
@@ -90,6 +91,59 @@ pub unsafe extern "C" fn sgi_gr2_cursor_position(h: *mut IrisEngine, x: *mut i32
             let (cx, cy, shown) = e.cursor_position();
             (*x, *y) = (cx, cy);
             shown as c_int
+        })
+    }
+}
+
+/// See `sgi_gr2_take_damage` in the C header.
+///
+/// # Safety
+/// `h` is a live GR2 handle, `runs` points to `2 * cap` words and `n` to a `size_t`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_gr2_take_damage(h: *mut IrisEngine, runs: *mut u32, cap: usize, n: *mut usize) -> c_int {
+    unsafe {
+        call::<Gr2Engine<CMem>, _>(h, Point::Pixel, IRIS_ENGINE_FAULT, |e| {
+            if n.is_null() || cap == 0 || runs.is_null() {
+                return IRIS_ENGINE_ERROR;
+            }
+            if e.fault().is_some() {
+                return IRIS_ENGINE_FAULT;
+            }
+            let mut found = e.take_damage();
+            while found.len() > cap {
+                // Join the two runs with the least between them.
+                let at = (1..found.len()).min_by_key(|&i| found[i].0 - found[i - 1].1).unwrap_or(1);
+                found[at - 1].1 = found[at].1;
+                found.remove(at);
+            }
+            for (i, (first, end)) in found.iter().enumerate() {
+                *runs.add(2 * i) = *first;
+                *runs.add(2 * i + 1) = *end;
+            }
+            *n = found.len();
+            IRIS_ENGINE_OK
+        })
+    }
+}
+
+/// See `sgi_gr2_scanout_rows` in the C header.
+///
+/// # Safety
+/// `h` is a live GR2 handle, `buf` points to `cap` words and `w` and `hgt` to `uint32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_gr2_scanout_rows(h: *mut IrisEngine, first: u32, end: u32, buf: *mut u32, cap: usize, w: *mut u32, hgt: *mut u32) -> c_int {
+    unsafe {
+        call::<Gr2Engine<CMem>, _>(h, Point::Pixel, IRIS_ENGINE_FAULT, |e| {
+            if w.is_null() || hgt.is_null() || (buf.is_null() && cap != 0) {
+                return IRIS_ENGINE_ERROR;
+            }
+            let out = if cap == 0 { &mut [][..] } else { std::slice::from_raw_parts_mut(buf, cap) };
+            let Ok((fw, fh)) = e.scanout_rows(first, end, out) else { return IRIS_ENGINE_FAULT };
+            (*w, *hgt) = (fw, fh);
+            if fw as usize * fh as usize > cap {
+                return IRIS_ENGINE_ERROR;
+            }
+            IRIS_ENGINE_OK
         })
     }
 }

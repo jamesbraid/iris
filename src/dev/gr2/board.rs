@@ -27,6 +27,7 @@ use super::hq2::{self, Hq2Engine, Hq2Regs, Re3Sink};
 #[cfg(feature = "gr2-jit")]
 use super::re3_jit;
 use super::re3::{self, Re3};
+use super::rows::{DamagedRows, RowSet};
 #[cfg(feature = "wgpu")]
 use super::scanout;
 use super::vc1::Vc1;
@@ -200,6 +201,8 @@ pub struct Gr2 {
     /// Something visible changed since the last `take_dirty`: for a shell that composes on request. The
     /// refresh thread is told through `head.damage()` as well (`damage`).
     pub(super) dirty: AtomicBool,
+    /// The rows drawn into since `take_damaged_rows`; anything else visible that changes marks them all.
+    pub(super) rows: DamagedRows,
     pub(super) running: AtomicBool,
     pub(super) hq_busy: AtomicBool,
     pub(super) re3_busy: AtomicBool,
@@ -741,10 +744,24 @@ impl Gr2 {
         }
     }
 
-    /// The picture may differ: for the shell's flag and for the refresh thread.
+    /// The picture may differ everywhere: for the shell's flag and for the refresh thread.
     pub(super) fn damage(&self) {
+        self.rows.mark_all();
         self.dirty.store(true, Ordering::Release);
         self.head.damage();
+    }
+
+    /// The RE3 drew: its rows only.
+    fn damage_drawn(&self, re3: &mut Re3) {
+        self.rows.add(&mut re3.rows);
+        self.dirty.store(true, Ordering::Release);
+        self.head.damage();
+    }
+
+    /// The rows drawn into, or the whole picture changed under, since the last call; they are cleared.
+    /// A row is a VRAM row (bottom-up); `RowSet::display_runs` turns them into display rows.
+    pub fn take_damaged_rows(&self) -> RowSet {
+        self.rows.take()
     }
 
     /// Whether something visible changed since the last `take_dirty`.
@@ -759,6 +776,7 @@ impl Gr2 {
 
     /// Note that the picture may differ (a loaded state).
     pub fn mark_dirty(&self) {
+        self.rows.mark_all();
         self.dirty.store(true, Ordering::Release);
     }
 
@@ -1331,7 +1349,7 @@ impl Gr2 {
                     self.publish_re3_telemetry(re3);
                 }
                 if drew {
-                    self.damage();
+                    self.damage_drawn(re3);
                 }
                 self.re3_fifo.consume();
                 backoff.reset();

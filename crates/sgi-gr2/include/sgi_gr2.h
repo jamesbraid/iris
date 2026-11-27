@@ -49,6 +49,15 @@ IrisEngine *sgi_gr2_new(const IrisGr2Config *cfg, const IrisEngineHost *host);
  * NULL output. */
 int sgi_gr2_cursor_position(IrisEngine *h, int32_t *x, int32_t *y);
 
+/* Rows that may have changed since the last call: up to cap (first, end) pairs into runs, in row order, their
+ * number in *n (0 for none); past cap the nearest runs are joined. FAULT on a faulted engine. */
+int sgi_gr2_take_damage(IrisEngine *h, uint32_t *runs, size_t cap, size_t *n);
+
+/* As iris_engine_scanout for rows first up to end only, written at their place in buf (row y from word y * *w),
+ * other words untouched; cap must hold the whole picture (else ERROR, size set). Does not wait for drawing. */
+int sgi_gr2_scanout_rows(IrisEngine *h, uint32_t first, uint32_t end, uint32_t *buf, size_t cap, uint32_t *w,
+                         uint32_t *hgt);
+
 #ifdef __cplusplus
 }
 #endif

@@ -28,11 +28,16 @@ const PD_BLACKOUT: u32 = 3;
 /// Compose one 1280x1024 frame into `out` (stride `OUT_STRIDE`).
 /// `vram` rows are bottom-up; display row 0 is the top of the screen.
 pub fn compose(vram: &[u32], vc1: &Vc1, xmap: &[Xmap5; 5], dac: &[Bt457; 3], out: &mut [u32]) {
+    compose_rows(vram, vc1, xmap, dac, out, 0, FB_H);
+}
+
+/// `compose` for display rows `first` up to `end` only; the other rows of `out` are left alone.
+pub fn compose_rows(vram: &[u32], vc1: &Vc1, xmap: &[Xmap5; 5], dac: &[Bt457; 3], out: &mut [u32], first: usize, end: usize) {
     let cursor_on = vc1.cursor_visible();
     let (cur_x, cur_y) = vc1.cursor_pos();
 
     let mut runs = [(0u16, 0u8); Vc1::MAX_DID_RUNS];
-    for dy in 0..FB_H {
+    for dy in first..end.min(FB_H) {
         // Per-pixel DID from the line's transition list.
         let nruns = vc1.line_did_runs(dy, &mut runs);
         let mut run = 0;
@@ -216,6 +221,27 @@ mod tests {
         assert_eq!(out[326], 0xff30_2010, "DID 9: 24-bit RGB");
         assert_eq!(out[939], 0xff30_2010);
         assert_eq!(out[940], 0xff00_00ff, "back to DID 3");
+    }
+
+    /// Rows composed alone are the rows a whole compose gives, and the others are left as they were.
+    #[test]
+    fn compose_rows_writes_only_its_rows() {
+        let mut vc1: Box<Vc1> = unsafe { Box::new_zeroed().assume_init() };
+        let mut xmap: Box<[Xmap5; 5]> = unsafe { Box::new_zeroed().assume_init() };
+        let dac: Box<[Bt457; 3]> = unsafe { Box::new_zeroed().assume_init() };
+        line_table(&mut vc1, &[5, 0x0003, 0, 0, 0, 0]);
+        for xm in xmap.iter_mut() {
+            xm.mode[3] = 0x8af0_0800;
+            xm.clut[17 * 256 + 5] = 0x00ff_0000;
+        }
+        let vram = vec![5u32; FB_W * FB_H];
+        let (mut whole, mut part) = (vec![0u32; OUT_STRIDE * FB_H], vec![7u32; OUT_STRIDE * FB_H]);
+        compose(&vram, &vc1, &xmap, &dac, &mut whole);
+        compose_rows(&vram, &vc1, &xmap, &dac, &mut part, 10, 12);
+        for y in 0..FB_H {
+            let row = |v: &[u32]| v[y * OUT_STRIDE..y * OUT_STRIDE + FB_W].to_vec();
+            assert_eq!(row(&part), if (10..12).contains(&y) { row(&whole) } else { vec![7; FB_W] }, "row {y}");
+        }
     }
 
     fn line_table(vc1: &mut Vc1, words: &[u16]) {
