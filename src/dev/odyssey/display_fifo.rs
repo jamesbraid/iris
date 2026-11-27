@@ -770,6 +770,36 @@ mod timing_tests {
         assert_eq!(shared.restarts(), base + 1, "and the same clock again does not");
     }
 
+    /// The restart is handed to the head at the time of the write that changed the mode, whenever the display
+    /// next looks, so the retrace times a guest sees do not depend on the poll schedule.
+    #[test]
+    fn a_restart_carries_the_time_of_the_write_not_the_next_look() {
+        use super::super::reader::ScanoutReader;
+        use std::sync::atomic::Ordering::Relaxed;
+        let run = |write_ns: i64, looks: usize| {
+            let mut f = fifo();
+            let shared = f.scanout.shared.clone();
+            let mut reader = ScanoutReader::default();
+            reader.attach(&shared);
+            f.set_scanout_size(1280, 1024);
+            reader.sync(&shared);
+            reader.restarted = None;
+            for (register, value) in [(0, 0x30), (1, 0), (2, 0), (3, 5), (4, 2)] {
+                write_register(&mut f, 0x58, register, value);
+            }
+            shared.write_ns.store(write_ns, Relaxed);
+            f.data(vtg::CONTROL, 1);
+            shared.write_ns.store(-1, Relaxed);
+            for _ in 0..looks {
+                reader.sync(&shared);
+            }
+            reader.restarted
+        };
+        assert_eq!(run(7_000_000, 1), Some(7_000_000), "the write's time");
+        assert_eq!(run(7_000_000, 5), Some(7_000_000), "however many looks");
+        assert_eq!(run(-1, 1), Some(-1), "no time given: the head starts it when it sees the restart");
+    }
+
     #[test]
     fn a_mode_load_sets_the_rate() {
         let mut f = fifo();

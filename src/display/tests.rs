@@ -404,6 +404,44 @@ fn a_new_timing_restarts_the_phase() {
     assert_eq!(rig.count("a start0"), 1);
 }
 
+/// A restart at the time of the guest's write puts the next retrace one field after it, not after
+/// the moment the thread noticed; a time it cannot believe is the moment it noticed.
+#[test]
+fn a_restart_anchors_at_the_write_when_it_is_believable() {
+    let after_restart = |at: Box<dyn Fn(u64) -> Option<u64>>| {
+        let rig = Rig::new();
+        let (head, handle) = rig.head("a");
+        handle.start();
+        rig.run(HZ60_NS + 5 * MS);
+        let now = rig.clock.load(Ordering::SeqCst);
+        rig.take();
+        handle.restart_phase(at(now));
+        // Wake once so the thread sees the request, then count the retraces to a point.
+        rig.run(0);
+        rig.take();
+        (rig, now, head, handle)
+    };
+    // The write was 4 ms ago: the retrace falls a field after it.
+    let (rig, now, _keep, _h) = after_restart(Box::new(|now| Some(now - 4 * MS)));
+    let anchor = now - 4 * MS;
+    rig.run(anchor + HZ60_NS - now - MS);
+    assert_eq!(rig.count("a start0"), 0, "not before a field after the write");
+    rig.run(2 * MS);
+    assert_eq!(rig.count("a start0"), 1, "a field after the write");
+    // No time given: a field after the thread saw it.
+    let (rig, _, _keep, _h) = after_restart(Box::new(|_| None));
+    rig.run(HZ60_NS - MS);
+    assert_eq!(rig.count("a start0"), 0);
+    rig.run(2 * MS);
+    assert_eq!(rig.count("a start0"), 1);
+    // A write more than a field ago is not believed.
+    let (rig, _, _keep, _h) = after_restart(Box::new(|now| Some(1)));
+    rig.run(HZ60_NS - MS);
+    assert_eq!(rig.count("a start0"), 0, "taken from when the thread saw it");
+    rig.run(2 * MS);
+    assert_eq!(rig.count("a start0"), 1);
+}
+
 #[test]
 fn two_heads_keep_their_own_rates() {
     let rig = Rig::new();
