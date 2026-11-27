@@ -110,6 +110,11 @@ pub struct Gr2Engine<M: HostMem> {
     irq_seen: u64,
 }
 
+/// compose gives 0xAABBGGRR; the interface wants 0x00RRGGBB.
+fn to_rgb(p: u32) -> u32 {
+    ((p & 0xff) << 16) | (p & 0xff00) | ((p >> 16) & 0xff)
+}
+
 fn new_board(config: &Config, out: &Arc<Outbox>, failure: &Arc<Failure>) -> Result<Arc<Gr2>, String> {
     let p = config.probe;
     if !matches!(p.ges, 1 | 2 | 4 | 8) {
@@ -155,6 +160,37 @@ impl<M: HostMem> Gr2Engine<M> {
         let vc1 = &self.gr.regs().vc1;
         let (x, y) = vc1.cursor_pos();
         (x, y, vc1.cursor_visible())
+    }
+
+    /// The display rows that may have changed since the last call, as runs `(first, end)`.
+    pub fn take_damage(&mut self) -> Vec<(u32, u32)> {
+        let (_, h) = self.size();
+        let mut runs = self.gr.take_damaged_rows().display_runs();
+        runs.retain_mut(|r| {
+            r.1 = r.1.min(h);
+            r.0 < r.1
+        });
+        runs
+    }
+
+    /// Rows `first` up to `end` into `out` as `scanout` makes them, other words untouched; does not wait
+    /// for queued work. `out` must hold the whole picture or nothing is written.
+    pub fn scanout_rows(&mut self, first: u32, end: u32, out: &mut [u32]) -> Result<(u32, u32), Fault> {
+        if let Some(f) = self.fault_text() {
+            return Err(Fault(f));
+        }
+        let (w, h) = self.size();
+        let (first, end) = (first.min(h) as usize, end.min(h) as usize);
+        if first < end && out.len() >= w as usize * h as usize {
+            let r = self.gr.regs();
+            self.compose_buf.resize(gr2comp::OUT_STRIDE * FB_H, 0);
+            gr2comp::compose_rows(self.gr.vram(), &r.vc1, &r.xmap, &r.dac, &mut self.compose_buf, first, end);
+            for y in first..end {
+                let row = &self.compose_buf[y * gr2comp::OUT_STRIDE..][..w as usize];
+                out[y * w as usize..][..w as usize].iter_mut().zip(row).for_each(|(o, &p)| *o = to_rgb(p));
+            }
+        }
+        Ok((w, h))
     }
 
     fn faulted(&self) -> bool {
@@ -269,8 +305,7 @@ impl<M: HostMem> Gr2Engine<M> {
         px.clear();
         let (w, h) = self.size();
         for row in self.compose_buf.chunks(gr2comp::OUT_STRIDE).take(h as usize) {
-            // compose gives 0xAABBGGRR; the interface wants 0x00RRGGBB.
-            px.extend(row[..w as usize].iter().map(|&w| ((w & 0xff) << 16) | (w & 0xff00) | ((w >> 16) & 0xff)));
+            px.extend(row[..w as usize].iter().map(|&p| to_rgb(p)));
         }
         self.picture = Some((now, px));
     }

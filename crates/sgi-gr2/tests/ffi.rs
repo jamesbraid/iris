@@ -160,3 +160,34 @@ fn the_cursor_entry_reports_the_vc1() {
     assert_eq!(unsafe { sgi_gr2_cursor_position(h, null_mut(), &mut y) }, 0);
     unsafe { iris_engine_free(h) };
 }
+
+#[test]
+fn the_damage_and_row_entries_name_and_compose_the_drawn_rows() {
+    let h = new();
+    let (mut runs, mut n) = ([0u32; 8], 0usize);
+    assert_eq!(unsafe { sgi_gr2_take_damage(h, runs.as_mut_ptr(), 4, &mut n) }, IRIS_ENGINE_OK);
+    assert_eq!((n, runs[..2].to_vec()), (1, vec![0, 1024]), "the first look is the whole picture");
+    assert_eq!(unsafe { sgi_gr2_take_damage(h, null_mut(), 4, &mut n) }, IRIS_ENGINE_ERROR);
+    // Three rectangles far apart, a cap of two runs: the two nearest are joined.
+    wr(h, 0x6a070, 0);
+    wr(h, 0x6a078, 0);
+    wr(h, 0x40000 + 4 * hq2::PUC_INIT, 1);
+    for y in [100, 120, 800] {
+        for (index, v) in [(hq2::PUC_COLOR, 5), (hq2::PUC_RECTI2D, 0), (hq2::PUC_DATA, y), (hq2::PUC_DATA, 9), (hq2::PUC_DATA, y)] {
+            wr(h, 0x40000 + 4 * index, v);
+        }
+    }
+    let mut i = IrisEngineIdle::default();
+    unsafe { iris_engine_wait_idle(h, 0, 1_000_000_000, &mut i) };
+    assert_eq!(unsafe { sgi_gr2_take_damage(h, runs.as_mut_ptr(), 2, &mut n) }, IRIS_ENGINE_OK);
+    assert_eq!((n, runs[..4].to_vec()), (2, vec![223, 224, 903, 924]));
+    let mut px = vec![0xdead_beefu32; 1280 * 1024];
+    let (mut w, mut hgt) = (0u32, 0u32);
+    assert_eq!(unsafe { sgi_gr2_scanout_rows(h, 223, 224, px.as_mut_ptr(), px.len(), &mut w, &mut hgt) }, IRIS_ENGINE_OK);
+    assert_eq!((w, hgt), (1280, 1024));
+    assert!(px[223 * 1280..224 * 1280].iter().all(|&p| p != 0xdead_beef) && px[..223 * 1280].iter().all(|&p| p == 0xdead_beef));
+    let mut small = [0u32; 4];
+    assert_eq!(unsafe { sgi_gr2_scanout_rows(h, 0, 1, small.as_mut_ptr(), small.len(), &mut w, &mut hgt) }, IRIS_ENGINE_ERROR, "a buffer too small");
+    assert_eq!((w, hgt), (1280, 1024), "which still says the size");
+    unsafe { iris_engine_free(h) };
+}

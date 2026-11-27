@@ -9,6 +9,8 @@
 //! Rows are stored bottom-up (y = 0 is the bottom scanline).
 //! X registers hold the linear pixel column (not bank-coded).
 
+use super::rows::RowSet;
+
 pub const FB_W: usize = 1280;
 pub const FB_H: usize = 1024;
 
@@ -308,6 +310,8 @@ pub struct Re3 {
     pub ctx: Re3Context,
     pub vram: [u32; FB_W * FB_H],
     pub zbuf: [u32; FB_W * FB_H],
+    /// Rows drawn into since the board last took them (`Gr2::damage_drawn`).
+    pub rows: RowSet,
     /// The span JIT's state (`re3_jit`): mode, memoised shaders, counts.
     #[cfg(feature = "gr2-jit")]
     pub jit: super::re3_jit::JitState,
@@ -509,14 +513,44 @@ impl Re3 {
 
     fn execute(&mut self) {
         self.load_iterators();
-        if matches!(self.ctx.reg[RE3_DRAW_TRIGGER], DRAW_SMOOTH | DRAW_FLAT_5 | DRAW_FLAT_20) {
+        let trigger = self.ctx.reg[RE3_DRAW_TRIGGER];
+        if matches!(trigger, DRAW_SMOOTH | DRAW_FLAT_5 | DRAW_FLAT_20) {
             self.record_span();
         }
+        // Read before the draw steps the iterators; marked after it, so a taker that sees the row sees the pixels.
+        let span = self.span_rows(trigger);
+        self.draw(trigger);
+        if let Some((lo, hi)) = span {
+            self.mark_rows(lo, hi);
+        }
+    }
+
+    /// The rows a span can write: its first and last, which the y iterator walks between.
+    fn span_rows(&self, trigger: u32) -> Option<(i64, i64)> {
+        let c = &self.ctx;
+        let n = c.numpix as i64;
+        let first = c.y >> 14;
+        let last = match trigger {
+            _ if n == 0 => return None,
+            DRAW_SMOOTH => (c.y + (n - 1) * (c.reg[RE3_Y_STEP] as u16 as i16 as i64)) >> 14,
+            DRAW_FLAT_5 | DRAW_FLAT_20 => first,
+            _ => return None,
+        };
+        Some((first.min(last), first.max(last)))
+    }
+
+    /// Mark rows `lo` to `hi` that the scissor lets a pixel reach.
+    fn mark_rows(&mut self, lo: i64, hi: i64) {
+        let r = &self.ctx.reg;
+        self.rows.mark(lo.max(r[RE3_CLIP_Y_LO] as i64), hi.min(r[RE3_CLIP_Y_HI] as i64));
+    }
+
+    fn draw(&mut self, trigger: u32) {
         #[cfg(feature = "gr2-jit")]
-        if super::re3_jit::run(self, self.ctx.reg[RE3_DRAW_TRIGGER]) {
+        if super::re3_jit::run(self, trigger) {
             return;
         }
-        match self.ctx.reg[RE3_DRAW_TRIGGER] {
+        match trigger {
             DRAW_SMOOTH => self.draw_shaded_span(),
             DRAW_FLAT_5 => self.draw_flat_span(5),
             DRAW_FLAT_20 => self.draw_flat_span(20),
@@ -884,6 +918,7 @@ impl Re3 {
     fn write_buffer(&mut self) {
         let mode = self.ctx.reg[RE3_UNPACK_MODE];
         let data = self.ctx.reg[RE3_HOST_DATA];
+        let (mut lo, mut hi) = (i32::MAX, i32::MIN);
         for i in 0..=mode {
             if self.ctx.numpix == 0 {
                 break;
@@ -894,10 +929,15 @@ impl Re3 {
                 let off = y as usize * FB_W + x as usize;
                 if self.wid_ok(DRAW_HOST_WRITE, off) {
                     self.plane_write(off, unpack(data, i, mode));
+                    (lo, hi) = (lo.min(y), hi.max(y));
                 }
             }
             self.step_iterators();
             self.ctx.numpix -= 1;
+        }
+        // The Z planes are not shown.
+        if !matches!(self.ctx.reg[RE3_HOST_PLANE], HPLANE_Z | HPLANE_Z_RAW) {
+            self.mark_rows(lo as i64, hi as i64);
         }
         if self.ctx.numpix == 0 {
             self.ctx.stream = STREAM_IDLE;
@@ -965,6 +1005,7 @@ impl Re3 {
                 }
             }
         }
+        self.mark_rows(dy as i64 + j0 as i64, dy as i64 + j1 as i64 - 1);
     }
 
     /// Emulator-private screen-to-screen copy of the planes selected by
@@ -1005,6 +1046,7 @@ impl Re3 {
                 self.vram[off] = (dst & !mask) | (src & mask);
             }
         }
+        self.mark_rows(dy as i64 + j0 as i64, dy as i64 + j1 as i64 - 1);
     }
 }
 

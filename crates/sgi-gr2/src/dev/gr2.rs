@@ -20,6 +20,8 @@ pub mod gr2comp;
 pub mod hq2;
 #[path = "../../../../src/dev/gr2/re3.rs"]
 pub mod re3;
+#[path = "../../../../src/dev/gr2/rows.rs"]
+pub mod rows;
 #[cfg(feature = "gr2-jit")]
 #[path = "../../../../src/dev/gr2/re3_jit/mod.rs"]
 pub mod re3_jit;
