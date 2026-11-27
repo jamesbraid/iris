@@ -13,6 +13,12 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Graphics boards
+
+- An Octane2 can carry a second VPro: a `vpro` `[[devices]]` entry at `slot_cd`
+  beside the board `[graphics] board` names, as SGI's Dual Head module has it.
+  The same entry types (`express`, `impact`, `kona`) exist for the other families.
+
 ### Serial ports
 
 - A serial port can carry a device in place of its socket, on every machine:

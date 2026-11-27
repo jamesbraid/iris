@@ -911,6 +911,8 @@ prebuf_ms = 20              # sound held before playing: the margin against a la
 # and usb_input = true (the Fuel's USB keyboard and mouse).
 # The graphics board's slot is a device too: type = "graphics" and `at` (xio11, node1/xio8 on the Onyx 3000);
 # left out, the machine places it. Which board it is stays [graphics] board.
+# A second board is an entry of its family's type: "vpro", "express", "impact" or "kona" with `board`
+# (the Octane2 takes a second "vpro" at slot_cd).
 
 # ── Host tuning and debugging ────────────────────────────────────────────────
 

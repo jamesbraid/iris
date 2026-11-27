@@ -272,11 +272,19 @@ impl DevicePlacement {
         let machine = machine_name(cfg.machine.profile);
         let slots = cfg.machine.profile.slots();
         let mut devices = devices.to_vec();
+        // The machine's own board takes its usual port; a second one takes what is free.
+        let usual = match cfg.machine.profile {
+            MachineProfile::Onyx3000Ip35 => crate::ip35_machine::default_at(cfg),
+            MachineProfile::OctaneIp30 => Some(format!("xio{}", crate::ip30_machine::WIDGET_GFX)),
+            _ => None,
+        };
         let named = devices.iter().any(|d| matches!(d.device, DeviceModel::Graphics));
+        if let Some(d) = devices.iter_mut().find(|d| d.at.is_none() && matches!(d.device, DeviceModel::Graphics)) {
+            d.at = usual.clone();
+        }
         if !named && cfg.graphics_board() != GraphicsBoard::None && slots_take(&slots, DeviceFamily::Gfx) {
             let first = || slots.iter().find(|s| s.kind.takes(DeviceFamily::Gfx, false)).map(|s| s.path.to_string());
-            let at = (cfg.machine.profile == MachineProfile::Onyx3000Ip35).then(|| crate::ip35_machine::default_at(cfg)).flatten().or_else(first);
-            devices.push(ConfiguredDevice { at, ..ConfiguredDevice::new("", DeviceModel::Graphics) });
+            devices.push(ConfiguredDevice { at: usual.or_else(first), ..ConfiguredDevice::new("", DeviceModel::Graphics) });
         }
         let (slots, at) = layout(machine, slots, &devices);
         DevicePlacement { slots, machine, devices, at, pci: HashMap::new() }

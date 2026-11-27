@@ -183,6 +183,19 @@ and what iris-ci screenshots show; the keyboard and mouse are IOC3's PS/2
 ports. `board = "none"` leaves the port empty, and the machine
 then runs on its serial console with no window.
 
+An Octane2 can have a second VPro, as SGI's Dual Head module does (Octane2
+Dual Head Installation Guide, 007-4493-001): the board `[graphics] board` names
+sits in `slot_ab` (`xio11`) and a `vpro` entry at `slot_cd` (`xio10`) adds the
+second. `slot_b` and `slot_d` name the same ports. The module has no room for
+another XIO board, so iris refuses a `pci_shoehorn` beside the pair. The pair
+takes one processor or two, and the first board may be an IMPACT with a VPro
+beside it. These slot rules (an IMPACT in `slot_ab` only, a second board in `slot_cd` only) are what iris
+models, not the hardware's: a real Octane takes a second IMPACT in slot B or C, and dual
+IMPACT is not modelled yet. The first board is head 0 and the second head 1 (iris-ci
+`screenshot head=1`, a second window, the GUI's side-by-side view). With two
+boards the monitor takes a slot first, `vpro slot_cd status`, and a bare `vpro`
+means the first. A two-processor Octane cannot be saved to a snapshot yet.
+
 `v6`, `v8`, `v10` and `v12` are the four Octane VPro boards on the same
 port: a port of the VPro (Odyssey) model in jamesbraid/qemu-sgi-origami
 (`src/dev/odyssey`), with the X server and OpenGL drawn by the model's

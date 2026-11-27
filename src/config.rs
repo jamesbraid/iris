@@ -3759,6 +3759,11 @@ impl MachineConfig {
         if written == 1 && board == GraphicsBoard::None {
             return Err("[[devices]] graphics: the board `[graphics] board` names is none".into());
         }
+        if self.machine.profile == MachineProfile::OctaneIp30 {
+            crate::ip30_machine::fitted_boards(self, &placement)?;
+        } else if self.devices.iter().any(|d| matches!(d.device, DeviceModel::Board(_))) {
+            return Err(format!("[[devices]]: the {} takes no second graphics board in iris", placement.machine()));
+        }
         if self.has_device("nvme") {
             self.machine.profile.refuse_nvme()?;
             let mut images = std::collections::HashSet::new();

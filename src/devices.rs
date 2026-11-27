@@ -7,7 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::Arc;
 
 use crate::dev::serial_dev::{SerialDeviceConfig, SerialKind};
-use crate::config::{MachineConfig, NvmeConfig, ScsiDeviceConfig, ScsiKind, Virtio9pConfig, VirtioSerialConfig};
+use crate::config::{GraphicsBoard, MachineConfig, NvmeConfig, ScsiDeviceConfig, ScsiKind, Virtio9pConfig, VirtioSerialConfig};
 use crate::dev::ice1724::{Ice1724, Variant};
 use crate::dev::isp2200::{card::Loop, Isp2200};
 use crate::dev::nvme::Nvme;
@@ -39,6 +39,8 @@ pub enum DeviceModel {
     Newport,
     /// The machine's graphics board, which `[graphics] board` names; the entry says where it goes.
     Graphics,
+    /// A graphics board beyond the machine's own, by its family: `vpro`, `express`, `impact` or `kona`.
+    Board(GraphicsBoard),
     VirtioSerial(VirtioSerialConfig),
     Virtio9p(Virtio9pConfig),
     /// A device on a serial port: `hostserial`, `midi_synth` or `midi_raw`, by its kind.
@@ -106,6 +108,11 @@ pub const DEVICE_TYPES: &[DeviceTypeSpec] = &[
     DeviceTypeSpec { name: "newport", family: DeviceFamily::Gio, keys: &[], parse: |_, _| Ok(DeviceModel::Newport), slots: None },
     // Where the board goes; which board it is stays a `[graphics]` setting.
     DeviceTypeSpec { name: "graphics", family: DeviceFamily::Gfx, keys: &[], parse: |_, _| Ok(DeviceModel::Graphics), slots: None },
+    // A second board, one type per family; `newport` above is a second Newport.
+    DeviceTypeSpec { name: "vpro", family: DeviceFamily::Gfx, keys: &["board"], parse: extra_board, slots: None },
+    DeviceTypeSpec { name: "express", family: DeviceFamily::Gfx, keys: &["board"], parse: extra_board, slots: None },
+    DeviceTypeSpec { name: "impact", family: DeviceFamily::Gfx, keys: &["board"], parse: extra_board, slots: None },
+    DeviceTypeSpec { name: "kona", family: DeviceFamily::Gfx, keys: &["board"], parse: extra_board, slots: None },
     DeviceTypeSpec {
         name: "virtio_serial",
         family: DeviceFamily::Virtio,
@@ -126,6 +133,26 @@ pub const DEVICE_TYPES: &[DeviceTypeSpec] = &[
     DeviceTypeSpec { name: "midi_synth", family: DeviceFamily::Serial, keys: &["path", "gain"], parse: serial_device, slots: None },
     DeviceTypeSpec { name: "midi_raw", family: DeviceFamily::Serial, keys: &["path"], parse: serial_device, slots: None },
 ];
+
+/// `board` of a second board: V12 for a `vpro`, XZ for an `express`, Solid for an `impact`, required for a `kona`.
+fn extra_board(t: &DeviceTypeSpec, mut opts: toml::Table) -> Result<DeviceModel, String> {
+    let named = match opts.remove("board") {
+        None => None,
+        Some(toml::Value::String(s)) => Some(s.parse::<GraphicsBoard>()?),
+        Some(v) => return Err(format!("board = {v} is not a string")),
+    };
+    let (board, fits, models) = match (t.name, named) {
+        ("vpro", b) => { let b = b.unwrap_or(GraphicsBoard::V12); (b, b.is_vpro(), "v6, v8, v10, v12") }
+        ("express", b) => { let b = b.unwrap_or(GraphicsBoard::Xz); (b, matches!(b, GraphicsBoard::Xz | GraphicsBoard::Elan | GraphicsBoard::Extreme), "xz, elan, extreme") }
+        ("impact", b) => { let b = b.unwrap_or(GraphicsBoard::SolidImpact); (b, b.is_impact(), "solidimpact, highimpact, maximpact") }
+        (_, Some(b)) => (b, b.is_kona(), "ir2, ir2:2rm, ir2e, ir2e:2rm, ir3"),
+        _ => return Err("needs a board (ir2, ir2:2rm, ir2e, ir2e:2rm or ir3)".into()),
+    };
+    if !fits {
+        return Err(format!("{} is not a model of {} ({models})", board.as_str(), t.name));
+    }
+    Ok(DeviceModel::Board(board))
+}
 
 fn serial_device(t: &DeviceTypeSpec, opts: toml::Table) -> Result<DeviceModel, String> {
     let kind = SerialKind::from_name(t.name).expect("a serial type");
@@ -178,6 +205,10 @@ impl DeviceModel {
             DeviceModel::TestDevice(_) => "test_device",
             DeviceModel::Newport => "newport",
             DeviceModel::Graphics => "graphics",
+            DeviceModel::Board(b) if b.is_vpro() => "vpro",
+            DeviceModel::Board(b) if b.is_impact() => "impact",
+            DeviceModel::Board(b) if b.is_kona() => "kona",
+            DeviceModel::Board(_) => "express",
             DeviceModel::VirtioSerial(_) => "virtio_serial",
             DeviceModel::Virtio9p(_) => "virtio_9p",
             DeviceModel::Serial(d) => d.kind.name(),
@@ -231,6 +262,7 @@ impl DeviceModel {
             DeviceModel::VirtioSerial(d) => changed(d, keys),
             DeviceModel::Virtio9p(d) => changed(d, keys),
             DeviceModel::Serial(d) => changed(d, keys),
+            DeviceModel::Board(b) => toml::Table::from_iter([("board".to_string(), b.as_str().into())]),
             DeviceModel::XioBoard(_) | DeviceModel::PciBridge | DeviceModel::Ice1724 | DeviceModel::Qla2200 | DeviceModel::Ultra64 | DeviceModel::Newport | DeviceModel::Graphics => toml::Table::new(),
         }
     }
@@ -518,6 +550,19 @@ mod tests {
         struct File { devices: Vec<ConfiguredDevice> }
         let text = toml::to_string(&File { devices: vec![e] }).unwrap();
         assert_eq!(text, "[[devices]]\ntype = \"hdd\"\npath = \"a.raw\"\nwrite_cache = false\n", "type first, defaults left out");
+    }
+
+    #[test]
+    fn a_board_type_names_its_family_and_keeps_to_it() {
+        for (text, board) in [("type = \"vpro\"", GraphicsBoard::V12), ("type = \"express\"\nboard = \"elan\"", GraphicsBoard::Elan), ("type = \"impact\"", GraphicsBoard::SolidImpact), ("type = \"kona\"\nboard = \"ir3\"", GraphicsBoard::Ir3), ("type = \"vpro\"\nboard = \"v10\"", GraphicsBoard::V10)] {
+            let e = entry(text).unwrap();
+            assert!(matches!(e.device, DeviceModel::Board(b) if b == board), "{text}");
+            let back = ConfiguredDevice::from_table(toml::Table::try_from(&e).unwrap()).unwrap();
+            assert!(matches!(back.device, DeviceModel::Board(b) if b == board), "{text} round trip");
+        }
+        assert!(entry("type = \"vpro\"\nboard = \"solidimpact\"").unwrap_err().contains("not a model of vpro"));
+        assert!(entry("type = \"express\"\nboard = \"v12\"").unwrap_err().contains("not a model of express"));
+        assert!(entry("type = \"kona\"").unwrap_err().contains("needs a board"));
     }
 
     #[test]

@@ -44,6 +44,7 @@ use crate::ip30::{
     WIDGET_HEART, WIDGET_SMALL_SIZE, WIDGET_XBOW,
 };
 use crate::pci::{BoardIrq, DevFn, PCI_INTA, PCI_INTB};
+use crate::slot_path::MachineSlotPath;
 use crate::topology::MachineSlotKind;
 use crate::snapshot::{
     field, ChunksManifest, Manifest, MgrasChunk, OdysseyChunk, Snapshot, StateTable, SCHEMA_VERSION,
@@ -74,16 +75,17 @@ pub(crate) const SYSTEM_SLOTS: &[(u8, MachineSlotKind, Option<&str>)] = &[
     ];
 
 /// The XIO slots as Crossbow ports, by letter A to D (007-3582-001 p. 33), in the order a board with no slot takes them;
-/// real Octanes have a shoehorn in 10.
-const XIO_SLOTS: [(u8, &str); 4] = [(10, "slot_d"), (12, "slot_a"), (9, "slot_c"), (11, "slot_b")];
+/// real Octanes have a shoehorn in 10. The Octane2's dual-head module takes two slots a head: A/B and C/D (007-4493-001 p. 1).
+const XIO_SLOTS: [(u8, &[&str]); 4] = [(10, &["slot_d", "slot_cd"]), (12, &["slot_a"]), (9, &["slot_c"]), (11, &["slot_b", "slot_ab"])];
 
 /// The Octane's slots.
 pub(crate) fn slots(s: &mut Vec<crate::topology::MachineSlot>) {
     use crate::topology::DeviceFamily;
     crate::topology::pci_bus_slots(s, &format!("xio{}/pci0", crate::ip30::WIDGET_BRIDGE), "Octane system board", SYSTEM_SLOTS);
-    for (w, alias) in XIO_SLOTS {
-        // The graphics board has the port it is fitted in whenever one is.
-        crate::topology::open_slot(s, &format!("xio{w}"), if w == WIDGET_GFX { &[DeviceFamily::Xio, DeviceFamily::Gfx] } else { &[DeviceFamily::Xio] }, &[alias]);
+    for (w, aliases) in XIO_SLOTS {
+        // A graphics board takes 11, and a second VPro 10.
+        let takes: &[DeviceFamily] = if matches!(w, WIDGET_GFX | WIDGET_GFX2) { &[DeviceFamily::Xio, DeviceFamily::Gfx] } else { &[DeviceFamily::Xio] };
+        crate::topology::open_slot(s, &format!("xio{w}"), takes, aliases);
     }
     crate::topology::open_slot(s, &format!("xio{}", crate::dev::xio_pci::CAGE_WIDGET), &[DeviceFamily::Cage], &["pci_module", "shoebox"]);
 }
@@ -111,6 +113,75 @@ fn vpro_prom_needed(board: crate::config::GraphicsBoard) -> (u32, u32) {
     }
 }
 
+/// The graphics boards placed, the one at the highest port first, or why iris cannot build them: the machine's own board and at
+/// most one more, in C/D beside a first in A/B, with no other XIO board (007-4493-001). The slot rules are what iris models; a
+/// real Octane takes a second IMPACT in B or C.
+pub(crate) fn fitted_boards(cfg: &MachineConfig, placement: &crate::topology::DevicePlacement) -> Result<Vec<(crate::config::GraphicsBoard, MachineSlotPath)>, String> {
+    let own = placement.graphics().map(|at| (cfg.graphics_board(), at.clone()));
+    let mut boards: Vec<_> = own.into_iter().chain(placement.placed().filter_map(|(d, at)| match d.device {
+        crate::devices::DeviceModel::Board(b) => Some((b, at.clone())),
+        _ => None,
+    })).collect();
+    boards.sort_by_key(|(_, at)| std::cmp::Reverse(at.last_number()));
+    if let Some((b, _)) = boards.iter().find(|(b, _)| !b.is_vpro() && !b.is_impact()) {
+        return Err(format!("graphics board \"{}\" is not modelled on the Octane (valid: solidimpact, highimpact, maximpact, v6, v8, v10, v12, none)", b.as_str()));
+    }
+    let ports: Vec<_> = boards.iter().filter_map(|(_, at)| at.last_number()).collect();
+    if boards.len() > 2 || boards.iter().filter(|(b, _)| b.is_impact()).count() > 1 {
+        return Err("iris builds at most two graphics boards in an Octane, and one of them an IMPACT".into());
+    }
+    if boards.iter().any(|(b, at)| b.is_impact() && at.last_number() != Some(WIDGET_GFX)) {
+        return Err(format!("an IMPACT board is modelled in xio{WIDGET_GFX} (slot_ab) only"));
+    }
+    if ports.contains(&WIDGET_GFX2) && boards.len() != 2 {
+        return Err(format!("iris takes the second board in xio{WIDGET_GFX2} (slot_cd) only, beside the first in xio{WIDGET_GFX} (slot_ab) (007-4493-001, chapter 1)"));
+    }
+    if boards.len() == 2 && placement.placed().any(|(d, _)| matches!(d.device, crate::devices::DeviceModel::XioBoard(crate::dev::xio_pci::Kind::Shoehorn))) {
+        return Err("a dual-head Octane2 has no slot for an XIO board: each head takes two (007-4493-001, chapter 1)".into());
+    }
+    Ok(boards)
+}
+
+/// The names a monitor command can address the board in `at` by: its path and its aliases.
+fn slot_names(slots: &[crate::topology::MachineSlot], at: &MachineSlotPath) -> Vec<String> {
+    let aliases = slots.iter().find(|s| &s.path == at).map(|s| s.aliases.clone()).unwrap_or_default();
+    std::iter::once(at.to_string()).chain(aliases).collect()
+}
+
+/// One of two boards that answer the same monitor command: `vpro slot_d status` reaches the board in that slot, and a bare
+/// `vpro` the first.
+struct SlotCommands {
+    board: Arc<dyn Device>,
+    names: Vec<String>,
+    others: Vec<String>,
+    first: bool,
+}
+
+impl Device for SlotCommands {
+    fn step(&self, _cycles: u64) {}
+    fn stop(&self) {}
+    fn start(&self) {}
+    fn is_running(&self) -> bool { self.board.is_running() }
+
+    fn register_commands(&self) -> Vec<(String, String)> {
+        self.board.register_commands()
+    }
+
+    fn execute_command(&self, cmd: &str, args: &[&str], writer: Box<dyn std::io::Write + Send>) -> Result<(), String> {
+        let head = args.first().copied().unwrap_or_default();
+        if self.names.iter().any(|n| n == head) {
+            self.board.execute_command(cmd, &args[1..], writer)
+        } else if self.first && !self.others.iter().any(|n| n == head) {
+            if head.starts_with("slot_") || head.strip_prefix("xio").is_some_and(|n| n.parse::<u8>().is_ok()) {
+                return Err(format!("no VPro board in {head}"));
+            }
+            self.board.execute_command(cmd, args, writer)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// The PROM's own revision, from its banner ("SGI Version 6.5 Rev 4.9
 /// IP30 ..."), if the image carries one.
 fn prom_revision(prom: &[u8]) -> Option<(u32, u32)> {
@@ -124,6 +195,8 @@ fn prom_revision(prom: &[u8]) -> Option<(u32, u32)> {
 /// The graphics port the one IMPACT board sits in. A choice: it is where a
 /// measured Octane2 has its graphics board, not a measured SI placement.
 pub const WIDGET_GFX: u8 = 11;
+/// The port of the second VPro of a dual-head Octane2 (007-4493-001 p. 1).
+const WIDGET_GFX2: u8 = 10;
 /// The blank part on the Bridge's second flash select: reads all ones and
 /// keeps no writes, an approximation from one word read on a real Octane2.
 /// The PROM looks for a part there too.
@@ -297,10 +370,10 @@ pub struct OctaneMachine {
     /// The virtio and audio functions the entries placed on the buses.
     cards: crate::devices::AttachedCards,
     flash: Arc<CfiFlash>,
-    /// The IMPACT board, when `[graphics] board` names one.
+    /// The IMPACT board, when `[graphics] board` or an `impact` entry names one.
     pub gfx: Option<Arc<ImpactXio>>,
-    /// The VPro board, with `[graphics] board = "v6"`, `"v8"`, `"v10"` or `"v12"`.
-    pub vpro: Option<Arc<Odyssey>>,
+    /// The VPro boards, `[graphics] board`'s and a `vpro` entry's, with the slot each is in; the board at the highest port is first.
+    pub vpro: Vec<(MachineSlotPath, Arc<Odyssey>)>,
     nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
     /// Guest frames the network backend has processed.
     frames: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -327,16 +400,17 @@ impl OctaneMachine {
         let cpu_count = cfg.machine.cpus();
         MachineProfile::OctaneIp30.accepts_cpus(cpu_count)?;
         let banks = heart_banks(cfg);
-        let kind = cfg.graphics_board();
-        let board = match kind {
-            crate::config::GraphicsBoard::None => None,
-            b if b.is_vpro() => None,
-            b if b.is_impact() => Some(b),
-            b => return Err(format!("graphics.board \"{}\" is not modelled on the Octane (valid: solidimpact, highimpact, maximpact, v6, v8, v10, v12, none)", b.as_str())),
+        let mut resolved = crate::topology::DevicePlacement::new(cfg)?;
+        let boards = fitted_boards(cfg, &resolved)?;
+        let board = match boards.first() {
+            None => None,
+            Some((b, _)) if b.is_vpro() => None,
+            Some((b, _)) if b.is_impact() => Some(*b),
+            Some(_) => unreachable!("fitted_boards takes only IMPACT and VPro boards"),
         };
-        let has_vpro = kind.is_vpro();
-        if has_vpro {
-            let needed = vpro_prom_needed(kind);
+        let vpros: Vec<_> = boards.iter().filter(|(b, _)| b.is_vpro()).collect();
+        for (kind, _) in &vpros {
+            let needed = vpro_prom_needed(*kind);
             if let Some(found) = prom_revision(&prom) {
                 if found < needed {
                     eprintln!(
@@ -354,7 +428,7 @@ impl OctaneMachine {
         // (007-4210-003) requires Crossbow 1.4 for them. Choosing one gives
         // the machine the Octane2's Crossbow (revision 5) and Bridge
         // (revision 4); there is no separate option for the machine.
-        let octane2 = matches!(kind, crate::config::GraphicsBoard::V10 | crate::config::GraphicsBoard::V12);
+        let octane2 = vpros.iter().any(|(b, _)| matches!(b, crate::config::GraphicsBoard::V10 | crate::config::GraphicsBoard::V12));
         let xbow_revision = if octane2 { XBOW_REVISION_OCTANE2 } else { XBOW_REVISION };
         let (event_tx, event_rx) = crate::traits::MachineEvents::channel(4);
         let events = event_tx.clone();
@@ -371,9 +445,8 @@ impl OctaneMachine {
         let identity = if octane2 { Identity::octane2(processor) } else { Identity::octane(processor) };
         heart.set_microlan(identity.processor.bus());
 
-        let gfx_link = if board.is_some() || has_vpro { 1 << WIDGET_GFX } else { 0 };
+        let gfx_link = boards.iter().fold(0u16, |m, (_, at)| m | 1 << at.last_number().unwrap_or(WIDGET_GFX));
         // The option boards, in config order, each on the port it was placed at.
-        let mut resolved = crate::topology::DevicePlacement::new(cfg)?;
         let xio_widgets: Vec<(crate::dev::xio_pci::Kind, u8)> = resolved.placed()
             .filter_map(|(d, at)| match d.device {
                 crate::devices::DeviceModel::XioBoard(kind) => Some((kind, at.last_number()?)),
@@ -465,11 +538,14 @@ impl OctaneMachine {
         let gfx = board
             .map(|b| ImpactXio::with_raster(WIDGET_GFX, b, heart.clone(), mem.clone(), status.clone(), (cfg.graphics.raster, cfg.graphics.gpu_backend.as_str())))
             .transpose()?;
-        let vpro = if has_vpro {
-            Some(Odyssey::new(WIDGET_GFX, kind.as_str(), heart.clone(), mem.clone(), status.clone(), (cfg.graphics.threads, cfg.graphics.tile), (cfg.graphics.raster, cfg.graphics.gpu_backend.as_str()))?)
-        } else {
-            None
-        };
+        let vpro = vpros
+            .iter()
+            .map(|(kind, at)| {
+                let widget = at.last_number().unwrap_or(WIDGET_GFX);
+                let board = Odyssey::new(widget, kind.as_str(), heart.clone(), mem.clone(), status.clone(), (cfg.graphics.threads, cfg.graphics.tile), (cfg.graphics.raster, cfg.graphics.gpu_backend.as_str()))?;
+                Ok((at.clone(), board))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
 
         // The bus over them, then the table.
         let phys = Ip30Bus::new(ram.clone());
@@ -489,8 +565,8 @@ impl OctaneMachine {
         if let Some(g) = &gfx {
             phys.attach_widget(WIDGET_GFX, g.clone(), false);
         }
-        if let Some(v) = &vpro {
-            phys.attach_widget(WIDGET_GFX, v.clone(), true);
+        for (at, v) in &vpro {
+            phys.attach_widget(at.last_number().unwrap_or(WIDGET_GFX), v.clone(), true);
         }
         let phys = Arc::new(phys);
         phys.init();
@@ -545,7 +621,7 @@ impl OctaneMachine {
             "iris: Octane with {} MB ({}), {}",
             banks.iter().sum::<u64>() >> 20,
             banks.iter().filter(|&&b| b != 0).map(|b| format!("{}", b >> 20)).collect::<Vec<_>>().join("+"),
-            if has_vpro { kind.label() } else { board.map_or("no graphics", |b| b.label()) }
+            if boards.is_empty() { "no graphics".to_string() } else { boards.iter().map(|(b, _)| b.label()).collect::<Vec<_>>().join(" and ") }
         );
 
         let count_hz = cfg.clock.count_hz(part);
@@ -686,8 +762,18 @@ impl OctaneMachine {
             monitor.register_device(g.mgras().clone());
             g.register_locks();
         }
-        if let Some(v) = &vpro {
-            monitor.register_device(v.clone());
+        // With two boards each answers `vpro SLOT ...`; a bare `vpro` is the first.
+        let names: Vec<Vec<String>> = vpro.iter().map(|(at, _)| slot_names(&resolved.slots, at)).collect();
+        for (i, (_, v)) in vpro.iter().enumerate() {
+            match vpro.len() {
+                1 => monitor.register_device(v.clone()),
+                _ => monitor.register_device(Arc::new(SlotCommands {
+                    board: v.clone(),
+                    names: names[i].clone(),
+                    others: names.iter().enumerate().filter(|(j, _)| *j != i).flat_map(|(_, n)| n.clone()).collect(),
+                    first: i == 0,
+                })),
+            }
         }
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
         let ci_serial = cfg.ci.then(|| Arc::new(crate::dev::serial_host::CiSerialBackend::new()));
@@ -846,9 +932,7 @@ impl OctaneMachine {
         if let Some(g) = &self.gfx {
             d.push(g.clone());
         }
-        if let Some(v) = &self.vpro {
-            d.push(v.clone());
-        }
+        d.extend(self.vpro.iter().map(|(_, v)| v.clone() as Arc<dyn Device>));
         d
     }
 
@@ -928,7 +1012,7 @@ impl OctaneMachine {
         if let Some(g) = &self.gfx {
             g.power_on();
         }
-        if let Some(v) = &self.vpro {
+        for (_, v) in &self.vpro {
             v.power_on();
         }
         Self::sync_links(&self.phys, &self.xbow);
@@ -1004,7 +1088,8 @@ struct OctaneSnapshot {
     /// The cards' state, by slot.
     cards: toml::Value,
     impact: Option<(String, Vec<(String, Vec<u32>)>)>,
-    vpro: Option<(String, Vec<(String, Vec<u32>)>)>,
+    /// Each VPro board's metadata and parts, in the order of `OctaneMachine::vpro`.
+    vpro: Vec<(String, Vec<(String, Vec<u32>)>)>,
     dir: std::path::PathBuf,
 }
 
@@ -1028,7 +1113,7 @@ impl OctaneMachine {
     }
     /// Why this machine cannot be saved, when it cannot.
     fn snapshot_refusal(&self) -> Option<String> {
-        snapshot_refusal_for(self.gfx.is_some(), self.vpro.is_some(), self.cpus.len()).or_else(|| self.cards.snapshot_blocker())
+        snapshot_refusal_for(self.gfx.is_some(), !self.vpro.is_empty(), self.cpus.len()).or_else(|| self.cards.snapshot_blocker())
     }
 
     /// Every device's state but the CPU's. Called with the machine stopped.
@@ -1138,14 +1223,14 @@ impl OctaneMachine {
         if let Some((metadata, _)) = &impact {
             snap.write_state("impact", &toml::Value::String(metadata.clone())).map_err(io)?;
         }
-        let vpro = self
-            .vpro
-            .as_ref()
-            .map(|vpro| vpro.snapshot_parts())
-            .transpose()?;
-        if let Some((metadata, _)) = &vpro {
-            snap.write_state("vpro", &toml::Value::String(metadata.clone()))
-                .map_err(io)?;
+        let vpro = self.vpro.iter().map(|(at, v)| Ok((at.to_string(), v.snapshot_parts()?))).collect::<Result<Vec<_>, String>>()?;
+        // A lone board is saved as it always was, so an older iris still reads it; a pair is named by slot.
+        let single = vpro.len() == 1;
+        let state = |m: &String| toml::Value::String(m.clone());
+        match vpro.as_slice() {
+            [] => {}
+            [(_, (metadata, _))] => snap.write_state("vpro", &state(metadata)).map_err(io)?,
+            _ => snap.write_state("vpro", &toml::Value::Table(vpro.iter().map(|(at, (m, _))| (at.clone(), state(m))).collect())).map_err(io)?,
         }
         snap.write_bin("flash.bin", &self.flash.contents())
             .map_err(io)?;
@@ -1161,15 +1246,11 @@ impl OctaneMachine {
                 chunks.mgras_chunks.push(MgrasChunk { name, words: words.len(), hashes });
             }
         }
-        if let Some((_, parts)) = vpro {
+        for (at, (_, parts)) in vpro {
             for (name, words) in parts {
-                let hashes = put_words_as_chunks(&store, &words)
-                    .map_err(|e| format!("CAS VPro {name} put: {e}"))?;
-                chunks.odyssey_chunks.push(OdysseyChunk {
-                    name,
-                    words: words.len(),
-                    hashes,
-                });
+                let hashes = put_words_as_chunks(&store, &words).map_err(|e| format!("CAS VPro {at} {name} put: {e}"))?;
+                let name = if single { name } else { format!("{at}/{name}") };
+                chunks.odyssey_chunks.push(OdysseyChunk { name, words: words.len(), hashes });
             }
         }
         snap.write_chunks_manifest(&chunks).map_err(io)?;
@@ -1262,36 +1343,37 @@ impl OctaneMachine {
             (None, false) => return Err("snapshot contains IMPACT state but this Octane has no IMPACT board".into()),
             (None, true) => None,
         };
-        let vpro = match (&self.vpro, chunks.odyssey_chunks.is_empty()) {
-            (Some(_), false) => {
-                let metadata = state("vpro")?
-                    .as_str()
-                    .ok_or("VPro snapshot metadata is not a string")?
-                    .to_string();
+        let vpro = match (self.vpro.is_empty(), chunks.odyssey_chunks.is_empty()) {
+            (true, true) => Vec::new(),
+            (true, false) => return Err("snapshot contains VPro state but this Octane has no VPro board".into()),
+            (false, true) => return Err("snapshot has no state for the configured VPro board".into()),
+            (false, false) => {
+                let saved = state("vpro")?;
                 let store = ChunkStore::new(saves);
-                let mut parts = Vec::with_capacity(chunks.odyssey_chunks.len());
-                for part in &chunks.odyssey_chunks {
-                    let words = get_chunks_as_words(&store, &part.hashes)
-                        .map_err(|e| format!("CAS VPro {} get: {e}", part.name))?;
-                    if words.len() != part.words {
-                        return Err(format!(
-                            "CAS VPro {} has {} words, expected {}",
-                            part.name,
-                            words.len(),
-                            part.words
-                        ));
+                let mut boards = Vec::with_capacity(self.vpro.len());
+                for (at, _) in &self.vpro {
+                    let prefix = format!("{at}/");
+                    // A lone board has a string and bare part names.
+                    let bare = saved.is_str() && self.vpro.len() == 1;
+                    let metadata = match &saved {
+                        toml::Value::String(m) if bare => Some(m.as_str()),
+                        saved => saved.get(at.to_string()).and_then(|m| m.as_str()),
                     }
-                    parts.push((part.name.clone(), words));
+                    .ok_or_else(|| format!("snapshot has no state for the VPro board at {at}"))?
+                    .to_string();
+                    let mut parts = Vec::new();
+                    for part in &chunks.odyssey_chunks {
+                        let Some(name) = part.name.strip_prefix(&prefix).or(bare.then_some(part.name.as_str())) else { continue };
+                        let words = get_chunks_as_words(&store, &part.hashes).map_err(|e| format!("CAS VPro {at} {name} get: {e}"))?;
+                        if words.len() != part.words {
+                            return Err(format!("CAS VPro {at} {name} has {} words, expected {}", words.len(), part.words));
+                        }
+                        parts.push((name.to_string(), words));
+                    }
+                    boards.push((metadata, parts));
                 }
-                Some((metadata, parts))
+                boards
             }
-            (Some(_), true) => {
-                return Err("snapshot has no state for the configured VPro board".into())
-            }
-            (None, false) => {
-                return Err("snapshot contains VPro state but this Octane has no VPro board".into())
-            }
-            (None, true) => None,
         };
         Ok(OctaneSnapshot {
             cpu: state("cpu")?,
@@ -1320,7 +1402,7 @@ impl OctaneMachine {
         if let (Some(gfx), Some((metadata, parts))) = (&self.gfx, s.impact) {
             gfx.restore_snapshot_parts(&metadata, &parts)?;
         }
-        if let (Some(vpro), Some((metadata, parts))) = (&self.vpro, s.vpro) {
+        for ((_, vpro), (metadata, parts)) in self.vpro.iter().zip(s.vpro) {
             vpro.restore_snapshot_parts(&metadata, &parts)?;
         }
         Ok(())
@@ -1385,11 +1467,7 @@ impl Workstation for OctaneMachine {
         self.lifecycle = state;
     }
     fn display(&self, n: usize) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> {
-        if n > 0 { return None; }
-        match &self.vpro {
-            Some(v) => Some(v.display()),
-            None => self.gfx.as_ref().map(|g| g.display()),
-        }
+        self.gfx.iter().map(|g| g.display()).chain(self.vpro.iter().map(|(_, v)| v.display())).nth(n)
     }
     fn register_monitor_device(&self, device: Arc<dyn crate::traits::Device>) { self.monitor.register_device(device); }
     fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> {
@@ -1742,7 +1820,6 @@ mod snapshot_tests {
         cfg.prom = prom.into();
         cfg.nvram = dir.join("nvram.bin").to_string_lossy().into_owned();
         cfg.headless = true;
-        cfg.graphics.board = Some(crate::config::GraphicsBoard::None);
         // Not CI mode: its overlays share one path per process, and the
         // tests run in parallel; this way each sits beside its own disk.
         cfg.network.mode = crate::config::NetMode::Off;
@@ -1756,6 +1833,7 @@ mod snapshot_tests {
             std::fs::write(&disk, vec![0u8; 4 << 20]).unwrap();
         }
         cfg.devices.clear();
+        cfg.graphics.board = Some(crate::config::GraphicsBoard::None);
         cfg.set_disk(1, toml::from_str(&format!("path = {:?}\noverlay = true", disk.to_string_lossy())).unwrap());
         edit(&mut cfg);
         OctaneMachine::new(&cfg).expect("an Octane")
@@ -2233,7 +2311,7 @@ mod snapshot_tests {
                 let mut m = machine_with(&prom, &dir, |cfg| {
                     cfg.graphics.board = Some(crate::config::GraphicsBoard::V6)
                 });
-                let vpro = m.vpro.as_ref().unwrap().clone();
+                let vpro = m.vpro[0].1.clone();
                 let sw_token = widget_small_base(WIDGET_GFX) + 0x107c;
                 vpro.start();
                 assert_eq!(vpro.write32(sw_token, 0x51c2_93a4), crate::traits::BUS_OK);
@@ -2249,6 +2327,7 @@ mod snapshot_tests {
                     .collect();
                 names.sort_unstable();
                 assert_eq!(names, ["state", "vram"]);
+                assert!(snap.read_state("vpro").unwrap().is_str(), "a lone board keeps the older shape");
                 assert!(chunks
                     .odyssey_chunks
                     .iter()
@@ -2264,6 +2343,112 @@ mod snapshot_tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    fn octane_with_boards(boards: &str) -> Result<(), String> {
+        let mut cfg = MachineConfig::from_toml_str(&format!("[machine]\nprofile = \"octane_ip30\"\n{boards}")).unwrap();
+        cfg.resolve_slots().and_then(|_| cfg.validate())
+    }
+
+    /// A second board goes in C/D beside the machine's own in A/B, with one processor or two, and nothing else shares the module.
+    #[test]
+    fn a_second_board_is_admitted_only_where_the_dual_head_module_has_it() {
+        let v12 = "[graphics]\nboard = \"v12\"\n";
+        let extra = |ty: &str, at: &str| format!("[[devices]]\ntype = \"{ty}\"\nat = \"{at}\"\n");
+        for at in ["slot_cd", "slot_d", "xio10"] {
+            octane_with_boards(&format!("{v12}{}", extra("vpro", at))).unwrap();
+        }
+        octane_with_boards(&format!("{v12}[[devices]]\ntype = \"vpro\"\n")).unwrap();
+        octane_with_boards(&extra("vpro", "slot_cd")).unwrap();
+        for at in ["slot_a", "slot_c"] {
+            assert!(octane_with_boards(&format!("{v12}{}", extra("vpro", at))).unwrap_err().contains("does not take"), "{at}");
+        }
+        let e = octane_with_boards(&format!("{v12}{}", extra("vpro", "slot_ab"))).unwrap_err();
+        assert!(e.contains("taken by"), "{e}");
+        assert!(octane_with_boards(&format!("{v12}{}", extra("impact", "slot_cd"))).unwrap_err().contains("slot_ab"));
+        assert!(octane_with_boards(&format!("{v12}{}", extra("express", "slot_cd"))).unwrap_err().contains("not modelled on the Octane"));
+        assert!(octane_with_boards(&format!("[graphics]\nboard = \"none\"\n{}", extra("vpro", "slot_cd"))).unwrap_err().contains("beside the first"));
+        assert!(octane_with_boards(&format!("{v12}{}[[devices]]\ntype = \"pci_shoehorn\"\n", extra("vpro", "slot_cd"))).unwrap_err().contains("007-4493-001"));
+    }
+
+    /// Several boards answer one monitor command: a slot name picks one, and none means the first.
+    #[test]
+    fn a_monitor_command_reaches_the_board_it_names() {
+        struct Echo(&'static str);
+        impl Device for Echo {
+            fn step(&self, _: u64) {}
+            fn stop(&self) {}
+            fn start(&self) {}
+            fn is_running(&self) -> bool { true }
+            fn register_commands(&self) -> Vec<(String, String)> { vec![("vpro".into(), String::new())] }
+            fn execute_command(&self, _: &str, args: &[&str], mut w: Box<dyn std::io::Write + Send>) -> Result<(), String> {
+                write!(w, "{} {}", self.0, args.join(" ")).map_err(|e| e.to_string())
+            }
+        }
+        let monitor = crate::monitor::Monitor::new();
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (a, b) = (names(&["xio11", "slot_b"]), names(&["xio10", "slot_d"]));
+        monitor.register_device(Arc::new(SlotCommands { board: Arc::new(Echo("first")), names: a.clone(), others: b.clone(), first: true }));
+        monitor.register_device(Arc::new(SlotCommands { board: Arc::new(Echo("second")), names: b, others: a, first: false }));
+        assert_eq!(monitor.run("vpro", &["status"]), "first status");
+        assert_eq!(monitor.run("vpro", &["slot_d", "status"]), "second status");
+        assert_eq!(monitor.run("vpro", &["xio11", "hash"]), "first hash");
+        assert_eq!(monitor.run("vpro", &[]), "first ");
+        assert!(monitor.run("vpro", &["slot_a", "status"]).contains("no VPro board in slot_a"));
+    }
+
+    /// Both boards of a dual-head Octane2 are built at their own ports and save and restore by slot. (The machine refuses a
+    /// snapshot with two processors, so this drives the pieces the refusal guards.)
+    #[test]
+    fn two_vpro_boards_sit_at_ports_11_and_10_and_round_trip_by_slot() {
+        std::thread::Builder::new().stack_size(64 << 20).spawn(|| {
+            let dir = scratch("two-vpro");
+            let prom = empty_prom(&dir);
+            let mut m = machine_with(&prom, &dir, |cfg| {
+                cfg.machine.cpus = Some(2);
+                cfg.graphics.board = Some(crate::config::GraphicsBoard::V12);
+                cfg.devices.push(crate::devices::ConfiguredDevice::new("slot_d", crate::devices::DeviceModel::Board(crate::config::GraphicsBoard::V12)));
+            });
+            let slots: Vec<_> = m.vpro.iter().map(|(at, _)| at.to_string()).collect();
+            assert_eq!(slots, ["xio11", "xio10"]);
+            for w in [11, 10] {
+                assert!(m.xbow.carries(w), "link to port {w}");
+                assert_eq!(m.phys.phys.read32(widget_small_base(w) + 4).status, crate::traits::BUS_OK, "port {w} answers");
+            }
+            assert!(!m.xbow.carries(12));
+            let heads: Vec<_> = (0..3).map(|n| crate::workstation::Workstation::display(&m, n)).collect();
+            assert!(heads[0].is_some() && heads[1].is_some() && heads[2].is_none());
+            assert!(!Arc::ptr_eq(heads[0].as_ref().unwrap(), heads[1].as_ref().unwrap()));
+
+            let token = |w: u8| widget_small_base(w) + 0x107c;
+            m.restart_peripherals();
+            for (w, v) in [(11, 0x1111_2222), (10, 0x3333_4444)] {
+                let board = &m.vpro.iter().find(|(at, _)| at.last_number() == Some(w)).unwrap().1;
+                assert_eq!(board.write32(token(w), v), crate::traits::BUS_OK);
+            }
+            m.stop();
+            let saves = dir.join("saves");
+            m.write_snapshot(&saves, "x").unwrap();
+            let snap = Snapshot::new(saves.join("x"));
+            let mut names: Vec<_> = snap.read_chunks_manifest().unwrap().odyssey_chunks.into_iter().map(|c| c.name).collect();
+            names.sort_unstable();
+            assert_eq!(names, ["xio10/state", "xio10/vram", "xio11/state", "xio11/vram"]);
+
+            m.restart_peripherals();
+            for (w, v) in [(11, 0xaaaa_aaaa), (10, 0xbbbb_bbbb)] {
+                let board = &m.vpro.iter().find(|(at, _)| at.last_number() == Some(w)).unwrap().1;
+                assert_eq!(board.write32(token(w), v), crate::traits::BUS_OK);
+            }
+            m.stop();
+            let read = m.read_snapshot(&saves, "x").unwrap();
+            m.apply_snapshot(read).unwrap();
+            m.restart_peripherals();
+            for (w, v) in [(11, 0x1111_2222), (10, 0x3333_4444)] {
+                let board = &m.vpro.iter().find(|(at, _)| at.last_number() == Some(w)).unwrap().1;
+                assert_eq!(board.read32(token(w)).data, v, "port {w}");
+            }
+            m.stop();
+        }).unwrap().join().unwrap();
     }
 
     /// A snapshot of another machine, or with a boot flash of another size,
