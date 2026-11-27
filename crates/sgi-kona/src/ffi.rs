@@ -356,6 +356,31 @@ pub unsafe extern "C" fn sgi_kona_scan_rows(s: *mut IrisKonaScan, head: u32, fir
     }
 }
 
+/// The option board's head at ten bits into `buf`, as `iris_engine_scanout10` gives it; callable from any thread.
+///
+/// # Safety
+/// As `sgi_kona_scan_rows`.
+#[no_mangle]
+pub unsafe extern "C" fn sgi_kona_scan_wide(s: *mut IrisKonaScan, head: u32, control: u32, buf: *mut u32, cap: usize, w: *mut u32, hgt: *mut u32) -> c_int {
+    if s.is_null() || w.is_null() || hgt.is_null() || (buf.is_null() && cap != 0) {
+        return IRIS_ENGINE_ERROR;
+    }
+    let src = unsafe { &(*s).0 };
+    let out: &mut [u32] = if cap == 0 { &mut [] } else { unsafe { std::slice::from_raw_parts_mut(buf, cap) } };
+    let (r, size) = match catch_unwind(AssertUnwindSafe(|| src.wide(head, control, out))) {
+        Ok(Ok(Some(Scan::Done(fw, fh)))) => (IRIS_ENGINE_OK, (fw, fh)),
+        Ok(Ok(Some(Scan::Short(fw, fh)))) => (IRIS_ENGINE_ERROR, (fw, fh)),
+        Ok(Ok(None)) => (IRIS_ENGINE_ERROR, (0, 0)),
+        Ok(Err(_)) => (IRIS_ENGINE_FAULT, (0, 0)),
+        Err(_) => {
+            src.fail("panic in the scan-out");
+            (IRIS_ENGINE_FAULT, (0, 0))
+        }
+    };
+    unsafe { (*w, *hgt) = size };
+    r
+}
+
 /// Free a scan-out source. NULL is ignored.
 ///
 /// # Safety

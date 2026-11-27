@@ -9,7 +9,7 @@ use parking_lot::Mutex as PMutex;
 use sgi_engine::{BoardEngine, Chunk, HostMem, MemFault, Source, Swap, VecSource, Write};
 use sgi_kona::dev::kona::back::display::option::DisplayBusSlave;
 use sgi_kona::dev::kona::defs::*;
-use sgi_kona::dev::kona::engine::{KonaEngine, Options};
+use sgi_kona::dev::kona::engine::{KonaEngine, Options, Scan};
 use sgi_kona::dev::kona::ident::KonaConfig;
 
 #[derive(Default)]
@@ -433,4 +433,31 @@ fn the_gvo_head_is_ten_bits_formed_as_the_control_register_says_and_a_monitor_he
     video(&mut e, VIDEO_CHANNEL_BLANKING, &[0xc6, 1]);
     BoardEngine::scanout10(&mut e, 1, &mut ten).unwrap();
     assert!(ten.iter().all(|&t| t == 0));
+}
+
+#[test]
+fn a_scan_source_gives_the_gvo_heads_ten_bits_as_scanout10_does_and_no_monitor_head() {
+    let (mut e, board) = the_probed_pipe();
+    for (selector, args) in [(0x3, &[1, 0x3fc, 0x155, 1][..]), (0x2, &[1]), (0x6, &[100, 1000])] {
+        for w in [&[1, selector][..], args].concat() {
+            e.set_source(A);
+            assert_eq!(e.write(COMMAND_PAGE, 32, w as u64), Write::Done);
+            e.run(usize::MAX);
+        }
+    }
+    load_format_at(&mut e, 0, 1280, 1024, 60);
+    load_format_at(&mut e, 0xc6, 720, 486, 30);
+    video(&mut e, VIDEO_RESIZE, &[0xc6, 0, 1023, 720, 486, 1, 1, 0]);
+    video(&mut e, 0x58, &[0xc6, 1, 0]);
+    video(&mut e, 0x01, &[0xc006, 0x684]);
+    let control = board.regs.lock().unwrap()[&0xc006];
+    let mut ten = Vec::new();
+    assert_eq!(BoardEngine::scanout10(&mut e, 1, &mut ten), Ok(Some((720, 486))));
+    assert!(ten.iter().any(|&t| t != 0), "the point is in the window");
+    let src = e.scan_source().expect("a source");
+    let mut out = vec![0; 720 * 486];
+    assert_eq!(src.wide(1, control, &mut out[..10]).unwrap(), Some(Scan::Short(720, 486)));
+    assert_eq!(src.wide(1, control, &mut out).unwrap(), Some(Scan::Done(720, 486)));
+    assert!(out == ten, "the source's words are scanout10's");
+    assert_eq!(src.wide(0, control, &mut out).unwrap(), None);
 }

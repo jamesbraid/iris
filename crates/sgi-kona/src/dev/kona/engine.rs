@@ -263,6 +263,25 @@ pub fn head_rows((first, end): (usize, usize), y: u32, h: u32) -> Option<(u32, u
 struct HeadView {
     window: (u32, u32, u32, u32),
     blanked: bool,
+    option: bool,
+}
+
+/// The option board's ten-bit window of the wide frame `frame`, `fw` a row (`scanout_gvo`); None when it lies outside.
+fn gvo_window(frame: &[u32], fw: u32, (x, y, w, h): (u32, u32, u32, u32), blanked: bool, mode: u32, out: &mut Vec<u32>) -> Option<(u32, u32)> {
+    let channel = |p: u32| low_bits(p & 0x3ff, mode) | low_bits(p >> 10 & 0x3ff, mode) << 10 | low_bits(p >> 20 & 0x3ff, mode) << 20;
+    out.clear();
+    for row in y..y + h {
+        let at = (row * fw + x) as usize;
+        match frame.get(at..at + w as usize) {
+            Some(px) if !blanked => out.extend(px.iter().map(|&p| channel(p))),
+            Some(_) => out.extend(std::iter::repeat_n(0, w as usize)),
+            None => {
+                out.clear();
+                return None;
+            }
+        }
+    }
+    (w != 0 && h != 0).then_some((w, h))
 }
 
 /// One head as the shell may ask after it without waiting for the stream.
@@ -335,6 +354,28 @@ impl ScanSource {
         }
         self.pixels.window_rows(view.window, first..end, view.blanked, out, &mut self.band.lock());
         Ok(Scan::Done(w, h))
+    }
+
+    /// The option board's head at ten bits as `scanout10` gives it, `control` being its 0xc006 as the shell's
+    /// device holds it; None for another head, whose DAC cursor needs the engine.
+    pub fn wide(&self, head: u32, control: u32, out: &mut [u32]) -> Result<Option<Scan>, Fault> {
+        if let Some(f) = self.sh.fault.lock().clone() {
+            return Err(Fault(f));
+        }
+        let Some(Some(view)) = self.heads.get(head as usize) else { return Ok(Some(Scan::Done(0, 0))) };
+        if !view.option {
+            return Ok(None);
+        }
+        let (_, _, w, h) = view.window;
+        if out.len() < w as usize * h as usize {
+            return Ok(Some(Scan::Short(w, h)));
+        }
+        let mut px = Vec::new();
+        let Some(size) = gvo_window(&self.pixels.frame_wide(), self.pixels.size().0, view.window, view.blanked, control >> 9 & 3, &mut px) else {
+            return Ok(Some(Scan::Done(0, 0)));
+        };
+        out[..px.len()].copy_from_slice(&px);
+        Ok(Some(Scan::Done(size.0, size.1)))
     }
 
     /// Stop the engine with `why`: a panic in a call.
@@ -760,23 +801,11 @@ impl Inner {
     /// 2 the gamma's own bits, 3 a copy of the top two bits; 1 is unnamed, shown as 2).
     fn scanout_gvo(&mut self, head: u32, out: &mut Vec<u32>) -> Result<Option<(u32, u32)>, Fault> {
         out.clear();
-        let Some((x, y, w, h)) = self.head_window(head) else { return Ok(None) };
+        let Some(window) = self.head_window(head) else { return Ok(None) };
         let (fw, _, frame) = self.compose_wide();
         let blanked = self.head_blanked(head);
         let mode = self.back.option_control().map_or(2, |c| c >> 9 & 3);
-        let channel = |p: u32| low_bits(p & 0x3ff, mode) | low_bits(p >> 10 & 0x3ff, mode) << 10 | low_bits(p >> 20 & 0x3ff, mode) << 20;
-        for row in y..y + h {
-            let at = (row * fw + x) as usize;
-            match frame.get(at..at + w as usize) {
-                Some(px) if !blanked => out.extend(px.iter().map(|&p| channel(p))),
-                Some(_) => out.extend(std::iter::repeat_n(0, w as usize)),
-                None => {
-                    out.clear();
-                    return Ok(None);
-                }
-            }
-        }
-        Ok((w != 0 && h != 0).then_some((w, h)))
+        Ok(gvo_window(&frame, fw, window, blanked, mode, out))
     }
 
     /// The pixels of `window` of the composed frame, `0x00RRGGBB` in rows from the top, with its size.
@@ -1222,7 +1251,7 @@ impl<M: HostMem> KonaEngine<M> {
         if self.dead() {
             return None;
         }
-        let heads = self.sh.view.lock().heads.iter().map(|h| h.window.filter(|_| h.fits).map(|window| HeadView { window, blanked: h.blanked })).collect();
+        let heads = self.sh.view.lock().heads.iter().map(|h| h.window.filter(|_| h.fits).map(|window| HeadView { window, blanked: h.blanked, option: h.option })).collect();
         Some(ScanSource { pixels: self.pixels.clone(), band: self.band.clone(), heads, sh: self.sh.clone() })
     }
 

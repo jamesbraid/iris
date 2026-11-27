@@ -110,6 +110,12 @@ typedef struct IrisKonaScan IrisKonaScan;
 IrisKonaScan *sgi_kona_scan_begin(IrisEngine *h);
 int sgi_kona_scan_rows(IrisKonaScan *s, uint32_t head, uint32_t first, uint32_t end, uint32_t *buf, size_t cap,
                        uint32_t *w, uint32_t *hgt);
+/*
+ * The option board's head at ten bits, as iris_engine_scanout10 gives it, from any thread as sgi_kona_scan_rows;
+ * control is the board's 0xc006 as the shell's device holds it. Another head: IRIS_ENGINE_ERROR with *w 0.
+ */
+int sgi_kona_scan_wide(IrisKonaScan *s, uint32_t head, uint32_t control, uint32_t *buf, size_t cap, uint32_t *w,
+                       uint32_t *hgt);
 void sgi_kona_scan_end(IrisKonaScan *s);
 
 /*
