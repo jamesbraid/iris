@@ -3476,6 +3476,11 @@ impl MachineConfig {
         self.devices.iter().any(|d| d.device.spec().name == ty)
     }
 
+    /// Whether the machine has a second graphics head: a second Newport or a second board.
+    pub fn has_second_head(&self) -> bool {
+        self.has_device("newport") || self.devices.iter().any(|d| matches!(d.device, DeviceModel::Board(_)))
+    }
+
     /// Add an unplaced device of type `ty` with default options, or remove
     /// every one.
     pub fn set_device(&mut self, ty: &str, on: bool) {
@@ -5201,6 +5206,17 @@ mod export_tests {
             let e = cfg.resolve_slots().and_then(|_| cfg.validate()).err().unwrap_or_default();
             assert!(e.contains("Fibre Channel"), "{profile}: {e}");
         }
+    }
+
+    #[test]
+    fn a_second_head_is_a_second_newport_or_a_second_board() {
+        let mut cfg = MachineConfig::default();
+        assert!(!cfg.has_second_head());
+        cfg.set_device("newport", true);
+        assert!(cfg.has_second_head());
+        cfg.set_device("newport", false);
+        cfg.devices.push(ConfiguredDevice::new("slot_d", DeviceModel::Board(GraphicsBoard::V12)));
+        assert!(cfg.has_second_head());
     }
 
     #[test]

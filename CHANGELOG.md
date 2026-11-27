@@ -18,6 +18,8 @@ hashes are given where a change is easiest to understand by reading the commit.
 - An Octane2 can carry a second VPro: a `vpro` `[[devices]]` entry at `slot_cd`
   beside the board `[graphics] board` names, as SGI's Dual Head module has it.
   The same entry types (`express`, `impact`, `kona`) exist for the other families.
+  The CI socket's `screenshot` takes `head=N` for the second screen, and the GUI
+  shows both heads side by side for any machine with a second board.
 
 ### Serial ports
 
