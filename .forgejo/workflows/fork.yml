@@ -1,0 +1,96 @@
+name: Fork CI
+
+# Fork only. Forgejo reads this directory instead of .github/workflows, so
+# upstream's workflows stay untouched and do not run here. The suite runs on
+# the fork trunk. A qemu-pin tag push, or a dispatch, also checks that QEMU
+# can consume the engine crates from a depth-1 fetch of the commit.
+on:
+  push:
+    branches: [ "qemu/integration" ]
+    tags: [ "qemu-pin-*-engines" ]
+  workflow_dispatch:
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # A dated nightly, not the floating channel, so a run does not change with the day.
+  RUSTUP_TOOLCHAIN: nightly-2026-10-27
+  LIBCHDMAN_PREBUILT_FALLBACK: "1"
+
+jobs:
+  test:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: [ skunkworks-docker, large ]
+    timeout-minutes: 90
+    container:
+      image: code.forgejo.org/oci/node:22-bookworm
+      # The runner ignores --shm-size, and ppmem's shared memory needs the room.
+      options: --tmpfs /dev/shm:rw,size=4g
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install build dependencies
+      run: |
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+          build-essential ca-certificates cmake curl git pkg-config elfutils clang libclang-dev \
+          libasound2-dev libegl1 libgl-dev libgl1-mesa-dri libgtk-3-dev liblzma-dev libpcap-dev \
+          libssl-dev libudev-dev libv4l-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev \
+          libxcb-xfixes0-dev libxkbcommon-dev mesa-utils xvfb
+    # Some tests assert that an unreadable file is refused or that chown works as a user,
+    # which a root container defeats.
+    - name: Install Rust and nextest, and make an unprivileged user
+      run: |
+        useradd -m ci
+        chown -R ci .
+        curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init
+        echo "5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4  /tmp/rustup-init" | sha256sum -c -
+        chmod +x /tmp/rustup-init
+        su ci -c "/tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUSTUP_TOOLCHAIN -c clippy -c rustfmt"
+        curl -fsSL -o /tmp/nextest.tgz https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-x86_64-unknown-linux-gnu.tar.gz
+        echo "b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f  /tmp/nextest.tgz" | sha256sum -c -
+        tar -xzf /tmp/nextest.tgz -C /usr/local/bin cargo-nextest
+    - name: Test
+      run: |
+        su ci -c "cd '$PWD' && . ~/.cargo/env && RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN CARGO_INCREMENTAL=0 LIBCHDMAN_PREBUILT_FALLBACK=1 cargo ci-test --test-threads 6"
+
+  # QEMU's sgi-engines wrap fetches this repository at one commit, depth 1, and
+  # builds the crates by path from rust/sgi-gpu. Do the same from GitHub, the wrap's URL.
+  standalone:
+    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+    runs-on: skunkworks-docker
+    timeout-minutes: 30
+    container:
+      image: code.forgejo.org/oci/node:22-bookworm
+    steps:
+    - name: Fetch the commit as the wrap does
+      run: |
+        git init -q iris
+        git -C iris remote add origin https://github.com/jamesbraid/iris.git
+        git -C iris fetch -q --depth 1 origin "${{ github.sha }}"
+        git -C iris -c advice.detachedHead=false checkout -q FETCH_HEAD
+        test "$(git -C iris rev-parse HEAD)" = "${{ github.sha }}"
+    - name: Install build dependencies and Rust
+      run: |
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+          build-essential cmake pkg-config clang libclang-dev libasound2-dev libudev-dev libssl-dev
+        curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init
+        echo "5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4  /tmp/rustup-init" | sha256sum -c -
+        chmod +x /tmp/rustup-init
+        /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "$RUSTUP_TOOLCHAIN"
+    - name: Build the crates from a path outside the clone's workspace
+      run: |
+        . "$HOME/.cargo/env"
+        mkdir consumer && cd consumer
+        {
+          printf '[package]\nname = "consumer"\nversion = "0.0.0"\nedition = "2021"\n[workspace]\n[dependencies]\n'
+          for c in sgi-engine sgi-gl-math sgi-gpu-core sgi-gr2 sgi-kona sgi-mgras sgi-odyssey; do
+            printf '%s = { path = "../iris/crates/%s" }\n' "$c" "$c"
+          done
+        } > Cargo.toml
+        mkdir src && : > src/lib.rs
+        cargo check
