@@ -847,6 +847,106 @@ mod tests {
         }).unwrap().join().unwrap();
     }
 
+    /// Run a monitor command on `hi`, returning what it printed.
+    fn run(hi: &HostInput, cmd: &str, args: &[&str]) -> Result<String, String> {
+        let out = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        struct Sink(Arc<parking_lot::Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { self.0.lock().extend_from_slice(b); Ok(b.len()) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        use crate::traits::Device;
+        hi.execute_command(cmd, args, Box::new(Sink(out.clone()))).map(|_| String::from_utf8(out.lock().clone()).unwrap())
+    }
+
+    /// 4x2 first, 6x3 second: the two heads of a dual-head board.
+    fn two_heads() -> HostInput {
+        let a: Arc<dyn GfxDisplay> = Arc::new(crate::gfx_display::testing::FakeDisplay::new(4, 2, false));
+        let b: Arc<dyn GfxDisplay> = Arc::new(crate::gfx_display::testing::FakeDisplay::new(6, 3, false));
+        HostInput::with_displays(vec![a, b], Arc::new(Ps2Controller::new(None)))
+    }
+
+    fn one_head() -> HostInput {
+        let a: Arc<dyn GfxDisplay> = Arc::new(crate::gfx_display::testing::FakeDisplay::new(4, 2, false));
+        HostInput::new(Some(a), Arc::new(Ps2Controller::new(None)))
+    }
+
+    #[test]
+    fn the_index_comes_before_the_verb_and_is_optional() {
+        let none: [&str; 0] = [];
+        assert_eq!(screen_route(&["shot"], 2), Ok((0, &["shot"][..])));
+        assert_eq!(screen_route(&["1", "shot"], 2), Ok((1, &["shot"][..])));
+        assert_eq!(screen_route(&["1", "shot", "/tmp/x.png"], 2), Ok((1, &["shot", "/tmp/x.png"][..])));
+        assert_eq!(screen_route(&["0", "shot"], 1), Ok((0, &["shot"][..])));
+        assert_eq!(screen_route(&["1"], 2), Ok((1, &none[..])));
+        assert_eq!(screen_route(&[], 2), Ok((0, &none[..])));
+        // A verb's own numbers are not an index: only the first word is.
+        assert_eq!(screen_route(&["pix", "1", "1"], 2), Ok((0, &["pix", "1", "1"][..])));
+        assert_eq!(screen_route(&["2", "shot"], 2), Err("no screen 2: this machine has 2 (screen list)".into()));
+        assert!(screen_route(&["1", "shot"], 1).unwrap_err().contains("has 1"));
+        assert!(screen_route(&["0", "shot"], 0).unwrap_err().contains("has none"));
+        // The bare form still reaches a headless machine's own answer.
+        assert_eq!(screen_route(&["info"], 0), Ok((0, &["info"][..])));
+    }
+
+    #[test]
+    fn a_single_screen_machine_works_with_or_without_an_index() {
+        let hi = one_head();
+        assert_eq!(hi.screen_count(), 1);
+        let bare = run(&hi, "screen", &["info"]).unwrap();
+        assert!(bare.starts_with("screen 4x2 frame "), "{bare}");
+        assert_eq!(run(&hi, "screen", &["0", "info"]).unwrap().lines().next(), bare.lines().next());
+        assert_eq!(run(&hi, "screen", &[]).unwrap().lines().next(), bare.lines().next());
+        assert!(run(&hi, "screen", &["1", "info"]).unwrap_err().contains("this machine has 1"));
+        assert!(run(&hi, "screen", &["list"]).unwrap().starts_with("0: head 0 4x2"));
+        assert!(run(&hi, "screen", &["pix", "0", "0"]).unwrap().starts_with("0,0 = "));
+    }
+
+    #[test]
+    fn several_screens_are_a_fixed_list_the_verbs_address_by_index() {
+        let hi = two_heads();
+        assert_eq!(hi.screen_count(), 2);
+        let list = run(&hi, "screen", &["list"]).unwrap();
+        assert!(list.contains("0: head 0 4x2") && list.contains("1: head 1 6x3"), "{list}");
+        // Each screen answers with its own picture.
+        assert!(run(&hi, "screen", &["info"]).unwrap().starts_with("screen 0 (head 0) 4x2 frame "));
+        assert!(run(&hi, "screen", &["1", "info"]).unwrap().starts_with("screen 1 (head 1) 6x3 frame "));
+        assert!(run(&hi, "screen", &["pix", "5", "2"]).unwrap_err().contains("outside the 4x2 screen"));
+        assert!(run(&hi, "screen", &["1", "pix", "5", "2"]).unwrap().starts_with("5,2 = "));
+        let path = std::env::temp_dir().join(format!("iris-screen-index-{}.png", std::process::id()));
+        let path_str = path.to_str().unwrap();
+        let shot = run(&hi, "screen", &["1", "shot", path_str]).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(shot.contains("6x3"), "{shot}");
+        let bare = run(&hi, "screen", &["shot", path_str]).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(bare.contains("4x2"), "{bare}");
+        assert_eq!(run(&hi, "screen", &["2", "shot", "x.png"]).unwrap_err(), "no screen 2: this machine has 2 (screen list)");
+        // A viewer of screen 1 steers the pointer on screen 1.
+        assert_eq!(hi.screen_size(1), (6, 3));
+        assert_eq!(hi.for_screen(1).unwrap().pointer_screen(), 1);
+        assert!(hi.for_screen(2).is_err());
+    }
+
+    #[test]
+    fn a_headless_machine_has_no_screens() {
+        let hi = HostInput::with_displays(Vec::new(), Arc::new(Ps2Controller::new(None)));
+        assert_eq!(hi.screen_count(), 0);
+        assert!(run(&hi, "screen", &["list"]).unwrap().contains("headless"));
+        assert!(run(&hi, "screen", &["shot", "x.png"]).is_err());
+        assert!(run(&hi, "screen", &["0", "shot", "x.png"]).unwrap_err().contains("has none"));
+    }
+
+    /// Tab completion reads the verbs after `screen` from this string: each must follow the command
+    /// name directly, and the `screen <N>` form must not hide them.
+    #[test]
+    fn the_usage_string_lists_every_verb_after_the_command_name() {
+        for verb in ["info", "cursor", "shot", "pix", "wait", "list"] {
+            assert!(SCREEN_HELP.contains(&format!("screen {verb}")), "{verb} missing from {SCREEN_HELP}");
+        }
+        assert!(SCREEN_HELP.contains("screen <N> <verb>"));
+    }
+
     #[test]
     fn png_crop_bounds() {
         let px = vec![0u32; 4 * 3];

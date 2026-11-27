@@ -367,3 +367,19 @@ impl PointerDriver {
         }
     }
 }
+
+#[cfg(test)]
+mod port_tests {
+    use super::listen_for_screen;
+
+    #[test]
+    fn screen_n_listens_n_ports_above_the_base() {
+        assert_eq!(listen_for_screen("127.0.0.1:5900", 0).unwrap(), "127.0.0.1:5900");
+        assert_eq!(listen_for_screen("127.0.0.1:5900", 1).unwrap(), "127.0.0.1:5901");
+        assert_eq!(listen_for_screen("5900", 1).unwrap(), "5901");
+        assert_eq!(listen_for_screen("[::1]:5900", 1).unwrap(), "[::1]:5901");
+        assert_eq!(listen_for_screen("127.0.0.1:0", 1).unwrap(), "127.0.0.1:0", "port 0 takes any free port");
+        assert!(listen_for_screen("127.0.0.1:65535", 1).is_err());
+        assert!(listen_for_screen("localhost", 0).is_err());
+    }
+}
