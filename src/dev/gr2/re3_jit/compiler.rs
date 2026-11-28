@@ -25,7 +25,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
 
 use super::{Fmt, Pat, Prim, ShaderFn, SpanKey, Wid};
-use crate::dev::gr2::re3::{self, Re3, FB_H, FB_W, ZBUF_STENCIL_SHIFT};
+use crate::dev::gr2::re3::{self, Re3, FB_H, FB_W, STENCIL_MASK, ZBUF_STENCIL_SHIFT};
 use crate::dev::bayer::BAYER_PACKED;
 
 macro_rules! off {
@@ -422,7 +422,7 @@ impl<'a> E<'a> {
             let field = |e: &mut Self, sh: i64| {
                 let v = e.b.ins().ushr_imm_s(st, sh);
                 let v = e.b.ins().ireduce(I32, v);
-                e.b.ins().band_imm_s(v, 0xff)
+                e.b.ins().band_imm_s(v, STENCIL_MASK as i64)
             };
             let sref = field(self, 4);
             let smask = field(self, 12);
@@ -628,7 +628,7 @@ impl<'a> E<'a> {
         let mut pass = self.b.ins().iconst(I8, 1);
         let sv = if k.stencil.is_some() {
             let v = self.b.ins().ushr_imm_s(word, ZBUF_STENCIL_SHIFT as i64);
-            self.b.ins().band_imm_s(v, 0xff)
+            self.b.ins().band_imm_s(v, STENCIL_MASK as i64)
         } else {
             word
         };
@@ -669,13 +669,13 @@ impl<'a> E<'a> {
                 nv[i] = match op {
                     1 => {
                         let v = self.b.ins().bnot(sv);
-                        self.b.ins().band_imm_s(v, 0xff)
+                        self.b.ins().band_imm_s(v, STENCIL_MASK as i64)
                     }
                     2 => self.i32c(0),
                     3 => s.sref,
                     4 => {
                         let v = self.b.ins().iadd_imm_s(sv, 1);
-                        let m = self.i32c(0xff);
+                        let m = self.i32c(STENCIL_MASK as i64);
                         self.b.ins().umin(v, m)
                     }
                     5 => {

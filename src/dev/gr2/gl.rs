@@ -1599,7 +1599,7 @@ impl Hq2Engine {
             T_STENCIL_WMASK => g.st_wmask = a[0] & 0xff,
             T_STENCIL_BITS => g.st_bits = a[0] & 0xff,
             T_STENCIL_CLEAR => {
-                let (v, m) = ((a[0] & 0xff) << re3::ZBUF_STENCIL_SHIFT, (a[1] & 0xff) << re3::ZBUF_STENCIL_SHIFT);
+                let (v, m) = ((a[0] & re3::STENCIL_MASK) << re3::ZBUF_STENCIL_SHIFT, (a[1] & re3::STENCIL_MASK) << re3::ZBUF_STENCIL_SHIFT);
                 self.gl_zfill(v, m, out);
             }
             T_DEPTH_CLEAR => {

@@ -1537,11 +1537,11 @@ fn gl_czclear_packed_colour() {
     assert_eq!(gl_px(g, 200, 150), 0x0000_ff00, "cleared to the packed colour (green)");
 }
 
-/// glprim --scene stencil: stencil cleared to 0; a triangle writes 1 with
-/// colour writes off (ALWAYS, zpass REPLACE); a full-window blue quad with
-/// EQUAL 1 lands only inside the triangle.
-#[test]
-fn gl_stencil_mask_quad() {
+/// glprim --scene stencil: stencil cleared to 0; a triangle runs `zpass`
+/// `tris` times with colour writes off (ALWAYS, ref 1); a full-window blue
+/// quad with EQUAL `qref` under `qmask` lands where the stencil matches.
+/// Returns the quad's pixel inside the triangle and one outside.
+fn gl_stencil_quad(zpass: u32, tris: usize, qref: u32, qmask: u32) -> (u32, u32) {
     let g = &live_gr2(Gr2Variant::Xz);
     gl_setup_window_z(g, 20);
     let fl = |v: f32| v.to_bits();
@@ -1551,30 +1551,46 @@ fn gl_stencil_mask_quad() {
     data(g, 0xf);
     cmd(g, 0x010, 0xf);
     cmd(g, 0x00f, 1);
-    for v in [1, 7, 0xf, 0, 0, 3] { data(g, v); }
+    for v in [1, 7, 0xf, 0, 0, zpass] { data(g, v); }
     cmd(g, 0x10b, 0);
     cmd(g, 0x10b, 0);
-    cmd(g, 0x0f0, 0);
-    cmd(g, 0x4f2, 0);
-    for p in [[80.0f32, 60.], [320., 60.], [200., 240.]] {
-        for x in [1.0f32, 1., 1.] { cmd(g, 0x1982, fl(x)); }
-        for x in p { cmd(g, 0x1263, fl(x)); }
+    for _ in 0..tris {
+        cmd(g, 0x0f0, 0);
+        cmd(g, 0x4f2, 0);
+        for p in [[80.0f32, 60.], [320., 60.], [200., 240.]] {
+            for x in [1.0f32, 1., 1.] { cmd(g, 0x1982, fl(x)); }
+            for x in p { cmd(g, 0x1263, fl(x)); }
+        }
+        cmd(g, 0x0f1, 0);
+        cmd(g, 0x465, 0);
     }
-    cmd(g, 0x0f1, 0);
-    cmd(g, 0x465, 0);
     cmd(g, 0x10b, 0xffffff);
     cmd(g, 0x10b, 0xffffff);
     cmd(g, 0x00f, 1);
-    for v in [1, 2, 0xf, 0, 0, 0] { data(g, v); }
+    for v in [qref, 2, qmask, 0, 0, 0] { data(g, v); }
     gl_quad3(g, [0., 0., 1.], [[0., 0., 0.], [400., 0., 0.], [400., 300., 0.], [0., 300., 0.]]);
     cmd(g, 0x00f, 0);
     for _ in 0..6 { data(g, 0); }
     g.wait_idle();
+    (gl_px(g, 200, 120), gl_px(g, 20, 20))
+}
+
+/// Stencil operands are 4 bits: the quad's ref 0x11 and mask 0xff act as 1
+/// and 0xf, so it matches the 1 the triangle wrote.
+#[test]
+fn gl_stencil_mask_quad() {
+    let (inside, outside) = gl_stencil_quad(3, 1, 0x11, 0xff);
     // 0.75 is 192: the GE takes min(255, floor(v * 256)) (real Indy XZ).
     let pink = 0xff | (0x80 << 8) | (0xc0 << 16);
-    assert_eq!(gl_px(g, 200, 120), 0xff << 16, "inside the stencilled triangle: blue");
-    assert_eq!(gl_px(g, 20, 20), pink, "outside: stencil 0, quad rejected");
-    assert_eq!(gl_px(g, 380, 280), pink);
+    assert_eq!(inside, 0xff << 16, "inside the stencilled triangle: blue");
+    assert_eq!(outside, pink, "outside: stencil 0, quad rejected");
+}
+
+/// INCR stops at 15, the top of a 4-plane stencil: 17 triangles leave 15.
+#[test]
+fn gl_stencil_incr_saturates_at_15() {
+    let (inside, _) = gl_stencil_quad(4, 17, 15, 0xf);
+    assert_eq!(inside, 0xff << 16, "stencil saturated at 15");
 }
 
 /// glprim --scene blend: red quad, then a blue triangle with alpha 0.5

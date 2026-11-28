@@ -207,17 +207,20 @@ pub const PIXFMT_RGB4: u32 = 5;
 /// and written by SMOOTH spans (the only spans that iterate Z per pixel).
 pub const RE3_OP_ZCTL: u32 = 0xFFFF_1005;
 /// Emulator-private stencil control: val = enable (bit 0) | func << 1 |
-/// ref << 4 (8 bits) | mask << 12 (8) | write mask << 20 (8) | fail << 28 |
-/// zfail << 32 | zpass << 36 (ops 0 KEEP, 1 INVERT, 2 ZERO, 3 REPLACE,
-/// 4 INCR, 5 DECR; libglcore's codes).
+/// ref << 4 | mask << 12 | write mask << 20 (each clamped to STENCIL_MASK) |
+/// fail << 28 | zfail << 32 | zpass << 36 (ops 0 KEEP, 1 INVERT, 2 ZERO,
+/// 3 REPLACE, 4 INCR, 5 DECR; libglcore's codes).
 pub const RE3_OP_STENCIL: u32 = 0xFFFF_1006;
 /// Emulator-private Z/stencil rectangle fill: RE3_OP_ZFILL_A = x0 | y0 << 16
 /// | x1 << 32 | y1 << 48 (exclusive), RE3_OP_ZFILL_B = value (bits 31:0) |
 /// mask << 32: zbuf = (zbuf & !mask) | (value & mask). Z is bits 23:0,
-/// stencil bits 31:24 of the emulator's zbuf word (layout unverified).
+/// stencil bits 27:24 of the emulator's zbuf word.
 pub const RE3_OP_ZFILL_A: u32 = 0xFFFF_1007;
 pub const RE3_OP_ZFILL_B: u32 = 0xFFFF_1008;
 pub const ZBUF_STENCIL_SHIFT: u32 = 24;
+/// The board has 4 stencil planes (devices README: established). The TR puts
+/// them in the low-order Z bits, so the model's position is its own (inferred).
+pub const STENCIL_MASK: u32 = 0xf;
 /// RE3 has a blend stage (public TR: established). This private encoding of
 /// it (op, factor codes, alpha iterator) is the model's own (inferred, from
 /// GE7 microcode); the blend rounding is unknown. A match with an Indy XZ
@@ -784,8 +787,9 @@ impl Re3 {
         let mut pass = true;
         let mut sop = 0u64;
         if st & 1 != 0 {
-            let (func, sref, smask) = ((st >> 1) & 7, (st >> 4) & 0xff, (st >> 12) & 0xff);
-            let sv = (word >> ZBUF_STENCIL_SHIFT) as u64 & 0xff;
+            let sm = STENCIL_MASK as u64;
+            let (func, sref, smask) = ((st >> 1) & 7, (st >> 4) & sm, (st >> 12) & sm);
+            let sv = (word >> ZBUF_STENCIL_SHIFT) as u64 & sm;
             if !cmp(func as u32, (sref & smask) as u32, (sv & smask) as u32) {
                 pass = false;
                 sop = (st >> 28) & 0xf;
@@ -809,16 +813,16 @@ impl Re3 {
             sop = (st >> 36) & 0xf;
         }
         if st & 1 != 0 {
-            let (sref, wmask) = ((st >> 4) & 0xff, ((st >> 20) & 0xff) as u32);
-            let sv = (new >> ZBUF_STENCIL_SHIFT) & 0xff;
+            let (sref, wmask) = ((st >> 4) & STENCIL_MASK as u64, (st >> 20) as u32 & STENCIL_MASK);
+            let sv = (new >> ZBUF_STENCIL_SHIFT) & STENCIL_MASK;
             let nv = match sop {
                 1 => !sv,
                 2 => 0,
                 3 => sref as u32,
-                4 => (sv + 1).min(0xff),
+                4 => (sv + 1).min(STENCIL_MASK),
                 5 => sv.saturating_sub(1),
                 _ => sv,
-            } & 0xff;
+            } & STENCIL_MASK;
             let sv2 = (sv & !wmask) | (nv & wmask);
             new = (new & 0x00ff_ffff) | (sv2 << ZBUF_STENCIL_SHIFT);
         }
