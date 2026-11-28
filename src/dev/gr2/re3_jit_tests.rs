@@ -140,6 +140,10 @@ impl Pair {
         st &= !(0xffff_f << 28);
         st |= (rng.below(16) << 28) | (rng.below(16) << 32) | (rng.below(16) << 36);
         let blend = rng.below(2) as u32 | (rng.below(8) as u32) << 1 | (rng.below(8) as u32) << 4;
+        // Blending runs only with COPY, so give it that logic op most of the time.
+        if blend & 1 != 0 && rng.chance(0.75) {
+            regs[0].1 = ROP_COPY;
+        }
         let (a, da) = (rng.below(0x8_0000), rng.range(-0x2000, 0x2000));
         for (r, v) in regs {
             self.reg(r, v);
@@ -336,6 +340,38 @@ fn rop_runs_before_dither_in_rgb12() {
     p.reg(RE3_DRAW_TRIGGER, DRAW_SMOOTH);
     assert_eq!(p.jit.jit.hits, 1);
     assert_eq!(p.jit.vram[1], 0x724 | 0x724 << 12);
+    p.assert_same(0, &key);
+}
+
+/// The directed case of `logic_op_wins_over_blend` (re3_tests) through a
+/// shader: ZERO/ZERO blending with XOR gives the XOR alone.
+#[test]
+fn logic_op_wins_over_blend() {
+    if re3_jit::forbidden() {
+        return;
+    }
+    let mut p = Pair::new(seed(4));
+    p.both(|r| {
+        r.set_pixfmt(0);
+        r.set_blend(1);
+        r.vram[0] = 0x0f;
+    });
+    for (reg, v) in [
+        (RE3_LOGIC_OP, 6),
+        (RE3_COLOR_PLANE_MASK, 0x00ff_ffff),
+        (RE3_CLIP_X_HI, FB_W as u32 - 1),
+        (RE3_CLIP_Y_HI, FB_H as u32 - 1),
+        (RE3_RED_START, 0xf0 << 11),
+        (RE3_X_STEP, 1 << 14),
+        (RE3_SPAN_LEN, 1),
+    ] {
+        p.reg(reg, v);
+    }
+    let key = re3_jit::key_of(&p.jit, Prim::of_draw_op(DRAW_SMOOTH).unwrap());
+    assert!(key.blend.is_none());
+    p.reg(RE3_DRAW_TRIGGER, DRAW_SMOOTH);
+    assert_eq!(p.jit.jit.hits, 1);
+    assert_eq!(p.jit.vram[0] & 0xff, 0xff);
     p.assert_same(0, &key);
 }
 

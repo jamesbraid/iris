@@ -273,6 +273,15 @@ pub struct Re3Context {
     pub da: i64,
 }
 
+impl Re3Context {
+    /// The blend stage runs only when the logic op is COPY: the pipeline
+    /// takes blend or logic op, not both (public TR: established).
+    #[inline]
+    pub fn blends(&self) -> bool {
+        self.blend & 1 != 0 && self.reg[RE3_LOGIC_OP] & 0xf == ROP_COPY
+    }
+}
+
 pub const SPAN_BUCKET_LIMITS: [u32; 8] = [4, 8, 16, 32, 64, 256, 1024, u32::MAX];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -590,7 +599,7 @@ impl Re3 {
     fn color_blended(&self, x: i32, y: i32, off: usize) -> u32 {
         let c = &self.ctx;
         // No blending in colour-index mode (GL).
-        if c.blend & 1 == 0 || c.pixfmt == PIXFMT_CI12 || c.pixfmt == PIXFMT_CI8 {
+        if !c.blends() || c.pixfmt == PIXFMT_CI12 || c.pixfmt == PIXFMT_CI8 {
             return self.color(x, y);
         }
         self.pack(self.blend_rgb(off), x, y)
@@ -631,7 +640,7 @@ impl Re3 {
     #[inline]
     fn store_rgb12_dither(&mut self, off: usize, aux: u32, x: i32, y: i32, mask: u32) {
         let c = &self.ctx;
-        let rgb = if c.blend & 1 != 0 {
+        let rgb = if c.blends() {
             self.blend_rgb(off)
         } else {
             let ch = |v: i64| (v >> 11).clamp(0, 255) as u32;

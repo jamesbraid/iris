@@ -147,7 +147,7 @@ pub fn key_of(re3: &Re3, prim: Prim) -> SpanKey {
             zfail: ((st >> 32) & 0xf) as u8,
             zpass: ((st >> 36) & 0xf) as u8,
         }),
-        blend: (c.blend & 1 != 0).then_some(Blend { src: ((c.blend >> 1) & 7) as u8, dst: ((c.blend >> 4) & 7) as u8 }),
+        blend: c.blends().then_some(Blend { src: ((c.blend >> 1) & 7) as u8, dst: ((c.blend >> 4) & 7) as u8 }),
     }
     .normalized()
 }

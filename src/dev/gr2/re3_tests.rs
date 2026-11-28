@@ -162,6 +162,32 @@ fn rop_runs_before_dither_in_rgb12() {
     assert_eq!(xor_rgb12_pixel(0), 0x714 | 0x714 << 12);
 }
 
+/// One SMOOTH pixel of colour 0xf0 over 0x0f with ZERO/ZERO blending on
+/// (the blend alone gives 0) and the given logic op.
+fn blend_and_rop_pixel(op: u32) -> u32 {
+    let mut r = bare_re3();
+    setup(&mut r);
+    r.set_blend(1);
+    r.vram[0] = 0x0f;
+    for (reg, v) in [
+        (RE3_LOGIC_OP, op),
+        (RE3_RED_START, 0xf0 << 11),
+        (RE3_X_STEP, 1 << 14),
+        (RE3_SPAN_LEN, 1),
+        (RE3_DRAW_TRIGGER, DRAW_SMOOTH),
+    ] {
+        r.write_reg(reg, v);
+    }
+    px(&r, 0, 0)
+}
+
+/// Blend or logic op, not both: XOR alone gives 0xff, blend alone 0.
+#[test]
+fn logic_op_wins_over_blend() {
+    assert_eq!(blend_and_rop_pixel(6), 0xff);
+    assert_eq!(blend_and_rop_pixel(ROP_COPY), 0);
+}
+
 #[test]
 fn copy_rect_handles_overlap_both_ways() {
     let mut r = bare_re3();
