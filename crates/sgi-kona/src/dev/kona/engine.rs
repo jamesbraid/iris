@@ -126,6 +126,10 @@ impl InterruptController for Events {
         true
     }
 
+    fn note(&self, text: &str) {
+        self.out.post(Event::Note(text.to_string()));
+    }
+
     fn swap_consumed(&self) {
         let count = self.swaps.fetch_add(1, Relaxed) + 1;
         self.out.post(Event::Swap { count, time_ns: self.clock_ns.load(Relaxed) });

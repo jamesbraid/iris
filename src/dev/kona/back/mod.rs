@@ -1448,6 +1448,9 @@ impl KonaBackend {
             DRAW_PIXEL_RECTANGLE_FROM_HOST_DATA => {
                 if let Ok(h) = <[u32; 8]>::try_from(args) {
                     draw(&mut c.gl, &mut self.pix_counts, &env, &h, bytes);
+                    for t in self.pix_counts.notes.drain(..) {
+                        self.handle.as_ref().inspect(|d| d.note(&t));
+                    }
                 }
             }
             DRAW_BITMAP_FROM_DISPLAY_LIST if args.len() == 8 => {

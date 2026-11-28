@@ -41,6 +41,11 @@ impl DisplayHandle {
         self.host.with_front(|f| ((), f.video_frame(epoch)));
     }
 
+    /// A diagnostic note for the shell, which may drop it.
+    pub fn note(&self, text: &str) {
+        self.host.irq.note(text);
+    }
+
     /// The back end is working: the driver's watchdog sees activity. For a
     /// drain loop or the raster thread while it works. Not for the display
     /// thread, which runs whether or not the pipe does: if it set the latch

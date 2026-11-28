@@ -337,6 +337,23 @@ pub struct Counts {
     pub list_positions: u64,
     /// Draw announced by DMA whose packet arrived.
     pub dma_draws: u64,
+    /// The `Miss` reasons already reported, and the reports the caller has yet to send.
+    pub misses: u32,
+    pub notes: Vec<String>,
+}
+
+/// Why a draw took the general float path instead of `plain_store`.
+#[derive(Clone, Copy, Debug)]
+enum Miss {
+    GpuStore,
+    Format,
+    Fragment,
+    Transfer,
+    Zoom,
+    Position,
+    Data,
+    Clip,
+    Colour,
 }
 
 impl Counts {
@@ -1463,47 +1480,62 @@ struct Plain<'a> {
 
 /// The plan for a draw of unzoomed RGBA or RGB bytes through no fragment operation, or None for
 /// any other draw. Everything the general path would refuse or do differently returns None.
-fn plain_plan<'a>(gl: &Gl, env: &Env<'a>, h: &Header, rec: &Record, bytes: &[u8]) -> Option<Plain<'a>> {
+fn plain_plan<'a>(gl: &Gl, env: &Env<'a>, h: &Header, rec: &Record, bytes: &[u8]) -> Result<Plain<'a>, Miss> {
     let (p, ds) = (&gl.pix, &env.ds);
     // The GPU arm keeps its planes on the device and takes the fragments through `StoreOp::Frags`.
     if env.store.is_gpu() {
-        return None;
+        return Err(Miss::GpuStore);
     }
     let pixel = match (h.format, h.ty) {
         (FORMAT_RGBA, TYPE_UNSIGNED_BYTE) => 4,
         (FORMAT_RGB, TYPE_UNSIGNED_BYTE) => 3,
-        _ => return None,
+        _ => return Err(Miss::Format),
     };
     let fragment_ops = ds.ownership.is_some() || ds.samples.is_some() || ds.alpha.enabled || (ds.stencil.enabled && ds.stencil_bits != 0) || ds.depth_test || ds.blend.enabled || ds.logic.is_some() || ds.colour_mask != [true; 4];
     let identity = p.suspended || (!p.map_colour && p.scale == [1.0; 4] && p.bias == [0.0; 4]);
-    if fragment_ops || !identity || p.zoom != [1.0; 2] || !p.pos.valid || h.w == 0 || h.h == 0 || h.w > 1 << 22 || h.h > 1 << 22 {
-        return None;
+    let miss = [(fragment_ops, Miss::Fragment), (!identity, Miss::Transfer), (p.zoom != [1.0; 2], Miss::Zoom), (!p.pos.valid, Miss::Position)];
+    if let Some(&(_, m)) = miss.iter().find(|m| m.0) {
+        return Err(m);
+    }
+    if h.w == 0 || h.h == 0 || h.w > 1 << 22 || h.h > 1 << 22 {
+        return Err(Miss::Data);
     }
     let (px, py) = (p.pos.x + h.column as f32 * p.zoom[0], p.pos.y);
     // Within f32's exact integers, so the general path's span arithmetic agrees; false for NaN.
     if !(px.abs() < 1048576.0 && py.abs() < 1048576.0) {
-        return None;
+        return Err(Miss::Position);
     }
     let (rx, ry) = (px.floor() as i64, py.floor() as i64);
-    let g = h.geometry(rec)?;
-    if h.image_words(rec)? as u64 * 4 > bytes.len() as u64 + 3 {
-        return None;
+    let g = h.geometry(rec).ok_or(Miss::Data)?;
+    if h.image_words(rec).ok_or(Miss::Data)? as u64 * 4 > bytes.len() as u64 + 3 {
+        return Err(Miss::Data);
     }
     let (w, ht) = (h.w as usize, h.h as usize);
     let rows = row_offsets(&g, h.row_mode, ht);
     // Every byte the general path would read is there, else it refuses the draw.
     if rows[ht - 1] + w * pixel > bytes.len() {
-        return None;
+        return Err(Miss::Data);
     }
     let cpu = env.store.cpu();
     let (pitch, c, o) = (cpu.width() as usize, &ds.clip, ds.origin);
     if c.x0 < 0 || c.y0 < 0 || c.x1 as i64 > pitch as i64 || c.y1 as i64 > cpu.height() as i64 {
-        return None;
+        return Err(Miss::Clip);
     }
-    let colour = ds.colour[..ds.colours as usize].iter().map(|&w| cpu.array(w as usize).filter(|a| a.len() >= pitch * cpu.height() as usize)).collect::<Option<Vec<_>>>()?;
+    let colour = ds.colour[..ds.colours as usize].iter().map(|&w| cpu.array(w as usize).filter(|a| a.len() >= pitch * cpu.height() as usize)).collect::<Option<Vec<_>>>().ok_or(Miss::Colour)?;
     let x = (rx.max(c.x0 as i64 - o[0] as i64), (rx + w as i64).min(c.x1 as i64 - o[0] as i64));
     let y = (ry.max(c.y0 as i64 - o[1] as i64), (ry + ht as i64).min(c.y1 as i64 - o[1] as i64));
-    Some(Plain { pixel, rows, origin: (rx, ry), x, y, colour, pitch, window: o })
+    Ok(Plain { pixel, rows, origin: (rx, ry), x, y, colour, pitch, window: o })
+}
+
+/// The draw and state behind the first refusal for `m`, for the shell's trace.
+fn miss_note(m: Miss, gl: &Gl, env: &Env<'_>, h: &Header) -> String {
+    let (p, ds) = (&gl.pix, &env.ds);
+    format!(
+        "glDrawPixels takes the general path ({m:?}): {}x{} format {:#x} type {:#x} zoom {:?} scale {:?} bias {:?} map {} suspended {} \
+         ownership {} samples {} alpha {} stencil {} depth {} blend {} logic {} mask {:?} gpu store {}",
+        h.w, h.h, h.format, h.ty, p.zoom, p.scale, p.bias, p.map_colour, p.suspended, ds.ownership.is_some(), ds.samples.is_some(),
+        ds.alpha.enabled, ds.stencil.enabled && ds.stencil_bits != 0, ds.depth_test, ds.blend.enabled, ds.logic.is_some(), ds.colour_mask, env.store.is_gpu()
+    )
 }
 
 /// Store the rows of a plain draw; the pixels that landed.
@@ -1540,10 +1572,17 @@ pub fn draw(gl: &mut Gl, c: &mut Counts, env: &Env<'_>, hdr: &[u32; 8], bytes: &
     c.draws += 1;
     let Some(h) = Header::parse(hdr) else { return };
     let rec = gl.pix.unpack_in_force();
-    if let Some(plan) = plain_plan(gl, env, &h, &rec, bytes) {
-        c.fragments += plain_store(&plan, bytes);
-        note_unapplied_stages(&gl.pix, c);
-        return;
+    match plain_plan(gl, env, &h, &rec, bytes) {
+        Ok(plan) => {
+            c.fragments += plain_store(&plan, bytes);
+            note_unapplied_stages(&gl.pix, c);
+            return;
+        }
+        Err(m) if c.misses & 1 << m as u32 == 0 => {
+            c.misses |= 1 << m as u32;
+            c.notes.push(miss_note(m, gl, env, &h));
+        }
+        Err(_) => {}
     }
     let Some(img) = unpack(&h, &rec, bytes) else {
         c.refused += 1;
@@ -1994,8 +2033,9 @@ mod tests {
                 let env = Env { store: &store, ds };
                 let mut c = Counts::default();
                 let h = [hdr.w, hdr.h, hdr.format, hdr.ty, hdr.offset, 0, hdr.row_mode, hdr.column];
-                let taken = plain_plan(&gl, &env, &hdr, &gl.pix.unpack_in_force(), &bytes).is_some();
+                let taken = plain_plan(&gl, &env, &hdr, &gl.pix.unpack_in_force(), &bytes).is_ok();
                 draw(&mut gl, &mut c, &env, &h, &bytes);
+                (c.misses, c.notes) = (0, Vec::new());
                 let mut hash = DefaultHasher::new();
                 (2..=8).for_each(|w| (0..64 * 48).for_each(|i| unsafe { store.cpu().array(w).unwrap().load(i) }.hash(&mut hash)));
                 (hash.finish(), format!("{c:?}"), taken)
@@ -2013,5 +2053,28 @@ mod tests {
             }
         }
         assert!(plain > 100 && other > 100, "plain {plain} other {other}");
+    }
+
+    /// A draw off the plain path is reported once per reason, with the state that sent it there.
+    #[test]
+    fn a_draw_off_the_plain_path_is_reported_once_per_reason() {
+        let store = Store::new(64, 48);
+        (2..=8).for_each(|w| store.cpu().ensure(w));
+        let ds = DrawState { colour: [2, 3], colours: 1, clip: crate::dev::kona::back::raster::Rect { x0: 0, y0: 0, x1: 64, y1: 48 }, ..DrawState::default() };
+        let env = Env { store: &store, ds };
+        let (mut gl, mut c) = (Gl::default(), Counts::default());
+        gl.pix.pos.valid = true;
+        gl.pix.zoom = [2.0, 2.0];
+        let bytes = vec![0x80u8; 8 * 8 * 4];
+        let h = [8, 8, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 0, 0, 0, 0];
+        draw(&mut gl, &mut c, &env, &h, &bytes);
+        draw(&mut gl, &mut c, &env, &h, &bytes);
+        assert_eq!(c.notes.len(), 1, "{:?}", c.notes);
+        assert!(c.notes[0].contains("(Zoom)") && c.notes[0].contains("zoom [2.0, 2.0]"), "{}", c.notes[0]);
+        gl.pix.zoom = [1.0, 1.0];
+        draw(&mut gl, &mut c, &env, &h, &bytes);
+        assert_eq!(c.notes.len(), 1, "the plain path reports nothing");
+        draw(&mut gl, &mut c, &env, &[8, 8, FORMAT_RGBA, TYPE_UNSIGNED_SHORT, 0, 0, 0, 0], &[0; 8 * 8 * 8]);
+        assert!(c.notes.len() == 2 && c.notes[1].contains("(Format)"), "{:?}", c.notes);
     }
 }

@@ -40,6 +40,9 @@ pub trait InterruptController: Send + Sync {
 
     /// A KONA pipe consumed a buffer swap (the shell's `Event::Swap`). The default drops it.
     fn swap_consumed(&self) {}
+
+    /// A diagnostic note from a KONA pipe (the shell's `Event::Note`). The default drops it.
+    fn note(&self, _text: &str) {}
 }
 
 /// One input of one controller, as a device sees it.
