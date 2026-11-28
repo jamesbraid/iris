@@ -29,7 +29,7 @@ flowchart LR
   C["<b>Set-up</b><br/>Hardware: hand-off format to RE3 not documented<br/>Iris: gr2/gl.rs writes RE3 span registers"]
   D["<b>Rasterisation</b><br/>Hardware: RE3 draws; hand-off not documented<br/>Iris: GR2-RE3, interpreter or span JIT"]
   E["<b>Shading and texture</b><br/>Hardware: colour stepping not documented.<br/>No texture on this board<br/>Iris: same span routine"]
-  G["<b>Per-fragment operations</b><br/>Hardware: per-pixel list not documented;<br/>blending and alpha test not documented<br/>Iris: same span routine; RE3 pattern, window-ID, Z,<br/>stencil and logic op; Iris blends in the span routine"]
+  G["<b>Per-fragment operations</b><br/>Hardware: per-pixel list not documented;<br/>alpha test not documented, blending a stage in the public TR<br/>Iris: same span routine; RE3 pattern, window-ID, Z,<br/>stencil and logic op; Iris blends in the span routine"]
   H[("<b>Frame buffer</b><br/>Hardware: video memory boards and a Z-buffer board<br/>(type not documented)<br/>Iris: one word per pixel, in Re3")]
   I["<b>Scan-out</b><br/>Hardware: XMAP5, Bt457; VC1 timing (inferred)<br/>Iris: Display-Refresh, gr2comp"]
   A --> B --> C --> D --> E --> G --> H --> I
@@ -71,7 +71,7 @@ staged and pushed in batches.
 
 The GL side (`gl.rs`, `gl_light.rs`) keeps the GL state, assembles primitives,
 transforms and clips them through the shared GL core (`src/dev/gl/`), and emits
-RE3 spans. Iris blends in its RE3 span routine (`RE3_OP_SET_BLENDER`, `RE3_OP_SET_ALPHA`). Where the real board blends is not documented. The board has no alpha test. The guest's GL library rasterizes alpha-tested primitives on the CPU and sends the surviving fragments, which Iris draws through `gl_fragment`.
+RE3 spans. RE3 has a blend stage (public technical report: established). Iris blends in its RE3 span routine through a private encoding of it (`RE3_OP_SET_BLENDER`, `RE3_OP_SET_ALPHA`; inferred), and the blend rounding is unknown. The board has no alpha test. The guest's GL library rasterizes alpha-tested primitives on the CPU and sends the surviving fragments, which Iris draws through `gl_fragment`.
 
 The RE3 thread (`re3_loop`) applies register writes in order. A DRAW_TRIGGER write runs
 `Re3::execute` (`re3.rs`). The span kinds are SMOOTH (`draw_shaded_span`) and

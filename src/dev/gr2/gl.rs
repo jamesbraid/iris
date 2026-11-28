@@ -8,9 +8,9 @@
 //! IDX_VERTEX_ROUTINE, transforms, maps through the viewport and window origin (0x1E5) and
 //! rasterizes into RE3 spans.
 //!
-//! Blending: the real board blends in the GE7 microcode (RE3 has no blend
-//! unit); here the GE hands the blend state and a per-pixel alpha plane to
-//! an emulator-only RE3 extension (re3::RE3_OP_SET_BLENDER / RE3_OP_SET_ALPHA).
+//! Blending: RE3 has a blend stage (public TR: established). Here the GE hands
+//! the blend state and a per-pixel alpha plane to a private encoding of it
+//! (re3::RE3_OP_SET_BLENDER / RE3_OP_SET_ALPHA; inferred).
 //! Alpha test: there is none in the hardware and none here on purpose.
 //! libglcore rasterizes alpha-tested primitives on the CPU and sends the
 //! surviving fragments (T_SOFT_FRAGMENT).

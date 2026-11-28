@@ -218,13 +218,11 @@ pub const RE3_OP_STENCIL: u32 = 0xFFFF_1006;
 pub const RE3_OP_ZFILL_A: u32 = 0xFFFF_1007;
 pub const RE3_OP_ZFILL_B: u32 = 0xFFFF_1008;
 pub const ZBUF_STENCIL_SHIFT: u32 = 24;
-/// EMULATOR EXTENSION, not RE3 hardware. Real RE3 has no blend unit and no
-/// alpha iterator: on GR2 the GE7 microcode does blending (reading the
-/// destination back through RE3 and writing the result). Doing it here, per
-/// pixel inside RE3, gives the same pixels without a span read-modify-write
-/// round trip (verified against a real Indy
-/// XZ with glprim --scene blendsmooth). There is deliberately no alpha test:
-/// libglcore sends only the fragments that pass.
+/// RE3 has a blend stage (public TR: established). This private encoding of
+/// it (op, factor codes, alpha iterator) is the model's own (inferred, from
+/// GE7 microcode); the blend rounding is unknown. A match with an Indy XZ
+/// (Elan) on glprim blendsmooth is reported, with no capture here. No alpha
+/// test: libglcore sends only the fragments that pass.
 ///
 /// Emulator-private blend control: val = enable (bit 0) | src factor << 1 |
 /// dst factor << 4 (libglcore's codes: 0 ZERO, 1 ONE,
