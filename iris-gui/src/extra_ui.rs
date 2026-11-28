@@ -3,7 +3,7 @@ use egui::{ComboBox, DragValue, TextEdit, Ui};
 use iris::config::*;
 use iris::dev::xio_pci::Kind;
 use iris::topology::{scsi_target_slot, scsi_target, slots_take, DeviceFamily, DevicePlacement, MachineSlotKind};
-use iris::devices::{DeviceModel, ConfiguredDevice};
+use iris::devices::{BoardConfig, DeviceModel, ConfiguredDevice};
 
 /// The Indy and Indigo2 family: the machines built around the MC memory
 /// controller, with Newport resolution presets, a DS1386 NVRAM and (on the
@@ -45,12 +45,16 @@ pub fn scsi_name(key: u8) -> String {
     if key < 16 { key.to_string() } else { format!("{}:{}", key / 16, key % 16) }
 }
 
-/// Choices reflect the boards actually fitted by machine constructors. The O2
-/// has a fixed GBE display; its shared board field is only a placeholder.
-pub fn board_supported(board: GraphicsBoard, profile: MachineProfile) -> bool {
-    board.supports(profile)
-        && (profile != MachineProfile::O2Ip32 || board == GraphicsBoard::Newport)
-        && (profile != MachineProfile::Onyx2Ip27 || board != GraphicsBoard::Ir3)
+/// The picker's choices: each board the graphics slot takes (an IR2 with one or two raster managers), then none.
+pub fn board_choices(profile: MachineProfile) -> Vec<Option<BoardConfig>> {
+    let boards = profile.graphics_boards();
+    let pipes = |m: GraphicsBoard| 1..=if matches!(m, GraphicsBoard::Ir2 | GraphicsBoard::Ir2e) { 2 } else { 1 };
+    let each = boards.iter().flat_map(|&m| pipes(m).map(move |raster_managers| BoardConfig { model: m, raster_managers, ..Default::default() }));
+    each.map(Some).chain((!boards.is_empty()).then_some(None)).collect()
+}
+
+pub fn board_label(board: &Option<BoardConfig>) -> String {
+    board.as_ref().map_or_else(|| "None".into(), BoardConfig::label)
 }
 
 /// Refit hardware when the user explicitly changes profiles. Do not run this
@@ -62,16 +66,14 @@ pub fn switch_profile(cfg: &mut MachineConfig, from: MachineProfile) {
     cfg.clock.fixed_mhz = None;
     cfg.banks = crate::dialogs::new_machine::distribute_ram(crate::ram::ram_presets(p)[0], p);
     cfg.banks_set = true;
-    cfg.graphics.board = Some(if p.ip28() {
-        GraphicsBoard::SolidImpact
-    } else {
-        GraphicsBoard::default_for(p)
-    });
+    cfg.devices.retain(|d| !d.names_graphics(p));
+    if p.ip28() {
+        cfg.set_graphics(Some(BoardConfig::new(GraphicsBoard::SolidImpact)));
+    }
     // `compile = "sync"` needs one CPU; the new machine may start with more.
     if cfg.machine.cpus() > 1 {
         cfg.jitv2.compile = JitCompile::Async;
     }
-    cfg.graphics.resolution = Default::default();
     cfg.octane.graphics = None;
     // SN0 rejects another product's private table, even when it is inactive.
     cfg.origin200 = Default::default();
@@ -79,8 +81,8 @@ pub fn switch_profile(cfg: &mut MachineConfig, from: MachineProfile) {
     cfg.onyx2 = Default::default();
     rehome_disks(cfg, from);
     // Cards need a GIO slot; a second head also needs a Newport board.
-    if !mc_machine(p) || cfg.graphics_board() != GraphicsBoard::Newport {
-        cfg.set_device("newport", false);
+    if !mc_machine(p) || cfg.graphics_board() != Some(GraphicsBoard::Newport) {
+        cfg.set_dual_head(false);
     }
     // What `MachineConfig::validate` refuses on the new machine, and the
     // Advanced tab no longer shows for it.
@@ -245,7 +247,13 @@ pub fn show(ui: &mut Ui, cfg: &mut MachineConfig, running: bool) {
                         }
                     });
             });
-            text(ui, &t!("extra-graphics-flash"), &mut cfg.graphics.flash);
+            if let Some(mut board) = cfg.graphics_entry().filter(|b| b.model.kona().is_some()) {
+                let before = board.flash.clone();
+                text(ui, &t!("extra-graphics-flash"), &mut board.flash);
+                if board.flash != before {
+                    cfg.set_graphics(Some(board));
+                }
+            }
         });
         ui.collapsing(t!("extra-connections"), |ui| {
             text(ui, &t!("extra-socket-a"), &mut cfg.serial_socket_a);
