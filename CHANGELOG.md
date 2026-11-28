@@ -43,6 +43,19 @@ hashes are given where a change is easiest to understand by reading the commit.
 - The `IRIS_IP28_*` bring-up variables (cache ops, watch window, exception
   address, TLB writes, GPR watch) and `log mips.cp0` are gone. `log mips.tlb`
   in a `developer` build already shows TLB writes.
+- `--startup COMMAND` (repeatable) and `[debug] startup = [...]` run monitor
+  commands once the machine is built, before the CPU starts. They replace the
+  board trace and recording variables:
+- `IRIS_REX3_TRACE` and `IRIS_REX3_REC` are gone: `--startup "rex trace FILE"`
+  and `--startup "rex rec FILE"`.
+- `IRIS_MGRAS_TRACE` and `IRIS_MGRAS_REC` are gone: `--startup "mgras trace
+  FILE"` and `--startup "mgras rec FILE"`.
+- `IRIS_ODSY_TRACE` and `IRIS_ODSY_REC` are gone: `--startup "vpro trace
+  FILE"` and `--startup "vpro rec FILE"`. The replay tests' trace is now
+  `VPRO_REPLAY_TRACE`.
+- `IRIS_O2_TRACE` is gone: `--startup "re trace FILE"`. `IRIS_IP32_RE_TRACE` and
+  `o2 retrace PATH` are gone too: `--startup "re rec FILE"` records the same
+  writes (`gputrace` builds).
 
 - One pattern names trace points everywhere: `log heart,l1d.*,-l1d.hit on`,
   `--log PATTERN` and `[debug] log`. `IRIS_DEBUG_LOG` and `[debug] debug_log`
