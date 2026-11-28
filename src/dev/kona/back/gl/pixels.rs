@@ -1527,15 +1527,24 @@ fn plain_plan<'a>(gl: &Gl, env: &Env<'a>, h: &Header, rec: &Record, bytes: &[u8]
     Ok(Plain { pixel, rows, origin: (rx, ry), x, y, colour, pitch, window: o })
 }
 
-/// The draw and state behind the first refusal for `m`, for the shell's trace.
-fn miss_note(m: Miss, gl: &Gl, env: &Env<'_>, h: &Header) -> String {
-    let (p, ds) = (&gl.pix, &env.ds);
-    format!(
-        "glDrawPixels takes the general path ({m:?}): {}x{} format {:#x} type {:#x} zoom {:?} scale {:?} bias {:?} map {} suspended {} \
-         ownership {} samples {} alpha {} stencil {} depth {} blend {} logic {} mask {:?} gpu store {}",
-        h.w, h.h, h.format, h.ty, p.zoom, p.scale, p.bias, p.map_colour, p.suspended, ds.ownership.is_some(), ds.samples.is_some(),
-        ds.alpha.enabled, ds.stencil.enabled && ds.stencil_bits != 0, ds.depth_test, ds.blend.enabled, ds.logic.is_some(), ds.colour_mask, env.store.is_gpu()
-    )
+/// The draw and state behind the first refusal for `m`, for the shell's trace: lines under the 96 bytes a note holds.
+fn miss_note(m: Miss, gl: &Gl, env: &Env<'_>, h: &Header) -> Vec<String> {
+    let (p, ds, b) = (&gl.pix, &env.ds, &env.ds.blend);
+    let bit = |v: bool| v as u8;
+    let mask: String = ds.colour_mask.iter().map(|&c| if c { '1' } else { '0' }).collect();
+    vec![
+        format!("glDrawPixels slow ({m:?}): {}x{} fmt {:#x} ty {:#x} zoom {} {} pos {} gpu {}", h.w, h.h, h.format, h.ty, p.zoom[0], p.zoom[1], bit(p.pos.valid), bit(env.store.is_gpu())),
+        format!("({m:?}) blend {} {:?} {:?} {:?}", bit(b.enabled), b.src, b.dst, b.eq),
+        format!("({m:?}) blend constant {:#x} {:#x} {:#x} {:#x}", b.constant[0], b.constant[1], b.constant[2], b.constant[3]),
+        format!(
+            "({m:?}) mask {mask} alpha {} stencil {} depth {} own {} ms {} logic {:?}",
+            bit(ds.alpha.enabled), bit(ds.stencil.enabled && ds.stencil_bits != 0), bit(ds.depth_test), bit(ds.ownership.is_some()), bit(ds.samples.is_some()), ds.logic
+        ),
+        format!(
+            "({m:?}) scale {:.3} {:.3} {:.3} {:.3} bias {:.3} {:.3} {:.3} {:.3} map {} susp {}",
+            p.scale[0], p.scale[1], p.scale[2], p.scale[3], p.bias[0], p.bias[1], p.bias[2], p.bias[3], bit(p.map_colour), bit(p.suspended)
+        ),
+    ]
 }
 
 /// Store the rows of a plain draw; the pixels that landed.
@@ -1580,7 +1589,7 @@ pub fn draw(gl: &mut Gl, c: &mut Counts, env: &Env<'_>, hdr: &[u32; 8], bytes: &
         }
         Err(m) if c.misses & 1 << m as u32 == 0 => {
             c.misses |= 1 << m as u32;
-            c.notes.push(miss_note(m, gl, env, &h));
+            c.notes.extend(miss_note(m, gl, env, &h));
         }
         Err(_) => {}
     }
@@ -2069,12 +2078,13 @@ mod tests {
         let h = [8, 8, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 0, 0, 0, 0];
         draw(&mut gl, &mut c, &env, &h, &bytes);
         draw(&mut gl, &mut c, &env, &h, &bytes);
-        assert_eq!(c.notes.len(), 1, "{:?}", c.notes);
-        assert!(c.notes[0].contains("(Zoom)") && c.notes[0].contains("zoom [2.0, 2.0]"), "{}", c.notes[0]);
+        let n = c.notes.len();
+        assert!(n > 1 && c.notes.iter().all(|t| t.contains("(Zoom)") && t.len() < 96), "{:?}", c.notes);
+        assert!(c.notes[0].contains("zoom 2 2") && c.notes[1].contains("blend 0 One Zero Add"), "{:?}", c.notes);
         gl.pix.zoom = [1.0, 1.0];
         draw(&mut gl, &mut c, &env, &h, &bytes);
-        assert_eq!(c.notes.len(), 1, "the plain path reports nothing");
+        assert_eq!(c.notes.len(), n, "the plain path reports nothing");
         draw(&mut gl, &mut c, &env, &[8, 8, FORMAT_RGBA, TYPE_UNSIGNED_SHORT, 0, 0, 0, 0], &[0; 8 * 8 * 8]);
-        assert!(c.notes.len() == 2 && c.notes[1].contains("(Format)"), "{:?}", c.notes);
+        assert!(c.notes.len() == 2 * n && c.notes[n].contains("(Format)"), "{:?}", c.notes);
     }
 }
