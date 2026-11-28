@@ -638,9 +638,10 @@ impl KonaConfig {
         Ok(())
     }
 
-    /// The geometry board the pipe has.
+    /// The geometry board the pipe has. Behind a Ktown2 (the IP35 hosts) the GE16-4 is the -002 part.
     pub(super) fn geometry_spec(&self) -> &'static GeometrySpec {
-        self.geometry.map_or(self.spec().geometries[0], |g| g.spec().of(self.spec()))
+        let own = self.geometry.map_or(self.spec().geometries[0], |g| g.spec().of(self.spec()));
+        if self.host_board == HostBoard::Ktown2 && own.id == GE16_4.id { &GE16_4_B } else { own }
     }
 
     /// The channels the pipe's display generator has: 8 on a DG5-8, 2 on a DG5-2 (with or without its option board).
@@ -1038,6 +1039,10 @@ pub(in crate::dev::kona) mod tests {
         let ir4 = KonaConfig::new(Product::Ir4, 1).unwrap().with_geometry("ge16-4").unwrap();
         assert_eq!(ir4.geometry_spec().board.part, "030-1398-002", "the InfiniteReality4's GE16-4 is the -002 part");
         assert!(KonaConfig::new(Product::Ir4, 1).unwrap().with_geometry("ge14-4").is_err());
+        let part = |p, board| KonaConfig::new(p, 1).unwrap().with_host_board(board).geometry_spec().board.part;
+        assert_eq!(part(Product::Ir3, HostBoard::Ktown), "030-1398-001", "the Onyx2 rack's");
+        assert_eq!(part(Product::Ir3, HostBoard::Ktown2), "030-1398-002", "the IP35 hosts'");
+        assert_eq!(part(Product::Ir2, HostBoard::Ktown2), "030-1129-002", "other boards do not change");
     }
 
     #[test]
