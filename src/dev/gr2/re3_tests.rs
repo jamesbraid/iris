@@ -128,6 +128,40 @@ fn shaded_span_steps_colour() {
     assert_eq!(got, vec![10, 11, 12, 13]);
 }
 
+/// One SMOOTH pixel at (1, 0), Bayer threshold 8, in RGB12 with XOR over
+/// buffer nibbles R 8, G 3, B 0 (expanded 0x88, 0x33, 0x00).
+fn xor_rgb12_pixel(dither: u32) -> u32 {
+    let mut r = bare_re3();
+    setup(&mut r);
+    r.set_pixfmt(PIXFMT_RGB12);
+    r.vram[1] = 0x038 | 0x038 << 12;
+    for (reg, v) in [
+        (RE3_LOGIC_OP, 6),
+        (RE3_DITHER_ON, dither),
+        (RE3_RED_START, 0xc3 << 11),
+        (RE3_GREEN_START, 0x28 << 11),
+        (RE3_BLUE_START, 0x7f << 11),
+        (RE3_CUR_X, 1),
+        (RE3_CUR_Y, 0),
+        (RE3_X_STEP, 1 << 14),
+        (RE3_SPAN_LEN, 1),
+        (RE3_DRAW_TRIGGER, DRAW_SMOOTH),
+    ] {
+        r.write_reg(reg, v);
+    }
+    px(&r, 1, 0)
+}
+
+/// The logic op runs on the 24-bit colour, then the result is dithered:
+/// 0xc3 ^ 0x88 = 0x4b -> 4, 0x28 ^ 0x33 = 0x1b -> 2 (dithered up), 0x7f -> 7.
+/// Dithering first would give 4 ^ 8 = 3 and 2 ^ 3 = 1.
+#[test]
+fn rop_runs_before_dither_in_rgb12() {
+    assert_eq!(xor_rgb12_pixel(1), 0x724 | 0x724 << 12);
+    // No dither: the same op, truncated.
+    assert_eq!(xor_rgb12_pixel(0), 0x714 | 0x714 << 12);
+}
+
 #[test]
 fn copy_rect_handles_overlap_both_ways() {
     let mut r = bare_re3();

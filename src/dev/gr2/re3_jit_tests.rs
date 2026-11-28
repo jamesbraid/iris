@@ -304,6 +304,41 @@ fn spans_match_the_interpreter() {
     cov.assert_full();
 }
 
+/// The directed case of `rop_runs_before_dither_in_rgb12` (re3_tests): one
+/// SMOOTH pixel through a shader gives the hand value and the interpreter's.
+#[test]
+fn rop_runs_before_dither_in_rgb12() {
+    if re3_jit::forbidden() {
+        return;
+    }
+    let mut p = Pair::new(seed(3));
+    p.both(|r| {
+        r.set_pixfmt(PIXFMT_RGB12);
+        r.vram[1] = 0x038 | 0x038 << 12;
+    });
+    for (reg, v) in [
+        (RE3_LOGIC_OP, 6),
+        (RE3_COLOR_PLANE_MASK, 0x00ff_ffff),
+        (RE3_CLIP_X_HI, FB_W as u32 - 1),
+        (RE3_CLIP_Y_HI, FB_H as u32 - 1),
+        (RE3_DITHER_ON, 1),
+        (RE3_RED_START, 0xc3 << 11),
+        (RE3_GREEN_START, 0x28 << 11),
+        (RE3_BLUE_START, 0x7f << 11),
+        (RE3_CUR_X, 1),
+        (RE3_CUR_Y, 0),
+        (RE3_X_STEP, 1 << 14),
+        (RE3_SPAN_LEN, 1),
+    ] {
+        p.reg(reg, v);
+    }
+    let key = re3_jit::key_of(&p.jit, Prim::of_draw_op(DRAW_SMOOTH).unwrap());
+    p.reg(RE3_DRAW_TRIGGER, DRAW_SMOOTH);
+    assert_eq!(p.jit.jit.hits, 1);
+    assert_eq!(p.jit.vram[1], 0x724 | 0x724 << 12);
+    p.assert_same(0, &key);
+}
+
 /// A key-shaping register written between spans takes effect at once (the
 /// memoised shader is dropped), and rewriting the same value keeps it.
 #[test]

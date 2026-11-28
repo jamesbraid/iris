@@ -593,6 +593,14 @@ impl Re3 {
         if c.blend & 1 == 0 || c.pixfmt == PIXFMT_CI12 || c.pixfmt == PIXFMT_CI8 {
             return self.color(x, y);
         }
+        self.pack(self.blend_rgb(off), x, y)
+    }
+
+    /// The iterator colour blended with the frame buffer at `off`, 8 bits
+    /// per channel (R in bits 7:0).
+    #[inline]
+    fn blend_rgb(&self, off: usize) -> u32 {
+        let c = &self.ctx;
         let ch = |v: i64| (v >> 11).clamp(0, 255) as u32;
         let s = [ch(c.r), ch(c.g), ch(c.b)];
         let a = ch(c.a);
@@ -614,7 +622,30 @@ impl Re3 {
             let v = (s[k] * factor(sf, k, d) + d[k] * factor(df, k, s) + 127) / 255;
             out |= v.min(255) << (8 * k);
         }
-        self.pack(out, x, y)
+        out
+    }
+
+    /// RGB12 with dither: the logic op runs on the 24-bit colour and each
+    /// 12-bit buffer's expanded old value, then the result is dithered and
+    /// written. Aux bits take the logic op as in `store`.
+    #[inline]
+    fn store_rgb12_dither(&mut self, off: usize, aux: u32, x: i32, y: i32, mask: u32) {
+        let c = &self.ctx;
+        let rgb = if c.blend & 1 != 0 {
+            self.blend_rgb(off)
+        } else {
+            let ch = |v: i64| (v >> 11).clamp(0, 255) as u32;
+            ch(c.r) | (ch(c.g) << 8) | (ch(c.b) << 16)
+        };
+        let op = c.reg[RE3_LOGIC_OP];
+        let dst = self.vram[off];
+        let half = |d12: u32| {
+            let d = ((d12 & 0xf) | ((d12 << 4) & 0xf00) | ((d12 << 8) & 0xf_0000)) * 17;
+            let v = rop(op, rgb, d) & 0x00ff_ffff;
+            crate::dev::bayer::rgb24_to_rgb12_dither(crate::dev::bayer::bayer_pack(v, x, y))
+        };
+        let v = (rop(op, aux, dst) & 0xff00_0000) | half(dst & 0xfff) | (half(dst >> 12 & 0xfff) << 12);
+        self.vram[off] = (dst & !mask) | (v & mask);
     }
 
     /// Frame-buffer colour at `off` as 8-bit R, G, B for blending. For 12-bit
@@ -813,8 +844,12 @@ impl Re3 {
             if self.clip(x, y) && self.pattern(x, n) {
                 let off = y as usize * FB_W + x as usize;
                 if self.wid_ok(DRAW_SMOOTH, off) && self.zs_test(off) {
-                    let c = self.color_blended(x, y, off);
-                    self.store(off, aux | c, mask);
+                    if self.ctx.pixfmt == PIXFMT_RGB12 && self.ctx.reg[RE3_DITHER_ON] != 0 {
+                        self.store_rgb12_dither(off, aux, x, y, mask);
+                    } else {
+                        let c = self.color_blended(x, y, off);
+                        self.store(off, aux | c, mask);
+                    }
                 }
             }
             self.step_iterators();

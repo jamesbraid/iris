@@ -737,9 +737,17 @@ impl<'a> E<'a> {
     /// `color_blended`: `color`, blended with the frame-buffer word `dst`
     /// when the key blends.
     fn color_blended(&mut self, it: &[Variable; 7], s: &Span, dst: Value, x: Value, y: Value) -> Value {
-        let Some(bl) = self.k.blend else {
+        if self.k.blend.is_none() {
             return self.color(it, x, y);
-        };
+        }
+        let out = self.blend_rgb(it, s, dst);
+        self.pack(out, x, y)
+    }
+
+    /// `blend_rgb`: the iterator colour blended with the frame-buffer word
+    /// `dst`, as 8-bit channels. The key must blend.
+    fn blend_rgb(&mut self, it: &[Variable; 7], s: &Span, dst: Value) -> [Value; 3] {
+        let bl = self.k.blend.expect("blend key");
         let src = self.rgb8(it);
         let av = self.get(it[IA]);
         let a = self.chan(av, 255);
@@ -766,7 +774,7 @@ impl<'a> E<'a> {
             let v = self.b.ins().udiv_imm_s(v, 255);
             out[k] = self.b.ins().umin(v, c255);
         }
-        self.pack(out, x, y)
+        out
     }
 
     /// `dst_rgb8`: the frame-buffer colour as 8-bit channels.
@@ -823,40 +831,45 @@ impl<'a> E<'a> {
         }
     }
 
+    /// `rgb24_to_rgb12_dither(bayer_pack(rgb, x, y))`: 12 bits, R low.
+    fn dither12(&mut self, c: [Value; 3], x: Value, y: Value) -> Value {
+        let [r, g, b] = c;
+        let yi = self.b.ins().band_imm_s(y, 3);
+        let yi = self.b.ins().ishl_imm_s(yi, 2);
+        let xi = self.b.ins().band_imm_s(x, 3);
+        let idx = self.b.ins().bor(yi, xi);
+        let sh = self.b.ins().ishl_imm_s(idx, 2);
+        let sh = self.b.ins().uextend(I64, sh);
+        let tbl = self.i64c(BAYER_PACKED as i64);
+        let t = self.b.ins().ushr(tbl, sh);
+        let t = self.b.ins().ireduce(I32, t);
+        let bayer = self.b.ins().band_imm_s(t, 0xf);
+        let mut d = [r; 3];
+        for (k, &ch) in [r, g, b].iter().enumerate() {
+            let hi = self.b.ins().ushr_imm_s(ch, 4);
+            let sc = self.b.ins().isub(ch, hi);
+            let dc = self.b.ins().ushr_imm_s(sc, 4);
+            let dc = self.b.ins().band_imm_s(dc, 15);
+            let frac = self.b.ins().band_imm_s(sc, 0xf);
+            let up = self.b.ins().icmp(IntCC::UnsignedGreaterThan, frac, bayer);
+            let inc = self.b.ins().iadd_imm_s(dc, 1);
+            let m15 = self.i32c(15);
+            let inc = self.b.ins().umin(inc, m15);
+            d[k] = self.b.ins().select(up, inc, dc);
+        }
+        let g4 = self.b.ins().ishl_imm_s(d[1], 4);
+        let b4 = self.b.ins().ishl_imm_s(d[2], 8);
+        let v = self.b.ins().bor(d[0], g4);
+        self.b.ins().bor(v, b4)
+    }
+
     /// `pack`: 8-bit channels into the frame-buffer format.
     fn pack(&mut self, c: [Value; 3], x: Value, y: Value) -> Value {
         let [r, g, b] = c;
         match self.k.fmt {
             Fmt::Rgb12 => {
                 let v = if self.k.dither {
-                    // rgb24_to_rgb12_dither(bayer_pack(rgb, x, y)).
-                    let yi = self.b.ins().band_imm_s(y, 3);
-                    let yi = self.b.ins().ishl_imm_s(yi, 2);
-                    let xi = self.b.ins().band_imm_s(x, 3);
-                    let idx = self.b.ins().bor(yi, xi);
-                    let sh = self.b.ins().ishl_imm_s(idx, 2);
-                    let sh = self.b.ins().uextend(I64, sh);
-                    let tbl = self.i64c(BAYER_PACKED as i64);
-                    let t = self.b.ins().ushr(tbl, sh);
-                    let t = self.b.ins().ireduce(I32, t);
-                    let bayer = self.b.ins().band_imm_s(t, 0xf);
-                    let mut d = [r; 3];
-                    for (k, &ch) in [r, g, b].iter().enumerate() {
-                        let hi = self.b.ins().ushr_imm_s(ch, 4);
-                        let sc = self.b.ins().isub(ch, hi);
-                        let dc = self.b.ins().ushr_imm_s(sc, 4);
-                        let dc = self.b.ins().band_imm_s(dc, 15);
-                        let frac = self.b.ins().band_imm_s(sc, 0xf);
-                        let up = self.b.ins().icmp(IntCC::UnsignedGreaterThan, frac, bayer);
-                        let inc = self.b.ins().iadd_imm_s(dc, 1);
-                        let m15 = self.i32c(15);
-                        let inc = self.b.ins().umin(inc, m15);
-                        d[k] = self.b.ins().select(up, inc, dc);
-                    }
-                    let g4 = self.b.ins().ishl_imm_s(d[1], 4);
-                    let b4 = self.b.ins().ishl_imm_s(d[2], 8);
-                    let v = self.b.ins().bor(d[0], g4);
-                    self.b.ins().bor(v, b4)
+                    self.dither12(c, x, y)
                 } else {
                     let r4 = self.b.ins().ushr_imm_s(r, 4);
                     let g4 = self.b.ins().band_imm_s(g, 0xf0);
@@ -911,6 +924,34 @@ impl<'a> E<'a> {
         self.b.ins().store(self.m, new, addr, off!(vram));
     }
 
+    /// `store_rgb12_dither`: the logic op on the 24-bit colour and each
+    /// 12-bit buffer's expanded old value, dithered, then the masked write.
+    fn store_rgb12_dither(&mut self, s: &Span, it: &[Variable; 7], addr: Value, dst: Value, x: Value, y: Value) {
+        let rgb = if self.k.blend.is_some() { self.blend_rgb(it, s, dst) } else { self.rgb8(it) };
+        let mut half = [dst; 2];
+        for (h, sh) in [0i64, 12].into_iter().enumerate() {
+            let v = self.b.ins().ushr_imm_s(dst, sh);
+            let mut ch = [v; 3];
+            for k in 0..3 {
+                let n = self.b.ins().ushr_imm_s(v, 4 * k as i64);
+                let n = self.b.ins().band_imm_s(n, 0xf);
+                let d = self.b.ins().imul_imm_s(n, 17);
+                let r = self.rop(self.k.rop, rgb[k], d);
+                ch[k] = self.b.ins().band_imm_s(r, 0xff);
+            }
+            half[h] = self.dither12(ch, x, y);
+        }
+        let hi = self.b.ins().ishl_imm_s(half[1], 12);
+        let colour = self.b.ins().bor(half[0], hi);
+        let a = self.rop(self.k.rop, s.aux, dst);
+        let a = self.b.ins().band_imm_s(a, 0xff00_0000u32 as i32 as i64);
+        let v = self.b.ins().bor(a, colour);
+        let keep = self.b.ins().band_not(dst, s.mask);
+        let put = self.b.ins().band(v, s.mask);
+        let new = self.b.ins().bor(keep, put);
+        self.b.ins().store(self.m, new, addr, off!(vram));
+    }
+
     // ── spans ────────────────────────────────────────────────────────────
 
     /// One SMOOTH pixel at (x, y), the n-th of the span, its word at `addr`.
@@ -922,8 +963,12 @@ impl<'a> E<'a> {
         self.wid_ok(s, dst, skip);
         let z = self.get(it[IZ]);
         self.zs_test(s, addr, z, skip);
-        let c = self.color_blended(it, s, dst, x, y);
-        self.store(s, addr, dst, c);
+        if self.k.fmt == Fmt::Rgb12 && self.k.dither {
+            self.store_rgb12_dither(s, it, addr, dst, x, y);
+        } else {
+            let c = self.color_blended(it, s, dst, x, y);
+            self.store(s, addr, dst, c);
+        }
     }
 
     /// `draw_shaded_span`. A row span (DX = 1.0, DY = 0, as GL fills
