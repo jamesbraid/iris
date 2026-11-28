@@ -2655,6 +2655,10 @@ fn bench_draw_pixels() {
         let m = crate::dev::gl::math::ortho(0.0, w as f32, 0.0, h as f32, -1.0, 1.0);
         command(&mut b, Grammar::Gl, LOAD_MATRIX_16_FLOATS, &m.map(f32::to_bits));
         at(&mut b, 0, 0);
+        if env("BENCH_BLEND", 0) != 0 {
+            command(&mut b, Grammar::Gl, ENABLE_CAPABILITY, &[crate::dev::kona::defs::gl::BLEND]);
+            command(&mut b, Grammar::Gl, SET_BLEND_FACTORS, &[crate::dev::kona::defs::gl::SRC_ALPHA, crate::dev::kona::defs::gl::ONE_MINUS_SRC_ALPHA]);
+        }
         let mut seed = 0x1234_5678u32;
         // RGB bytes (words 0) are rows of w * 3 bytes padded to a word; the others take `words` a pixel.
         let len = if words == 0 { (w as usize * 3).div_ceil(4) * h as usize } else { w as usize * h as usize * words };

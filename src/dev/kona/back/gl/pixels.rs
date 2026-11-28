@@ -55,7 +55,7 @@
 use super::state::{f, Gl};
 use super::vertex::{colour13, depth32};
 use crate::dev::gl::math;
-use crate::dev::kona::back::raster::ops::{ownership_plane, to8};
+use crate::dev::kona::back::raster::ops::{blend_add, ownership_plane, to8, unpack_colour, BlendEq, BlendFactor, FULL};
 use crate::dev::kona::back::raster::pixel::Planes;
 use crate::dev::kona::back::raster::DrawState;
 use crate::dev::kona::back::store::{Store, StoreOp, WordArray, DID_PLANE};
@@ -1461,7 +1461,13 @@ pub fn plane_command(gl: &mut Gl, c: &mut Counts, env: &Env<'_>, selector: u32, 
 /// Each byte as the 8-bit colour the 13-bit fragment path stores for it, by the path's own arithmetic.
 fn byte_colours() -> &'static [u32; 256] {
     static T: OnceLock<[u32; 256]> = OnceLock::new();
-    T.get_or_init(|| std::array::from_fn(|b| to8(colour13(b as f32 / 255.0) as u32)))
+    T.get_or_init(|| std::array::from_fn(|b| to8(byte_colours13()[b])))
+}
+
+/// Each byte's 13-bit fragment component, as the general path makes it.
+fn byte_colours13() -> &'static [u32; 256] {
+    static T: OnceLock<[u32; 256]> = OnceLock::new();
+    T.get_or_init(|| std::array::from_fn(|b| colour13(b as f32 / 255.0) as u32))
 }
 
 /// A byte RGBA or RGB draw checked to need nothing between the bytes and the colour words.
@@ -1476,10 +1482,12 @@ struct Plain<'a> {
     colour: Vec<WordArray<'a>>,
     pitch: usize,
     window: [i32; 2],
+    /// Blended over the stored pixel by source alpha (SRC_ALPHA, ONE_MINUS_SRC_ALPHA, add).
+    over: bool,
 }
 
-/// The plan for a draw of unzoomed RGBA or RGB bytes through no fragment operation, or None for
-/// any other draw. Everything the general path would refuse or do differently returns None.
+/// The plan for a draw of unzoomed RGBA or RGB bytes through no fragment operation but a blend by
+/// source alpha, or None for any other draw. Everything the general path would refuse or do differently returns None.
 fn plain_plan<'a>(gl: &Gl, env: &Env<'a>, h: &Header, rec: &Record, bytes: &[u8]) -> Result<Plain<'a>, Miss> {
     let (p, ds) = (&gl.pix, &env.ds);
     // The GPU arm keeps its planes on the device and takes the fragments through `StoreOp::Frags`.
@@ -1491,7 +1499,9 @@ fn plain_plan<'a>(gl: &Gl, env: &Env<'a>, h: &Header, rec: &Record, bytes: &[u8]
         (FORMAT_RGB, TYPE_UNSIGNED_BYTE) => 3,
         _ => return Err(Miss::Format),
     };
-    let fragment_ops = ds.ownership.is_some() || ds.samples.is_some() || ds.alpha.enabled || (ds.stencil.enabled && ds.stencil_bits != 0) || ds.depth_test || ds.blend.enabled || ds.logic.is_some() || ds.colour_mask != [true; 4];
+    let b = &ds.blend;
+    let over = b.enabled && (b.src, b.dst, b.eq) == (BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha, BlendEq::Add);
+    let fragment_ops = ds.ownership.is_some() || ds.samples.is_some() || ds.alpha.enabled || (ds.stencil.enabled && ds.stencil_bits != 0) || ds.depth_test || (b.enabled && !over) || ds.logic.is_some() || ds.colour_mask != [true; 4];
     let identity = p.suspended || (!p.map_colour && p.scale == [1.0; 4] && p.bias == [0.0; 4]);
     let miss = [(fragment_ops, Miss::Fragment), (!identity, Miss::Transfer), (p.zoom != [1.0; 2], Miss::Zoom), (!p.pos.valid, Miss::Position)];
     if let Some(&(_, m)) = miss.iter().find(|m| m.0) {
@@ -1524,7 +1534,7 @@ fn plain_plan<'a>(gl: &Gl, env: &Env<'a>, h: &Header, rec: &Record, bytes: &[u8]
     let colour = ds.colour[..ds.colours as usize].iter().map(|&w| cpu.array(w as usize).filter(|a| a.len() >= pitch * cpu.height() as usize)).collect::<Option<Vec<_>>>().ok_or(Miss::Colour)?;
     let x = (rx.max(c.x0 as i64 - o[0] as i64), (rx + w as i64).min(c.x1 as i64 - o[0] as i64));
     let y = (ry.max(c.y0 as i64 - o[1] as i64), (ry + ht as i64).min(c.y1 as i64 - o[1] as i64));
-    Ok(Plain { pixel, rows, origin: (rx, ry), x, y, colour, pitch, window: o })
+    Ok(Plain { pixel, rows, origin: (rx, ry), x, y, colour, pitch, window: o, over })
 }
 
 /// The draw and state behind the first refusal for `m`, for the shell's trace: lines under the 96 bytes a note holds.
@@ -1559,7 +1569,9 @@ fn plain_store(plan: &Plain<'_>, bytes: &[u8]) -> u64 {
         let src = &bytes[from..from + n as usize * plan.pixel];
         let at = (plan.window[1] as i64 + y) as usize * plan.pitch + (plan.window[0] as i64 + plan.x.0) as usize;
         for a in &plan.colour {
-            if plan.pixel == 4 {
+            if plan.over {
+                over_row(a, at, src, plan.pixel);
+            } else if plan.pixel == 4 {
                 src.chunks_exact(4).enumerate().for_each(|(k, q)| store_word(a, at + k, lut[q[3] as usize], q, lut));
             } else {
                 src.chunks_exact(3).enumerate().for_each(|(k, q)| store_word(a, at + k, lut[255], q, lut));
@@ -1567,6 +1579,25 @@ fn plain_store(plan: &Plain<'_>, bytes: &[u8]) -> u64 {
         }
     }
     n * rows
+}
+
+/// A row of byte pixels blended over the stored ones by source alpha, through the general path's own arithmetic:
+/// its byte-to-13-bit and 13-to-8-bit conversions come from tables of the same functions.
+fn over_row(a: &WordArray<'_>, at: usize, src: &[u8], pixel: usize) {
+    static STORED: OnceLock<[u32; 256]> = OnceLock::new();
+    static TO8: OnceLock<Vec<u32>> = OnceLock::new();
+    let (l, d13) = (byte_colours13(), STORED.get_or_init(|| std::array::from_fn(|v| unpack_colour(v as u32)[2])));
+    let t8 = TO8.get_or_init(|| (0..=FULL).map(to8).collect());
+    for (k, q) in src.chunks_exact(pixel).enumerate() {
+        let s = [l[q[0] as usize], l[q[1] as usize], l[q[2] as usize], l[if pixel == 4 { q[3] } else { 255 } as usize]];
+        // SAFETY: the plan keeps the pixel inside the clip rectangle, inside the screen the array covers.
+        let old = unsafe { a.load(at + k) };
+        let d = [d13[(old >> 16 & 0xff) as usize], d13[(old >> 8 & 0xff) as usize], d13[(old & 0xff) as usize], d13[(old >> 24) as usize]];
+        let c = blend_add(s, d, BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha, [0; 4]);
+        let word = t8[c[3] as usize] << 24 | t8[c[0] as usize] << 16 | t8[c[1] as usize] << 8 | t8[c[2] as usize];
+        // SAFETY: as above.
+        unsafe { a.store(at + k, word) };
+    }
 }
 
 #[inline(always)]
@@ -1999,7 +2030,8 @@ mod tests {
                 9 => ds.samples = Some(Samples { count: 4, at: [[2, 2]; 8], cover: !0, alpha_to_mask: false, alpha_to_one: false, colour: (6, 3), depth: (0, 0), stencil: (0, 0) }),
                 _ => {}
             }
-            let fragment_ops = matches!(ops, 1..=7 | 9);
+            // Case 4 blends by source alpha, which the plain path takes.
+            let fragment_ops = matches!(ops, 1..=3 | 5..=7 | 9);
             let mut gl = Gl::default();
             gl.pix.zoom = [[1.0, 1.0], [1.0, 1.0], [2.0, 1.0], [1.0, 0.5]][rnd(4) as usize];
             gl.pix.pos.valid = rnd(8) != 0;
@@ -2062,6 +2094,59 @@ mod tests {
             }
         }
         assert!(plain > 100 && other > 100, "plain {plain} other {other}");
+    }
+
+    /// Blending byte pixels over the stored ones by source alpha stores what the general path stores: random
+    /// source pixels and alphas (the edges 0, 1, 254 and 255 often), random stored pixels, clip, origin,
+    /// positions half off the screen, one or two colour buffers, RGBA and RGB.
+    #[test]
+    fn plain_blend_by_source_alpha_stores_what_the_general_path_stores() {
+        use crate::dev::kona::back::raster::Rect;
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut seed = 0x2545_f491u32;
+        let mut rnd = move |n: u32| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) % n
+        };
+        let mut landed = 0;
+        for case in 0..800 {
+            let (w, ht) = (1 + rnd(40), 1 + rnd(24));
+            let format = if rnd(4) == 0 { FORMAT_RGB } else { FORMAT_RGBA };
+            let (x0, y0) = (rnd(20) as i32, rnd(15) as i32);
+            let mut ds = DrawState { origin: [rnd(5) as i32, rnd(5) as i32], colour: [2, 3], colours: 1 + rnd(2) as u8, ..DrawState::default() };
+            ds.clip = Rect { x0, y0, x1: (x0 + 8 + rnd(50) as i32).min(64), y1: (y0 + 6 + rnd(36) as i32).min(48) };
+            (ds.blend.enabled, ds.blend.src, ds.blend.dst) = (true, BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha);
+            let mut gl = Gl::default();
+            gl.pix.pos.valid = true;
+            gl.pix.pos.x = rnd(60) as f32 - 8.0;
+            gl.pix.pos.y = rnd(44) as f32 - 6.0;
+            gl.pix.unpack = Record { alignment: [1, 4][rnd(2) as usize], ..Record::default() };
+            let hdr = Header { w, h: ht, format, ty: TYPE_UNSIGNED_BYTE, offset: 0, dma: false, row_mode: 0, column: 0 };
+            let words = hdr.image_words(&gl.pix.unpack).unwrap() as usize;
+            let byte = |rnd: &mut dyn FnMut(u32) -> u32| [0, 1, 254, 255][rnd(4) as usize].max(if rnd(2) == 0 { 0 } else { rnd(256) });
+            let bytes: Vec<u8> = (0..words * 4).map(|_| byte(&mut rnd) as u8).collect();
+            let stored: Vec<u32> = (0..2 * 64 * 48).map(|_| rnd(u32::MAX)).collect();
+            let run = |general: bool| {
+                let store = Store::new(64, 48);
+                (2..=3).for_each(|w| store.cpu().ensure(w));
+                stored.iter().enumerate().for_each(|(i, &v)| unsafe { store.cpu().array(2 + i / (64 * 48)).unwrap().store(i % (64 * 48), v) });
+                let mut gl = gl.clone();
+                gl.pix.map_colour = general;
+                let env = Env { store: &store, ds };
+                let mut c = Counts::default();
+                let taken = plain_plan(&gl, &env, &hdr, &gl.pix.unpack_in_force(), &bytes).is_ok();
+                draw(&mut gl, &mut c, &env, &[hdr.w, hdr.h, hdr.format, hdr.ty, 0, 0, 0, 0], &bytes);
+                (c.misses, c.notes) = (0, Vec::new());
+                let mut hash = DefaultHasher::new();
+                (2..=3).for_each(|w| (0..64 * 48).for_each(|i| unsafe { store.cpu().array(w).unwrap().load(i) }.hash(&mut hash)));
+                (hash.finish(), format!("{c:?}"), taken, c.fragments)
+            };
+            let (a, b) = (run(false), run(true));
+            assert_eq!((a.0, &a.1), (b.0, &b.1), "case {case}: {w}x{ht} format {format}");
+            assert!(a.2 && !b.2, "case {case}: the plain path takes the blend, and the general one is forced");
+            landed += (a.3 > 0) as u32;
+        }
+        assert!(landed > 300, "only {landed} cases put a pixel on the screen");
     }
 
     /// A draw off the plain path is reported once per reason, with the state that sent it there.
