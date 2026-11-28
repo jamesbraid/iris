@@ -1080,6 +1080,22 @@ fn an_idle_display_composes_no_frames() {
     h.raster.stop();
 }
 
+/// A mode of two fields refreshes at each field and raises the retrace once a frame, at the first.
+#[test]
+fn the_display_raises_its_retrace_at_the_first_field_only() {
+    use crate::display::Head;
+    use crate::dev::odyssey::scanout::ScanoutMode;
+    let (h, _st, display) = display_rig();
+    let mode = ScanoutMode { width: 1280, height: 1024, frame_clocks: 1720 * 2092, clock_hz: 107_964_476, line_clocks: 1720, blank_lines: 22, fields: 2 };
+    h.test_board().display_fifo.lock().scanout.set_mode(&mode);
+    let scan = crate::dev::odyssey::display::Scan { state: h.clone(), display: display.clone() };
+    for field in [0, 1, 0, 1] {
+        scan.vblank_start(field, 0);
+    }
+    assert_eq!(display.reader.lock().retraces, 2, "four fields, two frames");
+    h.raster.stop();
+}
+
 /// With nothing showing or reading its frames the display looks at none (`--ci` with no window), and a
 /// capturing client or a frame request brings the looking back.
 #[test]

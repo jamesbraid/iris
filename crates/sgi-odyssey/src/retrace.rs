@@ -7,12 +7,10 @@ fn mul_div(a: u64, b: u64, c: u64) -> u64 {
     ((a as u128 * b as u128) / c as u128) as u64
 }
 
-/// The mode's frame period on the caller's clock. A retrace falls at each field, so a two-field mode (stereo,
-/// interlace) retraces twice a frame.
+/// The mode's frame period on the caller's clock. A retrace falls once a frame, however many fields it has.
 #[derive(Debug)]
 pub struct RetraceClock {
     clock_hz: u32,
-    fields: u32,
     frame_clocks: u64,
     /// Virtual ns of the next retrace; -1 disarmed.
     deadline: i64,
@@ -24,13 +22,13 @@ pub struct RetraceClock {
 
 impl Default for RetraceClock {
     fn default() -> Self {
-        RetraceClock { clock_hz: 0, fields: 1, frame_clocks: 0, deadline: -1, epoch: 0, frames: 0 }
+        RetraceClock { clock_hz: 0, frame_clocks: 0, deadline: -1, epoch: 0, frames: 0 }
     }
 }
 
 impl RetraceClock {
-    pub fn set_mode(&mut self, clock_hz: u32, fields: u32, frame_clocks: u64) {
-        (self.clock_hz, self.fields, self.frame_clocks) = (clock_hz, fields, frame_clocks);
+    pub fn set_mode(&mut self, clock_hz: u32, frame_clocks: u64) {
+        (self.clock_hz, self.frame_clocks) = (clock_hz, frame_clocks);
     }
 
     /// When the next retrace is due, if one is armed.
@@ -40,7 +38,7 @@ impl RetraceClock {
 
     /// Virtual time of retrace `n` of the current mode, or -1 with no retrace.
     pub fn retrace_time(&self, n: u64) -> i64 {
-        let hz = self.clock_hz as u64 * self.fields.max(1) as u64;
+        let hz = self.clock_hz as u64;
         let fc = self.frame_clocks;
         if hz == 0 || fc == 0 {
             return -1;

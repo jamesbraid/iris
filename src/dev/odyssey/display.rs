@@ -137,11 +137,14 @@ impl Head for Scan {
     /// The retrace: the host interface latches the swaps armed and raises
     /// the retrace source. The frame composed after the blank reads the
     /// buffer this latch displays, so nothing is captured before it.
-    fn vblank_start(&self, _field: u32, _t_ns: u64) {
+    fn vblank_start(&self, field: u32, _t_ns: u64) {
         self.state.trace.flush(false);
         let mut reader = self.display.reader.lock();
         reader.attach(&self.state.shared);
-        reader.retrace();
+        // The board raises its retrace once a frame, at the first field.
+        if field == 0 {
+            reader.retrace();
+        }
         // The retrace runs at the rate of the mode the guest loaded (its
         // frame and line tables at its clock part's frequency).
         if let Some(timing) = reader.mode.video_timing() {

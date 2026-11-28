@@ -967,3 +967,73 @@ fn every_swap_arm_write_is_its_own_event_with_a_running_count() {
     assert_eq!(swaps(&mut e), vec![(1, 500), (2, 500), (3, 900)]);
     assert_eq!(BoardEngine::swaps_dropped(&e), 0);
 }
+
+/// Load a timing of `fields` fields, each of `picture` picture lines and 22 blank ones, `clocks` a line, as the
+/// kernel does: a blank and a picture line type of 127-clock runs, then the frame table.
+fn load_timing(e: &mut VproEngine, fields: u32, picture: u32, clocks: u32) {
+    let word = |e: &mut VproEngine, w: u32| assert_eq!(e.write(BACKEND_SELECT, 32, w as u64), Write::Done);
+    let line = |states: u16| {
+        let mut runs: Vec<u16> = (0..clocks / 127).map(|_| 0x7f00 | 0x80 | states).collect();
+        runs.push(((clocks % 127) as u16) << 8 | 0x80 | states);
+        *runs.last_mut().unwrap() |= 0x8000;
+        runs.chunks(2).map(|c| c[0] as u32 | (*c.get(1).unwrap_or(&0) as u32) << 16).collect::<Vec<_>>()
+    };
+    for (at, words) in [(0x10u32, line(0)), (0x40, line(0x40))] {
+        word(e, 0x3000_0000 | (0x2000 + at) << 14 | words.len() as u32);
+        words.into_iter().for_each(|w| word(e, w));
+    }
+    word(e, 0x3000_0000 | 0x2400 << 14 | 2 * fields);
+    for _ in 0..fields {
+        word(e, 22 << 16 | 0x10);
+        word(e, picture << 16 | 0x40);
+    }
+    word(e, 0x3000_0000 | 0x2481 << 14 | 1);
+    word(e, 1);
+}
+
+/// The retrace interrupts a second of virtual time raises, in 1 ms steps.
+fn retraces_in_a_second(e: &mut VproEngine) -> usize {
+    let mut seen = 0;
+    drain(e);
+    for ms in 0..=1000u64 {
+        e.advance(10_000_000 + ms * 1_000_000);
+        seen += drain(e).iter().filter(|ev| **ev == packet(RETRACE_VECTOR, true)).count();
+    }
+    seen
+}
+
+/// A mode raises one retrace a frame whatever its fields: 60 a second for one field at 60 frames a second, and 30
+/// for two at 30, whole-picture (progressive) or half-picture (interlace) ones. The timing a shell paces its
+/// scan-out by still names the fields.
+#[test]
+fn a_mode_retraces_once_a_frame_whatever_its_fields() {
+    // 1280x1024 at one field, then the two-field 1280x1024, 1920x1200 (1920x1200_30f) and 1920x1080 interlaced (30i).
+    let modes = [(1, (1280u32, 1024u32), 1024u32, 1720u32, 60usize), (2, (1280, 1024), 1024, 1720, 30), (2, (1920, 1200), 1200, 1470, 30), (2, (1920, 1080), 540, 3201, 30)];
+    for (fields, size, picture, clocks, want) in modes {
+        let (mut e, _) = engine(Mode::Inline);
+        route_to_heart(&mut e);
+        for (index, v) in [(0x2802, size.0), (0x2803, size.1)] {
+            assert_eq!(e.write(BACKEND_SELECT, 32, (0x3000_0000 | index << 14 | 1) as u64), Write::Done);
+            assert_eq!(e.write(BACKEND_SELECT, 32, v as u64), Write::Done);
+        }
+        load_timing(&mut e, fields, picture, clocks);
+        e.advance(10_000_000);
+        assert_eq!(BoardEngine::head_timing(&e, 0).map(|t| t.fields), Some(fields));
+        let seen = retraces_in_a_second(&mut e);
+        assert!(seen.abs_diff(want) <= 1, "{fields} fields of {picture} lines: {seen} retraces, want {want}");
+    }
+}
+
+/// A swap armed in a two-field mode shows at the frame's retrace, not at the field's halfway: the buffer
+/// select reads unchanged 20 ms in (a field retrace of the 33.4 ms frame would have flipped it at 16.7).
+#[test]
+fn a_swap_lands_at_the_frame_boundary_in_a_two_field_mode() {
+    let (mut e, _) = engine(Mode::Inline);
+    load_timing(&mut e, 2, 1024, 1720);
+    e.advance(10_000_000);
+    put(&mut e, 0x10b4, 1);
+    e.advance(10_000_000 + 20_000_000);
+    assert_eq!(get(&mut e, 0x10d4), 0, "not at the field");
+    e.advance(10_000_000 + 34_000_000);
+    assert_eq!(get(&mut e, 0x10d4), 1, "at the frame");
+}

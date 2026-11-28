@@ -289,8 +289,8 @@ uint32_t iris_engine_heads(IrisEngine *h);
 int iris_engine_scanout(IrisEngine *h, uint32_t head, uint32_t *buf,
                         size_t cap, uint32_t *w, uint32_t *hgt);
 
-/* A head's scan-out timing: a frame is frame_clocks clocks of clock_hz in fields fields, so retrace n falls at
- * epoch + n * frame_clocks / (fields * clock_hz); lines lines in all (0: not known). epoch_ns is when retrace 0 fell in the
+/* A head's scan-out timing: a frame is frame_clocks clocks of clock_hz in fields fields, so a scan-out retrace n falls
+ * at epoch + n * frame_clocks / (fields * clock_hz) (a board's retrace interrupt may fall less often); lines lines in all (0: not known). epoch_ns is when retrace 0 fell in the
  * iris_engine_advance time base, or -1 where the shell's clock starts the phase. generation changes whenever
  * the timing or the phase restarts. */
 typedef struct IrisEngineHeadTiming {

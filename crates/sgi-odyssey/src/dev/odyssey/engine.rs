@@ -849,7 +849,7 @@ impl BoardEngine for VproEngine {
         r.attach(&self.locks.shared);
         let now = now_ns.min(i64::MAX as u64) as i64;
         r.sync(&self.locks.shared);
-        self.clock.set_mode(r.mode.clock_hz, r.mode.fields, r.mode.frame_clocks);
+        self.clock.set_mode(r.mode.clock_hz, r.mode.frame_clocks);
         // A restart at the write's own time when it had one, else this call's.
         if let Some(at) = r.restarted.take() {
             self.clock.restart(if at >= 0 { at } else { now });

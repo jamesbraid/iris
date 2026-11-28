@@ -263,8 +263,9 @@ impl fmt::Debug for LentFrame {
 
 /// The scan-out timing of a head, for a shell that paces its own retrace by the board's.
 ///
-/// A frame is `frame_clocks` clocks of `clock_hz`, in `fields` fields (retrace n falls at
-/// `epoch + n * frame_clocks / (fields * clock_hz)`), over `lines` lines in all (0: not known). `epoch_ns` is when retrace 0
+/// A frame is `frame_clocks` clocks of `clock_hz`, in `fields` fields (a shell's scan-out retrace n falls at
+/// `epoch + n * frame_clocks / (fields * clock_hz)`; a board's retrace interrupt may fall less often, as the VPro's
+/// does, once a frame), over `lines` lines in all (0: not known). `epoch_ns` is when retrace 0
 /// fell in the shell's `advance` time base, or -1 where the shell's clock starts the phase (a board whose retrace
 /// is the shell's, as KONA's is). `generation` changes whenever the timing or the phase restarts, so a shell
 /// reads it, and the rest only when it moved.
