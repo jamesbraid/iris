@@ -40,6 +40,9 @@ hashes are given where a change is easiest to understand by reading the commit.
   every physical bus access. That and the `hit` category of `log l1i` and
   `log l1d` need a `developer` build; before, every build but `lightning` paid
   a check per access for them.
+- The `IRIS_IP28_*` bring-up variables (cache ops, watch window, exception
+  address, TLB writes, GPR watch) and `log mips.cp0` are gone. `log mips.tlb`
+  in a `developer` build already shows TLB writes.
 
 - One pattern names trace points everywhere: `log heart,l1d.*,-l1d.hit on`,
   `--log PATTERN` and `[debug] log`. `IRIS_DEBUG_LOG` and `[debug] debug_log`
