@@ -531,8 +531,7 @@ impl MemoryController {
         let mut state = self.state.lock();
         state.regs[(REG_CPU_ERROR_ADDR / 4) as usize] = addr as u32;
         state.regs[(REG_CPU_ERROR_STAT / 4) as usize] = 1u32 << 10; // cpu address error
-        dlog_dev!(LogModule::Mc, "MC: CPU Error at {:08x}", addr);
-        eprintln!("MC: CPU Error at {:08x}", addr);
+        dlog!(LogModule::Mc, "MC: CPU Error at {:08x}", addr);
     }
 
     /// A GIO access nobody answered. Returns whether the MC aborts it with a
@@ -545,8 +544,7 @@ impl MemoryController {
         if abort_en {
             state.regs[(REG_GIO_ERROR_STAT / 4) as usize] = 1u32 << 10; // TIME: GIO bus timeout
         }
-        dlog_dev!(LogModule::Mc, "MC: GIO Timeout at {:08x} (abort_en={})", addr, abort_en);
-        eprintln!("MC: GIO Timeout at {:08x}", addr);
+        dlog!(LogModule::Mc, "MC: GIO Timeout at {:08x} (abort_en={})", addr, abort_en);
         abort_en
     }
 
@@ -639,7 +637,6 @@ impl MemoryControllerState {
             // Watchdog is 20-bit
             if dogc > 0xFFFFF {
                  // In a real system this resets the machine. For now we just wrap/clamp or log.
-                 // println!("MC: Watchdog Timer Expired!"); 
                  self.regs[dogc_idx] = 0; 
             } else {
                 self.regs[dogc_idx] = dogc as u32;
@@ -847,18 +844,12 @@ impl BusDevice for MemoryController {
                 BUS_OK
             }
             REG_MEMCFG0 => {
-                if self.base_shift != 22 {
-                    eprintln!("iris: ip28: guest writes MEMCFG0 = {val:#010x}");
-                }
                 dlog_dev!(LogModule::Mc, "MC: Write MEMCFG0 = {:08x}", val);
                 state.regs[(REG_MEMCFG0 / 4) as usize] = val;
                 self.on_memcfg_updated(&mut state);
                 BUS_OK
             }
             REG_MEMCFG1 => {
-                if self.base_shift != 22 {
-                    eprintln!("iris: ip28: guest writes MEMCFG1 = {val:#010x}");
-                }
                 dlog_dev!(LogModule::Mc, "MC: Write MEMCFG1 = {:08x}", val);
                 state.regs[(REG_MEMCFG1 / 4) as usize] = val;
                 self.on_memcfg_updated(&mut state);

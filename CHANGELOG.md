@@ -56,6 +56,10 @@ hashes are given where a change is easiest to understand by reading the commit.
 - `IRIS_O2_TRACE` is gone: `--startup "re trace FILE"`. `IRIS_IP32_RE_TRACE` and
   `o2 retrace PATH` are gone too: `--startup "re rec FILE"` records the same
   writes (`gputrace` builds).
+- Four stderr lines are now trace points: `MC: CPU Error` and `MC: GIO Timeout`
+  (`log mc`), `Rex3: Resolution changed` (`log rex3`), and the IP28-only
+  `guest writes MEMCFG` lines, which are gone. REX3 says "unhandled" for its
+  first 32 unhandled accesses and then stays quiet.
 
 - One pattern names trace points everywhere: `log heart,l1d.*,-l1d.hit on`,
   `--log PATTERN` and `[debug] log`. `IRIS_DEBUG_LOG` and `[debug] debug_log`

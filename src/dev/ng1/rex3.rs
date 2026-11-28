@@ -271,6 +271,14 @@ pub(crate) fn decode_dm1(v: u32) -> String {
     format!("{} {} host:{} cmp:{} logicop:{}{}", planes, depth, hdepth, dm.compare(), logicop, flags)
 }
 
+/// Say what an access nothing handles, for the first few only: a guest that polls one would flood stderr.
+fn unhandled(what: std::fmt::Arguments) {
+    static SEEN: AtomicU32 = AtomicU32::new(0);
+    if SEEN.fetch_add(1, Ordering::Relaxed) < 32 {
+        eprintln!("REX3: unhandled {what}");
+    }
+}
+
 pub(crate) fn rex3_reg_name(offset: u32) -> &'static str {
     match offset {
         REX3_DRAWMODE1 => "DRAWMODE1",
@@ -4043,14 +4051,7 @@ impl Rex3 {
             REX3_SLOPEALPHA => ctx.slopealpha = from_slope(val),
             REX3_SLOPEGRN => ctx.slopegrn = from_slope(val),
             REX3_SLOPEBLUE => ctx.slopeblue = from_slope(val),
-            REX3_WRMASK => {
-                //if val & 0xFFFFFF == 0x6db6db {
-                //    eprintln!("REX3 process_register WRMASK write: val={:08x} -> forcing 0xffffff", val);
-                //    ctx.wrmask = 0xFFFFFF;
-                //} else {
-                    ctx.wrmask = val;
-                //}
-            }
+            REX3_WRMASK => ctx.wrmask = val,
             REX3_COLORI => ctx.set_colori(val),
             REX3_COLORX => ctx.colorx = from_color_red(val, ctx.drawmode1),
             REX3_SLOPERED1 => ctx.slopered = from_slope_red(val),
@@ -4069,7 +4070,7 @@ impl Rex3 {
             REX3_CONFIG | REX3_STATUS | REX3_USER_STATUS |
             REX3_DCBMODE | REX3_DCBDATA0 | REX3_DCBDATA1 | REX3_DCBRESET => {}
             _ => {
-                eprintln!("REX3 Write: unhandled reg {:04x} ({}), val {:08x}", reg_offset, rex3_reg_name(reg_offset), val);
+                unhandled(format_args!("write reg {:04x} ({}), val {:08x}", reg_offset, rex3_reg_name(reg_offset), val));
             }
         }
         exit
@@ -5021,7 +5022,7 @@ impl Rex3 {
                     REX3_XYWIN        => busy_or_val!(ctx.xywin),
                     REX3_CLIPMODE     => busy_or_val!(ctx.clipmode & 0x1FFF),
                     _ => {
-                        eprintln!("REX3 Read32: unhandled reg {:04x} ({})", reg_offset, rex3_reg_name(reg_offset));
+                        unhandled(format_args!("read32 reg {:04x} ({})", reg_offset, rex3_reg_name(reg_offset)));
                         BusRead32::ok(0)
                     }
                 }
@@ -5091,7 +5092,7 @@ impl Rex3 {
             dlog_dev!(LogModule::Dcb, "DCB Read8: Offset {:04x} -> {:02x}", offset, val);
             BusRead8::ok(val)
         } else {
-            eprintln!("REX3 Read8: unhandled offset {:04x}", offset);
+            unhandled(format_args!("read8 offset {:04x}", offset));
             BusRead8::err()
         };
 
@@ -5113,7 +5114,7 @@ impl Rex3 {
             self.dcb_write((val as u32) << 24);
             return BUS_OK;
         }
-        eprintln!("REX3 Write8: unhandled offset {:04x} val {:02x}", offset, val);
+        unhandled(format_args!("write8 offset {:04x} val {:02x}", offset, val));
         BUS_ERR
     }
 
@@ -5125,7 +5126,7 @@ impl Rex3 {
             dlog_dev!(LogModule::Dcb, "DCB Read16: Offset {:04x} -> {:04x}", offset, val);
             BusRead16::ok(val)
         } else {
-            eprintln!("REX3 Read16: unhandled offset {:04x}", offset);
+            unhandled(format_args!("read16 offset {:04x}", offset));
             BusRead16::err()
         };
 
@@ -5147,7 +5148,7 @@ impl Rex3 {
             self.dcb_write((val as u32) << ((offset & 2) << 3));
             return BUS_OK;
         }
-        eprintln!("REX3 Write16: unhandled offset {:04x} val {:04x}", offset, val);
+        unhandled(format_args!("write16 offset {:04x} val {:04x}", offset, val));
         BUS_ERR
     }
 
