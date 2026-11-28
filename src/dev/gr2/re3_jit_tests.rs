@@ -375,6 +375,59 @@ fn logic_op_wins_over_blend() {
     p.assert_same(0, &key);
 }
 
+/// The mode registers key the shader and draw what the interpreter does,
+/// and rewriting one drops the memoised shader.
+#[test]
+fn mode_registers_shape_the_shader() {
+    if re3_jit::forbidden() {
+        return;
+    }
+    let mut p = Pair::new(seed(5));
+    p.both(|r| {
+        r.set_pixfmt(0);
+        r.set_zctl(1 | 0x00ff_ffff << 8);
+        r.ctx.a = 0x50 << 11;
+        r.ctx.da = 3 << 11;
+    });
+    for (reg, v) in [
+        (RE3_COLOR_PLANE_MASK, 0x00ff_ffff),
+        (RE3_CLIP_X_HI, FB_W as u32 - 1),
+        (RE3_CLIP_Y_HI, FB_H as u32 - 1),
+        (RE3_RED_START, 0xe0 << 11),
+        (RE3_GREEN_START, 0x20 << 11),
+        (RE3_Z_START, 0x7f_ff00),
+        (RE3_Z_STEP_FRAC, 0x1000),
+        (RE3_CUR_X, 8),
+        (RE3_CUR_Y, 0),
+        (RE3_X_STEP, 1 << 14),
+        (RE3_SPAN_LEN, 40),
+        (RE3_MODE, 1 << 21 | 4 << 4 | 5 << 7 | ROP_COPY),
+        (RE3_Z_FUNC, 3),
+        (RE3_STENCIL_WMASK, 0xf),
+        (RE3_STENCIL_MODE, 1 << 23 | 4 << 20 | 5 << 4 | 5 | 0xd << 7 | 1 << 11 | 3 << 14 | 4 << 17),
+    ] {
+        p.reg(reg, v);
+    }
+    let prim = Prim::of_draw_op(DRAW_SMOOTH).unwrap();
+    let key = re3_jit::key_of(&p.jit, prim);
+    assert_eq!(key.blend.map(|b| (b.src, b.dst)), Some((4, 5)));
+    assert_eq!(key.z, Some(3));
+    let s = key.stencil.unwrap();
+    assert_eq!((s.func, s.fail, s.zfail, s.zpass), (5, 1, 3, 4));
+    p.reg(RE3_DRAW_TRIGGER, DRAW_SMOOTH);
+    assert_eq!(p.jit.jit.hits, 1);
+    p.assert_same(0, &key);
+
+    p.reg(RE3_Z_FUNC, 6);
+    p.reg(RE3_CUR_X, 8);
+    p.reg(RE3_SPAN_LEN, 40);
+    let key2 = re3_jit::key_of(&p.jit, prim);
+    assert_eq!(key2.z, Some(6));
+    p.reg(RE3_DRAW_TRIGGER, DRAW_SMOOTH);
+    assert_eq!(p.jit.jit.hits, 2);
+    p.assert_same(1, &key2);
+}
+
 /// A key-shaping register written between spans takes effect at once (the
 /// memoised shader is dropped), and rewriting the same value keeps it.
 #[test]

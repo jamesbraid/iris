@@ -188,6 +188,174 @@ fn logic_op_wins_over_blend() {
     assert_eq!(blend_and_rop_pixel(ROP_COPY), 0);
 }
 
+/// RE3_MODE, RE3_Z_FUNC and RE3_STENCIL_MODE once aliased WID_VALUE,
+/// HOST_PLANE and 0x26 (reg & 63).
+#[test]
+fn mode_registers_do_not_alias_the_low_file() {
+    let mut r = bare_re3();
+    for (reg, v) in [(RE3_WID_VALUE, 3), (RE3_HOST_PLANE, 7), (0x26, 1)] {
+        r.write_reg(reg, v);
+    }
+    r.write_reg(RE3_MODE, 0x20_0000);
+    r.write_reg(RE3_Z_FUNC, 0);
+    r.write_reg(RE3_STENCIL_MODE, 0);
+    assert_eq!((r.ctx.reg[RE3_WID_VALUE], r.ctx.reg[RE3_HOST_PLANE], r.ctx.reg[0x26]), (3, 7, 1));
+    r.write_reg(0x62, 0);
+    r.write_reg(0x7f, 0);
+    assert_eq!((r.ctx.reg[0x22], r.ctx.reg[0x3f]), (0, 0));
+}
+
+/// A SMOOTH span of 16 pixels at y = 0, Z 0x80, over a prefilled frame
+/// buffer and Z/stencil row. Returns both rows.
+fn smooth_row(r: &mut Re3) -> (Vec<u32>, Vec<u32>) {
+    for x in 0..16 {
+        r.vram[x] = 0x0030_6090 + x as u32 * 0x0001_0101;
+        r.zbuf[x] = (x as u32 & 15) << 24 | (0x40 + x as u32 * 8);
+    }
+    for (reg, v) in [
+        (RE3_RED_START, 0xe0 << 11),
+        (RE3_GREEN_START, 0x20 << 11),
+        (RE3_BLUE_START, 0x90 << 11),
+        (RE3_RED_STEP, 0x1f << 11 & 0x00ff_ffff),
+        (RE3_Z_START, 0x80),
+        (RE3_X_STEP, 1 << 14),
+        (RE3_SPAN_LEN, 16),
+        (RE3_DRAW_TRIGGER, DRAW_SMOOTH),
+    ] {
+        r.write_reg(reg, v);
+    }
+    (r.vram[..16].to_vec(), r.zbuf[..16].to_vec())
+}
+
+fn row_with(f: impl Fn(&mut Re3)) -> (Vec<u32>, Vec<u32>) {
+    let mut r = bare_re3();
+    setup(&mut r);
+    f(&mut r);
+    smooth_row(&mut r)
+}
+
+/// A write at the inferred bits draws what the private operation does.
+#[test]
+fn blend_through_mode_register_matches_private_op() {
+    let alpha = |r: &mut Re3| {
+        r.ctx.a = 0x50 << 11;
+        r.ctx.da = 3 << 11;
+    };
+    let plain = row_with(|_| {});
+    let mut seen = vec![plain.clone()];
+    for (src, dst) in [(4u32, 5u32), (2, 0), (0, 1), (5, 4)] {
+        let private = row_with(|r| {
+            alpha(r);
+            r.set_blend(1 | src << 1 | dst << 4);
+        });
+        let register = row_with(|r| {
+            alpha(r);
+            r.write_reg(RE3_MODE, 1 << 21 | src << 4 | dst << 7 | ROP_COPY);
+        });
+        assert_eq!(register, private, "src {src} dst {dst}");
+        assert_ne!(register, plain, "src {src} dst {dst}");
+        seen.push(register);
+    }
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 5);
+}
+
+#[test]
+fn depth_func_register_matches_private_op() {
+    let mut seen = vec![];
+    for func in 0..8u32 {
+        let private = row_with(|r| r.set_zctl(1 | func << 1 | 0x00ff_ffff << 8));
+        let register = row_with(|r| {
+            r.set_zctl(1 | 0x00ff_ffff << 8);
+            r.write_reg(RE3_Z_FUNC, func);
+        });
+        assert_eq!(register, private, "func {func}");
+        seen.push(register);
+    }
+    seen.sort();
+    seen.dedup();
+    assert!(seen.len() >= 5, "{} distinct", seen.len());
+}
+
+/// The stencil word RE3_OP_STENCIL sets, and the register writes for it.
+fn stencil_cases() -> impl Iterator<Item = (u64, u32, u32)> {
+    (0..8u32).flat_map(|func| {
+        (0..6u32).map(move |op| {
+            let (fail, zfail, zpass) = (op, (op + 2) % 6, (op + 4) % 6);
+            let (sref, mask, wmask) = (5u32, 0xd, 0xb);
+            let private = 1 | (func as u64) << 1 | (sref as u64) << 4 | (mask as u64) << 12
+                | (wmask as u64) << 20 | (fail as u64) << 28 | (zfail as u64) << 32 | (zpass as u64) << 36;
+            let mode = 1 << 23 | 4 << 20 | func << 4 | sref | mask << 7
+                | fail << 11 | zfail << 14 | zpass << 17;
+            (private, mode, wmask)
+        })
+    })
+}
+
+#[test]
+fn stencil_registers_match_private_op() {
+    let mut seen = vec![];
+    for (private, mode, wmask) in stencil_cases() {
+        let want = row_with(|r| {
+            r.set_zctl(1 | 1 << 1 | 0x00ff_ffff << 8);
+            r.set_stencil(private);
+        });
+        let got = row_with(|r| {
+            r.set_zctl(1 | 1 << 1 | 0x00ff_ffff << 8);
+            r.write_reg(RE3_STENCIL_WMASK, wmask);
+            r.write_reg(RE3_STENCIL_MODE, mode);
+        });
+        assert_eq!(got, want, "mode {mode:#x}");
+        seen.push(got);
+    }
+    seen.sort();
+    seen.dedup();
+    assert!(seen.len() > 20, "{} distinct", seen.len());
+}
+
+/// The write mask is ANDed with (1 << planes) - 1 from the stored mode word,
+/// whichever register is written last.
+#[test]
+fn stencil_write_mask_follows_plane_count() {
+    let mut r = bare_re3();
+    r.write_reg(RE3_STENCIL_WMASK, 0xf);
+    r.write_reg(RE3_STENCIL_MODE, 1 << 23 | 2 << 20);
+    assert_eq!((r.ctx.stencil >> 20) & 0xf, 0x3);
+    r.write_reg(RE3_STENCIL_MODE, 1 << 23 | 4 << 20);
+    assert_eq!((r.ctx.stencil >> 20) & 0xf, 0xf);
+    r.write_reg(RE3_STENCIL_WMASK, 0x1f5);
+    assert_eq!((r.ctx.stencil >> 20) & 0xf, 0x5);
+    r.write_reg(RE3_STENCIL_MODE, 1 << 23);
+    assert_eq!((r.ctx.stencil >> 20) & 0xf, 0);
+}
+
+/// RE3_MODE's logic op and dither bits land in the registers the pipeline
+/// reads: xor_rgb12_pixel's cases through one write.
+#[test]
+fn mode_register_sets_logic_op_and_dither() {
+    for (dither, want) in [(1, 0x724 | 0x724 << 12), (0, 0x714 | 0x714 << 12)] {
+        let mut r = bare_re3();
+        setup(&mut r);
+        r.set_pixfmt(PIXFMT_RGB12);
+        r.vram[1] = 0x038 | 0x038 << 12;
+        r.write_reg(RE3_MODE, dither << 19 | 6);
+        for (reg, v) in [
+            (RE3_RED_START, 0xc3 << 11),
+            (RE3_GREEN_START, 0x28 << 11),
+            (RE3_BLUE_START, 0x7f << 11),
+            (RE3_CUR_X, 1),
+            (RE3_CUR_Y, 0),
+            (RE3_X_STEP, 1 << 14),
+            (RE3_SPAN_LEN, 1),
+            (RE3_DRAW_TRIGGER, DRAW_SMOOTH),
+        ] {
+            r.write_reg(reg, v);
+        }
+        assert_eq!(px(&r, 1, 0), want, "dither {dither}");
+    }
+}
+
 #[test]
 fn copy_rect_handles_overlap_both_ways() {
     let mut r = bare_re3();

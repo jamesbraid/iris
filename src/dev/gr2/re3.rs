@@ -63,6 +63,21 @@ pub const RE3_CLIP_Y_LO: usize = 0x39;
 pub const RE3_CLIP_Y_HI: usize = 0x3a;
 pub const RE3_CLIP_X_LO: usize = 0x3b;
 pub const RE3_CLIP_X_HI: usize = 0x3c;
+// Registers above the MAME-style file; field positions are inferred from
+// GE7 microcode.
+/// Stencil write mask, bits 3:0, ANDed with the plane count in STENCIL_MODE.
+pub const RE3_STENCIL_WMASK: usize = 0x61;
+/// Blend enable 21, source factor 6:4, destination factor 9:7 (the codes of
+/// RE3_OP_SET_BLENDER), dither enable 19, logic op 3:0 (as RE3_LOGIC_OP).
+pub const RE3_MODE: usize = 0x63;
+/// Depth function in bits 2:0, GL order NEVER..ALWAYS. The enable and Z write
+/// mask stay on RE3_OP_ZCTL.
+pub const RE3_Z_FUNC: usize = 0x65;
+/// Stencil enable 23, plane count 22:20, zpass/zfail/fail ops 19:17, 16:14,
+/// 13:11 (RE3_OP_STENCIL's codes), mask 10:7, function 6:4, reference 3:0.
+pub const RE3_STENCIL_MODE: usize = 0x66;
+/// One past the last register write_reg decodes.
+pub const RE3_REG_END: usize = 0x67;
 
 pub const DRAW_SMOOTH: u32 = 1;
 pub const DRAW_FLAT_5: u32 = 2;
@@ -105,6 +120,17 @@ pub const REG_NAMES: [&str; 64] = [
     "REPSTIP", "LINE_WID_TEST_ON", "FB_OPTIONS", "TOP_SCAN", "TESTMODE", "TESTDATA", "ZBOPTION", "XZOOM",
     "UNPACK_MODE", "CLIP_Y_LO", "CLIP_Y_HI", "CLIP_X_LO", "CLIP_X_HI", "COLORCMP", "MEGOPTION", "R3F",
 ];
+
+/// Name of register `reg` for traces; anything undecoded above the file is "R??".
+pub fn reg_name(reg: usize) -> &'static str {
+    match reg {
+        RE3_STENCIL_WMASK => "STENCIL_WMASK",
+        RE3_MODE => "MODE",
+        RE3_Z_FUNC => "Z_FUNC",
+        RE3_STENCIL_MODE => "STENCIL_MODE",
+        _ => REG_NAMES.get(reg).copied().unwrap_or("R??"),
+    }
+}
 
 pub fn draw_op_name(draw_op: u32) -> &'static str {
     match draw_op {
@@ -274,6 +300,9 @@ pub struct Re3Context {
     pub blend: u32,
     pub a: i64,
     pub da: i64,
+    /// RE3_STENCIL_WMASK and RE3_STENCIL_MODE as written.
+    pub stencil_wmask: u32,
+    pub stencil_mode: u32,
 }
 
 impl Re3Context {
@@ -413,7 +442,9 @@ impl Re3 {
     /// Apply one register write (masked), with MAME's fan-out side effects.
     /// Returns true when the write executed something that touches VRAM.
     pub fn write_reg(&mut self, reg: usize, val: u32) -> bool {
-        let reg = reg & 63;
+        if reg >= 64 {
+            return self.write_mode_reg(reg, val);
+        }
         let v = val & REGMASK[reg];
         #[cfg(feature = "gr2-jit")]
         if super::re3_jit::shapes_key(reg) && self.ctx.reg[reg] != v {
@@ -448,6 +479,39 @@ impl Re3 {
             }
             _ => false,
         }
+    }
+
+    /// RE3_MODE, RE3_Z_FUNC, RE3_STENCIL_WMASK and RE3_STENCIL_MODE drive the
+    /// state the private operations set; other registers above the file are
+    /// ignored.
+    fn write_mode_reg(&mut self, reg: usize, val: u32) -> bool {
+        match reg {
+            RE3_MODE => {
+                let (src, dst) = ((val >> 4) & 7, (val >> 7) & 7);
+                self.set_blend((val >> 21) & 1 | src << 1 | dst << 4);
+                self.write_reg(RE3_DITHER_ON, (val >> 19) & 1);
+                self.write_reg(RE3_LOGIC_OP, val & 0xf);
+            }
+            RE3_Z_FUNC => self.set_zctl((self.ctx.zctl & !0xe) | (val & 7) << 1),
+            RE3_STENCIL_WMASK | RE3_STENCIL_MODE => {
+                if reg == RE3_STENCIL_WMASK {
+                    self.ctx.stencil_wmask = val;
+                } else {
+                    self.ctx.stencil_mode = val;
+                }
+                let m = self.ctx.stencil_mode;
+                let planes = (m >> 20) & 7;
+                let wmask = self.ctx.stencil_wmask & ((1 << planes) - 1) & STENCIL_MASK;
+                let op = |s: u32| ((m >> s) & 7) as u64;
+                self.set_stencil(
+                    (m >> 23 & 1) as u64 | op(4) << 1 | ((m & 0xf) as u64) << 4
+                        | (((m >> 7) & 0xf) as u64) << 12 | (wmask as u64) << 20
+                        | op(11) << 28 | op(14) << 32 | op(17) << 36,
+                );
+            }
+            _ => {}
+        }
+        false
     }
 
     /// The private operations that shape span pipelines (RE3_OP_PIXFMT,

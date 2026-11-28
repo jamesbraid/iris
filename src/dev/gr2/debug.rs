@@ -181,7 +181,7 @@ impl Gr2 {
             re3::RE3_OP_ZFILL_B => t.line(format_args!("RE3 #{seq:06} op  ZFILL value={:#010x} mask={:#010x}", val as u32, val >> 32)),
             _ => {
                 let src = if addr & RE3_SRC_HQ != 0 { "hq " } else { "cpu" };
-                let reg = (addr & !RE3_SRC_HQ) as usize & 63;
+                let reg = (addr & !RE3_SRC_HQ) as usize;
                 let v = val as u32;
                 let extra = match reg {
                     re3::RE3_DRAW_TRIGGER => format!("  -> {}", describe_draw_op(regs, v)),
@@ -191,7 +191,7 @@ impl Gr2 {
                     re3::RE3_HOST_PLANE => format!("  ({})", re3::rwmode_name(v)),
                     _ => String::new(),
                 };
-                t.line(format_args!("RE3 #{seq:06} {src} {} = {v:#x}{extra}", REG_NAMES[reg]));
+                t.line(format_args!("RE3 #{seq:06} {src} {} = {v:#x}{extra}", re3::reg_name(reg)));
             }
         }
     }

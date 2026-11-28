@@ -1147,7 +1147,11 @@ impl Gr2 {
         }
         impl Re3Sink for Sink<'_> {
             fn reg(&mut self, reg: usize, val: u32) {
-                let r = reg & 63;
+                if reg >= 64 {
+                    self.push(reg as u32 | re3::RE3_SRC_HQ, val as u64);
+                    return;
+                }
+                let r = reg;
                 let v = val & re3::REGMASK[r];
                 let cpu = self.g.re3_cpu_writes.load(Ordering::Relaxed);
                 if cpu != self.cpu_writes {
@@ -1303,7 +1307,7 @@ impl Gr2 {
                     self.trace_re3(addr, val, &re3.ctx.reg);
                 }
                 let (drew, metrics_changed) = match addr {
-                    a if (a & !re3::RE3_SRC_HQ) < 64 => {
+                    a if ((a & !re3::RE3_SRC_HQ) as usize) < re3::RE3_REG_END => {
                         let drew = re3.write_reg((a & !re3::RE3_SRC_HQ) as usize, val as u32);
                         (drew, drew)
                     }
