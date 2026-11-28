@@ -24,10 +24,13 @@
 //!   at half.
 //! - A panic in a worker poisons the scheduler: the slot still retires, so a
 //!   drain finishes, and every later `submit` and `drain` says so.
+//! - A pixel rectangle's fragments (`Banding`) run in bands of rows on the same
+//!   workers, each band a pool job of its own that the producer waits for.
 //!
 //! The managed area is at most 4096 wide, the pool's grid, so every pixel has
 //! one tile and the tile the pool hands a job is the tile to clip to.
 
+use super::gl::pixels::frags_cpu;
 use super::raster::pixel;
 use super::raster::setup::TriJob;
 use super::raster::{ClearReq, DrawState, Rect};
@@ -35,7 +38,7 @@ use super::store::Store;
 use crate::tile_pool::{Rect as PoolRect, Tile, TilePool, GRID_SPAN};
 use std::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::*};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::Arc;
 
 /// A clear, under draw state `state`.
@@ -83,6 +86,36 @@ impl RasterJob {
     }
 }
 
+/// Rows of a rectangle's fragments, as pointers into the producer's buffers, which
+/// `Banding::frags` outlives the bands of.
+#[derive(Clone, Copy)]
+struct BandJob {
+    ds: *const DrawState,
+    data: *const u32,
+    fragments: *const AtomicU64,
+    x0: i64,
+    y0: i64,
+    w: usize,
+    h: usize,
+    kind: u8,
+}
+
+// SAFETY: the pointers are read-only except `fragments`, an atomic, and outlive the job (above).
+unsafe impl Send for BandJob {}
+
+/// What a pool slot holds.
+#[derive(Clone, Copy)]
+enum PoolJob {
+    Raster(RasterJob),
+    Band(BandJob),
+}
+
+impl Default for PoolJob {
+    fn default() -> Self {
+        PoolJob::Raster(RasterJob::default())
+    }
+}
+
 /// What the producer tells its owner while it waits on the workers.
 pub trait Activity: Send + Sync {
     fn activity(&self);
@@ -110,6 +143,8 @@ pub struct TileStats {
     /// the ring or the budget.
     pub peak_cost: u64,
     pub waits: u64,
+    /// Pool slots the pixel rectangles' bands took, not counted in `submitted` or `retired`.
+    pub bands: u64,
     /// Times something that touches the store asked for every job to finish,
     /// and those that found jobs still queued, which is what a drain costs.
     pub drains: u64,
@@ -131,6 +166,9 @@ unsafe impl Sync for StateCell {}
 /// Entries in the draw-state table.
 const STATES: usize = 64;
 
+/// A slot with no draw-state entry named.
+const NO_STATE: u16 = u16::MAX;
+
 /// What the pool's workers share with the producer.
 struct Shared {
     store: Arc<Store>,
@@ -138,23 +176,26 @@ struct Shared {
     poisoned: AtomicBool,
     tile_runs: AtomicU64,
     busy_ns: AtomicU64,
+    /// Pool slots `Banding` used: the producer's own bookkeeping does not see them.
+    bands: AtomicU64,
 }
 
 /// The job closure the pool runs, boxed: it holds the shared state, and the
 /// closure's own type cannot be named in `Tiles`. One indirect call per job and
 /// tile, against the pixels the call draws.
-type Run = Box<dyn Fn(&RasterJob, Tile) + Send + Sync>;
+type Run = Box<dyn Fn(&PoolJob, Tile) + Send + Sync>;
 
 pub struct Tiles {
     shared: Arc<Shared>,
     /// None with no workers: jobs run inline.
-    pool: Option<Arc<TilePool<RasterJob, Run>>>,
+    pool: Option<Arc<TilePool<PoolJob, Run>>>,
+    /// Installed in the store while there are workers.
+    banding: Option<Arc<Banding>>,
     screen: Rect,
     mask: u64,
-    /// Producer-only: slots written, slots retired, each slot's cost and
-    /// draw-state entry, the cost in flight, the budget and whether the
-    /// producer is waiting for half of it.
-    head: u64,
+    /// Producer-only: slots retired, each slot's cost and draw-state entry
+    /// (`NO_STATE`: a band's slot), the cost in flight, the budget and whether
+    /// the producer is waiting for half of it.
     tail: u64,
     costs: Vec<u64>,
     slot_state: Vec<u16>,
@@ -187,31 +228,60 @@ impl Tiles {
         let (w, h) = (store.cpu().width() as i32, store.cpu().height() as i32);
         debug_assert!(w <= GRID_SPAN && h <= GRID_SPAN, "a {w}x{h} screen wraps the tile grid");
         let states = (0..STATES).map(|_| StateCell(UnsafeCell::new(DrawState::default()))).collect();
-        let shared = Arc::new(Shared { store, states, poisoned: AtomicBool::new(false), tile_runs: AtomicU64::new(0), busy_ns: AtomicU64::new(0) });
+        let shared = Arc::new(Shared { store, states, poisoned: AtomicBool::new(false), tile_runs: AtomicU64::new(0), busy_ns: AtomicU64::new(0), bands: AtomicU64::new(0) });
         let pool = (threads > 0).then(|| {
             let s = shared.clone();
             let run: Run = Box::new(move |job, tile| {
-                // SAFETY: the entry the job names stays as it is until the job retires.
-                let ds = unsafe { &*s.states[job.state() as usize].0.get() };
-                // The tile's rectangle, cut at the screen's edge.
-                let clip = Rect { x0: tile.x, y0: tile.y, x1: (tile.x + tile.size).min(w), y1: (tile.y + tile.size).min(h) };
                 let began = std::time::Instant::now();
-                if catch_unwind(AssertUnwindSafe(|| pixel::run(s.store.cpu(), job, ds, clip))).is_err() {
-                    s.poisoned.store(true, SeqCst);
+                match job {
+                    PoolJob::Band(b) => {
+                        // SAFETY: `Banding::frags` keeps what the band names alive until it retires.
+                        let (ds, data, found) = unsafe { (&*b.ds, std::slice::from_raw_parts(b.data, 3 * b.w * b.h), &*b.fragments) };
+                        match catch_unwind(AssertUnwindSafe(|| frags_cpu(&s.store, ds, b.x0, b.y0, b.w, b.h, b.kind, data))) {
+                            Ok(n) => {
+                                found.fetch_add(n, Relaxed);
+                            }
+                            Err(_) => s.poisoned.store(true, SeqCst),
+                        }
+                    }
+                    PoolJob::Raster(job) => {
+                        // SAFETY: the entry the job names stays as it is until the job retires.
+                        let ds = unsafe { &*s.states[job.state() as usize].0.get() };
+                        // The tile's rectangle, cut at the screen's edge.
+                        let clip = Rect { x0: tile.x, y0: tile.y, x1: (tile.x + tile.size).min(w), y1: (tile.y + tile.size).min(h) };
+                        if catch_unwind(AssertUnwindSafe(|| pixel::run(s.store.cpu(), job, ds, clip))).is_err() {
+                            s.poisoned.store(true, SeqCst);
+                        }
+                        // A job writes only inside its rectangle: that is how tiles are assigned.
+                        let hit = job.rect().intersect(&clip);
+                        s.store.cpu().touch_rows(hit.y0, hit.y1);
+                    }
                 }
-                // A job writes only inside its rectangle: that is how tiles are assigned.
-                let hit = job.rect().intersect(&clip);
-                s.store.cpu().touch_rows(hit.y0, hit.y1);
                 s.busy_ns.fetch_add(began.elapsed().as_nanos() as u64, Relaxed);
                 s.tile_runs.fetch_add(1, Relaxed);
             });
             TilePool::new("kona-tile", ring, tile, threads, run)
         });
-        Ok(Tiles { shared, pool, screen: Rect { x0: 0, y0: 0, x1: w, y1: h }, mask: ring as u64 - 1, head: 0, tail: 0, costs: vec![0; ring], slot_state: vec![0; ring], refs: vec![0; STATES], held: None, inflight: 0, budget, throttled: false, scratch: RasterJob::default(), stats: TileStats::default(), handle })
+        // The GPU arm draws pixel rectangles itself.
+        let banding = pool.as_ref().filter(|_| !shared.store.is_gpu()).map(|p| Arc::new(Banding { pool: p.clone(), shared: shared.clone(), tile: tile.clamp(8, 256).next_power_of_two() as i32, workers: threads, min_pixels: AtomicUsize::new(MIN_BAND_PIXELS) }));
+        banding.iter().for_each(|b| shared.store.cpu().set_bands(Some(b.clone())));
+        Ok(Tiles { shared, pool, banding, screen: Rect { x0: 0, y0: 0, x1: w, y1: h }, mask: ring as u64 - 1, tail: 0, costs: vec![0; ring], slot_state: vec![NO_STATE; ring], refs: vec![0; STATES], held: None, inflight: 0, budget, throttled: false, scratch: RasterJob::default(), stats: TileStats::default(), handle })
     }
 
     pub fn stats(&self) -> TileStats {
-        TileStats { retired: self.tail, tile_runs: self.shared.tile_runs.load(Relaxed), busy_ns: self.shared.busy_ns.load(Relaxed), ..self.stats }
+        let bands = self.shared.bands.load(Relaxed);
+        TileStats { retired: self.tail.saturating_sub(bands), bands, tile_runs: self.shared.tile_runs.load(Relaxed), busy_ns: self.shared.busy_ns.load(Relaxed), ..self.stats }
+    }
+
+    /// Slots written to the pool, the bands' too: the pool counts them.
+    fn head(&self) -> u64 {
+        self.pool.as_ref().map_or(0, |p| p.staged())
+    }
+
+    /// Pixel rectangles smaller than `n` pixels are not cut into bands.
+    #[cfg(test)]
+    pub fn set_band_pixels(&self, n: usize) {
+        self.banding.iter().for_each(|b| b.min_pixels.store(n, Relaxed));
     }
 
     pub fn is_poisoned(&self) -> bool {
@@ -237,8 +307,11 @@ impl Tiles {
         let done = pool.retire();
         while self.tail < done {
             let i = (self.tail & self.mask) as usize;
-            self.inflight -= self.costs[i];
-            self.refs[self.slot_state[i] as usize] -= 1;
+            self.inflight -= std::mem::take(&mut self.costs[i]);
+            let state = std::mem::replace(&mut self.slot_state[i], NO_STATE);
+            if state != NO_STATE {
+                self.refs[state as usize] -= 1;
+            }
             self.tail += 1;
         }
     }
@@ -295,24 +368,23 @@ impl Tiles {
         };
         self.retire();
         let mut waited = false;
-        while self.head - self.tail > self.mask || (self.inflight > 0 && self.over_budget()) {
+        while self.head() - self.tail > self.mask || (self.inflight > 0 && self.over_budget()) {
             waited = true;
             self.working();
             std::thread::yield_now();
             self.retire();
         }
         self.stats.waits += waited as u64;
-        let i = (self.head & self.mask) as usize;
+        let i = (self.head() & self.mask) as usize;
         self.refs[job.state() as usize] += 1;
         self.slot_state[i] = job.state();
         let (bounds, cost) = (job.rect().intersect(&self.screen), job.cost());
-        self.head += 1;
         self.costs[i] = cost;
         self.inflight += cost;
         self.stats.peak_cost = self.stats.peak_cost.max(self.inflight);
         // The slot has retired, so the pool's ring does not make this wait. An
         // empty box (the pool's corners are inclusive) runs nowhere and retires at once.
-        pool.push(job, PoolRect { x0: bounds.x0, y0: bounds.y0, x1: bounds.x1 - 1, y1: bounds.y1 - 1 });
+        pool.push(PoolJob::Raster(job), PoolRect { x0: bounds.x0, y0: bounds.y0, x1: bounds.x1 - 1, y1: bounds.y1 - 1 });
         if bounds.is_empty() {
             self.retire();
         }
@@ -333,14 +405,14 @@ impl Tiles {
     pub fn queued(&mut self) -> u64 {
         self.retire();
         // Inline, nothing is ever queued: the tail follows the submissions and the head does not.
-        self.head.saturating_sub(self.tail)
+        self.head().saturating_sub(self.tail)
     }
 
     /// Wait until every job submitted has been run and retired.
     pub fn drain(&mut self) -> Result<(), Poisoned> {
         self.stats.drains += 1;
         self.stats.busy_drains += (self.queued() > 0) as u64;
-        while self.tail < self.head {
+        while self.tail < self.head() {
             self.working();
             self.retire();
             std::thread::yield_now();
@@ -353,8 +425,56 @@ impl Tiles {
     }
 }
 
+/// The fewest pixels a band is worth: a rectangle is cut into bands of at least this many.
+const MIN_BAND_PIXELS: usize = 1 << 12;
+
+/// Runs a pixel rectangle's fragments (`StoreOp::Frags`) in bands of rows on the pool's workers: exact,
+/// as a fragment reads and writes only its own pixel. Producer thread only.
+pub struct Banding {
+    pool: Arc<TilePool<PoolJob, Run>>,
+    shared: Arc<Shared>,
+    tile: i32,
+    workers: usize,
+    min_pixels: AtomicUsize,
+}
+
+impl Banding {
+    /// The fragments that landed, once every band has run; None: too small or poisoned, run it alone.
+    pub fn frags(&self, ds: &DrawState, x0: i64, y0: i64, w: usize, h: usize, kind: u8, data: &[u32]) -> Option<u64> {
+        let bands = ((self.workers + 1) * 2).min(w * h / self.min_pixels.load(Relaxed).max(1)).min(h);
+        if bands < 2 || data.len() < 3 * w * h || self.shared.poisoned.load(SeqCst) {
+            return None;
+        }
+        // Earlier jobs finish first, so a band sees what they drew.
+        self.pool.drain();
+        struct Wait<'a>(&'a TilePool<PoolJob, Run>);
+        impl Drop for Wait<'_> {
+            // The bands name this call's buffers: wait for them even if the call unwinds.
+            fn drop(&mut self) {
+                self.0.drain();
+            }
+        }
+        let wait = Wait(&self.pool);
+        let found = AtomicU64::new(0);
+        let rows = h.div_ceil(bands);
+        for (k, j) in (0..h).step_by(rows).enumerate() {
+            let band = BandJob { ds, data: data[3 * j * w..].as_ptr(), fragments: &found, x0, y0: y0 + j as i64, w, h: rows.min(h - j), kind };
+            // The box only picks a tile for the band; each band has its own.
+            let x = (k as i32 * self.tile) % GRID_SPAN;
+            self.pool.push(PoolJob::Band(band), PoolRect { x0: x, y0: 0, x1: x, y1: 0 });
+            self.shared.bands.fetch_add(1, Relaxed);
+        }
+        drop(wait);
+        Some(found.load(Relaxed))
+    }
+}
+
 impl Drop for Tiles {
     fn drop(&mut self) {
+        // The store holds `Banding`, which holds the pool: let go of it first.
+        if let Some(b) = &self.banding {
+            self.shared.store.cpu().clear_bands(b);
+        }
         let _ = self.drain();
         if let Some(pool) = &self.pool {
             pool.stop();
@@ -628,6 +748,144 @@ mod tests {
         }
         t.drain().unwrap();
         assert!(host.activity.load(Relaxed));
+    }
+
+    /// The state a random rectangle of fragments runs under: any mix of the tests, blends and writes after ownership.
+    fn random_state(rnd: &mut impl FnMut(u32) -> u32) -> DrawState {
+        use crate::dev::kona::back::raster::multisample::Samples;
+        use crate::dev::kona::back::raster::ops::{BlendFactor::*, Compare, LogicOp, Ownership};
+        let compare = [Compare::Never, Compare::Less, Compare::Equal, Compare::Lequal, Compare::Greater, Compare::Notequal, Compare::Gequal, Compare::Always];
+        let factors = [Zero, One, SrcColour, OneMinusSrcColour, SrcAlpha, OneMinusSrcAlpha, DstAlpha, OneMinusDstAlpha, DstColour, OneMinusDstColour, SrcAlphaSaturate];
+        let mut ds = DrawState { origin: [rnd(8) as i32, rnd(8) as i32], colour: [2, 3], colours: 1 + rnd(2) as u8, depth_mask: rnd(4) != 0, colour_mask: [true; 4], ..DrawState::default() };
+        let (cx, cy) = (rnd(30) as i32, rnd(30) as i32);
+        ds.clip = Rect { x0: cx, y0: cy, x1: (cx + 1 + rnd(64) as i32).min(64), y1: (cy + 1 + rnd(48) as i32).min(48) };
+        if rnd(2) == 0 {
+            (ds.blend.enabled, ds.blend.src, ds.blend.dst) = (true, factors[rnd(11) as usize], factors[rnd(11) as usize]);
+        }
+        if rnd(3) == 0 {
+            (ds.depth_bits, ds.depth_word, ds.depth_test, ds.depth_func) = (24, 4, true, compare[rnd(8) as usize]);
+        }
+        if rnd(3) == 0 {
+            (ds.stencil_bits, ds.stencil_word, ds.stencil.enabled, ds.stencil.func, ds.stencil.reference) = (8, 5, true, compare[rnd(8) as usize], rnd(256) as u8);
+        }
+        if rnd(4) == 0 {
+            ds.alpha = crate::dev::kona::back::raster::AlphaTest { enabled: true, func: compare[rnd(8) as usize], reference: rnd(8192) };
+        }
+        if rnd(4) == 0 {
+            ds.logic = Some([LogicOp::Xor, LogicOp::And, LogicOp::Clear][rnd(3) as usize]);
+        }
+        if rnd(4) == 0 {
+            ds.colour_mask = [rnd(2) == 0, rnd(2) == 0, rnd(2) == 0, rnd(2) == 0];
+        }
+        if rnd(5) == 0 {
+            ds.ownership = Some(Ownership { reference: 1, mask: 3 });
+        }
+        if rnd(6) == 0 {
+            // The sample words here hold colour alone.
+            (ds.depth_bits, ds.depth_test, ds.stencil_bits, ds.stencil.enabled) = (0, false, 0, false);
+            ds.samples = Some(Samples { count: 4, at: [[2, 2]; 8], cover: !0, alpha_to_mask: false, alpha_to_one: false, colour: (6, 3), depth: (0, 0), stencil: (0, 0) });
+        }
+        ds
+    }
+
+    /// A rectangle of fragments cut into bands on 1, 2 and 4 workers leaves the store word for word
+    /// as the one thread does, with the same count, under random state over random contents.
+    #[test]
+    fn bands_leave_the_store_as_one_thread_does() {
+        use crate::dev::kona::back::gl::pixels::{FRAG_COLOUR, FRAG_STENCIL};
+        use crate::dev::kona::back::store::{StoreOp, DID_PLANE};
+        let mut seed = 0x2545_f491u32;
+        let mut rnd = move |n: u32| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) % n
+        };
+        let words: Vec<usize> = (2..=8).chain([DID_PLANE]).collect();
+        let fresh = || {
+            let store = Arc::new(Store::new(64, 48));
+            words.iter().for_each(|&w| store.ensure(w));
+            store
+        };
+        let (alone, workers) = (fresh(), [1, 2, 4].map(|n| (Tiles::new(fresh(), 8, n, 16, 1 << 20, None).unwrap(), n)));
+        workers.iter().for_each(|(t, _)| t.set_band_pixels(1));
+        for case in 0..600 {
+            let ds = random_state(&mut rnd);
+            let (w, h) = (1 + rnd(48) as usize, 1 + rnd(40) as usize);
+            let (x0, y0) = (rnd(70) as i64 - 3, rnd(50) as i64 - 3);
+            let kind = if rnd(8) == 0 { FRAG_STENCIL } else { FRAG_COLOUR };
+            let data: Vec<u32> = (0..3 * w * h)
+                .map(|k| match (k % 3, kind) {
+                    (0, FRAG_COLOUR) => (rnd(8) != 0) as u32 * (1 << 31) | rnd(8192) | rnd(8192) << 13,
+                    (0, _) => (rnd(8) != 0) as u32 * (1 << 31) | rnd(256),
+                    (1, _) => rnd(8192) | rnd(8192) << 13,
+                    _ => rnd(1 << 24) << 8,
+                })
+                .collect();
+            let (t, n) = &workers[case % 3];
+            let before = t.stats().bands;
+            for store in [&alone, &t.shared.store] {
+                for &word in &words {
+                    let a = store.array(word).unwrap();
+                    // The same contents in both: the depth and ownership planes need values to test against.
+                    let mut fill = 0x9e37_79b9u32 ^ (case as u32 * 31 + word as u32);
+                    (0..a.len()).for_each(|i| {
+                        fill = fill.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        unsafe { a.store(i, if word == DID_PLANE { (fill >> 24) % 8 << 2 } else { fill }) };
+                    });
+                }
+            }
+            let (one, many) = (alone.apply(StoreOp::Frags { ds: &ds, x0, y0, w, h, kind, data: &data }), t.shared.store.apply(StoreOp::Frags { ds: &ds, x0, y0, w, h, kind, data: &data }));
+            assert_eq!(one.fragments, many.fragments, "case {case}: {n} workers, {w}x{h}");
+            assert_eq!(alone.checksum(), t.shared.store.checksum(), "case {case}: {n} workers, {w}x{h} at {x0},{y0}");
+            assert!(t.stats().bands > before || h < 2, "case {case}: banded");
+        }
+    }
+
+    /// The bands of a rectangle run after the jobs queued before them and are finished when it returns.
+    #[test]
+    fn a_banded_rectangle_follows_the_jobs_before_it_and_is_done_when_it_returns() {
+        use crate::dev::kona::back::gl::pixels::FRAG_COLOUR;
+        use crate::dev::kona::back::raster::ops::LogicOp;
+        use crate::dev::kona::back::store::StoreOp;
+        let ds = DrawState { logic: Some(LogicOp::Xor), colour_mask: [true; 4], ..draw_state() };
+        let data: Vec<u32> = (0..3 * (W * H) as usize).map(|k| [1 << 31 | 0x0f0f | 0x0f0f << 13, 0x0f0f | 0x0f0f << 13, 0][k % 3]).collect();
+        let run = |threads: usize| {
+            let store = store();
+            let (mut t, s) = tiles(store.clone(), 16, threads, 16, 1 << 20);
+            t.set_band_pixels(1);
+            // The clears are still queued when the rectangle comes: the xor reads what they left.
+            for k in 0..20u32 {
+                t.submit(clear(Rect { x0: 0, y0: 0, x1: W as i32, y1: H as i32 }, 0xff00_0000 | k * 0x0101, s)).unwrap();
+            }
+            store.apply(StoreOp::Frags { ds: &ds, x0: 0, y0: 0, w: W as usize, h: H as usize, kind: FRAG_COLOUR, data: &data });
+            // No drain: a command after it sees every row.
+            let sum = store.checksum();
+            (sum, t.stats().bands)
+        };
+        let (inline, none) = run(0);
+        assert_eq!(none, 0);
+        for threads in [1, 3] {
+            let (banded, bands) = run(threads);
+            assert!(bands >= 2, "{threads} workers: {bands} bands");
+            assert_eq!(banded, inline, "{threads} workers");
+        }
+    }
+
+    /// A worker that panics in a band poisons the tiles, and the call still returns: the bands are
+    /// waited for.
+    #[test]
+    fn a_panic_in_a_band_poisons_the_tiles_and_the_call_returns() {
+        use crate::dev::kona::back::gl::pixels::FRAG_COLOUR;
+        use crate::dev::kona::back::store::StoreOp;
+        let store = store();
+        let (mut t, _) = tiles(store.clone(), 16, 2, 16, 1 << 20);
+        t.set_band_pixels(1);
+        // A colour word that was never allocated: the pixel module panics on it.
+        let ds = DrawState { colour: [9, 0], ..draw_state() };
+        let data = vec![1 << 31; 3 * 40 * 40];
+        store.apply(StoreOp::Frags { ds: &ds, x0: 0, y0: 0, w: 40, h: 40, kind: FRAG_COLOUR, data: &data });
+        assert!(t.is_poisoned());
+        assert_eq!(t.drain(), Err(Poisoned));
+        assert_eq!(t.submit(RasterJob::default()), Err(Poisoned));
     }
 
     #[test]

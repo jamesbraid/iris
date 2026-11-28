@@ -43,6 +43,8 @@ pub mod texture;
 
 pub use seam::{Drained, Store, StoreOp};
 
+use crate::dev::kona::back::tiles::Banding;
+
 use std::alloc::{alloc_zeroed, dealloc, Layout as MemLayout};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering::{AcqRel, Acquire, Relaxed, Release}};
@@ -132,6 +134,8 @@ pub struct PixelStore {
     /// the shell's scan-out reads it, `touched` is the display thread's.
     damage_all: AtomicBool,
     damage_rows: Box<[AtomicU64]>,
+    /// What cuts a pixel rectangle into bands for the tile workers, while there are workers.
+    bands: parking_lot::RwLock<Option<std::sync::Arc<Banding>>>,
 }
 
 impl PixelStore {
@@ -144,7 +148,23 @@ impl PixelStore {
 
     /// A store whose texture memory is `tex`: a product's own size.
     pub fn with_texture(width: u32, height: u32, tex: texture::TextureStore) -> PixelStore {
-        PixelStore { width: width as usize, height: height as usize, slots: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())), tex, touched: AtomicBool::new(true), damage_all: AtomicBool::new(true), damage_rows: (0..height.div_ceil(64)).map(|_| AtomicU64::new(0)).collect() }
+        PixelStore { width: width as usize, height: height as usize, slots: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())), tex, touched: AtomicBool::new(true), damage_all: AtomicBool::new(true), damage_rows: (0..height.div_ceil(64)).map(|_| AtomicU64::new(0)).collect(), bands: Default::default() }
+    }
+
+    pub fn set_bands(&self, b: Option<std::sync::Arc<Banding>>) {
+        *self.bands.write() = b;
+    }
+
+    /// Forget `mine`, unless another has taken its place.
+    pub fn clear_bands(&self, mine: &std::sync::Arc<Banding>) {
+        let mut g = self.bands.write();
+        if g.as_ref().is_some_and(|b| std::sync::Arc::ptr_eq(b, mine)) {
+            *g = None;
+        }
+    }
+
+    pub fn bands(&self) -> Option<std::sync::Arc<Banding>> {
+        self.bands.read().clone()
     }
 
     /// Say the pixels changed, after the writes: a frame started from now on

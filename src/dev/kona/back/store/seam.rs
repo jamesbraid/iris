@@ -306,7 +306,12 @@ impl Store {
             }
             StoreOp::Accumulate { ds, accumulation, colour, passes } => done.fragments = gl_pixels::accumulate_cpu(self, ds, accumulation, colour, passes),
             StoreOp::ClearAccumulation { ds, first, values } => done.fragments = gl_pixels::clear_accumulation_cpu(self, ds, first, values),
-            StoreOp::Frags { ds, x0, y0, w, h, kind, data } => done.fragments = gl_pixels::frags_cpu(self, ds, x0, y0, w, h, kind, data),
+            StoreOp::Frags { ds, x0, y0, w, h, kind, data } => {
+                done.fragments = match s.bands().and_then(|b| b.frags(ds, x0, y0, w, h, kind, data)) {
+                    Some(n) => n,
+                    None => gl_pixels::frags_cpu(self, ds, x0, y0, w, h, kind, data),
+                }
+            }
             StoreOp::Reset(_) => {
                 // SAFETY: the op's token says no tile worker runs.
                 unsafe { s.reset() }

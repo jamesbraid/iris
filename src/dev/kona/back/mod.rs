@@ -1434,6 +1434,10 @@ impl KonaBackend {
             load_map(&mut c.gl, &mut self.pix_counts, selector, args, words);
             return;
         }
+        // The workers exist before a draw so that its rectangle can run on them.
+        if !self.store.is_gpu() {
+            self.tiles();
+        }
         self.drain();
         let ds = self.pixel_state(port);
         let c = self.contexts.select(port.context());

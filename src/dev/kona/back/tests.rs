@@ -2635,7 +2635,8 @@ fn the_sample_mask_and_alpha_to_mask_thin_the_coverage() {
 }
 
 /// ms a frame of glDrawPixels of a `BENCH_W` x `BENCH_H` (720 x 486) image, `BENCH_CASE` rgba8, rgb8, rgba16 or rgb10a2
-/// (all by default), `BENCH_FRAMES` a run (0: build only), `BENCH_RUNS` runs; the far corner is checked.
+/// (all by default), `BENCH_FRAMES` a run (0: build only), `BENCH_RUNS` runs, `BENCH_THREADS` tile workers (2) and
+/// `BENCH_BLEND` (1: blend on, which takes the general fragment path, as a blended player picture does); the far corner is checked.
 #[test]
 #[ignore]
 fn bench_draw_pixels() {
@@ -2645,10 +2646,14 @@ fn bench_draw_pixels() {
     let only = std::env::var("BENCH_CASE").unwrap_or_default();
     let cases: [(&str, u32, u32, usize); 4] = [("rgba8", FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 1), ("rgb8", FORMAT_RGB, TYPE_UNSIGNED_BYTE, 0), ("rgba16", FORMAT_RGBA, TYPE_UNSIGNED_SHORT, 2), ("rgb10a2", FORMAT_RGBA, TYPE_10_10_10_2, 1)];
     for (name, format, ty, words) in cases.into_iter().filter(|c| c.0.contains(&only)) {
-        let cfg = KonaConfig { managed: (w.max(1280), h.max(1024)), ..KonaConfig::default() };
+        let cfg = KonaConfig { managed: (w.max(1280), h.max(1024)), threads: env("BENCH_THREADS", 2) as usize, ..KonaConfig::default() };
         let mut b = KonaBackend::new(cfg);
         command(&mut b, Grammar::Kernel, WINDOW_CLIP_SETUP, &[0, 0, w, h, 0, 0, w, h, 0, 13, 0]);
         command(&mut b, Grammar::Gl, CONFIGURE_FRAME_BUFFER_LAYOUT, &[0, 8, 0, 1, 0, 0, 24, 0, 0, 0]);
+        if env("BENCH_BLEND", 0) != 0 {
+            command(&mut b, Grammar::Gl, ENABLE_CAPABILITY, &[crate::dev::kona::defs::gl::BLEND]);
+            command(&mut b, Grammar::Gl, SET_BLEND_FACTORS, &[0x302, 0x303]);
+        }
         command(&mut b, Grammar::Gl, SET_VIEWPORT, &[0, 0, w, h]);
         command(&mut b, Grammar::Gl, SET_CURRENT_COLOUR_4_COMPONENTS_SINGLE_FLOAT, &[1.0f32.to_bits(); 4]);
         command(&mut b, Grammar::Gl, SELECT_CURRENT_MATRIX_STACK, &[crate::dev::kona::defs::gl::PROJECTION]);
@@ -2680,4 +2685,67 @@ fn bench_draw_pixels() {
         let min = ms.iter().cloned().fold(f64::MAX, f64::min);
         println!("kona draw pixels {name} {w}x{h}: ms a frame {ms:.2?} ({:.2} ns a pixel at the min)", min * 1e6 / (w * h) as f64);
     }
+}
+
+/// glDrawPixels cut into bands on 1, 2 and 4 workers leaves the store word for word as 0 workers do,
+/// under random blend, alpha test, logic op, mask, zoom, bias and scissor.
+#[test]
+fn banded_pixel_draws_match_the_single_thread_back_end() {
+    use crate::dev::kona::defs::{gl as g, pixel::*};
+    let (host, mut core) = crate::dev::kona::tests::bare(&TestHost::new(), test_cfg());
+    let mut send = |b: &mut KonaBackend, job: Job<'_>| b.job(&mut BackPort { core: &mut core, host: &host }, job);
+    fn cmd(grammar: Grammar, selector: u32, args: &[u32]) -> Job<'_> {
+        Job::Command { grammar, selector, args, packed: 0, handled: false }
+    }
+    let mut boards: Vec<KonaBackend> = [0, 1, 2, 4]
+        .map(|threads| {
+            let mut b = KonaBackend::new(KonaConfig { threads, ..KonaConfig::default() });
+            send(&mut b, cmd(Grammar::Kernel, WINDOW_CLIP_SETUP, &[0, 0, 64, 64, 0, 0, 64, 64, 0, 13, 0]));
+            send(&mut b, cmd(Grammar::Gl, CONFIGURE_FRAME_BUFFER_LAYOUT, &[0, 8, 0, 1, 0, 0, 24, 0, 0, 0]));
+            send(&mut b, cmd(Grammar::Gl, SET_VIEWPORT, &[0, 0, 64, 64]));
+            send(&mut b, cmd(Grammar::Gl, SELECT_CURRENT_MATRIX_STACK, &[g::PROJECTION]));
+            send(&mut b, cmd(Grammar::Gl, LOAD_MATRIX_16_FLOATS, &crate::dev::gl::math::ortho(0.0, 64.0, 0.0, 64.0, -1.0, 1.0).map(f32::to_bits)));
+            b.tiles().set_band_pixels(1);
+            b
+        })
+        .into();
+    let mut seed = 0x6c07_8965u32;
+    let mut rnd = move |n: u32| {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (seed >> 8) % n
+    };
+    let (zooms, factors) = ([[1.0, 1.0], [2.0, 1.0], [1.0, 2.0], [0.5, 1.0], [2.0, 3.0], [-1.0, 1.0], [1.0, -1.0]], [[0x302, 0x303], [1, 1], [0x306, 0x307], [0, 1], [0x304, 0x305], [0x308, 0]]);
+    for case in 0..520 {
+        let (w, h) = (1 + rnd(48), 1 + rnd(32));
+        let image: Vec<u32> = (0..w * h).map(|_| rnd(1 << 16) << 16 | rnd(1 << 16)).collect();
+        let (zoom, blend, logic) = (zooms[rnd(7) as usize], rnd(3) != 0, rnd(5) == 0);
+        let (px, py, scissor) = (rnd(70) + 61, rnd(70) + 61, [rnd(40), rnd(40), 1 + rnd(40), 1 + rnd(40)]);
+        let mask = [rnd(4) != 0, rnd(4) != 0, rnd(4) != 0, rnd(4) != 0].map(u32::from);
+        let (func, bias, factor, op) = (g::NEVER + rnd(8), [0.0f32, 0.25][rnd(2) as usize], factors[rnd(6) as usize], g::LOGIC_OP_CLEAR + rnd(16));
+        let (alpha, clipped) = (rnd(5) == 0, rnd(3) == 0);
+        let toggle = |on: bool| if on { ENABLE_CAPABILITY } else { DISABLE_CAPABILITY };
+        for b in boards.iter_mut() {
+            send(b, cmd(Grammar::Gl, SET_PIXEL_ZOOM_FACTORS, &zoom.map(f32::to_bits)));
+            send(b, cmd(Grammar::Gl, toggle(blend), &[g::BLEND]));
+            send(b, cmd(Grammar::Gl, SET_BLEND_FACTORS, &factor));
+            send(b, cmd(Grammar::Gl, toggle(logic), &[g::LOGIC_OP]));
+            send(b, cmd(Grammar::Gl, SET_LOGIC_OPERATION, &[op]));
+            send(b, cmd(Grammar::Gl, toggle(alpha), &[g::ALPHA_TEST]));
+            send(b, cmd(Grammar::Gl, SET_ALPHA_TEST, &[func, 0.5f32.to_bits()]));
+            send(b, cmd(Grammar::Gl, SET_COLOUR_WRITE_MASK, &mask));
+            send(b, cmd(Grammar::Gl, toggle(clipped), &[g::SCISSOR_TEST]));
+            send(b, cmd(Grammar::Gl, SET_SCISSOR_BOX, &scissor));
+            send(b, cmd(Grammar::Gl, SET_PIXEL_TRANSFER_PARAMETER_FLOAT_FORM, &[RED_BIAS, bias.to_bits()]));
+            send(b, cmd(Grammar::Gl, SET_RASTER_POSITION_2_COMPONENTS_32_BIT_INTEGER, &[px.wrapping_sub(64), py.wrapping_sub(64)]));
+            let hdr = [w, h, FORMAT_RGBA, TYPE_UNSIGNED_BYTE, 0, 0, 0, 0];
+            send(b, cmd(Grammar::Gl, DRAW_PIXEL_RECTANGLE_FROM_HOST_DATA, &hdr));
+            send(b, Job::Data { grammar: Grammar::Gl, selector: DRAW_PIXEL_RECTANGLE_FROM_HOST_DATA, args: &hdr, words: &image });
+            send(b, cmd(Grammar::Kernel, WINDOW_SYSTEM_PIXEL_PATH_FINISH, &[0]));
+        }
+        let want = boards[0].store.checksum();
+        for b in &boards[1..] {
+            assert_eq!(b.store.checksum(), want, "case {case}: {w}x{h} zoom {zoom:?} blend {blend} {factor:x?} logic {logic} alpha {alpha} clipped {clipped} bias {bias}");
+        }
+    }
+    assert!(boards[1..].iter_mut().all(|b| b.tiles().stats().bands > 100), "the rectangles ran in bands");
 }
