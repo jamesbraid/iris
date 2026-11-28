@@ -153,6 +153,9 @@ const GE14_2: GeometrySpec = GeometrySpec { id: "ge14-2", board: BoardSpec { nam
 /// The rack capture's GE16-4, with its hinv revision and words.
 const GE16_4: GeometrySpec = GeometrySpec { id: "ge16-4", board: BoardSpec { name: "GE16-4", part: "030-1398-001", revision: "E" }, engines: 4, occupancy: 0xf, board_word: GE16_BOARD_WORD };
 
+/// The GE16-4 of the Onyx 350 and Onyx 3000 captures: part 030-1398-002 rev B, the same words.
+const GE16_4_B: GeometrySpec = GeometrySpec { id: "ge16-4", board: BoardSpec { name: "GE16-4", part: "030-1398-002", revision: "B" }, engines: 4, occupancy: 0xf, board_word: GE16_BOARD_WORD };
+
 /// The geometry boards of the model, by name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Geometry {
@@ -168,6 +171,13 @@ impl Geometry {
             Geometry::Ge14_2 => &GE14_2,
             Geometry::Ge16_4 => &GE16_4,
         }
+    }
+}
+
+impl GeometrySpec {
+    /// The product's own board of this name (the GE16-4 has a -001 and a -002 part).
+    fn of(&self, product: &ProductSpec) -> &'static GeometrySpec {
+        product.geometries.iter().copied().find(|g| g.id == self.id).unwrap_or(product.geometries[0])
     }
 }
 
@@ -213,6 +223,7 @@ pub enum Host {
     Onyx2Rack,
     Onyx300,
     Onyx3000,
+    Onyx350,
 }
 
 impl Host {
@@ -222,6 +233,7 @@ impl Host {
             Host::Onyx2Rack => "Onyx2 rack",
             Host::Onyx300 => "Onyx 300",
             Host::Onyx3000 => "Onyx 3000",
+            Host::Onyx350 => "Onyx 350",
         }
     }
 }
@@ -232,6 +244,19 @@ pub enum Product {
     Ir2,
     Ir2e,
     Ir3,
+    Ir4,
+}
+
+/// The chip words after a raster manager's slot word: the board report prints each one's top
+/// nibble as the chip revision.
+struct Chips {
+    pg: u32,
+    tg: u32,
+    tf: u32,
+    tm: u32,
+    imp: u32,
+    /// Image engines per raster manager; the block holds twenty words, the rest stay zero.
+    imp_count: usize,
 }
 
 /// One row of the product table: everything the model reports that
@@ -258,6 +283,7 @@ pub struct ProductSpec {
     texture_code: u32,
     /// The raster manager's identity word.
     raster_word: u32,
+    chips: Chips,
     /// Where the product shipped.
     pub hosts: &'static [Host],
 }
@@ -289,7 +315,7 @@ impl ProductSpec {
 }
 
 /// The product table, in the order of [`Product`].
-pub const PRODUCTS: [ProductSpec; 3] = [
+pub const PRODUCTS: [ProductSpec; 4] = [
     // The Onyx2 deskside's InfiniteReality2 (GE14-4 with RM7 and TM7): the
     // deskside capture's values.
     ProductSpec {
@@ -304,6 +330,7 @@ pub const PRODUCTS: [ProductSpec; 3] = [
         texture_mb: 64,
         texture_code: 2,
         raster_word: IR2_RASTER_WORD,
+        chips: IR3_CHIPS,
         hosts: &[Host::Onyx2Deskside],
     },
     // InfiniteReality2E: the GE16-4 geometry board with RM9 raster managers
@@ -327,6 +354,7 @@ pub const PRODUCTS: [ProductSpec; 3] = [
         texture_mb: 64,
         texture_code: 2,
         raster_word: IR2_RASTER_WORD,
+        chips: IR3_CHIPS,
         hosts: &[Host::Onyx2Deskside, Host::Onyx2Rack, Host::Onyx300],
     },
     // InfiniteReality3: the GE16-4 and RM9 records with a 256 MB TM8 texture
@@ -346,7 +374,25 @@ pub const PRODUCTS: [ProductSpec; 3] = [
         texture_mb: 256,
         texture_code: 4,
         raster_word: IR3_RASTER_WORD,
-        hosts: &[Host::Onyx2Rack, Host::Onyx300, Host::Onyx3000],
+        chips: IR3_CHIPS,
+        hosts: &[Host::Onyx2Rack, Host::Onyx300, Host::Onyx3000, Host::Onyx350],
+    },
+    // InfiniteReality4 from the Onyx 350 capture; board set 6 and class word 2 are the 6.5.30
+    // kernel's classes (software expectation). The RM11's one-wire name reads RM10, as captured.
+    ProductSpec {
+        product: Product::Ir4,
+        name: "ir4",
+        label: "InfiniteReality4",
+        board_set: 6,
+        class_word: 2,
+        geometries: &[&GE16_4_B],
+        raster: BoardSpec { name: "RM10", part: "030-1651-004", revision: "A" },
+        texture: BoardSpec { name: "TM9-1024", part: "030-1650-004", revision: "B" },
+        texture_mb: 1024,
+        texture_code: 6,
+        raster_word: IR4_RASTER_WORD,
+        chips: IR4_CHIPS,
+        hosts: &[Host::Onyx350, Host::Onyx3000],
     },
 ];
 
@@ -357,6 +403,13 @@ const GE16_BOARD_WORD: u32 = 0x80f6_1806;
 /// type 0xb (a TM8) with code 4 (the 3).
 const IR2_RASTER_WORD: u32 = 0x0302_0c06;
 const IR3_RASTER_WORD: u32 = 0x0304_1606;
+/// The InfiniteReality4's: texture code 6 in bits 18:16, as the capture's `3061c04`.
+const IR4_RASTER_WORD: u32 = 0x0306_1c04;
+
+/// The chip words of the InfiniteReality2, 2E and 3: twenty image engines each.
+const IR3_CHIPS: Chips = Chips { pg: 0x1503_2057, tg: 0x1543_1057, tf: 0x2463_1057, tm: 0x24d3_1057, imp: 0x5493_8057, imp_count: 20 };
+/// The Onyx 350 capture's words, with ten image engines to a raster manager.
+const IR4_CHIPS: Chips = Chips { pg: 0x0503_2057, tg: 0x3543_1057, tf: 0x3463_1057, tm: 0x34d3_1057, imp: 0x5493_8057, imp_count: 10 };
 
 impl Product {
     pub fn spec(self) -> &'static ProductSpec {
@@ -501,7 +554,7 @@ impl KonaConfig {
             return Ok(self);
         }
         let found = [Geometry::Ge14_4, Geometry::Ge14_2, Geometry::Ge16_4].into_iter().find(|g| g.spec().id == name);
-        match found.filter(|g| self.spec().geometries.iter().any(|s| std::ptr::eq(*s, g.spec()))) {
+        match found.filter(|g| self.spec().geometries.iter().any(|s| s.id == g.spec().id)) {
             Some(g) => self.geometry = Some(g),
             None => {
                 let takes: Vec<_> = self.spec().geometries.iter().map(|g| g.id).collect();
@@ -587,7 +640,7 @@ impl KonaConfig {
 
     /// The geometry board the pipe has.
     pub(super) fn geometry_spec(&self) -> &'static GeometrySpec {
-        self.geometry.map_or(self.spec().geometries[0], |g| g.spec())
+        self.geometry.map_or(self.spec().geometries[0], |g| g.spec().of(self.spec()))
     }
 
     /// The channels the pipe's display generator has: 8 on a DG5-8, 2 on a DG5-2 (with or without its option board).
@@ -905,11 +958,11 @@ pub(super) fn config_block(cfg: &KonaConfig, width: u32, height: u32) -> Vec<u8>
         put(&mut b, CFG_RM_PRESENT + 8 * i, 1);
         put(&mut b, CFG_RM_TEXTURE + 8 * i, spec.texture_code);
         put(&mut b, chips, spec.raster_word);
-        put(&mut b, chips + 0x04, 0x1503_2057);
-        put(&mut b, chips + 0x08, 0x1543_1057);
-        put_words(&mut b, chips + 0x0c, 4, 0x2463_1057);
-        put_words(&mut b, chips + 0x1c, 8, 0x24d3_1057);
-        put_words(&mut b, chips + 0x3c, 20, 0x5493_8057);
+        put(&mut b, chips + 0x04, spec.chips.pg);
+        put(&mut b, chips + 0x08, spec.chips.tg);
+        put_words(&mut b, chips + 0x0c, 4, spec.chips.tf);
+        put_words(&mut b, chips + 0x1c, 8, spec.chips.tm);
+        put_words(&mut b, chips + 0x3c, spec.chips.imp_count, spec.chips.imp);
         put_record(&mut b[CFG_NIC_RM + 0x4c * i..][..0x4c], &spec.raster, base + 2 + i as u32);
         put_record(&mut b[CFG_NIC_TM + 0x4c * i..][..0x4c], &spec.texture, base + 6 + i as u32);
     }
@@ -982,6 +1035,9 @@ pub(in crate::dev::kona) mod tests {
         assert!(KonaConfig::ir2(1).unwrap().with_geometry("ge16-4").is_err(), "the InfiniteReality2 takes GE14 boards");
         assert!(KonaConfig::new(Product::Ir2e, 1).unwrap().with_geometry("ge14-4").is_err());
         assert_eq!(KonaConfig::new(Product::Ir3, 1).unwrap().with_geometry("ge16-4").unwrap().geometry_spec().board.name, "GE16-4");
+        let ir4 = KonaConfig::new(Product::Ir4, 1).unwrap().with_geometry("ge16-4").unwrap();
+        assert_eq!(ir4.geometry_spec().board.part, "030-1398-002", "the InfiniteReality4's GE16-4 is the -002 part");
+        assert!(KonaConfig::new(Product::Ir4, 1).unwrap().with_geometry("ge14-4").is_err());
     }
 
     #[test]

@@ -65,7 +65,7 @@ fn the_config_follows_the_pipe() {
 #[test]
 fn the_texture_store_is_the_products_size() {
     use crate::dev::kona::ident::Product;
-    for (product, mb) in [(Product::Ir2, 64), (Product::Ir2e, 64), (Product::Ir3, 256)] {
+    for (product, mb) in [(Product::Ir2, 64), (Product::Ir2e, 64), (Product::Ir3, 256), (Product::Ir4, 1024)] {
         let be = KonaBackend::new(KonaConfig::new(product, 1).unwrap());
         assert_eq!(be.store.texture().bank_units(), mb << 14, "{product:?}: units of 256 bits in one of two banks");
     }

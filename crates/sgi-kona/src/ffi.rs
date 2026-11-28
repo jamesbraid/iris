@@ -24,7 +24,7 @@ const MAX_POOL_THREADS: u32 = 256;
 #[derive(Clone, Copy)]
 pub struct IrisKonaConfig {
     pub common: IrisEngineConfig,
-    /// The product: `ir2`, `ir2e` or `ir3`, NUL-terminated. NULL is refused.
+    /// The product: `ir2`, `ir2e`, `ir3` or `ir4`, NUL-terminated. NULL is refused.
     pub product: *const c_char,
     /// Raster managers, 1 or 2, or 4 behind a host board.
     pub rm_count: u32,

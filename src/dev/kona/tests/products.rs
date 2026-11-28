@@ -38,7 +38,7 @@ fn tm_part_and_name(block: &[u8]) -> (String, String) {
 #[test]
 fn the_board_set_and_texture_size_follow_the_product() {
     // (product, board set, texture size code, texture MiB)
-    for (product, set, code, mb) in [(Product::Ir2, 1, 2, 64), (Product::Ir2e, 4, 2, 64), (Product::Ir3, 5, 4, 256)] {
+    for (product, set, code, mb) in [(Product::Ir2, 1, 2, 64), (Product::Ir2e, 4, 2, 64), (Product::Ir3, 5, 4, 256), (Product::Ir4, 6, 6, 1024)] {
         let block = read_config(&pipe(product, 2));
         let name = product.spec().name;
         assert_eq!(word(&block, 0x00), set, "{name} board set");
@@ -96,13 +96,37 @@ fn the_records_name_each_products_boards() {
     }
 }
 
+/// The InfiniteReality4 block carries the words `gfxinfo -vv` printed for the Onyx 350 capture:
+/// board set 6, texture code 6, the raster slot word `3061c04`, the chip words with their revision
+/// digits, and ten image engines to each raster manager where the InfiniteReality3 has twenty.
+#[test]
+fn the_infinitereality4_block_carries_the_captures_words() {
+    let block = read_config(&pipe(Product::Ir4, 2));
+    assert_eq!((word(&block, 0x00), word(&block, 0x100)), (6, 0x80f6_1806));
+    for rm in 0..2usize {
+        assert_eq!((word(&block, 0x24 + 8 * rm), word(&block, 0x28 + 8 * rm)), (1, 6), "RM{rm}");
+        let at = 0x114 + 0x8c * rm;
+        let chips: Vec<u32> = (0..35).map(|i| word(&block, at + 4 * i)).collect();
+        assert_eq!(chips[..3], [0x0306_1c04, 0x0503_2057, 0x3543_1057], "RM{rm} slot, pg, tg");
+        assert!(chips[3..7].iter().all(|&w| w == 0x3463_1057), "RM{rm} tf");
+        assert!(chips[7..15].iter().all(|&w| w == 0x34d3_1057), "RM{rm} tm");
+        assert!(chips[15..25].iter().all(|&w| w == 0x5493_8057), "RM{rm} ten image engines");
+        assert!(chips[25..].iter().all(|&w| w == 0), "RM{rm} no more");
+    }
+    assert_eq!(rm_part_and_name(&block), ("030-1651-004".into(), "RM10".into()));
+    assert_eq!(tm_part_and_name(&block), ("030-1650-004".into(), "TM9-1024".into()));
+    // The InfiniteReality3 keeps its twenty.
+    let ir3 = read_config(&pipe(Product::Ir3, 1));
+    assert_eq!((word(&ir3, 0x114 + 0x3c), word(&ir3, 0x114 + 0x3c + 19 * 4)), (0x5493_8057, 0x5493_8057));
+}
+
 /// The attach names a pipe InfiniteReality2E when the geometry board's record
 /// holds "GE16-", so the one-wire record is what makes the guest's `hinv`
 /// differ between the 2 and the 2E.
 #[test]
 fn the_geometry_boards_one_wire_record_is_the_products() {
     for (product, part, revision, name) in
-        [(Product::Ir2, "030-1129-002", "F", "GE14-4"), (Product::Ir2e, "030-1398-001", "E", "GE16-4"), (Product::Ir3, "030-1398-001", "E", "GE16-4")]
+        [(Product::Ir2, "030-1129-002", "F", "GE14-4"), (Product::Ir2e, "030-1398-001", "E", "GE16-4"), (Product::Ir3, "030-1398-001", "E", "GE16-4"), (Product::Ir4, "030-1398-002", "B", "GE16-4")]
     {
         let f = pipe(product, 1);
         let w = Wire::new(&f, ONEWIRE);
@@ -116,10 +140,10 @@ fn the_geometry_boards_one_wire_record_is_the_products() {
 }
 
 /// After selecting 0x8800 the attach reads the product in the low two bits:
-/// 1 classes the pipe InfiniteReality3. After 0xb00 bit 10 stays clear for all.
+/// 1 classes the pipe InfiniteReality3 and 2 InfiniteReality4. After 0xb00 bit 10 stays clear for all.
 #[test]
 fn the_class_words_follow_the_product() {
-    for (product, low) in [(Product::Ir2, 0), (Product::Ir2e, 0), (Product::Ir3, 1)] {
+    for (product, low) in [(Product::Ir2, 0), (Product::Ir2e, 0), (Product::Ir3, 1), (Product::Ir4, 2)] {
         let f = pipe(product, 1);
         f.w(INDIRECT_SELECT, 0x8800);
         assert_eq!(f.r(INDIRECT_DATA) & 3, low, "{product:?}");
@@ -137,6 +161,11 @@ fn a_chassis_the_product_did_not_ship_in_is_refused_with_the_reason() {
     assert!(spec(Product::Ir2e).check_host(Host::Onyx2Rack).is_ok());
     assert!(spec(Product::Ir3).check_host(Host::Onyx2Rack).is_ok());
     assert!(spec(Product::Ir3).check_host(Host::Onyx3000).is_ok());
+    assert!(spec(Product::Ir3).check_host(Host::Onyx350).is_ok());
+    assert!(spec(Product::Ir4).check_host(Host::Onyx350).is_ok());
+    assert!(spec(Product::Ir4).check_host(Host::Onyx3000).is_ok());
+    let e = spec(Product::Ir4).check_host(Host::Onyx2Rack).unwrap_err();
+    assert!(e.contains("InfiniteReality4") && e.contains("Onyx2 rack") && e.contains("Onyx 350"), "{e}");
     let e = spec(Product::Ir3).check_host(Host::Onyx2Deskside).unwrap_err();
     assert!(e.contains("InfiniteReality3") && e.contains("Onyx2 deskside") && e.contains("Onyx2 rack"), "{e}");
     for row in &PRODUCTS {

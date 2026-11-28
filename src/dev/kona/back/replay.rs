@@ -1112,9 +1112,9 @@ mod tests {
         twice.extend(&board[12..]);
         assert!(Recording::parse(&twice).unwrap_err().contains("second board"));
         assert!(Recording::parse(&board[..12]).unwrap_err().contains("no board record"));
-        // The InfiniteReality4 is not modelled.
-        let e = Recording::parse(&Builder::new(2, "ir4").0).unwrap().config().unwrap_err();
-        assert!(e.contains("ir4") && e.contains("ir2e"), "{e}");
+        // A product the model has no row for.
+        let e = Recording::parse(&Builder::new(2, "ir5").0).unwrap().config().unwrap_err();
+        assert!(e.contains("ir5") && e.contains("ir4"), "{e}");
     }
 
     /// A recording's product picks the pipe, and its texture size has to be
@@ -1126,7 +1126,7 @@ mod tests {
             records: Vec::new(),
             end: None,
         };
-        for (product, mb) in [("ir2", 64), ("ir2e", 64), ("ir3", 256)] {
+        for (product, mb) in [("ir2", 64), ("ir2e", 64), ("ir3", 256), ("ir4", 1024)] {
             let cfg = board(product, mb).config().unwrap();
             assert_eq!(cfg.spec().name, product);
             assert_eq!(cfg.texture_bytes_per_rm(), (mb as u64) << 20);

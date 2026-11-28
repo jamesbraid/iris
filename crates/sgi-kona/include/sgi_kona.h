@@ -21,7 +21,7 @@ extern "C" {
 /* The KONA configuration: the shared part, then the pipe's. */
 typedef struct IrisKonaConfig {
     IrisEngineConfig common;
-    const char *product;        /* "ir2", "ir2e" or "ir3"; NULL is refused */
+    const char *product;        /* "ir2", "ir2e", "ir3" or "ir4"; NULL is refused */
     uint32_t rm_count;          /* raster managers, 1 or 2; 4 behind a host board */
     uint32_t identity_index;    /* the pipe slot, 0 to 3 */
     uint32_t host_widget;       /* the widget DMA goes to out of reset, 0 to 15 */
