@@ -5197,7 +5197,7 @@ mod export_tests {
         assert!(e.contains("type = \"serial\"\nat = \"serial1\"") && e.contains("backend = \"unix:/run/b.sock\""), "the Indy's channel B is its console: {e}");
         assert!(hint("serial_port_a = 8890\n").contains("at = \"serial2\"\nbackend = \"tcp:8890\""), "and channel A is serial2");
         assert!(hint("serial_log_a = \"a.log\"\n[machine]\nprofile = \"octane_ip30\"\n").contains("at = \"serial1\""), "the Octane's is serial1");
-        assert!(hint("serial_port_b = 1\n[machine]\nprofile = \"tezro_ip53\"\n").contains("at = \"serial4\""), "the Tezro's second is serial4");
+        assert!(hint("serial_port_b = 1\n[machine]\nprofile = \"tezro_ip53\"\n").contains("at = \"serial2\""), "the Tezro's second is serial2");
         let e = hint("[o2]\nserial_port = 2291\n");
         assert!(e.contains("`serial_port` is no longer read") && e.contains("serial1"), "{e}");
         let flag = |args: &[&str]| legacy::removed_flag(args.iter().map(|a| a.to_string()));

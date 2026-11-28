@@ -273,7 +273,7 @@ mod tests {
     fn the_serial_ports_join_the_clash_check() {
         let load = |text: &str| MachineConfig::from_toml_str(&format!("[machine]\nprofile = \"tezro_ip53\"\nl1_port = 8880\n{text}")).unwrap();
         let mut cfg = load("");
-        assert!(problems(&cfg).iter().any(|p| p == "serial at serial3 and machine.l1_port both use port 8880"), "{:?}", problems(&cfg));
+        assert!(problems(&cfg).iter().any(|p| p == "serial at serial1 and machine.l1_port both use port 8880"), "{:?}", problems(&cfg));
         cfg.tezro.l1_port = None;
         assert!(!problems(&cfg).iter().any(|p| p.contains("both use port")), "{:?}", problems(&cfg));
         cfg.ci = true;
@@ -282,9 +282,9 @@ mod tests {
         cfg.ci = false;
         cfg.monitor_port = None;
         cfg.virtio_serial.enabled = true;
-        cfg.devices.push(crate::devices::ConfiguredDevice::from_arg("serial@serial3,backend=tcp:8890").unwrap());
+        cfg.devices.push(crate::devices::ConfiguredDevice::from_arg("serial@serial1,backend=tcp:8890").unwrap());
         assert!(problems(&cfg).iter().any(|p| p.starts_with("virtio_serial tcp_port and serial at")), "{:?}", problems(&cfg));
-        cfg.devices = ["serial@serial3", "serial@serial4"].map(|d| crate::devices::ConfiguredDevice::from_arg(&format!("{d},backend=unix:/nowhere/x.sock")).unwrap()).into();
+        cfg.devices = ["serial@serial1", "serial@serial2"].map(|d| crate::devices::ConfiguredDevice::from_arg(&format!("{d},backend=unix:/nowhere/x.sock")).unwrap()).into();
         let all = problems(&cfg).join("\n");
         assert!(all.contains("both name /nowhere/x.sock") && all.contains("directory /nowhere does not exist"), "{all}");
     }

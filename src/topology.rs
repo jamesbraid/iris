@@ -237,7 +237,7 @@ impl MachineProfile {
             P::TezroIp53 => crate::ip53_machine::slots(&mut s),
             P::Origin3200Ip35 | P::Onyx3000Ip35 => crate::ip35_machine::slots(&mut s, self == P::Onyx3000Ip35),
         }
-        // The serial ports a device can take, by IRIX's /dev/ttydN.
+        // The serial ports a device can take, by the number on the case.
         for (n, _) in crate::dev::serial_dev::ports(self) {
             open_slot(&mut s, &format!("serial{n}"), &[DeviceFamily::Serial], &[]);
         }

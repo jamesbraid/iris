@@ -483,18 +483,23 @@ seeq status          # Ethernet MAC / DMA state
 The Z85C30 SCC provides two RS-232 serial channels, both exposed as TCP
 sockets on localhost.  Connect with `telnet`, `nc`, or any raw TCP client.
 
-| TCP port | Port      | SCC channel | IRIX device  | Physical connector |
-|----------|-----------|-------------|------------- |--------------------|
-| `8880`   | `serial2` | Channel A   | `/dev/ttyd2` | DB-9 RS-232 port (rear panel) |
-| `8881`   | `serial1` | Channel B   | `/dev/ttyd1` | Mini-DIN serial / console fallback |
+| TCP port | Port      | SCC channel | Physical connector |
+|----------|-----------|-------------|--------------------|
+| `8880`   | `serial2` | Channel A   | DB-9 RS-232 port (rear panel) |
+| `8881`   | `serial1` | Channel B   | Mini-DIN serial / console fallback |
 
-`/dev/ttyd1` is the Indy's primary serial console.  If the PROM `console`
+`serial1` is the Indy's primary serial console.  If the PROM `console`
 variable is set to `d` (serial), all PROM and early-boot output goes to
-`/dev/ttyd1` → TCP port **8881**.
+`serial1` → TCP port **8881**.
 
-Every machine names its serial ports `serialN`, N the IRIX `/dev/ttydN`. The Indy
-and Indigo2's `serial1` is SCC channel B, which is why it listens on 8881; the Onyx2's `serial3` and
-`serial4` are its MediaIO card's and have no listener by default. `--list-slots` shows each port and what is attached. The L1 console of
+Every machine names its serial ports `serialN`, N the number printed beside
+the connector on its case, not IRIX's `/dev/ttydN`: IRIX numbers ports per
+install, in the order it first sees them, so the same machine can show
+`ttyd1`/`ttyd2` on one disk and `ttyd5`/`ttyd6` on another. Where the case
+prints no number (an I-brick's single SERIAL), the ports are numbered from 1 in
+chip order. The Indy and Indigo2's `serial1` is SCC channel B, which is why it
+listens on 8881; the Onyx2's `serial3` and `serial4` (printed `tty_3` and
+`tty_4`) are its MediaIO card's and have no listener by default. `--list-slots` shows each port and what is attached. The L1 console of
 the Fuel, Tezro, Origin 3200 and Onyx 3000 is not a serial port: `l1_port` and
 `l1_log` set its host end, and `machine.console = "l1"` names it as the console.
 
@@ -551,16 +556,16 @@ through. Each is a `[[devices]]` entry at the port:
 ```toml
 [[devices]]
 type = "hostserial"
-at = "serial2"          # IRIX's /dev/ttyd2
+at = "serial2"          # the number on the case
 path = "/dev/ttyUSB0"
 ```
 
-`at` names the port the way IRIX does: `serialN` is `/dev/ttydN`, and a
-serial device always names its port. Most machines have `serial1` and
+`at` names the port by the number on the case, and a serial device always
+names its port. Most machines have `serial1` and
 `serial2`; on the Indy and Indigo2, `serial1` is SCC channel B, the console,
-and `serial2` channel A. The Tezro's are `serial3` and `serial4`, the IOC4's
-first two ports (its `ttyd1` is the L1 console, and IRIX makes no devices for
-the IOC4's other two ports). `iris --list-slots` shows them. A port with one of
+and `serial2` channel A. The Tezro's DB9s are labelled 1 and 2, so `serial1`
+and `serial2`: the IOC4's first two ports (the L1 console is its own CONSOLE
+connector, and the IOC4's other two ports have no connector). `iris --list-slots` shows them. A port with one of
 these devices serves no TCP or Unix socket; the console's `serial_log`, if set,
 still records what the guest sends.
 
@@ -586,7 +591,7 @@ hardware at all:
 ```toml
 [[devices]]
 type = "midi_synth"
-at = "serial3"          # IRIX's /dev/ttyd3 (the Tezro's first IOC4 port)
+at = "serial1"          # the Tezro's first DB9
 path = "GeneralUser-GS.sf2"
 gain = 2.0              # optional
 ```
@@ -609,14 +614,15 @@ guest's MIDI in and out. A host serial port with a MIDI interface on it
 
 In the guest, start MIDI on the port as on the real machine, from the
 System Manager's serial device panel or with `startmidi`; a plain RS-232
-port needs `-p rs232` (`startmidi -n synth -d /dev/ttyd3 -p rs232`), and the
+port needs `-p rs232` (`startmidi -n synth -d /dev/ttyd3 -p rs232`, with the `ttydN` IRIX
+made for that port on the install), and the
 interface then shows in `startmidi`'s list for MIDI programs to use.
 `serial` in the monitor counts the messages and notes the synth has played.
 
 ### Connect to a serial port
 
 ```bash
-# Attach to serial port 1 (ttyd1) in a separate terminal
+# Attach to serial1 in a separate terminal
 telnet 127.0.0.1 8881
 
 # Or with nc (avoids Telnet escape-sequence overhead)
@@ -799,7 +805,7 @@ scsi_deferred_int = true        # needed by OpenBSD/NetBSD; see --no-scsi-deferr
 # ci = false                    # CI control socket (see STORAGE.md)
 # ci_socket = "/tmp/iris.sock"  # default: iris.sock in $TMPDIR, else /tmp; Windows: "127.0.0.1:19851"
 # ci_display = false
-# serial_log = "ttyd1.log"
+# serial_log = "serial1.log"
 # serial_log_overwrite = false  # true: start the serial logs over each run instead of adding to them
 
 # Bare-metal testing (cpu-tests/, bench/)

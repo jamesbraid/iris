@@ -1,6 +1,6 @@
-//! What a config puts on a guest serial port with a `[[devices]]` entry at `serialN`, IRIX's `/dev/ttydN`: `serial`,
-//! the port's TCP, Unix socket and log ends, which a port with no entry gets as its default listener, or `hostserial`,
-//! `midi_synth` and `midi_raw` in place of them. Each is a [`SerialBackend`].
+//! What a config puts on a guest serial port with a `[[devices]]` entry at `serialN`, the number printed on the
+//! machine's case: `serial`, the port's TCP, Unix socket and log ends, which a port with no entry gets as its default
+//! listener, or `hostserial`, `midi_synth` and `midi_raw` in place of them. Each is a [`SerialBackend`].
 //!
 //! `hostserial` is a host serial port ([`host_tty`]) that follows the guest's rate, framing and modem lines, so a
 //! real device behaves as it would on the machine's own connector.
@@ -108,7 +108,7 @@ impl SerialDeviceConfig {
     }
 }
 
-/// The serial entries of a config that have a port, with the port's default listener: (IRIX ttyd number, the entry,
+/// The serial entries of a config that have a port, with the port's default listener: (case number, the entry,
 /// whether it is the port's default).
 fn placed(cfg: &MachineConfig) -> Vec<(u8, SerialDeviceConfig, bool)> {
     let p = DevicePlacement::lenient(cfg, &cfg.devices);
@@ -235,14 +235,15 @@ fn open(n: u8, d: &SerialDeviceConfig, cfg: &MachineConfig) -> Result<Arc<dyn Se
     }
 }
 
-/// The serial ports a machine wires to the host: each one's IRIX ttydN number and default TCP port. On the Tezro ttyd1
-/// is the L1 and IRIX names the IOC4's first two ports ttyd3 and ttyd4; the Indy's ttyd1 is SCC channel B.
+/// The serial ports a machine wires to the host: each one's number as the case prints it, and default TCP port. Where
+/// the case prints none (an I-brick's single SERIAL), they are numbered from 1 in chip order.
 pub fn ports(profile: crate::config::MachineProfile) -> &'static [(u8, Option<u16>)] {
     use crate::config::MachineProfile as P;
     match profile {
         P::IndyIp24 | P::Indigo2Ip22 | P::Indigo2Ip28 => &[(1, Some(8881)), (2, Some(8880))],
-        P::TezroIp53 => &[(3, Some(8880)), (4, Some(8881))],
-        // The MediaIO card's IOC3 ports are ttyd3 and ttyd4.
+        // The case's DB9s are 1 and 2; they are the IOC4's ports 0 and 1.
+        P::TezroIp53 => &[(1, Some(8880)), (2, Some(8881))],
+        // The case prints tty_1 to tty_4: the BaseIO's two, then the MediaIO card's.
         P::Onyx2Ip27 => &[(1, Some(8880)), (2, Some(8881)), (3, None), (4, None)],
         _ => &[(1, Some(8880)), (2, Some(8881))],
     }
@@ -270,11 +271,10 @@ mod tests {
         assert_eq!(section_at(&c, 1), None);
         let two = "[[devices]]\ntype = \"hostserial\"\nat = \"serial2\"\npath = \"/dev/ttyUSB0\"\n[[devices]]\ntype = \"midi_raw\"\nat = \"serial2\"\npath = \"/dev/midi3\"\n";
         assert!(cfg(indy, two).unwrap_err().contains("taken"), "{}", cfg(indy, two).unwrap_err());
-        let tezro = "[[devices]]\ntype = \"midi_raw\"\nat = \"serial4\"\npath = \"/dev/midi3\"\n";
-        assert_eq!(section_at(&cfg(MachineProfile::TezroIp53, tezro).unwrap(), 4), Some("midi_raw"), "a Tezro's are ttyd3 and ttyd4");
-        assert!(cfg(indy, tezro).is_err(), "an Indy has no serial4");
-        let first = "[[devices]]\ntype = \"hostserial\"\nat = \"serial1\"\npath = \"/dev/ttyUSB0\"\n";
-        assert!(cfg(MachineProfile::TezroIp53, first).is_err(), "ttyd1 is the Tezro's L1 console");
+        let tezro = "[[devices]]\ntype = \"midi_raw\"\nat = \"serial2\"\npath = \"/dev/midi3\"\n";
+        assert_eq!(section_at(&cfg(MachineProfile::TezroIp53, tezro).unwrap(), 2), Some("midi_raw"), "a Tezro's DB9s are 1 and 2");
+        let third = tezro.replace("serial2", "serial3");
+        assert!(cfg(indy, &third).is_err() && cfg(MachineProfile::TezroIp53, &third).is_err(), "neither has a serial3");
         let anywhere = "[[devices]]\ntype = \"hostserial\"\npath = \"/dev/ttyUSB0\"\n";
         assert!(cfg(indy, anywhere).unwrap_err().contains("needs an at"), "{}", cfg(indy, anywhere).unwrap_err());
         let no_path = "[[devices]]\ntype = \"hostserial\"\nat = \"serial1\"\n";
@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(lines(&indy), [(1, "tcp:8881".into(), true), (2, "tcp:8880".into(), true)]);
         let entry = "[[devices]]\ntype = \"serial\"\nat = \"serial2\"\nbackend = [\"unix:/run/a\", \"log:a.log\"]\n";
         assert_eq!(lines(&cfg(MachineProfile::IndyIp24, entry).unwrap()), [(2, "unix:/run/a log:a.log".into(), false), (1, "tcp:8881".into(), true)]);
-        assert_eq!(lines(&cfg(MachineProfile::TezroIp53, "").unwrap()), [(3, "tcp:8880".into(), true), (4, "tcp:8881".into(), true)]);
+        assert_eq!(lines(&cfg(MachineProfile::TezroIp53, "").unwrap()), [(1, "tcp:8880".into(), true), (2, "tcp:8881".into(), true)]);
         let (onyx2, origin) = (cfg(MachineProfile::Onyx2Ip27, "").unwrap(), cfg(MachineProfile::Origin2000Ip27, "").unwrap());
         assert_eq!((lines(&onyx2).len(), lines(&origin).len()), (2, 2), "the MediaIO's serial3 and serial4 have no listener");
         let mio = entry.replace("serial2", "serial4");
@@ -333,11 +333,11 @@ mod tests {
         assert_eq!(with(MachineProfile::IndyIp24, None), Ok(Some(1)));
         assert_eq!(with(MachineProfile::FuelIp34, None), Ok(None), "the L1");
         assert_eq!(with(MachineProfile::FuelIp34, Some("serial2")), Ok(Some(2)));
-        assert_eq!(with(MachineProfile::TezroIp53, Some("serial4")), Ok(Some(4)));
+        assert_eq!(with(MachineProfile::TezroIp53, Some("serial2")), Ok(Some(2)));
         assert_eq!(with(MachineProfile::OctaneIp30, Some("serial2")), Ok(Some(2)));
         let e = with(MachineProfile::FuelIp34, Some("ioc3_a")).unwrap_err();
         assert!(e.contains("write l1, serial1, serial2"), "{e}");
         assert!(with(MachineProfile::OctaneIp30, Some("l1")).unwrap_err().contains("write serial1, serial2"));
-        assert!(with(MachineProfile::TezroIp53, Some("serial1")).is_err(), "ttyd1 is the L1");
+        assert!(with(MachineProfile::TezroIp53, Some("serial3")).is_err(), "the Tezro has two");
     }
 }

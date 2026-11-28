@@ -42,10 +42,10 @@ mod routing_tests {
             assert_eq!(console_port(&cfg), Some(expected), "{p:?}");
         }
         cfg.machine.profile = MachineProfile::TezroIp53;
-        cfg.machine.console = Some("serial4".into());
-        cfg.devices.push(iris::devices::ConfiguredDevice::from_arg("serial@serial4,backend=tcp:19881").unwrap());
+        cfg.machine.console = Some("serial2".into());
+        cfg.devices.push(iris::devices::ConfiguredDevice::from_arg("serial@serial2,backend=tcp:19881").unwrap());
         assert_eq!(console_port(&cfg), Some(19881));
-        cfg.devices[0] = iris::devices::ConfiguredDevice::from_arg("serial@serial4,backend=unix:/run/tty.sock").unwrap();
+        cfg.devices[0] = iris::devices::ConfiguredDevice::from_arg("serial@serial2,backend=unix:/run/tty.sock").unwrap();
         assert_eq!(console_port(&cfg), None, "a Unix-only console has no TCP port to connect to");
     }
 }

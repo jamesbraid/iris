@@ -28,7 +28,7 @@ hashes are given where a change is easiest to understand by reading the commit.
   `serial_port_c`/`_d` keys and the `--serial-port-*` flags are refused with the
   entry that replaces them.
 - A serial port can carry a device in place of its socket, on every machine:
-  `[[devices]]` entries at `serialN` (IRIX's `/dev/ttydN`). `hostserial`
+  `[[devices]]` entries at `serialN`, the number printed on the machine's case. `hostserial`
   passes a host serial port through with the guest's rate, framing and modem
   lines, so a Spaceball works with IRIX's Magellan driver as on the
   machine's own connector.

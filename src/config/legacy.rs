@@ -93,8 +93,8 @@ const DROPPED: &[(&str, &[&str], &str)] = &[
     ("widget", &["graphics"], "the `at` of a `graphics` [[devices]] entry"),
     ("bridge_slot", &[], "the `at` of the virtio [[devices]] entry"),
     ("console", &["fuel", "tezro", "origin3200", "onyx3000"], "`console = \"serial1\"`, `\"serial2\"` or `\"l1\"` under [machine]"),
-    ("serial_port_c", &[], "nothing: the Tezro's case has two serial ports, serial3 and serial4"),
-    ("serial_port_d", &[], "nothing: the Tezro's case has two serial ports, serial3 and serial4"),
+    ("serial_port_c", &[], "nothing: the Tezro's case has two serial ports, serial1 and serial2"),
+    ("serial_port_d", &[], "nothing: the Tezro's case has two serial ports, serial1 and serial2"),
 ];
 
 /// The serial keys a `serial` [[devices]] entry replaced: the UART channel the key named, and the backend kind its value
