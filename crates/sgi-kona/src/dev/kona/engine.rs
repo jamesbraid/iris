@@ -841,6 +841,8 @@ pub struct KonaEngine<M: HostMem> {
     parked: bool,
     /// Moves with every store, push, frame, load and reset (`frame_generation`); the worker's runs are in `Shared::ran`.
     activity: u64,
+    /// The video interrupt's path that needs no pipe lock, for a frame while a runner holds the pipe.
+    clock: (Arc<super::back::display::clock::Clock>, DisplayHandle),
     _mem: std::marker::PhantomData<M>,
 }
 
@@ -856,6 +858,7 @@ impl<M: HostMem> KonaEngine<M> {
         let host = Arc::new(Host::new(front, events.clone(), Arc::new(Mem { mem, bus: !opts.threaded })));
         back.attach_manual(DisplayHandle::new(&host));
         back.latch_swaps(true);
+        let clock = (back.clock(), DisplayHandle::new(&host));
         let flash = match opts.flash {
             Some(d) => Flash::with_sink(&d.image, d.sink)?,
             None => Flash::fresh(),
@@ -898,6 +901,7 @@ impl<M: HostMem> KonaEngine<M> {
             source: Source::default(),
             parked: false,
             activity: 0,
+            clock,
             _mem: std::marker::PhantomData,
         };
         engine.sh.report_widget();
@@ -1482,7 +1486,17 @@ impl<M: HostMem> BoardEngine for KonaEngine<M> {
         self.sh.events.clock_ns.store(now_ns, Relaxed);
         self.activity += 1;
         {
-            let mut i = self.sh.inner.lock();
+            // A runner holding the pipe with no swap waiting has nothing for this frame to show, and the board's
+            // retrace does not wait for it: a swap it reaches from here on shows at the next frame.
+            let mut i = match self.sh.inner.try_lock() {
+                Some(i) => i,
+                None if !self.sh.swap_wait.load(Acquire) => {
+                    // The swap-ready line and the published view wait for the next locked frame; nothing needs them sooner.
+                    self.clock.0.frame(&self.clock.1);
+                    return;
+                }
+                None => self.sh.inner.lock(),
+            };
             i.back.set_swap_ready_held(self.sh.swap_held.load(Acquire));
             i.back.frame();
             self.sh.swap_wait.store(i.back.swaps_waiting(), Release);

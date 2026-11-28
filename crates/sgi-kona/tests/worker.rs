@@ -18,6 +18,9 @@ struct Ram {
     bytes: Mutex<Vec<u8>>,
     ram: AtomicU64,
     bus: AtomicU64,
+    /// A write sleeps this long, and says it has begun.
+    stall_ms: AtomicU64,
+    stalled: AtomicBool,
 }
 
 #[derive(Clone, Default)]
@@ -40,6 +43,11 @@ impl HostMem for Guest {
 
     fn ram_write(&self, addr: u64, data: &[u8], _: Swap) -> Result<(), MemFault> {
         self.0.ram.fetch_add(1, SeqCst);
+        let stall = self.0.stall_ms.load(SeqCst);
+        if stall != 0 {
+            self.0.stalled.store(true, SeqCst);
+            std::thread::sleep(Duration::from_millis(stall));
+        }
         let mut m = self.0.bytes.lock();
         if m.len() < addr as usize + data.len() {
             m.resize(addr as usize + data.len(), 0);
@@ -387,6 +395,64 @@ fn a_swap_holds_the_worker_until_the_frame() {
     assert!(matches!(e.quiesce(u64::MAX), Err(Refused::Midway(_))));
     quiesce_within(&mut e, Duration::from_secs(60));
     assert_eq!((e.queued(), e.pixel(7, 8, COLOUR_WORD)), (0, 9));
+}
+
+/// A worker mid-batch, with a swap queued behind the store it is running, does not hold up the frame: the video cause
+/// rises at once, and the swap it reaches after the frame shows at the next one, as on the board.
+#[test]
+fn a_slow_batch_with_a_swap_behind_it_does_not_hold_up_the_frame() {
+    let (mut e, guest) = pipe(true);
+    let mut s = Stores::new();
+    token(&mut s, PIPE_SET_UP, &[0x1000_0000 | REASON_PAGE >> 12, 0, 0x4000]);
+    s.iter().for_each(|&(off, w, src)| store(&mut e, off, w, src));
+    settle(&mut e);
+    guest.0.stall_ms.store(2000, SeqCst);
+    // The reason's write to the page stalls the worker inside the store.
+    kernel(&mut e, CONTEXT_CLEAN_UP_WITH_EVENT_CODE, &[0x103], A);
+    kernel(&mut e, DISPLAY_MODE_BYTE, &SWAP, A);
+    store(&mut e, COMMAND_PAGE, 1, A);
+    e.wait_idle(0, 0);
+    while !guest.0.stalled.load(SeqCst) {
+        std::thread::yield_now();
+    }
+    guest.0.stall_ms.store(0, SeqCst);
+    let t0 = Instant::now();
+    e.frame(1);
+    assert!(t0.elapsed() < Duration::from_secs(1), "the frame waited {:?} for the batch", t0.elapsed());
+    assert_eq!(e.wait_idle(0, u64::MAX), Idle::Stalled(StallOn::Frame));
+    let cause = e.read(INT_CAUSE, 32);
+    assert!(matches!(cause, Read::Value(v) if v as u32 & CAUSE_VIDEO != 0), "cause {cause:?}");
+    assert!(e.swap_waiting(), "the swap reached after the frame waits for the next");
+    e.frame(2);
+    settle(&mut e);
+    assert!(!e.swap_waiting());
+}
+
+/// A runner that holds the pipe while a swap waits does hold up the frame, which takes the lock and shows the swap now:
+/// here the worker posts a waiting reason, slowly, after stopping at the swap.
+#[test]
+fn a_frame_with_a_swap_waiting_takes_the_pipe_and_shows_it() {
+    let (mut e, guest) = pipe(true);
+    let mut s = Stores::new();
+    token(&mut s, PIPE_SET_UP, &[0x1000_0000 | REASON_PAGE >> 12, 0, 0x4000]);
+    token(&mut s, CONTEXT_CLEAN_UP_WITH_EVENT_CODE, &[0x101]);
+    token(&mut s, CONTEXT_CLEAN_UP_WITH_EVENT_CODE, &[0x102]);
+    s.iter().for_each(|&(off, w, src)| store(&mut e, off, w, src));
+    settle(&mut e);
+    guest.0.bytes.lock()[REASON_PAGE as usize..][..4].copy_from_slice(&0xbad0_0101u32.to_be_bytes());
+    guest.0.stall_ms.store(300, SeqCst);
+    kernel(&mut e, DISPLAY_MODE_BYTE, &SWAP, A);
+    store(&mut e, COMMAND_PAGE, 1, A);
+    e.wait_idle(0, 0);
+    while !guest.0.stalled.load(SeqCst) {
+        std::thread::yield_now();
+    }
+    guest.0.stall_ms.store(0, SeqCst);
+    assert!(e.swap_waiting(), "the worker holds the pipe with the swap waiting");
+    e.frame(1);
+    assert!(!e.swap_waiting(), "the swap showed at this frame");
+    assert_eq!(guest.word(REASON_PAGE as usize), 0x102);
+    settle(&mut e);
 }
 
 /// A worker held at a swap takes 32 charged stores and no more until the frame; uncharged ones still queue.

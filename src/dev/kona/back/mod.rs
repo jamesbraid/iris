@@ -795,6 +795,11 @@ impl KonaBackend {
         self.handle = Some(handle);
     }
 
+    /// The display clock `frame` raises the video interrupt through.
+    pub fn clock(&self) -> Arc<Clock> {
+        self.clock.clone()
+    }
+
     /// As `attach`, with no display thread: `frame` is the caller's, at each frame boundary it chooses.
     pub fn attach_manual(&mut self, handle: DisplayHandle) {
         let sink = Compositor::new(self.store.clone(), textport::COLOUR_WORD, self.map.clone(), self.tables.clone(), self.display.clone());
